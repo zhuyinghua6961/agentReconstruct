@@ -233,6 +233,17 @@ function asExcelList(files) {
     }));
 }
 
+function normalizeChatHistory(chatHistory = []) {
+  return (Array.isArray(chatHistory) ? chatHistory : [])
+    .map((item) => {
+      const roleRaw = String(item?.role || '').trim().toLowerCase();
+      const role = roleRaw === 'bot' ? 'assistant' : roleRaw;
+      const content = String(item?.content || '');
+      return { role, content };
+    })
+    .filter((item) => ['user', 'assistant', 'system'].includes(item.role) && item.content.trim().length > 0);
+}
+
 export const api = {
   // ==================== Conversation ====================
 
@@ -408,9 +419,10 @@ export const api = {
   },
 
   async *askStream(question, chatHistory = [], conversationId = null, pdfContext = null, signal = undefined) {
+    const normalizedHistory = normalizeChatHistory(chatHistory).slice(-10);
     const body = {
       question,
-      chat_history: chatHistory.slice(-10),
+      chat_history: normalizedHistory,
     };
     if (conversationId) body.conversation_id = conversationId;
     if (pdfContext) body.pdf_context = pdfContext;
@@ -455,10 +467,11 @@ export const api = {
   },
 
   async ask(question, chatHistory = []) {
+    const normalizedHistory = normalizeChatHistory(chatHistory).slice(-10);
     const payload = await requestJson(`${API_BASE}${V1}/ask_stream`, {
       method: 'POST',
       headers: authHeaders(true),
-      body: JSON.stringify({ question, chat_history: chatHistory.slice(-10) }),
+      body: JSON.stringify({ question, chat_history: normalizedHistory }),
     });
     return payload;
   },

@@ -3,6 +3,17 @@ import { streamSseJson } from '../utils/sse';
 
 const API_PREFIX = '/api/v1';
 
+function normalizeChatHistory(chatHistory = []) {
+  return (Array.isArray(chatHistory) ? chatHistory : [])
+    .map((item) => {
+      const roleRaw = String(item?.role || '').trim().toLowerCase();
+      const role = roleRaw === 'bot' ? 'assistant' : roleRaw;
+      const content = String(item?.content || '');
+      return { role, content };
+    })
+    .filter((item) => ['user', 'assistant', 'system'].includes(item.role) && item.content.trim().length > 0);
+}
+
 export async function getKbInfo() {
   return await getJson(`${API_PREFIX}/kb_info`);
 }
@@ -55,12 +66,13 @@ export async function streamAsk({
   if (token) {
     headers.Authorization = `Bearer ${token}`;
   }
+  const normalizedHistory = normalizeChatHistory(chatHistory);
   const response = await fetch(buildUrl(`${API_PREFIX}/ask_stream`), {
     method: 'POST',
     headers,
     body: JSON.stringify({
       question,
-      chat_history: chatHistory,
+      chat_history: normalizedHistory,
       use_pdf: usePdf,
       pdf_path: pdfPath,
       use_generation_driven: useGenerationDriven,
