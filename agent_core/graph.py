@@ -32,6 +32,19 @@ from ingest.embedder import get_embedding_client
 from ingest.vector_store import get_or_create_collection
 
 logger = logging.getLogger(__name__)
+_PARTIAL_RETRIEVAL_FLUSH_WAIT_SECONDS = 0.8
+
+
+def _trace_prefix(trace_id: str | None) -> str:
+    token = str(trace_id or "").strip()
+    return f"[trace_id={token}] " if token else ""
+
+
+def _short_text(value: str, *, limit: int = 120) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}..."
 
 
 @dataclass
@@ -39,6 +52,9 @@ class AgentState:
     """Agent 运行状态"""
     # 输入
     question: str = ""
+    raw_question: str = ""
+    effective_question: str = ""
+    conversation_context: dict[str, Any] = field(default_factory=dict)
 
     # 路径 A
     direct_answer: str = ""
@@ -74,6 +90,7 @@ def _run_pre_answer_retrieval_pipeline(
     embedding_client,
     batch_size: int,
     progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
+    trace_id: Optional[str] = None,
 ) -> tuple[list[str], list[list[RetrievedChunk]], dict[str, float]]:
     """流水线执行 Step2 预回答和 Step3 检索。"""
 
@@ -81,23 +98,44 @@ def _run_pre_answer_retrieval_pipeline(
         sub_answers = [""] * len(sub_questions)
         retrieved_chunks: list[list[RetrievedChunk]] = [[] for _ in sub_questions]
         pending_batch: list[tuple[int, str]] = []
-        retrieval_jobs: list[tuple[list[int], concurrent.futures.Future]] = []
+        retrieval_jobs: list[tuple[int, list[int], asyncio.Future]] = []
+        total_batches = max(1, (len(sub_questions) + max(1, int(batch_size)) - 1) // max(1, int(batch_size)))
+        submitted_retrieval_batches = 0
+        completed_retrieval_batches = 0
+        delayed_flush_task: asyncio.Task | None = None
         metrics = {
             "pre_answer_completed_at": 0.0,
             "retrieval_completed_at": 0.0,
+            "retrieval_total_batches": float(total_batches),
         }
         started_at = time.time()
         resolved_batch_size = max(1, int(batch_size))
         completed_pre_answers = 0
 
-        def _submit_batch(executor: concurrent.futures.ThreadPoolExecutor) -> None:
-            nonlocal pending_batch
+        def _cancel_delayed_flush() -> None:
+            nonlocal delayed_flush_task
+            if delayed_flush_task is not None and not delayed_flush_task.done():
+                delayed_flush_task.cancel()
+            delayed_flush_task = None
+
+        def _submit_batch(executor: concurrent.futures.ThreadPoolExecutor, *, reason: str) -> None:
+            nonlocal pending_batch, submitted_retrieval_batches, total_batches
             if not pending_batch:
                 return
             batch_items = pending_batch
             pending_batch = []
             batch_indexes = [item[0] for item in batch_items]
             batch_queries = [item[1] for item in batch_items]
+            announced_total_batches = max(total_batches, submitted_retrieval_batches + 1)
+            logger.info(
+                "%sstep3 submit retrieval batch %s/%s reason=%s indexes=%s query_chars=%s",
+                _trace_prefix(trace_id),
+                submitted_retrieval_batches + 1,
+                announced_total_batches,
+                reason,
+                batch_indexes,
+                [len(item) for item in batch_queries],
+            )
             future = executor.submit(
                 batch_retrieve,
                 batch_queries,
@@ -105,7 +143,52 @@ def _run_pre_answer_retrieval_pipeline(
                 collection,
                 embedding_client,
             )
-            retrieval_jobs.append((batch_indexes, future))
+            submitted_retrieval_batches += 1
+            total_batches = max(total_batches, submitted_retrieval_batches)
+            retrieval_jobs.append(
+                (
+                    submitted_retrieval_batches,
+                    batch_indexes,
+                    asyncio.wrap_future(future, loop=loop),
+                )
+            )
+            if progress_callback:
+                progress_callback(
+                    {
+                        "type": "progress",
+                        "stage": "step3",
+                        "status": "running",
+                        "message": f"已提交 {submitted_retrieval_batches}/{total_batches} 批文献检索任务",
+                        "data": {
+                            "submitted_batches": submitted_retrieval_batches,
+                            "total_batches": total_batches,
+                            "batch_queries": len(batch_queries),
+                            "total_queries": len(sub_questions),
+                        },
+                    }
+                )
+
+        async def _flush_partial_batch_after_wait(executor: concurrent.futures.ThreadPoolExecutor) -> None:
+            try:
+                await asyncio.sleep(_PARTIAL_RETRIEVAL_FLUSH_WAIT_SECONDS)
+                if pending_batch and len(pending_batch) < resolved_batch_size:
+                    logger.info(
+                        "%sstep3 flush partial retrieval batch size=%s wait=%.3fs",
+                        _trace_prefix(trace_id),
+                        len(pending_batch),
+                        _PARTIAL_RETRIEVAL_FLUSH_WAIT_SECONDS,
+                    )
+                    _submit_batch(executor, reason="partial_timeout")
+            except asyncio.CancelledError:
+                return
+
+        def _schedule_partial_flush(executor: concurrent.futures.ThreadPoolExecutor) -> None:
+            nonlocal delayed_flush_task
+            if len(pending_batch) >= resolved_batch_size:
+                return
+            if delayed_flush_task is not None and not delayed_flush_task.done():
+                return
+            delayed_flush_task = asyncio.create_task(_flush_partial_batch_after_wait(executor))
 
         loop = asyncio.get_running_loop()
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as retrieval_executor:
@@ -114,6 +197,14 @@ def _run_pre_answer_retrieval_pipeline(
                 async_client=async_llm_client,
             ):
                 completed_pre_answers += 1
+                logger.info(
+                    "%sstep2 sub-question answered index=%s/%s answer_chars=%s question=%s",
+                    _trace_prefix(trace_id),
+                    index + 1,
+                    len(sub_questions),
+                    len(answer or ""),
+                    _short_text(sub_questions[index]),
+                )
                 sub_answers[index] = answer
                 if progress_callback:
                     progress_callback(
@@ -132,17 +223,74 @@ def _run_pre_answer_retrieval_pipeline(
                 query = f"{sub_questions[index]}\n{answer}" if answer else sub_questions[index]
                 pending_batch.append((index, query))
                 if len(pending_batch) >= resolved_batch_size:
-                    _submit_batch(retrieval_executor)
+                    _cancel_delayed_flush()
+                    _submit_batch(retrieval_executor, reason="batch_full")
+                else:
+                    _schedule_partial_flush(retrieval_executor)
 
             metrics["pre_answer_completed_at"] = time.time() - started_at
-            _submit_batch(retrieval_executor)
+            if progress_callback:
+                progress_callback(
+                    {
+                        "type": "progress",
+                        "stage": "step2",
+                        "status": "success",
+                        "message": "子问题预回答全部完成，开始等待检索结果",
+                        "data": {
+                            "completed": completed_pre_answers,
+                            "total": len(sub_questions),
+                        },
+                    }
+                )
+            _cancel_delayed_flush()
+            _submit_batch(retrieval_executor, reason="drain")
 
-            for indexes, future in retrieval_jobs:
-                batch_results = await asyncio.wrap_future(future, loop=loop)
-                for idx, chunks in zip(indexes, batch_results):
-                    retrieved_chunks[idx] = chunks
+            pending_retrievals = {
+                wrapped_future: (batch_no, indexes)
+                for batch_no, indexes, wrapped_future in retrieval_jobs
+            }
+            while pending_retrievals:
+                done, _ = await asyncio.wait(
+                    pending_retrievals.keys(),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for wrapped_future in done:
+                    batch_no, indexes = pending_retrievals.pop(wrapped_future)
+                    logger.info(
+                        "%sstep3 awaiting retrieval batch indexes=%s",
+                        _trace_prefix(trace_id),
+                        indexes,
+                    )
+                    batch_results = wrapped_future.result()
+                    completed_retrieval_batches += 1
+                    for idx, chunks in zip(indexes, batch_results):
+                        retrieved_chunks[idx] = chunks
+                    logger.info(
+                        "%sstep3 retrieval batch completed %s/%s batch_no=%s indexes=%s chunk_counts=%s",
+                        _trace_prefix(trace_id),
+                        completed_retrieval_batches,
+                        total_batches,
+                        batch_no,
+                        indexes,
+                        [len(chunks) for chunks in batch_results],
+                    )
+                    if progress_callback:
+                        progress_callback(
+                            {
+                                "type": "progress",
+                                "stage": "step3",
+                                "status": "running",
+                                "message": f"文献检索已完成 {completed_retrieval_batches}/{total_batches} 批",
+                                "data": {
+                                    "completed_batches": completed_retrieval_batches,
+                                    "total_batches": total_batches,
+                                    "retrieved_chunks_total": sum(len(chunks) for chunks in retrieved_chunks),
+                                },
+                            }
+                        )
 
         metrics["retrieval_completed_at"] = time.time() - started_at
+        metrics["retrieval_total_batches"] = float(total_batches)
         return sub_answers, retrieved_chunks, metrics
 
     return asyncio.run(_pipeline())
@@ -153,11 +301,14 @@ def run_agent(
     stream_callback: Optional[Callable[[str], None]] = None,
     step_callback: Optional[Callable[[str, float], None]] = None,
     progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
+    raw_question: Optional[str] = None,
+    conversation_context: Optional[dict[str, Any]] = None,
     enable_thinking: Optional[bool] = None,
     num_sub_questions: Optional[int] = None,
     retrieval_top_k: Optional[int] = None,
     max_check_loops: Optional[int] = None,
     cancel_event: Optional[threading.Event] = None,
+    trace_id: Optional[str] = None,
 ) -> AgentState:
     """
     运行完整的 Agentic RAG 流程（同步入口）。
@@ -179,8 +330,14 @@ def run_agent(
     Returns:
         包含完整运行结果的 AgentState
     """
-    state = AgentState(question=question)
+    state = AgentState(
+        question=str(raw_question or question),
+        raw_question=str(raw_question or question),
+        effective_question=str(question),
+        conversation_context=dict(conversation_context or {}),
+    )
     total_start = time.time()
+    working_question = state.effective_question or state.question
     resolved_enable_thinking = config.LLM_ENABLE_THINKING if enable_thinking is None else bool(enable_thinking)
     resolved_direct_answer_enable_thinking = (
         config.DIRECT_ANSWER_ENABLE_THINKING if enable_thinking is None else bool(enable_thinking)
@@ -219,6 +376,12 @@ def run_agent(
         progress_callback(payload)
 
     try:
+        logger.info(
+            "%srun_agent start raw_question=%s effective_question=%s",
+            _trace_prefix(trace_id),
+            _short_text(state.raw_question),
+            _short_text(state.effective_question),
+        )
         direct_llm_client = get_llm_client()
         pipeline_llm_client = get_llm_client()
         async_llm_client = get_async_llm_client()
@@ -236,25 +399,42 @@ def run_agent(
 
         def _timed_direct_answer() -> tuple[str, float]:
             started_at = time.time()
+            logger.info("%sstep1 direct_answer start", _trace_prefix(trace_id))
             answer = direct_answer(
-                question,
+                working_question,
                 client=direct_llm_client,
                 enable_thinking=resolved_direct_answer_enable_thinking,
             )
-            return answer, time.time() - started_at
+            elapsed = time.time() - started_at
+            logger.info(
+                "%sstep1 direct_answer done elapsed=%.3fs answer_chars=%s",
+                _trace_prefix(trace_id),
+                elapsed,
+                len(answer or ""),
+            )
+            return answer, elapsed
 
         def _timed_decompose_question() -> tuple[list[str], float]:
             started_at = time.time()
+            logger.info("%sstep1 decompose start", _trace_prefix(trace_id))
             questions = decompose_question(
-                question,
+                working_question,
                 client=pipeline_llm_client,
                 num_sub_questions=resolved_num_sub_questions,
                 enable_thinking=resolved_decompose_enable_thinking,
             )
-            return questions, time.time() - started_at
+            elapsed = time.time() - started_at
+            logger.info(
+                "%sstep1 decompose done elapsed=%.3fs sub_questions=%s",
+                _trace_prefix(trace_id),
+                elapsed,
+                len(questions),
+            )
+            return questions, elapsed
 
         # 使用线程并行（因为两个都是同步调用外部 API）
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            future_collection = executor.submit(get_or_create_collection)
             future_direct = executor.submit(_timed_direct_answer)
             future_decompose = executor.submit(_timed_decompose_question)
 
@@ -274,7 +454,9 @@ def run_agent(
             logger.info("Step 2/3: 子问题预回答 + 检索流水线")
             _emit_progress("step2", "started", "开始执行子问题预回答与检索流水线")
             t_step23 = time.time()
-            collection = get_or_create_collection()
+            if not future_collection.done():
+                logger.info("%sstep3 waiting for collection warmup", _trace_prefix(trace_id))
+            collection = future_collection.result()
             state.sub_answers, state.retrieved_chunks, pipeline_metrics = _run_pre_answer_retrieval_pipeline(
                 sub_questions=state.sub_questions,
                 retrieval_top_k=resolved_retrieval_top_k,
@@ -283,6 +465,7 @@ def run_agent(
                 embedding_client=embedding_client,
                 batch_size=resolved_retrieval_pipeline_batch_size,
                 progress_callback=progress_callback,
+                trace_id=trace_id,
             )
             _raise_if_cancelled()
             state.retrieval_queries = [
@@ -290,6 +473,15 @@ def run_agent(
                 for q, a in zip(state.sub_questions, state.sub_answers)
             ]
 
+            if not future_direct.done():
+                logger.info("%sstep1 waiting for direct answer after retrieval pipeline", _trace_prefix(trace_id))
+                _emit_progress(
+                    "step1",
+                    "running",
+                    "子问题处理完成，等待直接回答收尾",
+                    sub_questions=len(state.sub_questions),
+                    pre_answers=len(state.sub_answers),
+                )
             state.direct_answer, direct_elapsed = future_direct.result()
             _emit_progress(
                 "step1",
@@ -324,6 +516,14 @@ def run_agent(
             )
 
         total_chunks = sum(len(chunks) for chunks in state.retrieved_chunks)
+        _emit_progress(
+            "step3",
+            "success",
+            f"文献检索完成，共获得 {total_chunks} 个文段",
+            completed_batches=int(pipeline_metrics.get("retrieval_total_batches") or 1),
+            total_batches=int(pipeline_metrics.get("retrieval_total_batches") or 1),
+            retrieved_chunks_total=total_chunks,
+        )
         state.timings["step3_retrieval"] = pipeline_metrics["retrieval_completed_at"]
         logger.info(
             f"Step 3 完成 ({state.timings['step3_retrieval']:.1f}s): "
@@ -344,8 +544,10 @@ def run_agent(
 
         if stream_callback:
             draft_chunks: list[str] = []
+            draft_stream_started = False
+            logger.info("%sstep4 synthesis stream start", _trace_prefix(trace_id))
             for chunk in synthesize_answer_stream(
-                question=state.question,
+                question=working_question,
                 direct_answer=state.direct_answer,
                 all_retrieved_chunks=state.retrieved_chunks,
                 sub_questions=state.sub_questions,
@@ -354,17 +556,32 @@ def run_agent(
             ):
                 _raise_if_cancelled()
                 if chunk:
+                    if not draft_stream_started:
+                        logger.info("%sstep4 synthesis first_chunk chars=%s", _trace_prefix(trace_id), len(chunk))
+                        _emit_progress("step4", "running", "综合草稿开始流式输出", chunk_index=1)
+                        draft_stream_started = True
                     draft_chunks.append(chunk)
                     stream_callback(chunk)
             state.draft_answer = "".join(draft_chunks)
+            logger.info(
+                "%sstep4 synthesis stream done total_chars=%s",
+                _trace_prefix(trace_id),
+                len(state.draft_answer),
+            )
         else:
+            logger.info("%sstep4 synthesis blocking start", _trace_prefix(trace_id))
             state.draft_answer = synthesize_answer(
-                question=state.question,
+                question=working_question,
                 direct_answer=state.direct_answer,
                 all_retrieved_chunks=state.retrieved_chunks,
                 sub_questions=state.sub_questions,
                 client=pipeline_llm_client,
                 enable_thinking=resolved_enable_thinking,
+            )
+            logger.info(
+                "%sstep4 synthesis blocking done total_chars=%s",
+                _trace_prefix(trace_id),
+                len(state.draft_answer),
             )
         _raise_if_cancelled()
 
@@ -417,7 +634,7 @@ def run_agent(
 
                 check_started_at = time.time()
                 passed, issues = check_answer(
-                    question=state.question,
+                    question=working_question,
                     answer=current_answer,
                     all_retrieved_chunks=state.retrieved_chunks,
                     client=pipeline_llm_client,
@@ -464,7 +681,7 @@ def run_agent(
 
                 revise_started_at = time.time()
                 current_answer = revise_answer(
-                    question=state.question,
+                    question=working_question,
                     answer=current_answer,
                     issues=issues,
                     client=pipeline_llm_client,
@@ -508,11 +725,11 @@ def run_agent(
             )
 
     except Exception as e:
-        logger.error(f"Agent 运行出错: {e}", exc_info=True)
+        logger.error("%sAgent 运行出错: %s", _trace_prefix(trace_id), e, exc_info=True)
         state.error = str(e)
 
     state.timings["total"] = time.time() - total_start
-    logger.info(f"Agent 总耗时: {state.timings['total']:.1f}s")
+    logger.info("%sAgent 总耗时: %.1fs", _trace_prefix(trace_id), state.timings["total"])
 
     return state
 
@@ -537,6 +754,8 @@ def format_state_summary(
         "=" * 60,
         f"\n原始问题: {state.question}\n",
     ]
+    if state.effective_question and state.effective_question != state.question:
+        lines.append(f"执行问题: {state.effective_question}\n")
 
     if state.error:
         lines.append(f"错误: {state.error}\n")

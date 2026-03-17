@@ -378,6 +378,68 @@ def test_get_conversation_detail_backfills_mysql_from_legacy_json_messages():
     assert [item["message_id"] for item in healed_doc["messages"]] == ["m_000201", "m_000202"]
 
 
+def test_refresh_conversation_summary_persists_meta_summary():
+    repo = FakeConversationRepo()
+    document = _base_document()
+    document["messages"] = [
+        {
+            "message_id": "m_000001",
+            "role": "user",
+            "content": "介绍一下磷酸铁锂电池",
+            "created_at": "2026-03-15T10:01:00+08:00",
+            "status": "done",
+            "metadata": {"source": "ask_stream"},
+        },
+        {
+            "message_id": "m_000002",
+            "role": "assistant",
+            "content": "它的优点包括安全性高和循环寿命长",
+            "created_at": "2026-03-15T10:02:00+08:00",
+            "status": "done",
+            "metadata": {"query_mode": "thinking"},
+        },
+    ]
+    document["meta"]["message_count"] = 2
+    document["meta"]["last_message_at"] = "2026-03-15T10:02:00+08:00"
+    json_store = FakeJsonStore(document=document)
+    service = ConversationService(repo=repo, json_store=json_store, outbox_repo=FakeOutboxRepo())
+
+    result = service.refresh_conversation_summary(user_id=7, conversation_id=11)
+
+    assert result["success"] is True
+    summary = result["data"]["summary"]
+    assert summary["topic"] == "介绍一下磷酸铁锂电池"
+    assert summary["recent_focus"] == "它的优点包括安全性高和循环寿命长"
+    saved = json_store.saved_documents[-1]
+    assert saved["meta"]["summary"]["topic"] == "介绍一下磷酸铁锂电池"
+    detail = service.get_conversation_detail(user_id=7, conversation_id=11)
+    assert detail["data"]["summary"]["recent_focus"] == "它的优点包括安全性高和循环寿命长"
+
+
+def test_get_conversation_context_snapshot_returns_messages_and_summary():
+    repo = FakeConversationRepo()
+    document = _base_document()
+    document["messages"] = [
+        {
+            "message_id": "m_000001",
+            "role": "user",
+            "content": "介绍一下磷酸铁锂",
+            "created_at": "2026-03-15T10:01:00+08:00",
+            "status": "done",
+            "metadata": {"source": "ask_stream"},
+        }
+    ]
+    document["meta"]["summary"] = {"topic": "磷酸铁锂", "recent_focus": "介绍一下磷酸铁锂"}
+    json_store = FakeJsonStore(document=document)
+    service = ConversationService(repo=repo, json_store=json_store, outbox_repo=FakeOutboxRepo())
+
+    result = service.get_conversation_context_snapshot(user_id=7, conversation_id=11)
+
+    assert result["success"] is True
+    assert result["data"]["messages"][0]["content"] == "介绍一下磷酸铁锂"
+    assert result["data"]["summary"]["topic"] == "磷酸铁锂"
+
+
 def test_remove_uploaded_file_marks_json_deleted_and_removes_db_row():
     repo = FakeConversationRepo()
     repo.db_files = [

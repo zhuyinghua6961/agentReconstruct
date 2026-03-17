@@ -36,6 +36,39 @@ def test_fastapi_create_conversation_uses_auth_context(monkeypatch):
     assert response.json() == {"success": True, "data": {"conversation_id": 11, "title": "demo"}}
 
 
+def test_fastapi_conversation_detail_includes_summary(monkeypatch):
+    monkeypatch.setattr(
+        "server_fastapi.routers.conversation.conversation_service.get_conversation_detail",
+        lambda **_kwargs: {
+            "success": True,
+            "data": {
+                "conversation_id": 11,
+                "user_id": 7,
+                "title": "demo",
+                "message_count": 2,
+                "created_at": "2026-03-17T10:00:00+08:00",
+                "updated_at": "2026-03-17T10:02:00+08:00",
+                "messages": [],
+                "summary": {"topic": "磷酸铁锂", "recent_focus": "低温性能"},
+                "uploaded_files": [],
+                "uploaded_files_all": [],
+                "pdf_files": [],
+                "excel_files": [],
+            },
+        },
+    )
+
+    app = create_app()
+    app.dependency_overrides[require_auth_context] = lambda: AuthContext(user_id=7, role="user", username="demo")
+    client = TestClient(app)
+    response = client.get("/api/v1/conversations/11")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["data"]["summary"]["topic"] == "磷酸铁锂"
+
+
 def test_fastapi_conversation_download_local_file(tmp_path, monkeypatch):
     sample = tmp_path / "demo.pdf"
     sample.write_bytes(b"pdf")

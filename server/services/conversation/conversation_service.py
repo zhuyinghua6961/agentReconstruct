@@ -11,6 +11,7 @@ from server.database.connection import DatabaseConfigError, DatabaseConnectionEr
 from server.repositories.conversation_outbox_repository import ConversationOutboxRepository
 from server.repositories.conversation_repository import ConversationRepository
 from server.services.conversation.chat_json_store import ConversationJsonStore
+from server.services.conversation.conversation_summary_service import build_conversation_summary
 
 
 class ConversationService:
@@ -138,6 +139,19 @@ class ConversationService:
             "metadata": metadata,
         }
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+    def _document_summary(self, document: dict[str, Any]) -> dict[str, Any]:
+        meta = document.get("meta") if isinstance(document.get("meta"), dict) else {}
+        summary = meta.get("summary")
+        return dict(summary) if isinstance(summary, dict) else {}
+
+    def _set_document_summary(self, *, document: dict[str, Any], summary: dict[str, Any]) -> None:
+        meta = document.get("meta") if isinstance(document.get("meta"), dict) else {}
+        if summary:
+            meta["summary"] = dict(summary)
+        else:
+            meta.pop("summary", None)
+        document["meta"] = meta
 
     def _file_signature(self, row: dict[str, Any]) -> str:
         payload = {
@@ -605,6 +619,7 @@ class ConversationService:
                     "created_at": row.get("created_at"),
                     "updated_at": row.get("updated_at"),
                     "messages": messages,
+                    "summary": self._document_summary(doc),
                     "uploaded_files": uploaded_files,
                     "uploaded_files_all": files_all,
                     "pdf_files": pdf_files,
@@ -615,6 +630,137 @@ class ConversationService:
             return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
         except Exception as exc:
             return {"success": False, "error": str(exc), "code": "CONVERSATION_FETCH_ERROR"}
+
+    def get_conversation_summary(self, *, user_id: int, conversation_id: int) -> dict[str, Any]:
+        try:
+            row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id)
+            if not row:
+                return {"success": False, "error": "conversation_not_found", "code": "NOT_FOUND"}
+
+            with self._json_store.conversation_lock(user_id=user_id, conversation_id=conversation_id):
+                doc, bootstrapped = self._load_or_bootstrap_document(
+                    row=row,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                )
+                doc, healed = self._reconcile_document_messages_with_db(
+                    row=row,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    document=doc,
+                )
+                doc, files_healed = self._reconcile_document_files_with_db(
+                    row=row,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    document=doc,
+                )
+                if bootstrapped or healed or files_healed:
+                    self._persist_document_and_index(
+                        row=row,
+                        user_id=user_id,
+                        conversation_id=conversation_id,
+                        document=doc,
+                    )
+
+            return {"success": True, "data": {"summary": self._document_summary(doc)}}
+        except (DatabaseConfigError, DatabaseConnectionError) as exc:
+            return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
+        except Exception as exc:
+            return {"success": False, "error": str(exc), "code": "CONVERSATION_FETCH_ERROR"}
+
+    def get_conversation_context_snapshot(self, *, user_id: int, conversation_id: int) -> dict[str, Any]:
+        try:
+            row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id)
+            if not row:
+                return {"success": False, "error": "conversation_not_found", "code": "NOT_FOUND"}
+
+            with self._json_store.conversation_lock(user_id=user_id, conversation_id=conversation_id):
+                doc, bootstrapped = self._load_or_bootstrap_document(
+                    row=row,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                )
+                doc, healed = self._reconcile_document_messages_with_db(
+                    row=row,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    document=doc,
+                )
+                if bootstrapped or healed:
+                    self._persist_document_and_index(
+                        row=row,
+                        user_id=user_id,
+                        conversation_id=conversation_id,
+                        document=doc,
+                    )
+                    self._repo.set_message_count(
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        message_count=len(doc.get("messages") or []),
+                    )
+
+            messages = self._prepare_response_messages(doc.get("messages") or [])
+            return {
+                "success": True,
+                "data": {
+                    "messages": messages,
+                    "summary": self._document_summary(doc),
+                    "conversation_id": int(conversation_id),
+                    "user_id": int(user_id),
+                },
+            }
+        except (DatabaseConfigError, DatabaseConnectionError) as exc:
+            return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
+        except Exception as exc:
+            return {"success": False, "error": str(exc), "code": "CONVERSATION_FETCH_ERROR"}
+
+    def refresh_conversation_summary(self, *, user_id: int, conversation_id: int) -> dict[str, Any]:
+        try:
+            row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id)
+            if not row:
+                return {"success": False, "error": "conversation_not_found", "code": "NOT_FOUND"}
+
+            with self._json_store.conversation_lock(user_id=user_id, conversation_id=conversation_id):
+                doc, _ = self._load_or_bootstrap_document(
+                    row=row,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                )
+                doc, healed = self._reconcile_document_messages_with_db(
+                    row=row,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    document=doc,
+                )
+                doc, files_healed = self._reconcile_document_files_with_db(
+                    row=row,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    document=doc,
+                )
+                summary = build_conversation_summary(
+                    messages=doc.get("messages") if isinstance(doc.get("messages"), list) else [],
+                    previous_summary=self._document_summary(doc),
+                )
+                self._set_document_summary(document=doc, summary=summary)
+                self._persist_document_and_index(
+                    row=row,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    document=doc,
+                )
+                if healed or files_healed:
+                    self._repo.set_message_count(
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        message_count=len(doc.get("messages") or []),
+                    )
+            return {"success": True, "data": {"summary": summary}}
+        except (DatabaseConfigError, DatabaseConnectionError) as exc:
+            return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
+        except Exception as exc:
+            return {"success": False, "error": str(exc), "code": "CONVERSATION_SUMMARY_ERROR"}
 
     def add_message(
         self,

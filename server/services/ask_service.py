@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import atexit
+import logging
 import queue
 import re
 import threading
@@ -13,10 +14,13 @@ from typing import Any, Generator
 
 import config
 from server.schemas.request_models import AskRequest
+from server.services.conversation_context_service import ConversationContext, build_conversation_context
 from server.services.mode_profiles import RuntimeProfile, get_runtime_profile
+from server.services.query_rewrite_service import QuestionRewriteResult, rewrite_question
 
 _DOI_PATTERN = re.compile(r"10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
 _BRACKET_CITATION_PATTERN = re.compile(r"\[(10\.\d{4,9}/[-._;()/:A-Z0-9]+)(?:,\s*[^\]]+)?\]", re.IGNORECASE)
+logger = logging.getLogger(__name__)
 
 
 class AskServiceError(Exception):
@@ -90,6 +94,8 @@ def _format_frontend_step_message(stage: str, payload: dict[str, Any]) -> tuple[
     data = dict(payload.get("data") or {}) if isinstance(payload.get("data"), dict) else {}
 
     if stage == "step1":
+        if "等待直接回答" in raw_message:
+            return "阶段1：子问题处理完成，等待直接回答收尾", data
         if "查询分解完成" in raw_message:
             return "阶段1：查询分解完成，开始组织子问题", data
         if "直接回答完成" in raw_message:
@@ -97,6 +103,15 @@ def _format_frontend_step_message(stage: str, payload: dict[str, Any]) -> tuple[
         return "阶段1：开始执行直接回答与查询分解", data
 
     if stage == "step2":
+        if "全部完成" in raw_message:
+            completed = data.get("completed")
+            try:
+                completed_int = int(completed)
+            except Exception:
+                completed_int = 0
+            if completed_int > 0:
+                data["count"] = completed_int
+            return "阶段2：子问题预回答全部完成，开始等待检索结果", data
         completed = data.get("completed")
         total = data.get("total")
         try:
@@ -112,7 +127,41 @@ def _format_frontend_step_message(stage: str, payload: dict[str, Any]) -> tuple[
             return f"阶段2：子问题预回答：已完成 {completed_int}/{total_int}", data
         return "阶段2：开始执行子问题预回答与检索流水线", data
 
+    if stage == "step3":
+        submitted_batches = data.get("submitted_batches")
+        completed_batches = data.get("completed_batches")
+        total_batches = data.get("total_batches")
+        retrieved_chunks_total = data.get("retrieved_chunks_total")
+        try:
+            submitted_batches_int = int(submitted_batches)
+        except Exception:
+            submitted_batches_int = 0
+        try:
+            completed_batches_int = int(completed_batches)
+        except Exception:
+            completed_batches_int = 0
+        try:
+            total_batches_int = int(total_batches)
+        except Exception:
+            total_batches_int = 0
+        try:
+            retrieved_chunks_total_int = int(retrieved_chunks_total)
+        except Exception:
+            retrieved_chunks_total_int = 0
+
+        if completed_batches_int > 0 and total_batches_int > 0:
+            data["count"] = completed_batches_int
+            if "检索完成" in raw_message:
+                return f"阶段3：文献检索完成，共获得 {retrieved_chunks_total_int} 个文段", data
+            return f"阶段3：文献检索：已完成 {completed_batches_int}/{total_batches_int} 批", data
+        if submitted_batches_int > 0 and total_batches_int > 0:
+            data["count"] = submitted_batches_int
+            return f"阶段3：已提交 {submitted_batches_int}/{total_batches_int} 批检索任务", data
+        return "阶段3：开始文献检索", data
+
     if stage == "step4":
+        if "开始流式输出" in raw_message:
+            return "阶段4：综合草稿开始流式输出", data
         return "阶段4：开始综合生成草稿答案", data
 
     if stage == "step5_check":
@@ -242,6 +291,39 @@ def _safe_stream_adapt_prefix_length(text: str) -> int:
     return len(content)
 
 
+def _build_preflight_step_events(
+    *,
+    context: ConversationContext,
+    rewrite: QuestionRewriteResult,
+) -> list[dict[str, Any]]:
+    context_message = f"已完成上下文整理（最近 {len(context.recent_turns)} 条消息）"
+    if bool(context.summary):
+        context_message += "并加载会话摘要"
+    rewrite_message = "已完成问题改写" if rewrite.rewrite_applied else "当前问题无需改写"
+    return [
+        {
+            "type": "step",
+            "step": "context_ready",
+            "message": context_message,
+            "status": "success",
+            "data": {
+                "context_turns": len(context.recent_turns),
+                "summary_available": bool(context.summary),
+            },
+        },
+        {
+            "type": "step",
+            "step": "rewrite_ready",
+            "message": rewrite_message,
+            "status": "success",
+            "data": {
+                "rewrite_applied": bool(rewrite.rewrite_applied),
+                "rewrite_reason": str(rewrite.rewrite_reason or ""),
+            },
+        },
+    ]
+
+
 def resolve_profile(mode: str) -> RuntimeProfile:
     try:
         profile = get_runtime_profile(mode)
@@ -257,6 +339,8 @@ def _run_agent_for_profile(question: str, profile: RuntimeProfile, **callbacks: 
 
     return run_agent(
         question=question,
+        raw_question=callbacks.get("raw_question"),
+        conversation_context=callbacks.get("conversation_context"),
         stream_callback=callbacks.get("stream_callback"),
         step_callback=callbacks.get("step_callback"),
         progress_callback=callbacks.get("progress_callback"),
@@ -265,7 +349,26 @@ def _run_agent_for_profile(question: str, profile: RuntimeProfile, **callbacks: 
         retrieval_top_k=profile.retrieval_top_k,
         max_check_loops=profile.max_check_loops,
         cancel_event=callbacks.get("cancel_event"),
+        trace_id=callbacks.get("trace_id"),
     )
+
+
+def _prepare_execution(request: AskRequest) -> tuple[ConversationContext, QuestionRewriteResult]:
+    context = build_conversation_context(request=request)
+    try:
+        rewrite = rewrite_question(
+            raw_question=context.raw_question,
+            recent_turns=context.recent_turns,
+            summary=context.summary,
+        )
+    except Exception:
+        rewrite = QuestionRewriteResult(
+            raw_question=context.raw_question,
+            effective_question=context.raw_question,
+            rewrite_applied=False,
+            rewrite_reason="rewrite_failed",
+        )
+    return context, rewrite
 
 
 def execute_ask(
@@ -276,13 +379,29 @@ def execute_ask(
 ) -> dict[str, Any]:
     """Execute non-stream ask and return response data payload."""
     profile = resolve_profile(request.mode)
+    context, rewrite = _prepare_execution(request)
     cancel_event = threading.Event()
+    logger.info(
+        "[trace_id=%s] execute_ask start mode=%s conversation_id=%s question=%s",
+        trace_id,
+        profile.mode,
+        request.conversation_id,
+        str(context.raw_question or "")[:120],
+    )
 
     future = _get_agent_executor().submit(
         _run_agent_for_profile,
-        request.question,
+        rewrite.effective_question,
         profile,
+        raw_question=context.raw_question,
+        conversation_context={
+            "recent_turns": list(context.recent_turns),
+            "summary": dict(context.summary),
+            "conversation_id": context.conversation_id,
+            "user_id": context.user_id,
+        },
         cancel_event=cancel_event,
+        trace_id=trace_id,
     )
     try:
         state = future.result(timeout=max(1, int(timeout_seconds)))
@@ -308,6 +427,13 @@ def execute_ask(
             "mode": profile.mode,
             "query_mode": profile.mode,
             "conversation_id": request.conversation_id,
+            "raw_question": context.raw_question,
+            "effective_question": rewrite.effective_question,
+            "rewrite_applied": rewrite.rewrite_applied,
+            "rewrite_reason": rewrite.rewrite_reason,
+            "context_turns": len(context.recent_turns),
+            "summary_available": bool(context.summary),
+            "summary_updated_at": str(context.summary.get("updated_at") or "") if isinstance(context.summary, dict) else "",
         },
         "references": references,
         "pdf_links": links,
@@ -325,6 +451,14 @@ def stream_ask_events(
 ) -> Generator[dict[str, Any], None, None]:
     """Yield structured ask-stream events (not encoded as SSE yet)."""
     profile = resolve_profile(request.mode)
+    context, rewrite = _prepare_execution(request)
+    logger.info(
+        "[trace_id=%s] stream_ask_events start mode=%s conversation_id=%s question=%s",
+        trace_id,
+        profile.mode,
+        request.conversation_id,
+        str(context.raw_question or "")[:120],
+    )
     event_queue: queue.Queue[Any] = queue.Queue()
     stop_token = object()
     result_holder: dict[str, Any] = {}
@@ -332,10 +466,18 @@ def stream_ask_events(
     cancel_event = threading.Event()
     streamed_raw_content = ""
     streamed_adapted_content = ""
+    first_content_logged = False
 
     def on_step(description: str, elapsed: float) -> None:
         nonlocal step_idx
         step_idx += 1
+        logger.info(
+            "[trace_id=%s] stream step callback step=%s elapsed=%.3fs message=%s",
+            trace_id,
+            step_idx,
+            float(elapsed),
+            str(description),
+        )
         event_queue.put(
             {
                 "type": "step",
@@ -348,6 +490,14 @@ def stream_ask_events(
 
     def on_progress(payload: dict[str, Any]) -> None:
         normalized = dict(payload)
+        logger.info(
+            "[trace_id=%s] stream progress stage=%s status=%s message=%s data=%s",
+            trace_id,
+            normalized.get("stage"),
+            normalized.get("status"),
+            normalized.get("message"),
+            normalized.get("data"),
+        )
         event_queue.put(normalized)
         event_queue.put(_progress_to_step_event(normalized))
 
@@ -368,21 +518,37 @@ def stream_ask_events(
             event_queue.put({"type": "content", "content": part})
 
     def on_content(text: str) -> None:
-        nonlocal streamed_raw_content
+        nonlocal streamed_raw_content, first_content_logged
         streamed_raw_content += str(text or "")
+        if not first_content_logged and text:
+            first_content_logged = True
+            logger.info(
+                "[trace_id=%s] stream first raw content chunk chars=%s",
+                trace_id,
+                len(str(text or "")),
+            )
         safe_len = _safe_stream_adapt_prefix_length(streamed_raw_content)
         adapted = _adapt_answer_for_frontend(streamed_raw_content[:safe_len])
         _emit_adapted_delta(adapted)
 
     def worker() -> None:
+        logger.info("[trace_id=%s] stream worker submit to ask executor", trace_id)
         future = _get_agent_executor().submit(
             _run_agent_for_profile,
-            request.question,
+            rewrite.effective_question,
             profile,
+            raw_question=context.raw_question,
+            conversation_context={
+                "recent_turns": list(context.recent_turns),
+                "summary": dict(context.summary),
+                "conversation_id": context.conversation_id,
+                "user_id": context.user_id,
+            },
             stream_callback=on_content,
             step_callback=on_step,
             progress_callback=on_progress,
             cancel_event=cancel_event,
+            trace_id=trace_id,
         )
         result_holder["future"] = future
 
@@ -391,8 +557,17 @@ def stream_ask_events(
         "mode": profile.mode,
         "query_mode": profile.mode,
         "trace_id": trace_id,
+        "raw_question": context.raw_question,
+        "effective_question": rewrite.effective_question,
+        "rewrite_applied": rewrite.rewrite_applied,
+        "rewrite_reason": rewrite.rewrite_reason,
+        "context_turns": len(context.recent_turns),
+        "summary_available": bool(context.summary),
+        "summary_updated_at": str(context.summary.get("updated_at") or "") if isinstance(context.summary, dict) else "",
         "ts": _utc_iso(),
     }
+    for event in _build_preflight_step_events(context=context, rewrite=rewrite):
+        yield event
 
     started_at = time.monotonic()
     worker()
@@ -401,6 +576,7 @@ def stream_ask_events(
         elapsed = time.monotonic() - started_at
         remaining = max(0.0, float(timeout_seconds) - elapsed)
         if remaining <= 0:
+            logger.warning("[trace_id=%s] stream timeout after %.3fs", trace_id, elapsed)
             cancel_event.set()
             future = result_holder.get("future")
             if future is not None:
@@ -420,8 +596,10 @@ def stream_ask_events(
         future = result_holder.get("future")
         if future is not None and future.done():
             try:
+                logger.info("[trace_id=%s] stream future completed, collecting state", trace_id)
                 result_holder["state"] = future.result()
             except Exception as exc:  # pragma: no cover - defensive
+                logger.exception("[trace_id=%s] stream future raised: %s", trace_id, exc)
                 result_holder["error"] = exc
             finally:
                 result_holder.pop("future", None)
@@ -444,6 +622,7 @@ def stream_ask_events(
 
     state = result_holder.get("state")
     if "error" in result_holder:
+        logger.error("[trace_id=%s] stream finished with upstream error=%s", trace_id, result_holder["error"])
         yield {
             "type": "error",
             "code": "UPSTREAM_ERROR",
@@ -455,6 +634,7 @@ def stream_ask_events(
         return
 
     if state is None:
+        logger.error("[trace_id=%s] stream finished without state", trace_id)
         yield {
             "type": "error",
             "code": "INTERNAL_ERROR",
@@ -466,6 +646,7 @@ def stream_ask_events(
         return
 
     if getattr(state, "error", ""):
+        logger.error("[trace_id=%s] stream state error=%s", trace_id, state.error)
         if str(getattr(state, "error", "")).strip().lower() == "cancelled":
             yield {
                 "type": "error",
@@ -489,6 +670,12 @@ def stream_ask_events(
     frontend_answer = _adapt_answer_for_frontend(state.final_answer)
     references = _extract_references(state.final_answer)
     links = _build_reference_links(references)
+    logger.info(
+        "[trace_id=%s] stream done total_chars=%s references=%s",
+        trace_id,
+        len(frontend_answer),
+        len(references),
+    )
     yield {
         "type": "done",
         "mode": profile.mode,

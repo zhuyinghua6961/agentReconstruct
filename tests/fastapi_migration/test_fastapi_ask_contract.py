@@ -44,7 +44,13 @@ def test_fastapi_ask_success_contract(monkeypatch):
         return {
             "final_answer": "alpha",
             "timings": {"total": 0.1},
-            "metadata": {"mode": "thinking", "query_mode": "thinking", "conversation_id": None},
+            "metadata": {
+                "mode": "thinking",
+                "query_mode": "thinking",
+                "conversation_id": None,
+                "summary_available": True,
+                "summary_updated_at": "2026-03-17T10:00:00+08:00",
+            },
             "references": ["10.1000/demo"],
             "pdf_links": [{"doi": "10.1000/demo", "pdf_url": "/api/v1/view_pdf/10.1000/demo"}],
             "reference_links": [{"doi": "10.1000/demo", "pdf_url": "/api/v1/view_pdf/10.1000/demo"}],
@@ -63,12 +69,20 @@ def test_fastapi_ask_success_contract(monkeypatch):
     assert payload["success"] is True
     assert payload["data"]["final_answer"] == "alpha"
     assert payload["data"]["metadata"]["query_mode"] == "thinking"
+    assert payload["data"]["metadata"]["summary_available"] is True
     assert payload["trace_id"].startswith("req_")
 
 
 def test_fastapi_ask_stream_success_contract(monkeypatch):
     def fake_stream_ask_events(**_kwargs):
-        yield {"type": "metadata", "mode": "thinking", "query_mode": "thinking", "trace_id": "req_test"}
+        yield {
+            "type": "metadata",
+            "mode": "thinking",
+            "query_mode": "thinking",
+            "trace_id": "req_test",
+            "summary_available": True,
+            "summary_updated_at": "2026-03-17T10:00:00+08:00",
+        }
         yield {"type": "content", "content": "alpha"}
         yield {
             "type": "done",
@@ -97,6 +111,7 @@ def test_fastapi_ask_stream_success_contract(monkeypatch):
     assert [frame["type"] for frame in frames] == ["metadata", "content", "done"]
     assert [frame["seq"] for frame in frames] == [1, 2, 3]
     assert all("ts" in frame for frame in frames)
+    assert frames[0]["summary_available"] is True
     assert frames[-1]["reference_links"][0]["doi"] == "10.1000/demo"
 
 

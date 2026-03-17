@@ -231,28 +231,32 @@ def _persist_assistant_message_if_needed(*, request: Request, ask_request, summa
         "steps": summary.get("steps") or [],
         "done_seen": bool(summary.get("done_seen")),
     }
+
+    def _persist_and_refresh_summary() -> None:
+        result = conversation_service.add_message(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            role="assistant",
+            content=content,
+            metadata=meta,
+        )
+        if not result.get("success"):
+            request.app.logger.warning("conversation assistant message persist skipped: %s", result)
+            return
+        refresh = conversation_service.refresh_conversation_summary(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+        if not refresh.get("success"):
+            request.app.logger.warning("conversation summary refresh skipped: %s", refresh)
+
     if _chat_persist_async_enabled(request):
         get_default_dispatcher().submit(
             key=_persistence_key(user_id=user_id, conversation_id=conversation_id),
-            fn=_persist_message_task,
-            kwargs={
-                "logger": request.app.logger,
-                "user_id": user_id,
-                "conversation_id": conversation_id,
-                "role": "assistant",
-                "content": content,
-                "metadata": meta,
-            },
+            fn=_persist_and_refresh_summary,
         )
         return
-    _persist_message_task(
-        logger=request.app.logger,
-        user_id=user_id,
-        conversation_id=conversation_id,
-        role="assistant",
-        content=content,
-        metadata=meta,
-    )
+    _persist_and_refresh_summary()
 
 
 def _build_stream_response(*, request: Request, ask_request, trace_id: str, slot) -> StreamingResponse:
