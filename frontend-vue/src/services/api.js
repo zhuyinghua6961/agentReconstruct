@@ -6,28 +6,27 @@ function resolveBackendBase() {
   if (explicit) {
     return explicit.replace(/\/$/, '');
   }
-
-  const proxyTarget = String(import.meta.env.VITE_PROXY_TARGET || '').trim();
-  if (!proxyTarget) {
-    return '';
-  }
-
-  try {
-    const url = new URL(proxyTarget, window.location.origin);
-    if (['127.0.0.1', 'localhost'].includes(url.hostname) && window.location.hostname) {
-      url.hostname = window.location.hostname;
-    }
-    return url.origin.replace(/\/$/, '');
-  } catch {
-    return '';
-  }
+  return '';
 }
 
 const API_BASE = resolveBackendBase();
 const V1 = '/api/v1';
 
+function readStoredToken() {
+  return localStorage.getItem('token')
+    || localStorage.getItem('agentcode.auth.token.v1')
+    || '';
+}
+
+function clearStoredAuth() {
+  localStorage.removeItem('token');
+  localStorage.removeItem('user');
+  localStorage.removeItem('agentcode.auth.token.v1');
+  localStorage.removeItem('agentcode.auth.user.v1');
+}
+
 function authHeaders(includeJson = true) {
-  const token = localStorage.getItem('token') || '';
+  const token = readStoredToken();
   const headers = {};
   if (includeJson) headers['Content-Type'] = 'application/json';
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -36,8 +35,7 @@ function authHeaders(includeJson = true) {
 
 function handleApiError(error, response) {
   if (error?.code === 'ACCOUNT_DISABLED') {
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
+    clearStoredAuth();
     alert('您的账号已被停用，请联系管理员');
     window.location.href = '/login';
     return;
@@ -47,8 +45,7 @@ function handleApiError(error, response) {
     error?.code === 'TOKEN_MISSING' ||
     response?.status === 401
   ) {
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
+    clearStoredAuth();
     if (!window.location.pathname.includes('/login')) {
       window.location.href = '/login';
     }
@@ -132,9 +129,50 @@ function normalizeSteps(rawSteps) {
   return orderedSteps;
 }
 
+function normalizeReferenceLinks(rawLinks, references = []) {
+  const normalized = [];
+  const seen = new Set();
+
+  const append = (item) => {
+    if (!item) return;
+    const doi = String(typeof item === 'string' ? item : item?.doi || '').trim();
+    if (!doi) return;
+    const key = doi.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    const pdfUrl = String(
+      (typeof item === 'object' && (item?.pdfUrl || item?.pdf_url || item?.url))
+      || `${V1}/view_pdf/${encodeURIComponent(doi)}`
+    ).trim();
+    normalized.push({ doi, pdfUrl });
+  };
+
+  if (Array.isArray(rawLinks)) {
+    rawLinks.forEach(append);
+  }
+  if (normalized.length === 0 && Array.isArray(references)) {
+    references.forEach((item) => append(item?.doi || item));
+  }
+  return normalized;
+}
+
+function normalizeDoiLocations(rawLocations) {
+  if (!rawLocations || typeof rawLocations !== 'object') return {};
+  return Object.entries(rawLocations).reduce((acc, [doi, locations]) => {
+    const cleanDoi = String(doi || '').trim();
+    if (!cleanDoi) return acc;
+    acc[cleanDoi] = Array.isArray(locations)
+      ? locations.map((item) => (item && typeof item === 'object' ? { ...item } : item)).filter(Boolean)
+      : [];
+    return acc;
+  }, {});
+}
+
 function normalizeMessage(item) {
-  const metadata = item?.metadata && typeof item.metadata === 'object' ? item.metadata : {};
-  const refsRaw = Array.isArray(metadata.references) ? metadata.references : [];
+  const metadata = item?.metadata && typeof item.metadata === 'object' ? { ...item.metadata } : {};
+  const refsRaw = Array.isArray(item?.references)
+    ? item.references
+    : (Array.isArray(metadata.references) ? metadata.references : []);
   const references = refsRaw
     .map((ref) => {
       if (typeof ref === 'string') {
@@ -147,8 +185,11 @@ function normalizeMessage(item) {
     })
     .filter((ref) => ref.doi);
 
-  const rawMode = String(metadata.query_mode || metadata.queryMode || '').trim();
+  const rawMode = String(item?.queryMode || item?.query_mode || metadata.query_mode || metadata.queryMode || '').trim();
   const queryModeMap = {
+    fast: '快速模式',
+    thinking: '思考模式',
+    patent: '专利模式',
     neo4j: '知识图谱',
     community: '社区分析',
     literature: '文献检索',
@@ -157,16 +198,39 @@ function normalizeMessage(item) {
     tabular: '表格问答',
   };
   const queryMode = rawMode ? (queryModeMap[rawMode] || rawMode) : '';
+  const referenceLinks = normalizeReferenceLinks(
+    item?.referenceLinks
+    || item?.reference_links
+    || item?.pdfLinks
+    || item?.pdf_links
+    || metadata?.referenceLinks
+    || metadata?.reference_links
+    || metadata?.pdfLinks
+    || metadata?.pdf_links,
+    references,
+  );
+  const steps = normalizeSteps(item?.steps || metadata.steps);
+  const doiLocations = normalizeDoiLocations(
+    item?.doiLocations || item?.doi_locations || metadata?.doiLocations || metadata?.doi_locations
+  );
 
   return {
     role: String(item?.role || 'assistant'),
     content: String(item?.content || ''),
-    timestamp: item?.created_at || item?.timestamp || new Date().toISOString(),
-    metadata,
+    timestamp: item?.timestamp || item?.created_at || new Date().toISOString(),
+    metadata: {
+      ...metadata,
+      references,
+      ...(referenceLinks.length > 0 ? { reference_links: referenceLinks, pdf_links: referenceLinks } : {}),
+      ...(steps.length > 0 ? { steps } : {}),
+      ...(rawMode ? { query_mode: rawMode } : {}),
+      ...(Object.keys(doiLocations).length > 0 ? { doi_locations: doiLocations } : {}),
+    },
     queryMode,
     references,
-    referenceLinks: [],
-    steps: normalizeSteps(metadata.steps),
+    referenceLinks,
+    doiLocations,
+    steps,
     stepsCollapsed: false,
     isComplete: true,
   };
@@ -178,6 +242,7 @@ function normalizeUploadedFile(item) {
     id: Number(item?.id || 0),
     file_id: Number(item?.id || 0),
     file_no: Number(item?.file_no || 0),
+    display_no: Number(item?.display_no || 0),
     file_type: fileType,
     file_name: String(item?.file_name || ''),
     title: String(item?.file_name || ''),
@@ -202,6 +267,7 @@ function asPdfList(files) {
     .map((f) => ({
       file_id: f.file_id,
       file_no: f.file_no,
+      display_no: f.display_no,
       pdf_title: f.file_name || f.title || 'PDF',
       pdf_path: f.storage_ref || f.local_path || '',
       file_hash: '',
@@ -221,6 +287,7 @@ function asExcelList(files) {
     .map((f) => ({
       file_id: f.file_id,
       file_no: f.file_no,
+      display_no: f.display_no,
       excel_title: f.file_name || f.title || 'Excel',
       excel_path: f.storage_ref || f.local_path || '',
       uploaded_at: f.uploaded_at,
@@ -231,17 +298,6 @@ function asExcelList(files) {
       last_error: f.last_error || '',
       file_meta: f.file_meta || {},
     }));
-}
-
-function normalizeChatHistory(chatHistory = []) {
-  return (Array.isArray(chatHistory) ? chatHistory : [])
-    .map((item) => {
-      const roleRaw = String(item?.role || '').trim().toLowerCase();
-      const role = roleRaw === 'bot' ? 'assistant' : roleRaw;
-      const content = String(item?.content || '');
-      return { role, content };
-    })
-    .filter((item) => ['user', 'assistant', 'system'].includes(item.role) && item.content.trim().length > 0);
 }
 
 export const api = {
@@ -415,24 +471,42 @@ export const api = {
   // ==================== Knowledge ====================
 
   async getKbInfo() {
-    return await requestJson(`${API_BASE}${V1}/kb_info`, { method: 'GET' });
+    return await requestJson(`${API_BASE}${V1}/kb_info`, {
+      method: 'GET',
+      headers: authHeaders(false),
+    });
   },
 
-  async *askStream(question, chatHistory = [], conversationId = null, pdfContext = null, signal = undefined) {
-    const normalizedHistory = normalizeChatHistory(chatHistory).slice(-10);
+  async *askStream(question, chatHistory = [], conversationId = null, pdfContext = null, signal = undefined, mode = 'thinking') {
     const body = {
       question,
-      chat_history: normalizedHistory,
+      chat_history: chatHistory.slice(-10),
     };
     if (conversationId) body.conversation_id = conversationId;
     if (pdfContext) body.pdf_context = pdfContext;
 
-    const response = await fetchWithErrorHandling(`${API_BASE}${V1}/ask_stream`, {
+    const normalizedMode = String(mode || 'thinking').trim().toLowerCase();
+    const askPath = ['fast', 'thinking', 'patent'].includes(normalizedMode)
+      ? `${V1}/${normalizedMode}/ask_stream`
+      : `${V1}/ask_stream`;
+
+    const response = await fetch(`${API_BASE}${askPath}`, {
       method: 'POST',
       headers: authHeaders(true),
       body: JSON.stringify(body),
       signal,
     });
+
+    const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+    if (!response.ok && !contentType.includes('text/event-stream')) {
+      const payload = await response.json().catch(() => ({}));
+      handleApiError(payload, response);
+      const error = new Error(payload?.message || payload?.error || `HTTP ${response.status}`);
+      error.status = Number(response.status || 0);
+      error.code = payload?.code || '';
+      error.payload = payload;
+      throw error;
+    }
 
     const reader = response.body?.getReader();
     if (!reader) {
@@ -466,12 +540,19 @@ export const api = {
     }
   },
 
-  async ask(question, chatHistory = []) {
-    const normalizedHistory = normalizeChatHistory(chatHistory).slice(-10);
-    const payload = await requestJson(`${API_BASE}${V1}/ask_stream`, {
+  async ask(question, chatHistory = [], mode = 'thinking') {
+    const normalizedMode = String(mode || 'thinking').trim().toLowerCase();
+    const askPath = ['fast', 'thinking', 'patent'].includes(normalizedMode)
+      ? `${V1}/${normalizedMode}/ask`
+      : `${V1}/ask`;
+    const payload = await requestJson(`${API_BASE}${askPath}`, {
       method: 'POST',
       headers: authHeaders(true),
-      body: JSON.stringify({ question, chat_history: normalizedHistory }),
+      body: JSON.stringify({
+        question,
+        chat_history: chatHistory.slice(-10),
+        requested_mode: ['fast', 'thinking', 'patent'].includes(normalizedMode) ? normalizedMode : 'fast',
+      }),
     });
     return payload;
   },
@@ -573,7 +654,7 @@ export const api = {
 
       xhr.addEventListener('error', () => reject(new Error('网络错误')));
       xhr.open('POST', `${API_BASE}${V1}/upload_pdf`);
-      const token = localStorage.getItem('token') || '';
+      const token = readStoredToken();
       if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
       xhr.send(formData);
     });

@@ -57,6 +57,7 @@ export async function streamAsk({
   conversationId,
   signal,
   onEvent,
+  mode = 'thinking',
 }) {
   const token =
     typeof window !== 'undefined'
@@ -66,18 +67,37 @@ export async function streamAsk({
   if (token) {
     headers.Authorization = `Bearer ${token}`;
   }
-  const normalizedHistory = normalizeChatHistory(chatHistory);
-  const response = await fetch(buildUrl(`${API_PREFIX}/ask_stream`), {
+  const normalizedMode = String(mode || 'thinking').trim().toLowerCase();
+  const askPath = ['fast', 'thinking', 'patent'].includes(normalizedMode)
+    ? `${API_PREFIX}/${normalizedMode}/ask_stream`
+    : `${API_PREFIX}/ask_stream`;
+
+  const body = {
+    question,
+    chat_history: normalizeChatHistory(chatHistory),
+    requested_mode: ['fast', 'thinking', 'patent'].includes(normalizedMode) ? normalizedMode : 'fast',
+  };
+  if (conversationId) {
+    body.conversation_id = conversationId;
+  }
+  const options = {};
+  if (typeof usePdf === 'boolean') options.use_pdf = usePdf;
+  if (pdfPath) options.pdf_path = pdfPath;
+  if (typeof useGenerationDriven === 'boolean') options.use_generation_driven = useGenerationDriven;
+  if (Object.keys(options).length > 0) {
+    body.options = options;
+  }
+  if (usePdf || pdfPath) {
+    body.pdf_context = {
+      legacy_use_pdf: Boolean(usePdf),
+      legacy_pdf_path: String(pdfPath || ''),
+    };
+  }
+
+  const response = await fetch(buildUrl(askPath), {
     method: 'POST',
     headers,
-    body: JSON.stringify({
-      question,
-      chat_history: normalizedHistory,
-      use_pdf: usePdf,
-      pdf_path: pdfPath,
-      use_generation_driven: useGenerationDriven,
-      conversation_id: conversationId || undefined,
-    }),
+    body: JSON.stringify(body),
     signal,
   });
 

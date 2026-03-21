@@ -3,13 +3,25 @@
  */
 const API_BASE = '/api/v1/auth'
 
+function readStoredToken() {
+  return localStorage.getItem('token')
+    || localStorage.getItem('agentcode.auth.token.v1')
+    || ''
+}
+
+function clearStoredAuth() {
+  localStorage.removeItem('token')
+  localStorage.removeItem('user')
+  localStorage.removeItem('agentcode.auth.token.v1')
+  localStorage.removeItem('agentcode.auth.user.v1')
+}
+
 // 全局错误处理函数
 function handleAuthError(error, response) {
   // 检查是否是账号停用错误
   if (error.code === 'ACCOUNT_DISABLED') {
     // 清除本地存储
-    localStorage.removeItem('token')
-    localStorage.removeItem('user')
+    clearStoredAuth()
     
     // 显示友好提示
     alert('您的账号已被停用，请联系管理员')
@@ -23,8 +35,7 @@ function handleAuthError(error, response) {
   // 检查是否是 token 失效
   if (error.code === 'TOKEN_INVALID' || error.code === 'TOKEN_MISSING' || response?.status === 401) {
     // 清除本地存储
-    localStorage.removeItem('token')
-    localStorage.removeItem('user')
+    clearStoredAuth()
     
     // 跳转到登录页（除非已经在登录页）
     if (!window.location.pathname.includes('/login')) {
@@ -81,7 +92,7 @@ export const authApi = {
    * 获取当前用户信息
    */
   async getMe() {
-    const token = localStorage.getItem('token')
+    const token = readStoredToken()
     return fetchWithErrorHandling(`${API_BASE}/me`, {
       headers: {
         'Authorization': `Bearer ${token}`
@@ -93,7 +104,7 @@ export const authApi = {
    * 修改密码
    */
   async changePassword(oldPassword, newPassword) {
-    const token = localStorage.getItem('token')
+    const token = readStoredToken()
     const response = await fetch(`${API_BASE}/password`, {
       method: 'PUT',
       headers: {
@@ -154,7 +165,7 @@ export const authApi = {
    * 获取当前用户设置的安全问题
    */
   async getSecurityQuestions() {
-    const token = localStorage.getItem('token')
+    const token = readStoredToken()
     const response = await fetch(`${API_BASE}/security-questions`, {
       headers: {
         'Authorization': `Bearer ${token}`
@@ -171,7 +182,7 @@ export const authApi = {
    * 设置/更新安全问题
    */
   async setSecurityQuestions(questions) {
-    const token = localStorage.getItem('token')
+    const token = readStoredToken()
     const response = await fetch(`${API_BASE}/security-questions`, {
       method: 'PUT',
       headers: {

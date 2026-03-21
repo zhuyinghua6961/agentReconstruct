@@ -218,6 +218,7 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
+import { checkPdfAvailability } from '../api/literature'
 import { api } from '../services/api'
 
 // Props & Emits
@@ -289,44 +290,41 @@ async function openReader(doi, locations = []) {
   summaryError.value = ''
   isSummarizing.value = false
   
-  // 添加认证token到URL
-  const encodedDoi = encodeDoiPath(doi)
   let url = buildPdfUrl(doi)
   
   // 如果有位置信息，添加页码锚点
   if (locations.length > 0) {
     targetPage.value = locations[0].page || 1
     url = buildPdfUrl(doi, targetPage.value)
+  } else {
+    targetPage.value = 1
   }
   
-  pdfUrl.value = url
+  pdfUrl.value = ''
   pdfError.value = null
   isOpen.value = true
   translations.value = []
   manualText.value = ''
   nextTick(() => normalizeSummaryHeight())
-  
-  // 检查PDF是否存在（需要携带token）
-  // 注意：MinIO模式下会返回302重定向，这也是正常的
-  const checkUrl = buildPdfUrl(doi)
-  fetch(checkUrl, { method: 'HEAD', redirect: 'follow' })
-    .then(response => {
-      // 200 OK 或 302 重定向都表示PDF存在
-      if (!response.ok && response.status !== 302) {
-        pdfError.value = {
-          message: 'PDF文件不存在',
-          doi: currentDoi.value
-        }
-        isPdfLoading.value = false
-      }
-    })
-    .catch(() => {
+
+  try {
+    const payload = await checkPdfAvailability(doi)
+    if (!payload?.exists) {
       pdfError.value = {
         message: 'PDF文件不存在',
         doi: currentDoi.value
       }
       isPdfLoading.value = false
-    })
+      return
+    }
+    pdfUrl.value = url
+  } catch (_error) {
+    pdfError.value = {
+      message: 'PDF文件不存在',
+      doi: currentDoi.value
+    }
+    isPdfLoading.value = false
+  }
 }
 
 function toggleSidePanel() {

@@ -26,9 +26,38 @@ let tokenValidated = false
 let lastValidationTime = 0
 const VALIDATION_CACHE_TIME = 5 * 60 * 1000 // 5分钟缓存
 
+function readStoredToken() {
+  return localStorage.getItem('token')
+    || localStorage.getItem('agentcode.auth.token.v1')
+    || ''
+}
+
+function readStoredUser() {
+  const raw = localStorage.getItem('user') || localStorage.getItem('agentcode.auth.user.v1')
+  if (!raw) return null
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return null
+  }
+}
+
+function clearStoredAuth() {
+  localStorage.removeItem('token')
+  localStorage.removeItem('user')
+  localStorage.removeItem('agentcode.auth.token.v1')
+  localStorage.removeItem('agentcode.auth.user.v1')
+}
+
+function persistStoredUser(user) {
+  const serialized = JSON.stringify(user)
+  localStorage.setItem('user', serialized)
+  localStorage.setItem('agentcode.auth.user.v1', serialized)
+}
+
 router.beforeEach(async (to, from, next) => {
-  const token = localStorage.getItem('token')
-  const user = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')) : null
+  const token = readStoredToken()
+  const user = readStoredUser()
   
   // 如果需要认证但没有 token
   if (to.meta.requiresAuth && !token) {
@@ -46,8 +75,7 @@ router.beforeEach(async (to, from, next) => {
         const result = await authApi.getMe()
         if (!result.success) {
           // Token 无效，清除登录状态
-          localStorage.removeItem('token')
-          localStorage.removeItem('user')
+          clearStoredAuth()
           tokenValidated = false
           next('/login')
           return
@@ -77,7 +105,7 @@ router.beforeEach(async (to, from, next) => {
             require_security_questions_setup: Boolean(result.data?.require_security_questions_setup),
             has_security_questions: Boolean(result.data?.has_security_questions),
           }
-          localStorage.setItem('user', JSON.stringify(mergedUser))
+          persistStoredUser(mergedUser)
         }
         
         // Token 有效，更新缓存
@@ -86,8 +114,7 @@ router.beforeEach(async (to, from, next) => {
       } catch (e) {
         // 验证失败，清除登录状态
         console.error('Token 验证失败:', e)
-        localStorage.removeItem('token')
-        localStorage.removeItem('user')
+        clearStoredAuth()
         tokenValidated = false
         next('/login')
         return

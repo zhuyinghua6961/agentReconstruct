@@ -36,30 +36,100 @@ function applyDoiLinksToHtml(html) {
   return nextHtml
 }
 
+function normalizeMarkdownForRender(text) {
+  const input = String(text || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\u00a0/g, ' ')
+
+  const lines = input.split('\n')
+  const normalized = []
+
+  const isHeading = (line) => /^\s{0,3}#{1,6}\s+/.test(line)
+  const isList = (line) => /^\s{0,3}(?:[-*+]\s+|\d+[.)]\s+)/.test(line)
+  const isTable = (line) => line.includes('|') && !line.trim().startsWith('```')
+
+  for (const rawLine of lines) {
+    let line = String(rawLine || '').replace(/\t/g, '  ').replace(/[ \t]+$/g, '')
+    const trimmed = line.trim()
+
+    if (!trimmed) {
+      if (normalized.length === 0 || normalized[normalized.length - 1] === '') continue
+      normalized.push('')
+      continue
+    }
+
+    line = line.replace(/^(\s{0,3}#{1,6})([^\s#])/, '$1 $2')
+    line = line.replace(/^(\s{0,3}[-*+])([^\s])/, '$1 $2')
+    line = line.replace(/^(\s{0,3}\d+[.)])([^\s])/, '$1 $2')
+
+    const prev = normalized.length > 0 ? normalized[normalized.length - 1] : ''
+    if (isHeading(line) && prev && prev.trim()) {
+      normalized.push('')
+    }
+    if (isList(line) && prev && prev.trim() && !isList(prev)) {
+      normalized.push('')
+    }
+    if (isTable(line) && prev && prev.trim() && !isTable(prev)) {
+      normalized.push('')
+    }
+
+    normalized.push(line)
+  }
+
+  return normalized.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+}
+
+function containsStructuredMarkdown(text) {
+  return /(^|\n)\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|\|.+\|)/m.test(String(text || ''))
+}
+
+function looksLikeUnrenderedMarkdown(text, html) {
+  if (!containsStructuredMarkdown(text)) return false
+  if (/<(?:h[1-6]|ul|ol|li|table|blockquote)\b/i.test(String(html || ''))) return false
+  return /(?:^|\n)\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)/m.test(String(text || ''))
+}
+
+const BEIJING_TIME_ZONE = 'Asia/Shanghai'
+const BEIJING_DATE_FORMATTER = new Intl.DateTimeFormat('zh-CN', {
+  timeZone: BEIJING_TIME_ZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit'
+})
+
+function toValidDate(value) {
+  const date = value instanceof Date ? value : new Date(value)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+function formatBeijingDate(value) {
+  const date = toValidDate(value)
+  if (!date) return ''
+  return BEIJING_DATE_FORMATTER.format(date).replace(/\//g, '-')
+}
+
 // 格式化时间
 export function formatTime(date) {
-  const d = new Date(date)
-  const now = new Date()
-  const diff = now - d
-  
+  const d = toValidDate(date)
+  if (!d) return ''
+
+  const diff = Date.now() - d.getTime()
+
   if (diff < 60000) return '刚刚'
   if (diff < 3600000) return Math.floor(diff / 60000) + '分钟前'
   if (diff < 86400000) return Math.floor(diff / 3600000) + '小时前'
-  return d.toLocaleDateString()
+  return formatBeijingDate(d)
 }
 
 // 格式化答案 - Markdown 渲染
 export function formatAnswer(text, referenceSnippets = []) {
   if (!text) return ''
+  void referenceSnippets
+
+  let normalizedText = normalizeMarkdownForRender(text)
+  normalizedText = fixTableFormat(normalizedText)
+  normalizedText = cleanLaTeX(normalizedText)
   
-  // 预处理：确保表格格式正确
-  // 检查是否有不完整的表格（缺少分隔行）
-  text = fixTableFormat(text)
-  
-  // 预处理 LaTeX
-  text = cleanLaTeX(text)
-  
-  // 配置marked选项
   marked.setOptions({
     breaks: true,
     gfm: true,
@@ -68,16 +138,17 @@ export function formatAnswer(text, referenceSnippets = []) {
     headerIds: false
   })
   
-  // 使用 marked 渲染 Markdown
   let html = ''
   try {
-    html = marked.parse(text)
+    html = marked.parse(normalizedText)
+    if (looksLikeUnrenderedMarkdown(normalizedText, html)) {
+      html = formatStreamingAnswer(normalizedText)
+    }
   } catch (e) {
     console.error('Markdown解析失败:', e)
-    html = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    html = formatStreamingAnswer(normalizedText)
   }
   
-  // 在渲染后的HTML中处理DOI链接  // 将 [DOI: xxx] 格式转换为可点击的链接（新格式）
   return applyDoiLinksToHtml(html)
 }
 
@@ -92,7 +163,8 @@ export function formatStreamingAnswer(text) {
   const html = normalized
     .replace(/^###\s+(.+)$/gm, '<h3>$1</h3>')
     .replace(/^##\s+(.+)$/gm, '<h2>$1</h2>')
-    .replace(/^-\s+(.+)$/gm, '<div class="stream-bullet">• $1</div>')
+    .replace(/^[-*+]\s+(.+)$/gm, '<div class="stream-bullet">• $1</div>')
+    .replace(/^\d+[.)]\s+(.+)$/gm, '<div class="stream-bullet">$&</div>')
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\n/g, '<br>')
@@ -102,7 +174,6 @@ export function formatStreamingAnswer(text) {
 
 // 修复表格格式
 function fixTableFormat(text) {
-  // 查找可能的表格（多行都包含|的段落）
   const lines = text.split('\n')
   const result = []
   let i = 0
@@ -110,9 +181,7 @@ function fixTableFormat(text) {
   while (i < lines.length) {
     const line = lines[i]
     
-    // 检查是否是表格行（包含|且不是代码块）
     if (line.includes('|') && !line.trim().startsWith('```')) {
-      // 查找连续的表格行
       const tableLines = []
       let j = i
       while (j < lines.length && lines[j].includes('|')) {
@@ -120,13 +189,10 @@ function fixTableFormat(text) {
         j++
       }
       
-      // 如果有至少2行，可能是表格
       if (tableLines.length >= 2) {
-        // 检查第二行是否是分隔行
         const hasSeparator = tableLines[1].match(/^\s*\|[\s\-:|]+\|\s*$/)
         
         if (!hasSeparator) {
-          // 缺少分隔行，自动插入
           const headerCols = (tableLines[0].match(/\|/g) || []).length - 1
           const separator = '|' + Array(headerCols).fill('------').join('|') + '|'
           tableLines.splice(1, 0, separator)

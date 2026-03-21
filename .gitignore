@@ -4,17 +4,31 @@ __pycache__/
 .pytest_cache/
 .runtime/
 gunicorn.ctl
+**/.runtime/
+**/.run/
 
 frontend-vue/node_modules/
 frontend-vue/dist/
+gateway/frontend-vue/node_modules/
+gateway/frontend-vue/dist/
 
 cache/
 data/
 papers/
 uploads/
 vectordb/
+resource/state/
+resource/runtime/
+public-service/data/runtime/
+public-service/uploads/
+public-service/papers/
+public-service/vector_database/
 
 config.secret.env
 .env
+**/config.secret.env
+**/.env
 
 .vendor/
+
+archive/frontend-vue-legacy/

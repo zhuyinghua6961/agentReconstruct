@@ -1,5 +1,18 @@
 const API_BASE = '/api/admin'
 
+function readStoredToken() {
+  return localStorage.getItem('token')
+    || localStorage.getItem('agentcode.auth.token.v1')
+    || ''
+}
+
+function clearStoredAuth() {
+  localStorage.removeItem('token')
+  localStorage.removeItem('user')
+  localStorage.removeItem('agentcode.auth.token.v1')
+  localStorage.removeItem('agentcode.auth.user.v1')
+}
+
 async function safeJson(response) {
   try {
     return await response.json()
@@ -13,8 +26,7 @@ function handleAdminError(error, response) {
   // 检查是否是账号停用错误
   if (error.code === 'ACCOUNT_DISABLED') {
     // 清除本地存储
-    localStorage.removeItem('token')
-    localStorage.removeItem('user')
+    clearStoredAuth()
     
     // 显示友好提示
     alert('您的账号已被停用，请联系管理员')
@@ -28,8 +40,7 @@ function handleAdminError(error, response) {
   // 检查是否是 token 失效
   if (error.code === 'TOKEN_INVALID' || error.code === 'TOKEN_MISSING' || response?.status === 401) {
     // 清除本地存储
-    localStorage.removeItem('token')
-    localStorage.removeItem('user')
+    clearStoredAuth()
     
     // 跳转到登录页
     window.location.href = '/login'
@@ -55,14 +66,14 @@ async function fetchWithErrorHandling(url, options = {}) {
 
 export const adminApi = {
   async getUsers(page = 1, pageSize = 10) {
-    const token = localStorage.getItem('token')
+    const token = readStoredToken()
     return fetchWithErrorHandling(`${API_BASE}/users?page=${page}&page_size=${pageSize}`, {
       headers: { 'Authorization': `Bearer ${token}` }
     })
   },
 
   async createUser(username, password, userType = 'common') {
-    const token = localStorage.getItem('token')
+    const token = readStoredToken()
     const response = await fetch(`${API_BASE}/users`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
@@ -73,7 +84,7 @@ export const adminApi = {
   },
 
   async changeUserPassword(userId, newPassword) {
-    const token = localStorage.getItem('token')
+    const token = readStoredToken()
     const response = await fetch(`${API_BASE}/users/${userId}/password`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
@@ -84,7 +95,7 @@ export const adminApi = {
   },
 
   async changeUserStatus(userId, status) {
-    const token = localStorage.getItem('token')
+    const token = readStoredToken()
     const response = await fetch(`${API_BASE}/users/${userId}/status`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
@@ -95,7 +106,7 @@ export const adminApi = {
   },
 
   async changeUserType(userId, userType) {
-    const token = localStorage.getItem('token')
+    const token = readStoredToken()
     const response = await fetch(`${API_BASE}/users/${userId}/type`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
@@ -106,7 +117,7 @@ export const adminApi = {
   },
 
   async deleteUser(userId) {
-    const token = localStorage.getItem('token')
+    const token = readStoredToken()
     const response = await fetch(`${API_BASE}/users/${userId}`, {
       method: 'DELETE',
       headers: { 'Authorization': `Bearer ${token}` }
@@ -116,7 +127,7 @@ export const adminApi = {
   },
 
   async batchImportUsers(file) {
-    const token = localStorage.getItem('token')
+    const token = readStoredToken()
     const formData = new FormData()
     formData.append('file', file)
     
@@ -130,7 +141,7 @@ export const adminApi = {
   },
 
   async downloadImportTemplate(format = 'xlsx') {
-    const token = localStorage.getItem('token')
+    const token = readStoredToken()
     const response = await fetch(`${API_BASE}/users/import-template?format=${format}`, {
       headers: { 'Authorization': `Bearer ${token}` }
     })

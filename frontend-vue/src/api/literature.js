@@ -36,6 +36,11 @@ export async function getReferencePreview(dois, options = {}) {
   return await postJson(`${API_PREFIX}/reference_preview`, { doi: values, max_items: maxItems });
 }
 
+export async function checkPdfAvailability(doi) {
+  const encodedPath = encodeDoiPath(doi);
+  return await getJson(`${API_PREFIX}/check_pdf/${encodedPath}`);
+}
+
 export function buildPdfViewUrl(doi) {
   const encodedPath = encodeDoiPath(doi);
   const token = readPdfAuthToken();

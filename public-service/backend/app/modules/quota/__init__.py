@@ -1,0 +1,1 @@
+"""Quota module skeleton."""

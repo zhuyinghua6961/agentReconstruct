@@ -1,8 +1,8 @@
 import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
 
-const frontendPort = Number.parseInt(process.env.FRONTEND_PORT || '5174', 10) || 5174;
-const proxyTarget = process.env.VITE_PROXY_TARGET || process.env.BACKEND_PROXY_TARGET || 'http://127.0.0.1:8008';
+const frontendPort = Number.parseInt(process.env.FRONTEND_PORT || '5173', 10) || 5173;
+const proxyTarget = process.env.BACKEND_PROXY_TARGET || process.env.VITE_PROXY_TARGET || 'http://127.0.0.1:8101';
 
 export default defineConfig({
   plugins: [vue()],

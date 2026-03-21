@@ -33,6 +33,7 @@ async function handleLogin() {
     if (result.success) {
       // 保存token和用户信息（包含is_first_login）
       localStorage.setItem('token', result.data.token)
+      localStorage.setItem('agentcode.auth.token.v1', result.data.token)
       
       // 确保用户信息包含is_first_login字段
       const userData = {
@@ -42,6 +43,7 @@ async function handleLogin() {
         has_security_questions: Boolean(result.data?.has_security_questions),
       }
       localStorage.setItem('user', JSON.stringify(userData))
+      localStorage.setItem('agentcode.auth.user.v1', JSON.stringify(userData))
       
       // 检查是否需要进入首次安全设置流程（改密码 + 设置安全问题）
       if (result.require_password_change || result.require_security_questions_setup) {

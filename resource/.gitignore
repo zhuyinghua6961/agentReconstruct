@@ -1,0 +1,13 @@
+# Keep the directory shape, ignore mutable contents.
+*
+!README.md
+!.gitignore
+!config/
+!config/**
+!assets/
+!assets/**
+!mounts/
+!mounts/**
+!scripts/
+!scripts/**
+

@@ -6,13 +6,19 @@ defineProps({
 
 const emit = defineEmits(['new', 'select', 'delete', 'clear-all']);
 
+const sidebarTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
+  timeZone: 'Asia/Shanghai',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+})
+
 function formatTime(ts) {
-  return new Date(ts).toLocaleString('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  const date = new Date(ts)
+  if (Number.isNaN(date.getTime())) return ''
+  return sidebarTimeFormatter.format(date)
 }
 </script>
 

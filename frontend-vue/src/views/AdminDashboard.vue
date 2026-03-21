@@ -190,6 +190,8 @@ async function logout() {
   await authApi.logout()
   localStorage.removeItem('token')
   localStorage.removeItem('user')
+  localStorage.removeItem('agentcode.auth.token.v1')
+  localStorage.removeItem('agentcode.auth.user.v1')
   window.location.href = '/login'
 }
 

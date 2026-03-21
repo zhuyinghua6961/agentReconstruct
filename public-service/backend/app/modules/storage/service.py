@@ -1,0 +1,228 @@
+from __future__ import annotations
+
+import os
+import tempfile
+import threading
+from pathlib import Path
+from typing import Any
+
+from app.integrations.storage.factory import get_storage_backend
+from app.integrations.storage.minio import MinIOStorageBackend
+
+
+_PAPER_DOWNLOAD_LOCKS: dict[str, threading.Lock] = {}
+_PAPER_DOWNLOAD_LOCKS_GUARD = threading.Lock()
+
+
+class StorageService:
+    @staticmethod
+    def _paper_lock_key(local_path: Path) -> str:
+        return str(local_path.resolve())
+
+    @classmethod
+    def _get_paper_download_lock(cls, local_path: Path) -> threading.Lock:
+        key = cls._paper_lock_key(local_path)
+        with _PAPER_DOWNLOAD_LOCKS_GUARD:
+            lock = _PAPER_DOWNLOAD_LOCKS.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                _PAPER_DOWNLOAD_LOCKS[key] = lock
+            return lock
+
+    @staticmethod
+    def build_paper_filename(doi: str) -> str:
+        return str(doi or "").replace("/", "_") + ".pdf"
+
+    @classmethod
+    def build_paper_object_name(cls, doi: str) -> str:
+        return f"papers/{cls.build_paper_filename(doi)}"
+
+    @staticmethod
+    def parse_storage_ref(storage_ref: str | None) -> dict[str, str | None] | None:
+        if not storage_ref:
+            return None
+        raw = str(storage_ref).strip()
+        if raw.startswith("minio://"):
+            value = raw[len("minio://") :]
+            if "/" not in value:
+                return None
+            bucket, object_name = value.split("/", 1)
+            return {"scheme": "minio", "bucket": bucket, "object_name": object_name, "local_path": None}
+        if raw.startswith("local://"):
+            path = raw[len("local://") :]
+            return {"scheme": "local", "bucket": None, "object_name": None, "local_path": path}
+        return None
+
+    @staticmethod
+    def mirror_file(
+        *,
+        local_path: str,
+        object_name: str,
+        content_type: str | None,
+        project_root: str,
+        logger: Any,
+    ) -> str | None:
+        path = Path(local_path)
+        if not path.exists() or not path.is_file():
+            return None
+        try:
+            backend = get_storage_backend(project_root=project_root)
+            return backend.upload_file(local_path=str(path), object_name=object_name, content_type=content_type)
+        except Exception as exc:
+            logger.warning(f"object storage mirror skipped: {exc}")
+            return None
+
+    def paper_exists(self, *, doi: str, papers_dir: str | Path, project_root: str, logger: Any | None = None) -> bool:
+        papers_path = Path(papers_dir)
+        local_path = papers_path / self.build_paper_filename(doi)
+        backend = get_storage_backend(project_root=project_root)
+        if isinstance(backend, MinIOStorageBackend):
+            try:
+                if backend.object_exists(object_name=self.build_paper_object_name(doi)):
+                    return True
+            except Exception as exc:
+                if logger is not None:
+                    logger.warning(f"paper exists check via object storage failed: {exc}")
+        return local_path.exists() and local_path.is_file()
+
+    def ensure_local_paper_pdf(
+        self,
+        *,
+        doi: str,
+        papers_dir: str | Path,
+        project_root: str,
+        logger: Any | None = None,
+    ) -> Path | None:
+        papers_path = Path(papers_dir)
+        papers_path.mkdir(parents=True, exist_ok=True)
+        local_path = papers_path / self.build_paper_filename(doi)
+        lock = self._get_paper_download_lock(local_path)
+
+        with lock:
+            backend = get_storage_backend(project_root=project_root)
+            if isinstance(backend, MinIOStorageBackend):
+                object_name = self.build_paper_object_name(doi)
+                if local_path.exists() and local_path.is_file():
+                    null_logger = logger or type("_NullLogger", (), {"warning": lambda *args, **kwargs: None})()
+                    if not backend.object_exists(object_name=object_name):
+                        self.mirror_file(
+                            local_path=str(local_path),
+                            object_name=object_name,
+                            content_type="application/pdf",
+                            project_root=project_root,
+                            logger=null_logger,
+                        )
+                    return local_path
+
+                tmp_fd, tmp_path_text = tempfile.mkstemp(
+                    prefix=f"{local_path.stem}.",
+                    suffix=f"{local_path.suffix}.tmp",
+                    dir=str(local_path.parent),
+                )
+                os.close(tmp_fd)
+                tmp_path = Path(tmp_path_text)
+                try:
+                    if backend.object_exists(object_name=object_name) and backend.download_file(
+                        object_name=object_name,
+                        local_path=str(tmp_path),
+                    ):
+                        os.replace(tmp_path, local_path)
+                        return local_path
+                except Exception as exc:
+                    if logger is not None:
+                        logger.warning(f"paper object download failed: {exc}")
+                finally:
+                    if tmp_path.exists():
+                        try:
+                            tmp_path.unlink()
+                        except Exception:
+                            pass
+
+            if local_path.exists() and local_path.is_file():
+                return local_path
+            return None
+
+    def cleanup_resources(self, *, file_row: dict[str, Any], project_root: str) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "storage_attempted": False,
+            "storage_deleted": False,
+            "local_attempted": False,
+            "local_deleted": False,
+            "errors": [],
+        }
+        storage_ref = str(file_row.get("storage_ref") or "").strip()
+        local_path_text = str(file_row.get("local_path") or "").strip()
+        parsed = self.parse_storage_ref(storage_ref)
+
+        if parsed and parsed.get("scheme") == "minio" and parsed.get("object_name"):
+            result["storage_attempted"] = True
+            try:
+                backend = get_storage_backend(project_root=project_root)
+                result["storage_deleted"] = bool(
+                    backend.delete_object(
+                        object_name=str(parsed.get("object_name") or ""),
+                        bucket=str(parsed.get("bucket") or "") or None,
+                    )
+                )
+            except Exception as exc:
+                result["errors"].append(f"storage_delete_failed:{exc}")
+
+        if local_path_text:
+            result["local_attempted"] = True
+            try:
+                local_path = Path(local_path_text)
+                if local_path.exists() and local_path.is_file():
+                    local_path.unlink()
+                    result["local_deleted"] = True
+                elif not local_path.exists():
+                    result["local_deleted"] = True
+                else:
+                    result["errors"].append("local_path_not_file")
+            except Exception as exc:
+                result["errors"].append(f"local_delete_failed:{exc}")
+        return result
+
+    def resolve_download(
+        self,
+        *,
+        file_row: dict[str, Any],
+        project_root: str,
+        use_proxy: bool,
+        expires_seconds: int,
+    ) -> dict[str, Any] | None:
+        file_name = str(file_row.get("file_name") or "file")
+        local_path = str(file_row.get("local_path") or "").strip()
+        storage_ref = str(file_row.get("storage_ref") or "").strip()
+        parsed = self.parse_storage_ref(storage_ref)
+
+        if parsed and parsed.get("scheme") == "minio" and parsed.get("object_name"):
+            backend = get_storage_backend(project_root=project_root)
+            object_name = str(parsed.get("object_name") or "")
+            if not use_proxy:
+                url = backend.get_file_url(object_name=object_name, expires_seconds=expires_seconds)
+                return {"mode": "redirect", "target": url, "file_name": file_name}
+
+            suffix = Path(file_name).suffix or ".bin"
+            fd, temp_path = tempfile.mkstemp(prefix="fastapi-storage-", suffix=suffix)
+            os.close(fd)
+            ok = backend.download_file(object_name=object_name, local_path=temp_path)
+            if ok:
+                return {"mode": "proxy_file", "target": temp_path, "file_name": file_name}
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
+        if parsed and parsed.get("scheme") == "local" and parsed.get("local_path"):
+            candidate = Path(str(parsed.get("local_path")))
+            if candidate.exists() and candidate.is_file():
+                return {"mode": "local_file", "target": str(candidate), "file_name": file_name}
+
+        if local_path:
+            candidate = Path(local_path)
+            if candidate.exists() and candidate.is_file():
+                return {"mode": "local_file", "target": str(candidate), "file_name": file_name}
+        return None
+
+
+storage_service = StorageService()
