@@ -255,6 +255,23 @@ def log_top5_coverage(
     log_topk_coverage(cited_dois_set, top5_with_scores, logger, label="top-5")
 
 
+def _select_reference_preview_chunk(chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    preferred = None
+    for chunk in chunks:
+        text = str((chunk or {}).get("text", "") or "")
+        source = str((chunk or {}).get("source", "") or "")
+        text_head = text.lstrip()[:32].lower()
+        is_html_like = text_head.startswith("```html") or text_head.startswith("<html")
+        is_md_source = source.startswith("md_expansion")
+        if not is_html_like and not is_md_source:
+            return chunk
+        if preferred is None and not is_html_like:
+            preferred = chunk
+        if preferred is None:
+            preferred = chunk
+    return preferred or (chunks[0] if chunks else {})
+
+
 def build_references_from_pdf_chunks(
     cited_dois: List[str],
     pdf_chunks: Dict[str, List[Dict[str, Any]]],
@@ -282,11 +299,12 @@ def build_references_from_pdf_chunks(
         if canonical in seen:
             continue
         seen.add(canonical)
+        preview_chunk = _select_reference_preview_chunk(resolved_chunks)
         references.append(
             {
                 "doi": canonical or str(doi),
                 "chunk_count": len(resolved_chunks),
-                "sample_text": str(resolved_chunks[0].get("text", ""))[:400] + "...",
+                "sample_text": str(preview_chunk.get("text", ""))[:400] + "...",
             }
         )
     return references

@@ -4,6 +4,7 @@
 
 import math
 import re
+import time
 from difflib import SequenceMatcher
 from typing import Any, Callable, Dict, Optional
 
@@ -32,6 +33,7 @@ def programmatic_insert_dois(
         logger.info("ℹ️ 程序化DOI插入已禁用（runtime），直接返回原答案")
         return answer
 
+    started_at = time.perf_counter()
     logger.info("ℹ️ 程序化对齐：尝试将答案句子与检索证据对齐并插入 DOI")
     if similarity_threshold is None:
         similarity_threshold = getattr(agent, "insert_similarity_threshold", 0.45)
@@ -50,6 +52,60 @@ def programmatic_insert_dois(
 
     if not answer or not retrieval_results:
         return answer
+
+    emb_model = getattr(getattr(agent, "literature_expert", None), "embedding_model", None)
+    embedding_enabled = bool(use_sentence_emb and emb_model and hasattr(emb_model, "encode"))
+    sentence_embedding_cache: dict[str, Any] = {}
+    doc_embedding_cache: dict[str, Any] = {}
+    pdf_sentence_embedding_cache: dict[str, Any] = {}
+    pdf_sentences_cache: dict[str, Optional[list[str]]] = {}
+    cache_stats = {
+        "sentence_hits": 0,
+        "sentence_misses": 0,
+        "doc_hits": 0,
+        "doc_misses": 0,
+        "pdf_hits": 0,
+        "pdf_misses": 0,
+        "pdf_sentence_hits": 0,
+        "pdf_sentence_misses": 0,
+    }
+
+    def _cache_get_embedding(text: str, cache: dict[str, Any], *, kind: str):
+        payload = str(text or "")
+        if not embedding_enabled or not payload:
+            return None
+        cached = cache.get(payload)
+        if cached is not None:
+            cache_stats[f"{kind}_hits"] += 1
+            return cached
+        try:
+            vector = emb_model.encode([payload])[0]
+        except Exception:
+            return None
+        cache_stats[f"{kind}_misses"] += 1
+        cache[payload] = vector
+        return vector
+
+    def _get_sentence_embedding(text: str):
+        return _cache_get_embedding(text[:max_seq_chars], sentence_embedding_cache, kind="sentence")
+
+    def _get_doc_embedding(text: str):
+        return _cache_get_embedding(text[:max_seq_chars], doc_embedding_cache, kind="doc")
+
+    def _get_pdf_sentence_embedding(text: str):
+        return _cache_get_embedding(text[:max_seq_chars], pdf_sentence_embedding_cache, kind="pdf_sentence")
+
+    def _get_pdf_sentences(doi: str) -> Optional[list[str]]:
+        if doi in pdf_sentences_cache:
+            cache_stats["pdf_hits"] += 1
+            return pdf_sentences_cache[doi]
+        try:
+            sentences = agent._load_pdf_sentences(doi)
+        except Exception:
+            sentences = None
+        cache_stats["pdf_misses"] += 1
+        pdf_sentences_cache[doi] = list(sentences) if sentences else None
+        return pdf_sentences_cache[doi]
 
     metadatas = retrieval_results.get("all_metadatas", retrieval_results.get("metadatas", [])) or []
     documents = retrieval_results.get("all_documents", retrieval_results.get("documents", [])) or []
@@ -76,18 +132,11 @@ def programmatic_insert_dois(
         except Exception:
             vector_sim = 0.0
 
-        pdf_sentences = None
-        try:
-            pdf_sentences = agent._load_pdf_sentences(doi_clean)
-        except Exception:
-            pdf_sentences = None
-
         candidate_docs.append(
             {
                 "doi": doi_clean,
                 "text": doc_text,
                 "vector_sim": vector_sim,
-                "pdf_sentences": pdf_sentences,
             }
         )
 
@@ -144,8 +193,18 @@ def programmatic_insert_dois(
 
     sentence_split_pattern = r"(?<=[。！？?!.；;])\s*"
     raw_sentences = re.split(sentence_split_pattern, answer)
+    effective_sentences = [item.strip() for item in raw_sentences if str(item or "").strip()]
+    logger.info(
+        "ℹ️ 程序化DOI插入开始 candidate_docs=%s answer_sentences=%s embedding_enabled=%s",
+        len(candidate_docs),
+        len(effective_sentences),
+        embedding_enabled,
+    )
+
     out_sentences = []
     used_dois = set()
+    verified_pass_count = 0
+    verified_fail_count = 0
 
     for sent in raw_sentences:
         sent_strip = sent.strip()
@@ -176,26 +235,23 @@ def programmatic_insert_dois(
             continue
 
         sent_strip = cleaned_sent
+        sent_emb = _get_sentence_embedding(sent_strip)
         best_doc = None
         best_score = 0.0
 
         for doc_entry in candidate_docs:
+            doc_text = str(doc_entry.get("text", "") or "")[:max_seq_chars]
             embed_sim = None
-            if use_sentence_emb:
-                try:
-                    emb_model = getattr(agent.literature_expert, "embedding_model", None)
-                    if emb_model and hasattr(emb_model, "encode"):
-                        sent_emb = emb_model.encode([sent_strip])[0]
-                        doc_emb = emb_model.encode([doc_entry["text"][:max_seq_chars]])[0]
-                        embed_sim = _cosine_similarity(sent_emb, doc_emb)
-                except Exception:
-                    embed_sim = None
+            if sent_emb is not None:
+                doc_emb = _get_doc_embedding(doc_text)
+                if doc_emb is not None:
+                    embed_sim = _cosine_similarity(sent_emb, doc_emb)
 
             if embed_sim is not None:
                 combined_score = embedding_weight * embed_sim + vector_weight * doc_entry.get("vector_sim", 0.0)
             else:
                 try:
-                    seq_ratio = SequenceMatcher(None, sent_strip, doc_entry["text"][:max_seq_chars]).ratio()
+                    seq_ratio = SequenceMatcher(None, sent_strip, doc_text).ratio()
                 except Exception:
                     seq_ratio = 0.0
                 combined_score = seq_weight * seq_ratio + vector_weight * doc_entry.get("vector_sim", 0.0)
@@ -209,20 +265,16 @@ def programmatic_insert_dois(
             verify_pass = False
             verify_details: Dict[str, Any] = {}
             try:
-                emb_model = getattr(agent.literature_expert, "embedding_model", None)
-                doc_text = best_doc.get("text", "")[:max_seq_chars]
+                doc_text = str(best_doc.get("text", "") or "")[:max_seq_chars]
                 embed_sim = None
                 seq_ratio = None
                 vec_sim = None
 
-                if emb_model and hasattr(emb_model, "encode"):
-                    try:
-                        sent_emb = emb_model.encode([sent_strip])[0]
-                        doc_emb = emb_model.encode([doc_text])[0]
+                if sent_emb is not None:
+                    doc_emb = _get_doc_embedding(doc_text)
+                    if doc_emb is not None:
                         embed_sim = _cosine_similarity(sent_emb, doc_emb)
                         verify_details["embed_sim"] = float(embed_sim)
-                    except Exception:
-                        embed_sim = None
 
                 try:
                     seq_ratio = SequenceMatcher(None, sent_strip, doc_text).ratio()
@@ -236,7 +288,7 @@ def programmatic_insert_dois(
                 except Exception:
                     vec_sim = None
 
-                pdf_sents = best_doc.get("pdf_sentences")
+                pdf_sents = _get_pdf_sentences(doi_to_insert)
                 pdf_verified = False
                 if pdf_sents:
                     best_pdf_seq = 0.0
@@ -255,13 +307,14 @@ def programmatic_insert_dois(
                     if best_pdf_seq >= getattr(agent, "insert_seq_verify_threshold", 0.60):
                         pdf_verified = True
                         verify_details["matched_pdf_sentence"] = pdf_sents[best_pdf_idx][:300]
-                    elif emb_model and hasattr(emb_model, "encode"):
+                    elif sent_emb is not None:
                         try:
-                            sent_emb = emb_model.encode([sent_strip])[0]
                             best_pdf_emb = 0.0
                             best_pdf_idx2 = None
                             for j, p in enumerate(pdf_sents[:50]):
-                                p_emb = emb_model.encode([p[:max_seq_chars]])[0]
+                                p_emb = _get_pdf_sentence_embedding(p)
+                                if p_emb is None:
+                                    continue
                                 score = _cosine_similarity(sent_emb, p_emb)
                                 if score > best_pdf_emb:
                                     best_pdf_emb = score
@@ -289,6 +342,7 @@ def programmatic_insert_dois(
 
             if verify_pass:
                 used_dois.add(doi_to_insert)
+                verified_pass_count += 1
                 new_sent = sent.rstrip() + f" (doi={doi_to_insert})"
                 out_sentences.append(new_sent)
                 logger.info(
@@ -306,6 +360,7 @@ def programmatic_insert_dois(
                     }
                 )
             else:
+                verified_fail_count += 1
                 out_sentences.append(sent)
                 logger.info(
                     f"   ⚠️ 句子对齐但验证未通过，跳过插入：'{sent_strip[:80]}...' -> doi={doi_to_insert} "
@@ -325,7 +380,22 @@ def programmatic_insert_dois(
             out_sentences.append(sent)
 
     new_answer = "".join(out_sentences)
-    logger.info(f"✅ 程序化对齐完成，插入 {len(used_dois)} 个 DOI")
+    elapsed = time.perf_counter() - started_at
+    logger.info(
+        "✅ 程序化对齐完成 inserted=%s verify_pass=%s verify_fail=%s elapsed=%.3fs pdf_loads=%s pdf_cache_hits=%s sent_emb(hit=%s miss=%s) doc_emb(hit=%s miss=%s) pdf_sent_emb(hit=%s miss=%s)",
+        len(used_dois),
+        verified_pass_count,
+        verified_fail_count,
+        elapsed,
+        cache_stats["pdf_misses"],
+        cache_stats["pdf_hits"],
+        cache_stats["sentence_hits"],
+        cache_stats["sentence_misses"],
+        cache_stats["doc_hits"],
+        cache_stats["doc_misses"],
+        cache_stats["pdf_sentence_hits"],
+        cache_stats["pdf_sentence_misses"],
+    )
 
     if getattr(agent, "strict_mode", False):
         try:

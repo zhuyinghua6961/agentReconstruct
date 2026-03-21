@@ -251,3 +251,20 @@ def test_build_references_from_pdf_chunks_matches_underscore_pdf_keys():
 
     assert len(references) == 1
     assert references[0]["doi"] == "10.1007/s11581-021-04073-2"
+
+
+def test_build_references_from_pdf_chunks_prefers_pdf_preview_over_html_md_chunk():
+    references = build_references_from_pdf_chunks(
+        cited_dois=["10.1/a"],
+        pdf_chunks={
+            "10.1/a": [
+                {"text": "```html <html><body>md html preview</body></html>", "source": "md_expansion"},
+                {"text": "clean pdf preview", "page": 2, "source": "pdf"},
+            ],
+        },
+    )
+
+    assert len(references) == 1
+    assert references[0]["sample_text"].startswith("clean pdf preview")
+
+

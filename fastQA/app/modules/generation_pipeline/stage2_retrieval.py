@@ -294,45 +294,48 @@ def _generate_ai_query(
     if client is None or not model:
         return ""
 
-    sections_text = ", ".join(str(item).strip() for item in preferred_sections if str(item or "").strip()) or "无"
-    filters_text = ", ".join(f"{key}={value}" for key, value in filters.items()) or "无"
     entity_guardrail_block = ""
     if entity_lock_enabled:
-        entity_guardrail_block = (
-            "\n【关键约束】\n"
-            "- 如果用户问题中提到了具体化学元素，查询中必须保留该元素名称或符号\n"
-            "- 禁止省略用户问题中明确提到的元素，否则会检索到不相关文献\n"
-        )
+        entity_guardrail_block = """
+【⚠️ 关键约束 - 必须遵守】：
+- 如果用户问题中提到了具体的化学元素（如 Ti/钛、Mg/镁、F/氟 等），查询中必须保留该元素名称或符号
+- 禁止省略用户问题中明确提到的元素，否则会检索到不相关文献
+"""
 
+    core_question = normalized_user_question if normalized_user_question else f"关于{claim_text[:50]}的问题"
+    _ = preferred_sections
+    _ = filters
     prompt = f"""
 你是一个学术检索专家，擅长根据研究问题生成精准的文献检索查询。
 
-【原始用户问题】
-{normalized_user_question or claim_text}
+【原始用户问题】（最重要！查询必须紧密围绕这个问题生成）：
+{core_question}
 
-【检索主张】
+【检索主张】（这个主张需要文献验证）：
 {claim_text}
 
-【关键词参考】
+【关键词参考】（必须包含在查询中）：
 {', '.join(keywords) if keywords else '无'}
 
-【偏好段落】
-{sections_text}
-
-【筛选条件】
-{filters_text}
+【检索目标】：
+- 数据库包含学术论文的结构化摘要，主要为中文内容
+- 需要查找直接回答原始用户问题的文献
+- 重点关注：具体的实验参数、数值、比例、条件等事实信息
+- 如果用户问"最佳比例"，查询应包含具体的比例数值或搜索策略
 {entity_guardrail_block}
-【输出要求】
-- 输出空格分隔的检索关键词列表
-- 保留原问题中的材料体系、关键元素、数值和实验条件
-- 不要输出解释性文字
-- 长度控制在 40-60 字符
-""".strip()
+
+【格式要求】：
+- 用空格分隔的关键字列表（40-60字）
+- 保留核心关键词和具体数值
+- 不要包含与原始问题无关的背景信息或宽泛概念
+
+请根据【原始用户问题】生成查询（必须紧密围绕问题核心）：
+"""
 
     response = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": "你是一个学术检索专家，只输出检索查询本身，不要解释。"},
+            {"role": "system", "content": "你是一个学术检索专家，擅长根据研究内容生成精准的文献检索查询。"},
             {"role": "user", "content": prompt},
         ],
         temperature=0.3,
