@@ -1,0 +1,1616 @@
+from __future__ import annotations
+
+import copy
+import threading
+import pytest
+import time
+from datetime import datetime
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.testclient import TestClient
+
+from app.core.config import get_settings
+from app.core.deps import AuthContext
+from app.main import app
+from app.modules.auth import service as auth_service_module
+from app.modules.auth.deps import require_auth_context
+from app.modules.conversation import api as conversation_api_module
+from app.modules.conversation import service as conversation_service_module
+from app.modules.conversation.cache import cache_conversation_detail, get_recent_conversation_list_pages
+from app.modules.conversation.json_store import ConversationJsonStore
+from app.modules.conversation.outbox_worker import ChatJsonOutboxConfig, ChatJsonOutboxWorker
+from app.modules.conversation.repository import ConversationRepository
+from app.modules.conversation.service import ConversationService
+from app.modules.conversation.upload_processing_worker import UploadProcessingWorker
+from app.modules.quota import service as quota_service_module
+from app.modules.storage.service import storage_service
+from app.integrations.redis import RedisService
+from app.integrations.storage.local import LocalStorageBackend
+
+
+class _FakeRedis:
+    def __init__(self) -> None:
+        self.values: dict[str, object] = {}
+        self.expirations: dict[str, int] = {}
+
+    def get(self, key: str):
+        return self.values.get(key)
+
+    def set(self, key: str, value, ex=None, nx=False):
+        if nx and key in self.values:
+            return False
+        self.values[key] = value
+        if ex is not None:
+            self.expirations[key] = int(ex)
+        return True
+
+    def delete(self, *keys: str):
+        deleted = 0
+        for key in keys:
+            if key in self.values:
+                deleted += 1
+                self.values.pop(key, None)
+                self.expirations.pop(key, None)
+        return deleted
+
+    def expire(self, key: str, seconds: int):
+        if key not in self.values:
+            return False
+        self.expirations[key] = int(seconds)
+        return True
+
+    def ttl(self, key: str):
+        return self.expirations.get(key)
+
+
+class _MemoryConversationRepo:
+    def __init__(self) -> None:
+        self._next_conversation_id = 1
+        self._next_file_id = 1
+        self.conversations: dict[int, dict] = {}
+        self.messages: dict[int, list[dict]] = {}
+        self.files: dict[int, list[dict]] = {}
+
+    def create_conversation(self, *, user_id: int, title: str) -> int:
+        conversation_id = self._next_conversation_id
+        self._next_conversation_id += 1
+        now = datetime.now()
+        self.conversations[conversation_id] = {
+            "id": conversation_id,
+            "user_id": user_id,
+            "title": title,
+            "message_count": 0,
+            "created_at": now,
+            "updated_at": now,
+            "chat_json_local_path": None,
+            "chat_json_storage_ref": None,
+            "chat_json_hash": None,
+            "chat_json_size_bytes": None,
+            "chat_json_version": 0,
+            "chat_json_updated_at": None,
+            "chat_json_sync_status": None,
+        }
+        self.messages[conversation_id] = []
+        self.files[conversation_id] = []
+        return conversation_id
+
+    def update_conversation_title(self, *, conversation_id: int, user_id: int, title: str) -> int:
+        row = self.get_conversation(conversation_id=conversation_id, user_id=user_id)
+        if not row:
+            return 0
+        stored = self.conversations[conversation_id]
+        stored["title"] = title
+        stored["updated_at"] = datetime.now()
+        return 1
+
+    def list_conversations(self, *, user_id: int, offset: int, limit: int) -> list[dict]:
+        rows = [dict(row) for row in self.conversations.values() if int(row["user_id"]) == int(user_id)]
+        rows.sort(key=lambda item: (item.get("updated_at"), item.get("id")), reverse=True)
+        return rows[offset : offset + limit]
+
+    def count_conversations(self, *, user_id: int) -> int:
+        return sum(1 for row in self.conversations.values() if int(row["user_id"]) == int(user_id))
+
+    def get_conversation(self, *, conversation_id: int, user_id: int) -> dict | None:
+        row = self.conversations.get(int(conversation_id))
+        if not row or int(row["user_id"]) != int(user_id):
+            return None
+        return dict(row)
+
+    def update_chat_json_index(
+        self,
+        *,
+        conversation_id: int,
+        user_id: int,
+        local_path: str | None,
+        storage_ref: str | None,
+        content_hash: str | None,
+        size_bytes: int | None,
+        version: int,
+        sync_status: str,
+        updated_at,
+    ) -> int:
+        row = self.get_conversation(conversation_id=conversation_id, user_id=user_id)
+        if not row:
+            return 0
+        stored = self.conversations[int(conversation_id)]
+        stored["chat_json_local_path"] = local_path
+        stored["chat_json_storage_ref"] = storage_ref
+        stored["chat_json_hash"] = content_hash
+        stored["chat_json_size_bytes"] = size_bytes
+        stored["chat_json_version"] = int(version)
+        stored["chat_json_sync_status"] = sync_status
+        stored["chat_json_updated_at"] = updated_at
+        stored["updated_at"] = updated_at
+        return 1
+
+    def mark_chat_json_sync_ok(
+        self,
+        *,
+        conversation_id: int,
+        user_id: int,
+        expected_version: int | None = None,
+        storage_ref: str | None = None,
+        updated_at=None,
+    ) -> int:
+        row = self.get_conversation(conversation_id=conversation_id, user_id=user_id)
+        if not row:
+            return 0
+        stored = self.conversations[int(conversation_id)]
+        if expected_version is not None and int(stored.get("chat_json_version") or 0) != int(expected_version):
+            return 0
+        stored["chat_json_sync_status"] = "ok"
+        if storage_ref:
+            stored["chat_json_storage_ref"] = storage_ref
+        stored["chat_json_updated_at"] = updated_at or datetime.now()
+        return 1
+
+    def increment_message_count(
+        self,
+        *,
+        conversation_id: int,
+        user_id: int,
+        delta: int = 1,
+        touch_updated_at: bool = True,
+    ) -> int:
+        row = self.get_conversation(conversation_id=conversation_id, user_id=user_id)
+        if not row:
+            return 0
+        self.conversations[int(conversation_id)]["message_count"] = max(
+            0,
+            int(self.conversations[int(conversation_id)]["message_count"]) + int(delta),
+        )
+        if touch_updated_at:
+            self.conversations[int(conversation_id)]["updated_at"] = datetime.now()
+        return 1
+
+    def set_message_count(
+        self,
+        *,
+        conversation_id: int,
+        user_id: int,
+        message_count: int,
+        touch_updated_at: bool = True,
+    ) -> int:
+        row = self.get_conversation(conversation_id=conversation_id, user_id=user_id)
+        if not row:
+            return 0
+        self.conversations[int(conversation_id)]["message_count"] = max(0, int(message_count))
+        if touch_updated_at:
+            self.conversations[int(conversation_id)]["updated_at"] = datetime.now()
+        return 1
+
+    def delete_conversation(self, *, conversation_id: int, user_id: int) -> int:
+        row = self.get_conversation(conversation_id=conversation_id, user_id=user_id)
+        if not row:
+            return 0
+        self.conversations.pop(int(conversation_id), None)
+        self.messages.pop(int(conversation_id), None)
+        self.files.pop(int(conversation_id), None)
+        return 1
+
+    def list_messages(self, *, conversation_id: int, user_id: int) -> list[dict]:
+        if self.get_conversation(conversation_id=conversation_id, user_id=user_id) is None:
+            return []
+        return [dict(item) for item in self.messages.get(int(conversation_id), [])]
+
+    def add_uploaded_file(
+        self,
+        *,
+        conversation_id: int,
+        user_id: int,
+        file_type: str,
+        file_name: str,
+        local_path: str | None,
+        storage_ref: str | None,
+        content_type: str | None,
+        size_bytes: int | None,
+    ) -> int:
+        if self.get_conversation(conversation_id=conversation_id, user_id=user_id) is None:
+            return 0
+        file_id = self._next_file_id
+        self._next_file_id += 1
+        self.files[int(conversation_id)].append(
+            {
+                "id": file_id,
+                "conversation_id": conversation_id,
+                "user_id": user_id,
+                "file_type": file_type,
+                "file_name": file_name,
+                "local_path": local_path,
+                "storage_ref": storage_ref,
+                "content_type": content_type,
+                "size_bytes": size_bytes,
+                "created_at": datetime.now(),
+            }
+        )
+        self.conversations[int(conversation_id)]["updated_at"] = datetime.now()
+        return file_id
+
+    def list_uploaded_files(self, *, conversation_id: int, user_id: int) -> list[dict]:
+        if self.get_conversation(conversation_id=conversation_id, user_id=user_id) is None:
+            return []
+        return [dict(item) for item in self.files.get(int(conversation_id), [])]
+
+    def get_uploaded_file(self, *, conversation_id: int, user_id: int, file_id: int) -> dict | None:
+        if self.get_conversation(conversation_id=conversation_id, user_id=user_id) is None:
+            return None
+        for item in self.files.get(int(conversation_id), []):
+            if int(item["id"]) == int(file_id):
+                return dict(item)
+        return None
+
+    def list_uploaded_files_for_processing_recovery(self, *, limit: int) -> list[dict]:
+        rows: list[dict] = []
+        for items in self.files.values():
+            for item in items:
+                rows.append(dict(item))
+        rows.sort(key=lambda item: (item.get("created_at"), item.get("id")), reverse=True)
+        return rows[:limit]
+
+    def delete_uploaded_file(self, *, conversation_id: int, user_id: int, file_id: int) -> int:
+        if self.get_conversation(conversation_id=conversation_id, user_id=user_id) is None:
+            return 0
+        removed = 0
+        kept: list[dict] = []
+        for item in self.files.get(int(conversation_id), []):
+            if int(item["id"]) == int(file_id):
+                removed += 1
+                continue
+            kept.append(item)
+        self.files[int(conversation_id)] = kept
+        return removed
+
+
+class _TrackingConversationRepo(_MemoryConversationRepo):
+    def __init__(self) -> None:
+        super().__init__()
+        self.list_messages_calls = 0
+        self.list_uploaded_files_calls = 0
+        self.get_uploaded_file_calls = 0
+
+    def list_messages(self, *, conversation_id: int, user_id: int) -> list[dict]:
+        self.list_messages_calls += 1
+        return super().list_messages(conversation_id=conversation_id, user_id=user_id)
+
+    def list_uploaded_files(self, *, conversation_id: int, user_id: int) -> list[dict]:
+        self.list_uploaded_files_calls += 1
+        return super().list_uploaded_files(conversation_id=conversation_id, user_id=user_id)
+
+    def get_uploaded_file(self, *, conversation_id: int, user_id: int, file_id: int) -> dict | None:
+        self.get_uploaded_file_calls += 1
+        return super().get_uploaded_file(conversation_id=conversation_id, user_id=user_id, file_id=file_id)
+
+
+class _OutboxRecorder:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def enqueue_task(self, **kwargs) -> int:
+        self.calls.append(dict(kwargs))
+        return len(self.calls)
+
+
+class _FailingStorageBackend:
+    def object_exists(self, *, object_name: str, bucket: str | None = None) -> bool:
+        _ = object_name, bucket
+        return False
+
+    def upload_file(self, *, local_path: str, object_name: str, content_type: str | None = None) -> str:
+        _ = local_path, object_name, content_type
+        raise RuntimeError("upload_failed")
+
+    def download_file(self, *, object_name: str, local_path: str) -> bool:
+        _ = object_name, local_path
+        return False
+
+    def get_file_url(self, *, object_name: str, expires_seconds: int = 3600) -> str:
+        _ = object_name, expires_seconds
+        return ""
+
+    def delete_object(self, *, object_name: str, bucket: str | None = None) -> bool:
+        _ = object_name, bucket
+        return False
+
+
+def _route_for(path: str, method: str):
+    for route in app.routes:
+        if getattr(route, "path", None) == path and method in getattr(route, "methods", set()):
+            return route
+    raise AssertionError(f"route not found: {method} {path}")
+
+
+def test_conversation_routes_registered():
+    paths = {route.path for route in app.routes if hasattr(route, "path")}
+    assert "/api/v1/conversations" in paths
+    assert "/api/conversations" in paths
+    assert "/api/v1/conversations/{conversation_id}" in paths
+    assert "/api/v1/conversations/{conversation_id}/files/{file_id}/download" in paths
+
+    list_route = _route_for("/api/v1/conversations", "GET")
+    detail_route = _route_for("/api/v1/conversations/{conversation_id}", "GET")
+    assert require_auth_context in {dep.call for dep in list_route.dependant.dependencies}
+    assert require_auth_context in {dep.call for dep in detail_route.dependant.dependencies}
+
+
+def test_conversation_runtime_service_is_bound_to_live_http_route():
+    with TestClient(app) as client:
+        assert client.app.state.conversation_service is conversation_service_module.conversation_service
+
+
+def test_update_conversation_title_route_contract(monkeypatch):
+    with TestClient(app) as client:
+        client.app.dependency_overrides[require_auth_context] = lambda: AuthContext(
+            user_id=7,
+            role="user",
+            username="alice",
+        )
+        monkeypatch.setattr(
+            conversation_service_module.conversation_service,
+            "update_conversation_title",
+            lambda **kwargs: {
+                "success": True,
+                "data": {
+                    "conversation_id": kwargs["conversation_id"],
+                    "title": kwargs["title"],
+                    "message_count": 2,
+                    "created_at": "2026-03-17T10:00:00+08:00",
+                    "updated_at": "2026-03-17T10:05:00+08:00",
+                },
+            },
+        )
+
+        response = client.put(
+            "/api/v1/conversations/12/title",
+            json={"title": "updated title"},
+        )
+        client.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["data"]["conversation_id"] == 12
+    assert payload["data"]["title"] == "updated title"
+
+
+def test_conversation_http_crud_contracts(monkeypatch):
+    with TestClient(app) as client:
+        client.app.dependency_overrides[require_auth_context] = lambda: AuthContext(
+            user_id=7,
+            role="user",
+            username="alice",
+        )
+        monkeypatch.setattr(
+            conversation_service_module.conversation_service,
+            "create_conversation",
+            lambda **kwargs: {
+                "success": True,
+                "data": {
+                    "conversation_id": 21,
+                    "title": kwargs["title"],
+                    "message_count": 0,
+                    "created_at": "2026-03-17T10:00:00+08:00",
+                    "updated_at": "2026-03-17T10:00:00+08:00",
+                },
+            },
+        )
+        monkeypatch.setattr(
+            conversation_service_module.conversation_service,
+            "list_conversations",
+            lambda **kwargs: {
+                "success": True,
+                "data": {
+                    "conversations": [
+                        {
+                            "conversation_id": 21,
+                            "title": "Alpha",
+                            "message_count": 2,
+                            "created_at": "2026-03-17T10:00:00+08:00",
+                            "updated_at": "2026-03-17T10:05:00+08:00",
+                        }
+                    ],
+                    "total_count": 1,
+                    "page": kwargs["page"],
+                    "page_size": kwargs["page_size"],
+                },
+            },
+        )
+        monkeypatch.setattr(
+            conversation_service_module.conversation_service,
+            "get_conversation_detail",
+            lambda **kwargs: {
+                "success": True,
+                "data": {
+                    "conversation_id": kwargs["conversation_id"],
+                    "title": "Alpha",
+                    "message_count": 2,
+                    "created_at": "2026-03-17T10:00:00+08:00",
+                    "updated_at": "2026-03-17T10:05:00+08:00",
+                    "messages": [{"role": "user", "content": "hello", "metadata": {}}],
+                    "uploaded_files": [],
+                },
+            },
+        )
+        monkeypatch.setattr(
+            conversation_service_module.conversation_service,
+            "delete_conversation",
+            lambda **kwargs: {"success": True, "message": "deleted"},
+        )
+
+        create_resp = client.post("/api/v1/conversations", json={"title": "Alpha"})
+        list_resp = client.get("/api/v1/conversations?page=1&page_size=20")
+        detail_resp = client.get("/api/v1/conversations/21")
+        delete_resp = client.delete("/api/v1/conversations/21")
+        client.app.dependency_overrides.clear()
+
+    assert create_resp.status_code == 201
+    assert create_resp.json()["data"]["conversation_id"] == 21
+    assert list_resp.status_code == 200
+    assert list_resp.json()["data"]["conversations"][0]["title"] == "Alpha"
+    assert detail_resp.status_code == 200
+    assert detail_resp.json()["data"]["messages"][0]["content"] == "hello"
+    assert delete_resp.status_code == 200
+    assert delete_resp.json()["message"] == "deleted"
+
+
+def test_download_conversation_file_route_accepts_query_token(monkeypatch, tmp_path):
+    file_path = tmp_path / "sample.pdf"
+    file_path.write_bytes(b"%PDF-1.4\n")
+
+    with TestClient(app) as client:
+        monkeypatch.setattr(auth_service_module.auth_service, "decode_token", lambda token: {"user_id": 7, "role": "user"} if token == "token-1" else None)
+        monkeypatch.setattr(
+            auth_service_module.auth_service,
+            "get_user_by_id",
+            lambda user_id: {"id": user_id, "status": "active", "role": "user", "user_type": 3, "username": "alice"},
+        )
+        monkeypatch.setattr(quota_service_module.quota_service, "check_quota", lambda **kwargs: {"success": True, "allowed": True})
+        monkeypatch.setattr(quota_service_module.quota_service, "increment_quota", lambda **kwargs: {"success": True})
+        monkeypatch.setattr(
+            conversation_service_module.conversation_service,
+            "resolve_uploaded_file_download",
+            lambda **kwargs: (
+                {"success": True},
+                200,
+                {"mode": "local_file", "target": str(file_path), "file_name": "sample.pdf"},
+            ),
+        )
+
+        response = client.get("/api/v1/conversations/12/files/8/download?token=token-1")
+
+    assert response.status_code == 200
+    assert response.headers["content-disposition"].startswith("attachment;")
+    assert response.content.startswith(b"%PDF-1.4")
+
+
+def test_conversation_service_round_trip():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Alpha")
+        assert created["success"] is True
+        conversation_id = int(created["data"]["conversation_id"])
+
+        listed = service.list_conversations(user_id=7, page=1, page_size=20)
+        assert listed["success"] is True
+        assert listed["data"]["conversations"][0]["title"] == "Alpha"
+        assert get_recent_conversation_list_pages(redis_service=redis_service, user_id=7) == [{"page": 1, "page_size": 20}]
+
+        added_user = service.add_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            role="user",
+            content="hello",
+            metadata={"source": "test"},
+        )
+        assert added_user["success"] is True
+
+        added_assistant = service.add_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            role="assistant",
+            content="world",
+            metadata={
+                "route": "chat",
+                "trace_id": "trace-1",
+                "used_files": [{"file_id": 3}],
+                "done_seen": True,
+                "references": [{"id": "r1"}],
+                "reference_links": [{"doi": "10.1000/demo", "pdf_url": "/api/v1/view_pdf/10.1000/demo"}],
+                "pdf_links": [{"doi": "10.1000/demo", "pdf_url": "/api/v1/view_pdf/10.1000/demo"}],
+                "doi_locations": {"10.1000/demo": [{"start": 1, "end": 3}]},
+                "steps": [{"step": "s1"}],
+                "query_mode": "normal",
+            },
+        )
+        assert added_assistant["success"] is True
+
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+        assert detail["success"] is True
+        assert detail["data"]["message_count"] == 2
+        assert len(detail["data"]["messages"]) == 2
+        assert detail["data"]["messages"][1]["metadata"]["reference_links"][0]["doi"] == "10.1000/demo"
+        assert detail["data"]["messages"][1]["doi_locations"]["10.1000/demo"][0]["start"] == 1
+
+        latest = service.get_latest_turn_context(user_id=7, conversation_id=conversation_id)
+        assert latest["success"] is True
+        assert latest["data"]["last_turn_route"] == "chat"
+        assert latest["data"]["trace_id"] == "trace-1"
+        assert latest["data"]["last_focus_file_ids"] == [3]
+
+        file_path = Path(tempdir) / "sample.pdf"
+        file_path.write_bytes(b"pdf")
+        added_file = service.add_uploaded_file(
+            user_id=7,
+            conversation_id=conversation_id,
+            file_type="pdf",
+            file_name="sample.pdf",
+            local_path=str(file_path),
+            storage_ref=None,
+            content_type="application/pdf",
+            size_bytes=3,
+        )
+        assert added_file["success"] is True
+        file_id = int(added_file["data"]["file_id"])
+
+        listed_files = service.list_uploaded_files(user_id=7, conversation_id=conversation_id, include_deleted=False)
+        assert listed_files["success"] is True
+        assert len(listed_files["data"]["files"]) == 1
+
+        fetched_file = service.get_uploaded_file(user_id=7, conversation_id=conversation_id, file_id=file_id)
+        assert fetched_file["success"] is True
+        assert fetched_file["data"]["file_name"] == "sample.pdf"
+
+        payload, status_code, download = service.resolve_uploaded_file_download(
+            user_id=7,
+            conversation_id=conversation_id,
+            file_id=file_id,
+        )
+        assert payload["success"] is True
+        assert status_code == 200
+        assert download == {"mode": "local_file", "target": str(file_path), "file_name": "sample.pdf"}
+
+        removed = service.remove_uploaded_file(user_id=7, conversation_id=conversation_id, file_id=file_id)
+        assert removed["success"] is True
+        assert removed["data"]["cleanup_pending"] is False
+
+        listed_deleted = service.list_uploaded_files(user_id=7, conversation_id=conversation_id, include_deleted=True)
+        assert listed_deleted["success"] is True
+        assert listed_deleted["data"]["files"][0]["file_status"] == "deleted"
+
+        deleted = service.delete_conversation(user_id=7, conversation_id=conversation_id)
+        assert deleted["success"] is True
+
+
+def test_conversation_repository_list_uses_stable_ordering():
+    class _QueryCapturingConversationRepo(ConversationRepository):
+        def __init__(self) -> None:
+            self.queries: list[tuple[str, tuple]] = []
+            self._conversation_columns_cache = None
+
+        def _execute_query(self, query: str, params: tuple = ()):
+            self.queries.append((query, params))
+            return []
+
+    repo = _QueryCapturingConversationRepo()
+
+    repo.list_conversations(user_id=7, offset=20, limit=10)
+
+    assert repo.queries
+    query, params = repo.queries[0]
+    assert "ORDER BY updated_at DESC, id DESC" in " ".join(query.split())
+    assert params == (7, 10, 20)
+
+
+def test_add_message_prefers_json_document_over_stale_detail_cache():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Cache Drift")
+        conversation_id = int(created["data"]["conversation_id"])
+
+        first = service.add_message(user_id=7, conversation_id=conversation_id, role="user", content="first")
+        assert first["success"] is True
+
+        stale_payload = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+        assert stale_payload["success"] is True
+        stale_payload["data"]["messages"] = []
+        stale_payload["data"]["message_count"] = 0
+        stale_payload["data"]["updated_at"] = created["data"]["updated_at"]
+        cache_conversation_detail(
+            redis_service=redis_service,
+            user_id=7,
+            conversation_id=conversation_id,
+            payload=stale_payload,
+        )
+
+        second = service.add_message(user_id=7, conversation_id=conversation_id, role="assistant", content="second")
+        assert second["success"] is True
+
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+
+        assert detail["success"] is True
+        assert [item["content"] for item in detail["data"]["messages"]] == ["first", "second"]
+        assert detail["data"]["message_count"] == 2
+
+
+def test_add_message_does_not_bootstrap_from_stale_cache_when_json_is_missing():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Source Of Truth")
+        conversation_id = int(created["data"]["conversation_id"])
+        local_path = json_store.conversation_local_path(user_id=7, conversation_id=conversation_id)
+        local_path.unlink()
+
+        stale_payload = {
+            "success": True,
+            "data": {
+                "conversation_id": conversation_id,
+                "user_id": 7,
+                "title": "Cached Ghost",
+                "message_count": 1,
+                "created_at": created["data"]["created_at"],
+                "updated_at": created["data"]["updated_at"],
+                "messages": [
+                    {
+                        "id": 99,
+                        "message_id": "m_000099",
+                        "role": "user",
+                        "content": "ghost",
+                        "metadata": {},
+                        "created_at": created["data"]["updated_at"],
+                    }
+                ],
+                "uploaded_files": [],
+                "uploaded_files_all": [],
+                "pdf_files": [],
+                "excel_files": [],
+            },
+        }
+        cache_conversation_detail(
+            redis_service=redis_service,
+            user_id=7,
+            conversation_id=conversation_id,
+            payload=stale_payload,
+        )
+
+        added = service.add_message(user_id=7, conversation_id=conversation_id, role="user", content="real")
+        assert added["success"] is True
+
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+
+        assert detail["success"] is True
+        assert detail["data"]["title"] == "Source Of Truth"
+        assert [item["content"] for item in detail["data"]["messages"]] == ["real"]
+        assert detail["data"]["message_count"] == 1
+
+
+def test_conversation_detail_rejects_stale_cache_when_db_activity_is_newer():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Freshness")
+        conversation_id = int(created["data"]["conversation_id"])
+        added = service.add_message(user_id=7, conversation_id=conversation_id, role="user", content="fresh")
+        assert added["success"] is True
+
+        stale_payload = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+        assert stale_payload["success"] is True
+        stale_payload = copy.deepcopy(stale_payload)
+        stale_payload["data"]["messages"] = []
+        stale_payload["data"]["message_count"] = 0
+        stale_payload["data"]["updated_at"] = created["data"]["updated_at"]
+        cache_conversation_detail(
+            redis_service=redis_service,
+            user_id=7,
+            conversation_id=conversation_id,
+            payload=stale_payload,
+        )
+
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+
+        assert detail["success"] is True
+        assert [item["content"] for item in detail["data"]["messages"]] == ["fresh"]
+        assert detail["data"]["message_count"] == 1
+
+
+def test_repository_updates_activity_timestamp_on_user_visible_writes():
+    class _UpdateCapturingConversationRepo(ConversationRepository):
+        def __init__(self) -> None:
+            self.queries: list[tuple[str, tuple]] = []
+            self._conversation_columns_cache = None
+
+        def _execute_update(self, query: str, params: tuple = ()) -> int:
+            self.queries.append((" ".join(query.split()), params))
+            return 1
+
+    repo = _UpdateCapturingConversationRepo()
+
+    repo.update_conversation_title(conversation_id=3, user_id=7, title="Renamed")
+    repo.set_message_count(conversation_id=3, user_id=7, message_count=2)
+
+    assert len(repo.queries) == 2
+    assert "SET title = %s, updated_at = %s" in repo.queries[0][0]
+    assert repo.queries[0][1][0] == "Renamed"
+    assert "SET message_count = %s, updated_at = %s" in repo.queries[1][0]
+    assert repo.queries[1][1][0] == 2
+
+
+def test_conversation_detail_does_not_fallback_to_legacy_tables_by_default(monkeypatch):
+    monkeypatch.delenv("PUBLIC_SERVICE_ENABLE_LEGACY_CONVERSATION_FALLBACK", raising=False)
+    get_settings.cache_clear()
+    repo = _TrackingConversationRepo()
+
+    with TemporaryDirectory() as tempdir:
+        conversation_id = repo.create_conversation(user_id=7, title="Legacy Only")
+        repo.messages[conversation_id].append(
+            {
+                "id": 1,
+                "conversation_id": conversation_id,
+                "user_id": 7,
+                "role": "user",
+                "content": "legacy-message",
+                "metadata": {"source": "legacy"},
+                "created_at": datetime.now(),
+            }
+        )
+        repo.files[conversation_id].append(
+            {
+                "id": 1,
+                "conversation_id": conversation_id,
+                "user_id": 7,
+                "file_type": "pdf",
+                "file_name": "legacy.pdf",
+                "local_path": str(Path(tempdir) / "legacy.pdf"),
+                "storage_ref": None,
+                "content_type": "application/pdf",
+                "size_bytes": 3,
+                "created_at": datetime.now(),
+            }
+        )
+        service = ConversationService(repo=repo, workspace_root=tempdir)
+
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+        files = service.list_uploaded_files(user_id=7, conversation_id=conversation_id, include_deleted=False)
+        file_item = service.get_uploaded_file(user_id=7, conversation_id=conversation_id, file_id=1)
+
+        assert detail["success"] is True
+        assert detail["data"]["messages"] == []
+        assert detail["data"]["uploaded_files"] == []
+        assert files == {"success": True, "data": {"files": []}}
+        assert file_item["success"] is False
+        assert file_item["code"] == "NOT_FOUND"
+        assert repo.list_messages_calls == 0
+        assert repo.list_uploaded_files_calls == 0
+        assert repo.get_uploaded_file_calls == 0
+
+    get_settings.cache_clear()
+
+
+def test_conversation_detail_can_fallback_to_legacy_tables_when_enabled(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_ENABLE_LEGACY_CONVERSATION_FALLBACK", "1")
+    get_settings.cache_clear()
+    repo = _TrackingConversationRepo()
+
+    with TemporaryDirectory() as tempdir:
+        legacy_file_path = Path(tempdir) / "legacy.pdf"
+        legacy_file_path.write_bytes(b"pdf")
+        conversation_id = repo.create_conversation(user_id=7, title="Legacy Only")
+        repo.messages[conversation_id].append(
+            {
+                "id": 1,
+                "conversation_id": conversation_id,
+                "user_id": 7,
+                "role": "user",
+                "content": "legacy-message",
+                "metadata": {"source": "legacy"},
+                "created_at": datetime.now(),
+            }
+        )
+        repo.files[conversation_id].append(
+            {
+                "id": 1,
+                "conversation_id": conversation_id,
+                "user_id": 7,
+                "file_type": "pdf",
+                "file_name": "legacy.pdf",
+                "local_path": str(legacy_file_path),
+                "storage_ref": None,
+                "content_type": "application/pdf",
+                "size_bytes": 3,
+                "created_at": datetime.now(),
+            }
+        )
+        service = ConversationService(repo=repo, workspace_root=tempdir)
+
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+        files = service.list_uploaded_files(user_id=7, conversation_id=conversation_id, include_deleted=False)
+        file_item = service.get_uploaded_file(user_id=7, conversation_id=conversation_id, file_id=1)
+
+        assert detail["success"] is True
+        assert len(detail["data"]["messages"]) == 1
+        assert detail["data"]["messages"][0]["content"] == "legacy-message"
+        assert len(detail["data"]["uploaded_files"]) == 1
+        assert detail["data"]["uploaded_files"][0]["file_name"] == "legacy.pdf"
+        assert files["success"] is True
+        assert len(files["data"]["files"]) == 1
+        assert file_item["success"] is True
+        assert file_item["data"]["file_name"] == "legacy.pdf"
+        assert repo.list_messages_calls == 1
+        assert repo.list_uploaded_files_calls == 1
+        assert repo.get_uploaded_file_calls == 0
+
+    get_settings.cache_clear()
+
+
+def test_conversation_service_enqueues_outbox_when_json_mirror_fails():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+
+    with TemporaryDirectory() as tempdir:
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=_FailingStorageBackend(),
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+        )
+
+        created = service.create_conversation(user_id=9, title="MirrorFail")
+        assert created["success"] is True
+        assert len(outbox.calls) == 1
+        assert outbox.calls[0]["conversation_id"] == created["data"]["conversation_id"]
+
+
+def test_conversation_json_version_stays_monotonic_across_multiple_writes():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+        )
+
+        created = service.create_conversation(user_id=7, title="Versioned")
+        conversation_id = int(created["data"]["conversation_id"])
+        version_after_create = int(repo.get_conversation(conversation_id=conversation_id, user_id=7)["chat_json_version"])
+        assert version_after_create == 1
+
+        added_user = service.add_message(user_id=7, conversation_id=conversation_id, role="user", content="hello")
+        assert added_user["success"] is True
+        version_after_message = int(repo.get_conversation(conversation_id=conversation_id, user_id=7)["chat_json_version"])
+        assert version_after_message == 2
+
+        file_path = Path(tempdir) / "sample.pdf"
+        file_path.write_bytes(b"pdf")
+        added_file = service.add_uploaded_file(
+            user_id=7,
+            conversation_id=conversation_id,
+            file_type="pdf",
+            file_name="sample.pdf",
+            local_path=str(file_path),
+            storage_ref=None,
+            content_type="application/pdf",
+            size_bytes=3,
+        )
+        assert added_file["success"] is True
+        version_after_file = int(repo.get_conversation(conversation_id=conversation_id, user_id=7)["chat_json_version"])
+        assert version_after_file == 3
+
+
+def test_conversation_load_prefers_valid_local_json_over_stale_remote_copy():
+    with TemporaryDirectory() as tempdir:
+        project_root = Path(tempdir)
+        local_path = project_root / "data" / "conversations" / "7" / "3.json"
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_text('{"meta":{"title":"Local"},"messages":[],"files":[],"runtime":{}}\n', encoding="utf-8")
+
+        class _RemoteWouldOverwriteBackend(LocalStorageBackend):
+            def __init__(self, *, root_dir: str) -> None:
+                super().__init__(root_dir=root_dir)
+                self.download_calls = 0
+
+            def download_file(self, *, object_name: str, local_path: str) -> bool:
+                self.download_calls += 1
+                Path(local_path).write_text(
+                    '{"meta":{"title":"Remote"},"messages":[{"content":"stale"}],"files":[],"runtime":{}}\n',
+                    encoding="utf-8",
+                )
+                return True
+
+        storage_backend = _RemoteWouldOverwriteBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(project_root=tempdir, storage_backend=storage_backend)
+
+        loaded = json_store.load_document(user_id=7, conversation_id=3)
+
+        assert loaded is not None
+        assert loaded["meta"]["title"] == "Local"
+        assert storage_backend.download_calls == 0
+
+
+def test_conversation_add_uploaded_file_rolls_back_row_and_json_on_persist_error():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+        )
+
+        created = service.create_conversation(user_id=7, title="Rollback")
+        conversation_id = int(created["data"]["conversation_id"])
+        file_path = Path(tempdir) / "sample.pdf"
+        file_path.write_bytes(b"pdf")
+
+        original_persist = service._persist_document_and_index
+
+        def _failing_persist(**kwargs):
+            original_persist(**kwargs)
+            raise RuntimeError("persist_failed_after_write")
+
+        service._persist_document_and_index = _failing_persist  # type: ignore[method-assign]
+
+        added_file = service.add_uploaded_file(
+            user_id=7,
+            conversation_id=conversation_id,
+            file_type="pdf",
+            file_name="sample.pdf",
+            local_path=str(file_path),
+            storage_ref=None,
+            content_type="application/pdf",
+            size_bytes=3,
+        )
+
+        assert added_file["success"] is False
+        assert repo.list_uploaded_files(conversation_id=conversation_id, user_id=7) == []
+        doc = json_store.load_document(user_id=7, conversation_id=conversation_id)
+        assert isinstance(doc, dict)
+        assert doc.get("files") == []
+
+
+def test_upload_processing_worker_materializes_file_from_storage_ref_when_local_path_is_missing(tmp_path):
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    source_file = storage_root / "mirrored.pdf"
+    source_file.write_bytes(b"pdf-data")
+
+    class _ConversationService:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+            self._workspace_root = tmp_path
+
+        def get_uploaded_file(self, **kwargs):
+            _ = kwargs
+            return {
+                "success": True,
+                "data": {
+                    "id": 9,
+                    "file_name": "sample.pdf",
+                    "local_path": str(tmp_path / "missing.pdf"),
+                    "storage_ref": f"local://{source_file}",
+                },
+            }
+
+        def update_uploaded_file_processing_state(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            return {"success": True}
+
+    parse_paths: list[Path] = []
+
+    def _parse(path: Path, *_args, **_kwargs):
+        parse_paths.append(Path(path))
+        assert Path(path).exists()
+        assert Path(path).read_bytes() == b"pdf-data"
+        return "parsed text"
+
+    service = _ConversationService()
+    worker = UploadProcessingWorker(
+        conversation_service=service,
+        extract_pdf_text_fn=_parse,
+    )
+
+    worker._run_task(
+        user_id=7,
+        conversation_id=3,
+        file_id=9,
+        file_type="pdf",
+        local_path=str(tmp_path / "missing.pdf"),
+    )
+
+    assert len(parse_paths) == 1
+    assert str(parse_paths[0]) != str(tmp_path / "missing.pdf")
+    assert parse_paths[0] == source_file
+    assert any(call.get("parse_status") == "parsing" for call in service.calls)
+    assert any(call.get("index_status") == "ready" for call in service.calls)
+
+
+def test_upload_processing_worker_treats_legacy_pdf_error_text_as_failure():
+    worker = UploadProcessingWorker(
+        conversation_service=object(),
+        extract_pdf_text_fn=lambda *_args, **_kwargs: "[错误] pdf parse failed",
+    )
+
+    file_path = Path(__file__)
+
+    try:
+        worker._parse_pdf(file_path)
+    except RuntimeError as exc:
+        assert "[错误]" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError for legacy pdf error text")
+
+
+def test_upload_processing_worker_stops_before_parse_when_state_persist_fails():
+    class _StateFailingConversationService:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def update_uploaded_file_processing_state(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            return {"success": False, "code": "DB_UNAVAILABLE"}
+
+    service = _StateFailingConversationService()
+    parse_called = {"value": False}
+    worker = UploadProcessingWorker(
+        conversation_service=service,
+        extract_pdf_text_fn=lambda *_args, **_kwargs: parse_called.__setitem__("value", True) or "parsed text",
+    )
+
+    worker._run_task(
+        user_id=7,
+        conversation_id=3,
+        file_id=9,
+        file_type="pdf",
+        local_path=str(Path(__file__)),
+    )
+
+    assert parse_called["value"] is False
+    assert len(service.calls) == 1
+
+
+def test_update_uploaded_file_processing_state_skips_primary_list_cache_refresh():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        service = ConversationService(
+            repo=repo,
+            json_store=ConversationJsonStore(project_root=tempdir, storage_backend=storage_backend),
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+        )
+
+        created = service.create_conversation(user_id=7, title="CacheTest")
+        conversation_id = int(created["data"]["conversation_id"])
+        file_path = Path(tempdir) / "sample.pdf"
+        file_path.write_bytes(b"pdf")
+        added_file = service.add_uploaded_file(
+            user_id=7,
+            conversation_id=conversation_id,
+            file_type="pdf",
+            file_name="sample.pdf",
+            local_path=str(file_path),
+            storage_ref=None,
+            content_type="application/pdf",
+            size_bytes=3,
+        )
+        file_id = int(added_file["data"]["file_id"])
+
+        refreshed = {"list": 0, "detail": 0}
+        service._refresh_primary_list_cache = lambda **kwargs: refreshed.__setitem__("list", refreshed["list"] + 1)  # type: ignore[method-assign]
+        service._refresh_detail_cache = lambda **kwargs: refreshed.__setitem__("detail", refreshed["detail"] + 1)  # type: ignore[method-assign]
+
+        result = service.update_uploaded_file_processing_state(
+            user_id=7,
+            conversation_id=conversation_id,
+            file_id=file_id,
+            parse_status="parsed",
+            index_status="ready",
+            processing_stage="ready",
+        )
+
+        assert result["success"] is True
+        assert refreshed == {"list": 0, "detail": 1}
+
+
+def test_conversation_json_store_uses_distributed_lock_across_instances(monkeypatch):
+    monkeypatch.setenv("CONVERSATION_LOCK_TTL_SECONDS", "5")
+    monkeypatch.setenv("CONVERSATION_LOCK_WAIT_SECONDS", "1")
+    monkeypatch.setenv("CONVERSATION_LOCK_RETRY_INTERVAL_MS", "20")
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        first = ConversationJsonStore(project_root=tempdir, redis_service=redis_service)
+        second = ConversationJsonStore(project_root=tempdir, redis_service=redis_service)
+        results: dict[str, object] = {}
+        ready = threading.Event()
+
+        def _attempt_second_lock() -> None:
+            ready.set()
+            try:
+                with second.conversation_lock(user_id=7, conversation_id=11):
+                    results["acquired"] = True
+            except Exception as exc:
+                results["error"] = exc
+
+        with first.conversation_lock(user_id=7, conversation_id=11):
+            worker = threading.Thread(target=_attempt_second_lock, daemon=True)
+            worker.start()
+            assert ready.wait(timeout=1.0)
+            worker.join(timeout=2.0)
+
+        assert results.get("acquired") is not True
+        assert isinstance(results.get("error"), TimeoutError)
+
+
+def test_rename_and_add_message_keep_latest_title_under_lock_handoff():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    before_add_message_lock = threading.Event()
+    allow_add_message_lock = threading.Event()
+
+    class _BlockingConversationJsonStore(ConversationJsonStore):
+        def __init__(self, *, project_root: str, storage_backend: LocalStorageBackend) -> None:
+            super().__init__(project_root=project_root, storage_backend=storage_backend)
+            self._blocked_once = False
+            self.block_enabled = False
+
+        def conversation_lock(self, *, user_id: int, conversation_id: int):
+            base_context = super().conversation_lock(user_id=user_id, conversation_id=conversation_id)
+
+            class _WrappedContext:
+                def __enter__(_self):
+                    if self.block_enabled and not self._blocked_once:
+                        self._blocked_once = True
+                        before_add_message_lock.set()
+                        assert allow_add_message_lock.wait(timeout=1.0)
+                    return base_context.__enter__()
+
+                def __exit__(_self, exc_type, exc, tb):
+                    return base_context.__exit__(exc_type, exc, tb)
+
+            return _WrappedContext()
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = _BlockingConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+        )
+
+        created = service.create_conversation(user_id=7, title="Old Title")
+        conversation_id = int(created["data"]["conversation_id"])
+        json_store.block_enabled = True
+        result_holder: dict[str, dict] = {}
+
+        def _run_add_message() -> None:
+            result_holder["add_message"] = service.add_message(
+                user_id=7,
+                conversation_id=conversation_id,
+                role="user",
+                content="hello",
+            )
+
+        worker = threading.Thread(target=_run_add_message, daemon=True)
+        worker.start()
+        assert before_add_message_lock.wait(timeout=1.0)
+
+        renamed = service.update_conversation_title(
+            user_id=7,
+            conversation_id=conversation_id,
+            title="New Title",
+        )
+        assert renamed["success"] is True
+
+        allow_add_message_lock.set()
+        worker.join(timeout=2.0)
+
+        assert result_holder["add_message"]["success"] is True
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+        assert detail["success"] is True
+        assert detail["data"]["title"] == "New Title"
+
+
+def test_outbox_worker_hash_mismatch_fails_closed_without_upload(tmp_path):
+    local_path = tmp_path / "conversation.json"
+    local_path.write_text('{"meta":{"title":"new"}}\n', encoding="utf-8")
+
+    class _OutboxRepo:
+        def __init__(self) -> None:
+            self.retry_calls: list[dict] = []
+            self.done_calls: list[dict] = []
+
+        def touch_processing(self, *, task_id: int) -> int:
+            _ = task_id
+            return 1
+
+        def mark_retry(self, **kwargs) -> int:
+            self.retry_calls.append(dict(kwargs))
+            return 1
+
+        def mark_done(self, **kwargs) -> int:
+            self.done_calls.append(dict(kwargs))
+            return 1
+
+        def mark_dead(self, **kwargs) -> int:
+            raise AssertionError(f"unexpected dead: {kwargs}")
+
+    class _ConversationRepo:
+        def get_conversation(self, **kwargs):
+            _ = kwargs
+            return {"chat_json_version": 5}
+
+        def mark_chat_json_sync_ok(self, **kwargs):
+            raise AssertionError(f"should not update sync state: {kwargs}")
+
+    class _StorageBackend:
+        def __init__(self) -> None:
+            self.upload_calls = 0
+
+        def upload_file(self, **kwargs):
+            self.upload_calls += 1
+            return "minio://bucket/conversations/7/3.json"
+
+    outbox_repo = _OutboxRepo()
+    conversation_repo = _ConversationRepo()
+    storage_backend = _StorageBackend()
+    worker = ChatJsonOutboxWorker(
+        outbox_repo=outbox_repo,
+        conversation_repo=conversation_repo,
+        storage_backend=storage_backend,
+    )
+
+    outcome = worker._process_task(
+        {
+            "id": 1,
+            "conversation_id": 3,
+            "user_id": 7,
+            "json_version": 5,
+            "local_path": str(local_path),
+            "object_name": "conversations/7/3.json",
+            "content_hash": "deadbeef",
+            "attempt_count": 0,
+        }
+    )
+
+    assert outcome == "retry"
+    assert storage_backend.upload_calls == 0
+    assert outbox_repo.done_calls == []
+    assert outbox_repo.retry_calls
+    assert outbox_repo.retry_calls[0]["last_error"] == "local_content_hash_mismatch"
+
+
+def test_outbox_worker_heartbeats_during_slow_upload(tmp_path):
+    local_path = tmp_path / "conversation.json"
+    local_path.write_text('{"meta":{"title":"ok"}}\n', encoding="utf-8")
+
+    class _OutboxRepo:
+        def __init__(self) -> None:
+            self.touch_calls = 0
+            self.done_calls: list[dict] = []
+
+        def touch_processing(self, *, task_id: int) -> int:
+            assert task_id == 1
+            self.touch_calls += 1
+            return 1
+
+        def mark_retry(self, **kwargs) -> int:
+            raise AssertionError(f"unexpected retry: {kwargs}")
+
+        def mark_done(self, **kwargs) -> int:
+            self.done_calls.append(dict(kwargs))
+            return 1
+
+        def mark_dead(self, **kwargs) -> int:
+            raise AssertionError(f"unexpected dead: {kwargs}")
+
+    class _ConversationRepo:
+        def get_conversation(self, **kwargs):
+            _ = kwargs
+            return {"chat_json_version": 5}
+
+        def mark_chat_json_sync_ok(self, **kwargs):
+            return 1
+
+    class _StorageBackend:
+        def upload_file(self, **kwargs):
+            _ = kwargs
+            time.sleep(1.15)
+            return "minio://bucket/conversations/7/3.json"
+
+    worker = ChatJsonOutboxWorker(
+        outbox_repo=_OutboxRepo(),
+        conversation_repo=_ConversationRepo(),
+        storage_backend=_StorageBackend(),
+        config=ChatJsonOutboxConfig(processing_timeout_seconds=1),
+    )
+
+    outcome = worker._process_task(
+        {
+            "id": 1,
+            "conversation_id": 3,
+            "user_id": 7,
+            "json_version": 5,
+            "local_path": str(local_path),
+            "object_name": "conversations/7/3.json",
+            "content_hash": "",
+            "attempt_count": 0,
+        }
+    )
+
+    assert outcome == "done"
+    assert worker._outbox_repo.touch_calls >= 1
+    assert worker._outbox_repo.done_calls[0]["note"] == "ok"
+
+
+def test_upload_processing_worker_uses_distributed_file_lease():
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    parse_started = threading.Event()
+    parse_calls = {"count": 0}
+
+    class _ConversationService:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def update_uploaded_file_processing_state(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            return {"success": True}
+
+    service = _ConversationService()
+
+    def _parse(*_args, **_kwargs):
+        parse_calls["count"] += 1
+        parse_started.set()
+        time.sleep(0.2)
+        return "parsed text"
+
+    worker_one = UploadProcessingWorker(
+        conversation_service=service,
+        extract_pdf_text_fn=_parse,
+        redis_service=redis_service,
+    )
+    worker_two = UploadProcessingWorker(
+        conversation_service=service,
+        extract_pdf_text_fn=_parse,
+        redis_service=redis_service,
+    )
+
+    thread_one = threading.Thread(
+        target=worker_one._run_task,
+        kwargs={
+            "user_id": 7,
+            "conversation_id": 3,
+            "file_id": 9,
+            "file_type": "pdf",
+            "local_path": str(Path(__file__)),
+        },
+        daemon=True,
+    )
+    thread_two = threading.Thread(
+        target=worker_two._run_task,
+        kwargs={
+            "user_id": 7,
+            "conversation_id": 3,
+            "file_id": 9,
+            "file_type": "pdf",
+            "local_path": str(Path(__file__)),
+        },
+        daemon=True,
+    )
+
+    thread_one.start()
+    assert parse_started.wait(timeout=1.0)
+    thread_two.start()
+    thread_one.join(timeout=2.0)
+    thread_two.join(timeout=2.0)
+
+    assert parse_calls["count"] == 1
+
+
+def test_recover_pending_upload_processing_tasks_resubmits_uploaded_files():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+
+    class _Worker:
+        enabled = True
+
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def submit(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            return True
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        service = ConversationService(
+            repo=repo,
+            json_store=ConversationJsonStore(project_root=tempdir, storage_backend=storage_backend),
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+        )
+
+        created = service.create_conversation(user_id=7, title="Recover")
+        conversation_id = int(created["data"]["conversation_id"])
+        file_path = Path(tempdir) / "recover.pdf"
+        file_path.write_bytes(b"pdf")
+        added = service.add_uploaded_file(
+            user_id=7,
+            conversation_id=conversation_id,
+            file_type="pdf",
+            file_name="recover.pdf",
+            local_path=str(file_path),
+            storage_ref=None,
+            content_type="application/pdf",
+            size_bytes=3,
+        )
+
+        worker = _Worker()
+        summary = service.recover_pending_upload_processing_tasks(worker=worker)
+
+    assert summary["submitted"] == 1
+    assert worker.calls[0]["file_id"] == int(added["data"]["file_id"])
+    assert worker.calls[0]["conversation_id"] == conversation_id
+
+
+def test_conversation_download_route_contracts(monkeypatch):
+    monkeypatch.setattr(
+        conversation_service_module.conversation_service,
+        "resolve_uploaded_file_download",
+        lambda **kwargs: (
+            {"success": True, "data": {"id": kwargs["file_id"]}},
+            200,
+            {"mode": "redirect", "target": "https://example.com/file.pdf", "file_name": "file.pdf"},
+        ),
+    )
+    redirect_response = conversation_api_module.download_conversation_file(
+        1,
+        2,
+        AuthContext(user_id=7, role="user", username="alice"),
+        None,
+    )
+    assert isinstance(redirect_response, RedirectResponse)
+    assert redirect_response.status_code == 302
+
+    with TemporaryDirectory() as tempdir:
+        local_path = Path(tempdir) / "download.pdf"
+        local_path.write_bytes(b"data")
+        monkeypatch.setattr(
+            conversation_service_module.conversation_service,
+            "resolve_uploaded_file_download",
+            lambda **kwargs: (
+                {"success": True, "data": {"id": kwargs["file_id"]}},
+                200,
+                {"mode": "local_file", "target": str(local_path), "file_name": "download.pdf"},
+            ),
+        )
+        file_response = conversation_api_module.download_conversation_file(
+            1,
+            2,
+            AuthContext(user_id=7, role="user", username="alice"),
+            None,
+        )
+        assert isinstance(file_response, FileResponse)
+
+    monkeypatch.setattr(
+        conversation_service_module.conversation_service,
+        "resolve_uploaded_file_download",
+        lambda **kwargs: ({"success": False, "code": "FILE_UNAVAILABLE"}, 404, None),
+    )
+    error_response = conversation_api_module.download_conversation_file(
+        1,
+        2,
+        AuthContext(user_id=7, role="user", username="alice"),
+        None,
+    )
+    assert isinstance(error_response, JSONResponse)
+    assert error_response.status_code == 404
