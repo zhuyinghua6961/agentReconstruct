@@ -1,0 +1,275 @@
+{
+  "total_files_analyzed": 1000,
+  "total_json_files": 6958,
+  "top_keywords": [
+    {
+      "keyword": "放电容量",
+      "count": 235,
+      "percentage": "23.5%"
+    },
+    {
+      "keyword": "倍率性能",
+      "count": 227,
+      "percentage": "22.7%"
+    },
+    {
+      "keyword": "循环性能",
+      "count": 206,
+      "percentage": "20.6%"
+    },
+    {
+      "keyword": "库仑效率",
+      "count": 160,
+      "percentage": "16.0%"
+    },
+    {
+      "keyword": "XRD",
+      "count": 144,
+      "percentage": "14.4%"
+    },
+    {
+      "keyword": "煅烧",
+      "count": 110,
+      "percentage": "11.0%"
+    },
+    {
+      "keyword": "掺杂",
+      "count": 104,
+      "percentage": "10.4%"
+    },
+    {
+      "keyword": "SEM",
+      "count": 97,
+      "percentage": "9.7%"
+    },
+    {
+      "keyword": "PVDF",
+      "count": 96,
+      "percentage": "9.6%"
+    },
+    {
+      "keyword": "碳包覆",
+      "count": 94,
+      "percentage": "9.4%"
+    },
+    {
+      "keyword": "TEM",
+      "count": 76,
+      "percentage": "7.6%"
+    },
+    {
+      "keyword": "XPS",
+      "count": 66,
+      "percentage": "6.6%"
+    },
+    {
+      "keyword": "退火",
+      "count": 61,
+      "percentage": "6.1%"
+    },
+    {
+      "keyword": "热处理",
+      "count": 59,
+      "percentage": "5.9%"
+    },
+    {
+      "keyword": "水热法",
+      "count": 54,
+      "percentage": "5.4%"
+    },
+    {
+      "keyword": "粘结剂",
+      "count": 49,
+      "percentage": "4.9%"
+    },
+    {
+      "keyword": "碳源",
+      "count": 49,
+      "percentage": "4.9%"
+    },
+    {
+      "keyword": "葡萄糖",
+      "count": 48,
+      "percentage": "4.8%"
+    },
+    {
+      "keyword": "PEG",
+      "count": 46,
+      "percentage": "4.6%"
+    },
+    {
+      "keyword": "蔗糖",
+      "count": 32,
+      "percentage": "3.2%"
+    },
+    {
+      "keyword": "固相法",
+      "count": 28,
+      "percentage": "2.8%"
+    },
+    {
+      "keyword": "喷雾干燥",
+      "count": 16,
+      "percentage": "1.6%"
+    },
+    {
+      "keyword": "纳米材料",
+      "count": 12,
+      "percentage": "1.2%"
+    },
+    {
+      "keyword": "导电剂",
+      "count": 11,
+      "percentage": "1.1%"
+    },
+    {
+      "keyword": "共沉淀",
+      "count": 10,
+      "percentage": "1.0%"
+    },
+    {
+      "keyword": "烧结温度",
+      "count": 9,
+      "percentage": "0.9%"
+    },
+    {
+      "keyword": "Nb掺杂",
+      "count": 5,
+      "percentage": "0.5%"
+    },
+    {
+      "keyword": "燃烧法",
+      "count": 4,
+      "percentage": "0.4%"
+    },
+    {
+      "keyword": "Mg掺杂",
+      "count": 3,
+      "percentage": "0.3%"
+    },
+    {
+      "keyword": "Ti掺杂",
+      "count": 3,
+      "percentage": "0.3%"
+    }
+  ],
+  "topic_distribution": [
+    {
+      "topic": "电化学性能",
+      "doi_count": 828,
+      "percentage": "82.8%"
+    },
+    {
+      "topic": "表征技术",
+      "doi_count": 383,
+      "percentage": "38.3%"
+    },
+    {
+      "topic": "碳源与包覆",
+      "doi_count": 270,
+      "percentage": "27.0%"
+    },
+    {
+      "topic": "工艺参数",
+      "doi_count": 239,
+      "percentage": "23.9%"
+    },
+    {
+      "topic": "电极材料",
+      "doi_count": 168,
+      "percentage": "16.8%"
+    },
+    {
+      "topic": "掺杂元素",
+      "doi_count": 118,
+      "percentage": "11.8%"
+    },
+    {
+      "topic": "合成方法",
+      "doi_count": 112,
+      "percentage": "11.2%"
+    }
+  ],
+  "keyword_categories": {
+    "碳源与包覆": [
+      "葡萄糖",
+      "蔗糖",
+      "PEG",
+      "碳源",
+      "碳包覆",
+      "导电炭黑"
+    ],
+    "掺杂元素": [
+      "V掺杂",
+      "Ti掺杂",
+      "Nb掺杂",
+      "Mg掺杂",
+      "Zn掺杂",
+      "掺杂"
+    ],
+    "合成方法": [
+      "水热法",
+      "固相法",
+      "共沉淀",
+      "喷雾干燥",
+      "燃烧法"
+    ],
+    "电化学性能": [
+      "放电容量",
+      "循环性能",
+      "倍率性能",
+      "库仑效率"
+    ],
+    "表征技术": [
+      "XRD",
+      "SEM",
+      "TEM",
+      "XPS"
+    ],
+    "电极材料": [
+      "PVDF",
+      "导电剂",
+      "粘结剂",
+      "纳米材料"
+    ],
+    "工艺参数": [
+      "烧结温度",
+      "热处理",
+      "退火",
+      "煅烧"
+    ]
+  },
+  "prompt_context": "向量数据库内容摘要：\n\n【关键词分布】（出现频率最高的30个关键词）:\n放电容量, 倍率性能, 循环性能, 库仑效率, XRD, 煅烧, 掺杂, SEM, PVDF, 碳包覆, TEM, XPS, 退火, 热处理, 水热法, 粘结剂, 碳源, 葡萄糖, PEG, 蔗糖, 固相法, 喷雾干燥, 纳米材料, 导电剂, 共沉淀, 烧结温度, Nb掺杂, 燃烧法, Mg掺杂, Ti掺杂\n\n【主题分布】（按文献数量排序）:\n电化学性能(828篇), 表征技术(383篇), 碳源与包覆(270篇), 工艺参数(239篇), 电极材料(168篇), 掺杂元素(118篇), 合成方法(112篇)\n\n【可用研究方向】:\n- 碳源与包覆：葡萄糖, 蔗糖, PEG, 碳源, 碳包覆, 导电炭黑\n- 掺杂元素：V掺杂, Ti掺杂, Nb掺杂, Mg掺杂, Zn掺杂, 掺杂\n- 合成方法：水热法, 固相法, 共沉淀, 喷雾干燥, 燃烧法\n- 电化学性能：放电容量, 循环性能, 倍率性能, 库仑效率\n- 表征技术：XRD, SEM, TEM, XPS\n- 电极材料：PVDF, 导电剂, 粘结剂, 纳米材料\n- 工艺参数：烧结温度, 热处理, 退火, 煅烧",
+  "sample_dois": [
+    "10.1039_C4TA03566F_embedding.json",
+    "10.1002_app.49799_embedding.json",
+    "10.1016_j.matchemphys.2019.01.050_embedding.json",
+    "10.1021_jacs.3c04279_embedding.json",
+    "10.1002_er.3818_embedding.json",
+    "10.20964_2021.04.49_embedding.json",
+    "10.1007_s10008-024-05839-0_embedding.json",
+    "10.1021_acsaem.0c00935_embedding.json",
+    "10.1016_j.jpowsour.2014.04.042_embedding.json",
+    "10.1038_s43246-022-00273-z_embedding.json",
+    "10.1002_adma.202509213_embedding.json",
+    "10.1016_j.electacta.2016.01.119_embedding.json",
+    "10.1039_c3ta14471b_embedding.json",
+    "10.1016_j.est.2024.111915_embedding.json",
+    "10.1002_smll.202503310_embedding.json",
+    "10.1002_pi.6400_embedding.json",
+    "10.1002_adfm.202500761_embedding.json",
+    "10.20964_2019.03.21_embedding.json",
+    "10.1016_j.jpowsour.2010.03.038_embedding.json",
+    "10.1021_acsnano.3c04907_embedding.json",
+    "10.1002_cssc.201501330_embedding.json",
+    "10.1016_j.electacta.2016.02.161_embedding.json",
+    "10.1039_c7nr09058g_embedding.json",
+    "10.1021_acsaem.0c01173_embedding.json",
+    "10.1021_cm303411t_embedding.json",
+    "10.1002_aenm.202401330_embedding.json",
+    "10.1016_j.est.2024.112865_embedding.json",
+    "10.1038_ncomms5553_embedding.json",
+    "10.1002_anie.202425357_20251117193750_embedding.json",
+    "10.1149_2.039306jes_embedding.json"
+  ]
+}

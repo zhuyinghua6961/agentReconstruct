@@ -1,0 +1,207 @@
+from __future__ import annotations
+
+import os
+import re
+import threading
+from pathlib import Path
+from typing import Any, Iterable
+from urllib.parse import unquote
+
+_DOWNLOAD_LOCKS: dict[str, threading.Lock] = {}
+_DOWNLOAD_LOCKS_GUARD = threading.Lock()
+
+
+def normalize_doi(value: str) -> str:
+    text = str(value or "").strip()
+    filename_like_source = False
+    previous = None
+    while previous != text:
+        previous = text
+        text = unquote(text).strip()
+    text = text.replace("\\", "/")
+    text = re.sub(r"^doi:\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^[(/\\s]+|[)\\s]+$", "", text)
+    if "papers/" in text:
+        text = text.split("papers/", 1)[-1]
+        filename_like_source = text.lower().endswith(".pdf")
+    elif (
+        text.lower().endswith(".pdf")
+        and (
+            os.path.isabs(text)
+            or text.startswith("./")
+            or text.startswith("../")
+            or bool(re.match(r"^[A-Za-z]:[\\/]", text))
+        )
+    ):
+        text = Path(text).name or text
+        filename_like_source = True
+    if text.lower().endswith(".pdf"):
+        text = text[:-4]
+    if "_" in text and "/" not in text and text.startswith("10.") and not filename_like_source:
+        text = text.replace("_", "/", 1)
+    return text.strip()
+
+
+def build_paper_filename(doi: str) -> str:
+    normalized = normalize_doi(doi)
+    if not normalized:
+        return ""
+    return normalized.replace("/", "_").replace("\\", "_") + ".pdf"
+
+
+def build_paper_object_name(doi: str) -> str:
+    return f"papers/{build_paper_filename(doi)}"
+
+
+def _legacy_filename(doi: str) -> str:
+    normalized = normalize_doi(doi)
+    if not normalized:
+        return ""
+    return normalized.replace("/", "_", 1).replace("\\", "_", 1) + ".pdf"
+
+
+def _candidate_paths(base_dir: Path, doi: str) -> Iterable[Path]:
+    normalized = normalize_doi(doi)
+    if not normalized:
+        return []
+
+    seen: set[str] = set()
+    names = [
+        f"{normalized}.pdf",
+        build_paper_filename(normalized),
+        _legacy_filename(normalized),
+    ]
+    for name in names:
+        if not name:
+            continue
+        candidate = (base_dir / name).expanduser().resolve()
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        yield candidate
+
+    prefix = normalized.split("/", 1)[0] if "/" in normalized else normalized
+    suffix = normalized.rsplit("/", 1)[-1]
+    patterns = [
+        f"{build_paper_filename(normalized)[:-4]}*.pdf",
+        f"{_legacy_filename(normalized)[:-4]}*.pdf",
+        f"{prefix}_{suffix}*.pdf",
+    ]
+    for pattern in patterns:
+        for match in sorted(base_dir.glob(pattern)):
+            resolved = match.expanduser().resolve()
+            key = str(resolved)
+            if key in seen:
+                continue
+            seen.add(key)
+            yield resolved
+
+
+def _is_not_found_s3_error(exc: Exception) -> bool:
+    code = str(getattr(exc, "code", "") or "")
+    return code in {"NoSuchKey", "NoSuchBucket", "NoSuchObject"}
+
+
+def _build_minio_client_from_env():
+    endpoint = os.getenv("MINIO_ENDPOINT", "").strip()
+    access_key = os.getenv("MINIO_ACCESS_KEY", "").strip()
+    secret_key = os.getenv("MINIO_SECRET_KEY", "").strip()
+    bucket = os.getenv("MINIO_BUCKET", "").strip() or "agentcode"
+    secure = os.getenv("MINIO_SECURE", "0").strip() == "1"
+
+    if not endpoint or not access_key or not secret_key:
+        return None
+
+    try:
+        from minio import Minio  # type: ignore
+        from minio.error import S3Error  # type: ignore
+
+        return Minio(endpoint, access_key=access_key, secret_key=secret_key, secure=secure), bucket, S3Error
+    except Exception:
+        return None
+
+
+def _get_local_path_lock(local_path: Path) -> threading.Lock:
+    key = str(local_path.resolve())
+    with _DOWNLOAD_LOCKS_GUARD:
+        lock = _DOWNLOAD_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _DOWNLOAD_LOCKS[key] = lock
+        return lock
+
+
+def find_local_paper_pdf(*, doi: str, papers_dir: str | Path, logger: Any | None = None) -> Path | None:
+    base_dir = Path(papers_dir).expanduser().resolve()
+    raw_value = str(doi or "").strip()
+    if raw_value:
+        candidate_path = Path(unquote(raw_value)).expanduser()
+        if candidate_path.is_absolute() and candidate_path.exists() and candidate_path.is_file():
+            return candidate_path.resolve()
+    normalized = normalize_doi(doi)
+    if not normalized:
+        return None
+
+    for candidate in _candidate_paths(base_dir, normalized):
+        if candidate.exists() and candidate.is_file():
+            return candidate
+
+    minio_ctx = _build_minio_client_from_env()
+    if minio_ctx is None:
+        return None
+
+    client, bucket, s3_error_cls = minio_ctx
+    object_name = build_paper_object_name(normalized)
+    local_path = base_dir / build_paper_filename(normalized)
+    try:
+        client.stat_object(bucket, object_name)
+        return local_path.resolve()
+    except s3_error_cls as exc:
+        if not _is_not_found_s3_error(exc) and logger is not None:
+            logger.warning("MinIO stat_object failed for %s: %s", object_name, exc)
+    except Exception as exc:
+        if logger is not None:
+            logger.warning("MinIO stat_object failed for %s: %s", object_name, exc)
+    return None
+
+
+def ensure_local_paper_pdf(*, doi: str, papers_dir: str | Path, logger: Any | None = None) -> Path | None:
+    base_dir = Path(papers_dir).expanduser().resolve()
+    base_dir.mkdir(parents=True, exist_ok=True)
+    normalized = normalize_doi(doi)
+    if not normalized:
+        return None
+
+    existing = find_local_paper_pdf(doi=normalized, papers_dir=base_dir, logger=logger)
+    if existing is not None and existing.exists():
+        return existing
+
+    minio_ctx = _build_minio_client_from_env()
+    if minio_ctx is None:
+        return None
+
+    client, bucket, s3_error_cls = minio_ctx
+    object_name = build_paper_object_name(normalized)
+    local_path = (base_dir / build_paper_filename(normalized)).resolve()
+    lock = _get_local_path_lock(local_path)
+
+    with lock:
+        if local_path.exists():
+            return local_path
+        try:
+            client.stat_object(bucket, object_name)
+            client.fget_object(bucket, object_name, str(local_path))
+            if local_path.exists():
+                return local_path
+        except s3_error_cls as exc:
+            if not _is_not_found_s3_error(exc) and logger is not None:
+                logger.warning("MinIO download failed for %s: %s", object_name, exc)
+        except Exception as exc:
+            if logger is not None:
+                logger.warning("MinIO download failed for %s: %s", object_name, exc)
+    return None
+
+
+def paper_exists(*, doi: str, papers_dir: str | Path, logger: Any | None = None) -> bool:
+    return find_local_paper_pdf(doi=doi, papers_dir=papers_dir, logger=logger) is not None
