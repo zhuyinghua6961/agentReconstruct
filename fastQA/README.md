@@ -2,6 +2,11 @@
 
 Independent `fast` QA backend workspace inside the single-repository layout.
 
+## Status Notice
+
+This service is not functionally complete yet.
+It is still in migration and alignment work, and must not be treated as a finished production-equivalent replacement for the legacy fastapi-version implementation.
+
 ## Current Phase
 
 This directory now has a runnable phase-1 prep baseline:
