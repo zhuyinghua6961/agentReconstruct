@@ -89,16 +89,36 @@ function looksLikeUnrenderedMarkdown(text, html) {
   return /(?:^|\n)\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)/m.test(String(text || ''))
 }
 
+const BEIJING_TIME_ZONE = 'Asia/Shanghai'
+const BEIJING_DATE_FORMATTER = new Intl.DateTimeFormat('zh-CN', {
+  timeZone: BEIJING_TIME_ZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit'
+})
+
+function toValidDate(value) {
+  const date = value instanceof Date ? value : new Date(value)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+function formatBeijingDate(value) {
+  const date = toValidDate(value)
+  if (!date) return ''
+  return BEIJING_DATE_FORMATTER.format(date).replace(/\//g, '-')
+}
+
 // 格式化时间
 export function formatTime(date) {
-  const d = new Date(date)
-  const now = new Date()
-  const diff = now - d
-  
+  const d = toValidDate(date)
+  if (!d) return ''
+
+  const diff = Date.now() - d.getTime()
+
   if (diff < 60000) return '刚刚'
   if (diff < 3600000) return Math.floor(diff / 60000) + '分钟前'
   if (diff < 86400000) return Math.floor(diff / 3600000) + '小时前'
-  return d.toLocaleDateString()
+  return formatBeijingDate(d)
 }
 
 // 格式化答案 - Markdown 渲染

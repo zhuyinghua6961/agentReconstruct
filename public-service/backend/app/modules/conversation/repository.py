@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+
+from app.core.timezone import now_beijing
 from typing import Any
 
 from app.core.config import get_settings
@@ -63,12 +65,13 @@ class ConversationRepository:
         return ", ".join(fields)
 
     def create_conversation(self, *, user_id: int, title: str) -> int:
+        now = now_beijing()
         return self._execute_update(
             """
-            INSERT INTO conversations (user_id, title, message_count)
-            VALUES (%s, %s, 0)
+            INSERT INTO conversations (user_id, title, message_count, created_at, updated_at)
+            VALUES (%s, %s, 0, %s, %s)
             """,
-            (user_id, title),
+            (user_id, title, now, now),
         )
 
     def update_conversation_title(self, *, conversation_id: int, user_id: int, title: str) -> int:
@@ -78,7 +81,7 @@ class ConversationRepository:
             SET title = %s, updated_at = %s
             WHERE id = %s AND user_id = %s
             """,
-            (title, datetime.now(), conversation_id, user_id),
+            (title, now_beijing(), conversation_id, user_id),
         )
 
     def list_conversations(self, *, user_id: int, offset: int, limit: int) -> list[dict[str, Any]]:
@@ -189,7 +192,7 @@ class ConversationRepository:
             params.append(storage_ref)
         if self._has_conversation_column("chat_json_updated_at"):
             assignments.append("chat_json_updated_at = %s")
-            params.append(updated_at or datetime.now())
+            params.append(updated_at or now_beijing())
 
         if not assignments:
             return 0
@@ -222,7 +225,7 @@ class ConversationRepository:
         params: list[Any] = [int(delta)]
         if touch_updated_at:
             assignments.append("updated_at = %s")
-            params.append(datetime.now())
+            params.append(now_beijing())
         params.extend([conversation_id, user_id])
         return self._execute_update(
             f"""
@@ -245,7 +248,7 @@ class ConversationRepository:
         params: list[Any] = [max(0, int(message_count))]
         if touch_updated_at:
             assignments.append("updated_at = %s")
-            params.append(datetime.now())
+            params.append(now_beijing())
         params.extend([conversation_id, user_id])
         return self._execute_update(
             f"""
@@ -275,12 +278,13 @@ class ConversationRepository:
         metadata: dict[str, Any] | None,
     ) -> int:
         metadata_json = json.dumps(metadata or {}, ensure_ascii=False) if metadata is not None else None
+        created_at = now_beijing()
         message_id = self._execute_update(
             """
-            INSERT INTO conversation_messages (conversation_id, user_id, role, content, metadata_json)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO conversation_messages (conversation_id, user_id, role, content, metadata_json, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s)
             """,
-            (conversation_id, user_id, role, content, metadata_json),
+            (conversation_id, user_id, role, content, metadata_json, created_at),
         )
         self._execute_update(
             """
@@ -288,7 +292,7 @@ class ConversationRepository:
             SET message_count = message_count + 1, updated_at = %s
             WHERE id = %s AND user_id = %s
             """,
-            (datetime.now(), conversation_id, user_id),
+            (now_beijing(), conversation_id, user_id),
         )
         return message_id
 
@@ -328,6 +332,7 @@ class ConversationRepository:
         content_type: str | None,
         size_bytes: int | None,
     ) -> int:
+        created_at = now_beijing()
         return self._execute_update(
             """
             INSERT INTO conversation_files (
@@ -338,9 +343,10 @@ class ConversationRepository:
                 local_path,
                 storage_ref,
                 content_type,
-                size_bytes
+                size_bytes,
+                created_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 conversation_id,
@@ -351,6 +357,7 @@ class ConversationRepository:
                 storage_ref,
                 content_type,
                 size_bytes,
+                created_at,
             ),
         )
 

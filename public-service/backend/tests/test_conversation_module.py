@@ -4,7 +4,7 @@ import copy
 import threading
 import pytest
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -817,6 +817,90 @@ def test_repository_updates_activity_timestamp_on_user_visible_writes():
     assert repo.queries[0][1][0] == "Renamed"
     assert "SET message_count = %s, updated_at = %s" in repo.queries[1][0]
     assert repo.queries[1][1][0] == 2
+
+
+def test_conversation_service_formats_naive_datetimes_as_beijing_time():
+    service = ConversationService(repo=_MemoryConversationRepo())
+
+    formatted = service._to_iso(datetime(2026, 3, 21, 9, 30, 45), fallback="unused")
+
+    assert formatted == "2026-03-21T09:30:45+08:00"
+
+
+def test_conversation_service_list_payload_uses_beijing_time_for_naive_rows():
+    repo = _MemoryConversationRepo()
+    conversation_id = repo.create_conversation(user_id=7, title="Beijing")
+    repo.conversations[conversation_id]["created_at"] = datetime(2026, 3, 21, 9, 30, 45)
+    repo.conversations[conversation_id]["updated_at"] = datetime(2026, 3, 21, 11, 5, 6)
+    service = ConversationService(repo=repo)
+
+    payload = service.list_conversations(user_id=7, page=1, page_size=20)
+
+    assert payload["success"] is True
+    item = payload["data"]["conversations"][0]
+    assert item["created_at"] == "2026-03-21T09:30:45+08:00"
+    assert item["updated_at"] == "2026-03-21T11:05:06+08:00"
+
+
+def test_repository_writes_beijing_aware_timestamps_for_user_visible_updates():
+    class _UpdateCapturingConversationRepo(ConversationRepository):
+        def __init__(self) -> None:
+            self.queries: list[tuple[str, tuple]] = []
+            self._conversation_columns_cache = None
+
+        def _execute_update(self, query: str, params: tuple = ()) -> int:
+            self.queries.append((" ".join(query.split()), params))
+            return 1
+
+    repo = _UpdateCapturingConversationRepo()
+
+    repo.update_conversation_title(conversation_id=3, user_id=7, title="Renamed")
+    repo.set_message_count(conversation_id=3, user_id=7, message_count=2)
+
+    beijing = timezone(timedelta(hours=8))
+    for _, params in repo.queries:
+        timestamp = params[1]
+        assert isinstance(timestamp, datetime)
+        assert timestamp.tzinfo is not None
+        assert timestamp.utcoffset() == beijing.utcoffset(None)
+
+
+def test_repository_writes_beijing_aware_timestamps_for_inserted_entities():
+    class _InsertCapturingConversationRepo(ConversationRepository):
+        def __init__(self) -> None:
+            self.queries: list[tuple[str, tuple]] = []
+            self._conversation_columns_cache = None
+
+        def _execute_update(self, query: str, params: tuple = ()) -> int:
+            self.queries.append((" ".join(query.split()), params))
+            return 1
+
+    repo = _InsertCapturingConversationRepo()
+
+    repo.create_conversation(user_id=7, title="Alpha")
+    repo.add_message(conversation_id=3, user_id=7, role="user", content="hello", metadata={})
+    repo.add_uploaded_file(
+        conversation_id=3,
+        user_id=7,
+        file_type="pdf",
+        file_name="a.pdf",
+        local_path="/tmp/a.pdf",
+        storage_ref=None,
+        content_type="application/pdf",
+        size_bytes=123,
+    )
+
+    assert "INSERT INTO conversations (user_id, title, message_count, created_at, updated_at)" in repo.queries[0][0]
+    assert "INSERT INTO conversation_messages (conversation_id, user_id, role, content, metadata_json, created_at)" in repo.queries[1][0]
+    assert "UPDATE conversations SET message_count = message_count + 1, updated_at = %s" in repo.queries[2][0]
+    assert "INSERT INTO conversation_files ( conversation_id, user_id, file_type, file_name, local_path, storage_ref, content_type, size_bytes, created_at )".replace("  ", " ")[:70] in repo.queries[3][0]
+
+    beijing = timezone(timedelta(hours=8))
+    timestamp_params = [repo.queries[0][1][2], repo.queries[0][1][3], repo.queries[1][1][5], repo.queries[2][1][0], repo.queries[3][1][8]]
+    for timestamp in timestamp_params:
+        assert isinstance(timestamp, datetime)
+        assert timestamp.tzinfo is not None
+        assert timestamp.utcoffset() == beijing.utcoffset(None)
 
 
 def test_conversation_detail_does_not_fallback_to_legacy_tables_by_default(monkeypatch):

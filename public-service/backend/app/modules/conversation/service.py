@@ -8,6 +8,7 @@ from typing import Any
 
 from app.core.config import get_settings
 from app.core.errors import DatabaseUnavailableError
+from app.core.timezone import BEIJING_TIMEZONE, ensure_beijing_datetime, now_beijing, now_beijing_iso
 from app.integrations.redis import RedisService, build_redis_bindings
 from app.modules.conversation.cache import (
     cache_conversation_detail,
@@ -71,15 +72,13 @@ class ConversationService:
         return 500
 
     def _now_iso(self) -> str:
-        return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+        return now_beijing_iso()
 
     def _to_iso(self, value: Any, fallback: str) -> str:
         if value is None:
             return fallback
         if isinstance(value, datetime):
-            if value.tzinfo is None:
-                return value.replace(tzinfo=timezone.utc).astimezone().isoformat(timespec="seconds")
-            return value.astimezone().isoformat(timespec="seconds")
+            return ensure_beijing_datetime(value).isoformat(timespec="seconds")
         text = str(value).strip()
         return text or fallback
 
@@ -100,7 +99,7 @@ class ConversationService:
             except ValueError:
                 return None
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
+            parsed = parsed.replace(tzinfo=BEIJING_TIMEZONE)
         return parsed.astimezone(timezone.utc)
 
     def _safe_int(self, value: Any, default: int = 0) -> int:
@@ -897,7 +896,7 @@ class ConversationService:
             size_bytes=write_result.get("size_bytes"),
             version=next_version,
             sync_status=str(write_result.get("sync_status") or "sync_failed"),
-            updated_at=datetime.now(),
+            updated_at=now_beijing(),
         )
         self._json_store.assert_lock_healthy()
         row["chat_json_local_path"] = write_result.get("local_path")
@@ -906,7 +905,7 @@ class ConversationService:
         row["chat_json_size_bytes"] = write_result.get("size_bytes")
         row["chat_json_version"] = next_version
         row["chat_json_sync_status"] = str(write_result.get("sync_status") or "sync_failed")
-        row["chat_json_updated_at"] = datetime.now()
+        row["chat_json_updated_at"] = now_beijing()
         sync_status = str(write_result.get("sync_status") or "sync_failed")
         if sync_status != "ok":
             try:
