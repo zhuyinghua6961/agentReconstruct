@@ -61,6 +61,8 @@ def test_persist_assistant_summary_calls_conversation_service_and_refresh(monkey
             "timings": {"stage1": 1.0},
             "trace_id": "trace-1",
             "file_selection": {},
+            "source_scope": "pdf+kb",
+            "source_usage": {"pdf_used": True, "table_used": False, "kb_used": True},
             "done_seen": True,
         },
         payload=None,
@@ -69,6 +71,8 @@ def test_persist_assistant_summary_calls_conversation_service_and_refresh(monkey
     assert calls["add_message"]["role"] == "assistant"
     assert calls["add_message"]["metadata"]["references"] == ["10.1/a"]
     assert calls["add_message"]["metadata"]["reference_objects"] == [{"doi": "10.1/a", "chunk_count": 2}]
+    assert calls["add_message"]["metadata"]["source_scope"] == "pdf+kb"
+    assert calls["add_message"]["metadata"]["source_usage"] == {"pdf_used": True, "table_used": False, "kb_used": True}
     assert calls["add_message"]["metadata"]["done_seen"] is True
     assert calls["refresh"]["user_id"] == 7
     assert calls["refresh"]["conversation_id"] == 12

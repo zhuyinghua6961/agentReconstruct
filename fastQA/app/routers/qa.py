@@ -30,10 +30,15 @@ class AskRequest(BaseModel):
     requested_mode: Literal["fast", "thinking", "patent"] = "fast"
     actual_mode: Literal["fast", "thinking", "patent"] | None = None
     route: Literal["kb_qa", "pdf_qa", "tabular_qa", "hybrid_qa"] | None = None
+    source_scope: str | None = None
+    kb_enabled: bool = False
     turn_mode: Literal["kb_only", "file_only", "mixed"] | None = None
     allow_kb_verification: bool = False
     used_files: list[dict[str, Any]] = Field(default_factory=list)
     execution_files: list[dict[str, Any]] = Field(default_factory=list)
+    selected_file_ids: list[int | str] = Field(default_factory=list)
+    primary_file_id: int | str | None = None
+    file_selection: dict[str, Any] = Field(default_factory=dict)
     trace_id: str | None = None
     options: dict[str, Any] = Field(default_factory=dict)
     route_hint: str | None = None
@@ -70,9 +75,33 @@ def _trace_id(request: Request, payload: AskRequest) -> str:
     return uuid.uuid4().hex
 
 
-def _request_logger(request: Request, trace_id: str, route: str = "-") -> logging.LoggerAdapter:
+class _CompatLoggerAdapter:
+    def __init__(self, base_logger: Any, trace_id: str, route: str) -> None:
+        self._base_logger = base_logger
+        self._trace_id = trace_id
+        self._route = route or "-"
+
+    def _emit(self, method: str, message: str, *args: Any, **kwargs: Any) -> None:
+        target = getattr(self._base_logger, method, None) or getattr(self._base_logger, "info", None)
+        if not callable(target):
+            return
+        target(message, *args, **kwargs)
+
+    def info(self, message: str, *args: Any, **kwargs: Any) -> None:
+        self._emit("info", message, *args, **kwargs)
+
+    def warning(self, message: str, *args: Any, **kwargs: Any) -> None:
+        self._emit("warning", message, *args, **kwargs)
+
+    def error(self, message: str, *args: Any, **kwargs: Any) -> None:
+        self._emit("error", message, *args, **kwargs)
+
+
+def _request_logger(request: Request, trace_id: str, route: str = "-") -> Any:
     base_logger = getattr(request.app, "logger", None) or logging.getLogger(__name__)
-    return logging.LoggerAdapter(base_logger, {"trace_id": trace_id, "route": route or "-"})
+    if hasattr(base_logger, "isEnabledFor") and hasattr(base_logger, "log"):
+        return logging.LoggerAdapter(base_logger, {"trace_id": trace_id, "route": route or "-"})
+    return _CompatLoggerAdapter(base_logger, trace_id, route)
 
 
 def _requested_route(payload: AskRequest) -> str:
@@ -176,11 +205,22 @@ def _persist_assistant_summary_if_needed(
                 "timings": dict(summary.timings or {}),
                 "trace_id": summary.trace_id or trace_id,
                 "file_selection": dict(summary.file_selection or {}),
+                "source_scope": str(summary.source_scope or ""),
+                "source_usage": dict(summary.source_usage or {}),
                 "done_seen": bool(summary.done_seen),
             },
             "payload": adapted_request,
         },
     )
+
+
+def _source_usage_from_scope(source_scope: str | None) -> dict[str, bool]:
+    tokens = {part.strip().lower() for part in str(source_scope or "").split("+") if part.strip()}
+    return {
+        "pdf_used": "pdf" in tokens,
+        "table_used": "table" in tokens,
+        "kb_used": "kb" in tokens,
+    }
 
 
 def _metadata_event(
@@ -189,12 +229,16 @@ def _metadata_event(
     requested_mode: str,
     actual_mode: str,
     trace_id: str,
+    source_scope: str = "",
+    source_usage: dict[str, bool] | None = None,
     query_mode: str | None = None,
 ) -> dict[str, Any]:
     return {
         "type": "metadata",
         "query_mode": str(query_mode or route),
         "route": route,
+        "source_scope": source_scope,
+        "source_usage": dict(source_usage or _source_usage_from_scope(source_scope)),
         "requested_mode": requested_mode,
         "actual_mode": actual_mode,
         "trace_id": trace_id,
@@ -209,12 +253,16 @@ def _done_event(
     timings: dict[str, Any] | None = None,
     references: list[Any] | None = None,
     file_selection: dict[str, Any] | None = None,
+    source_scope: str = "",
+    source_usage: dict[str, bool] | None = None,
     query_mode: str | None = None,
 ) -> dict[str, Any]:
     normalized_reference_objects = normalize_reference_objects(list(references or []))
     normalized_references = normalize_references(normalized_reference_objects)
     links = build_reference_links(normalized_references)
     resolved_query_mode = str(query_mode or route)
+    resolved_source_scope = str(source_scope or (file_selection or {}).get("source_scope") or "")
+    resolved_source_usage = dict(source_usage or _source_usage_from_scope(resolved_source_scope))
     return {
         "type": "done",
         "references": normalized_references,
@@ -223,9 +271,16 @@ def _done_event(
         "pdf_links": links,
         "doi_locations": [],
         "route": route,
+        "source_scope": resolved_source_scope,
+        "source_usage": resolved_source_usage,
         "used_files": list(used_files or []),
         "timings": dict(timings or {}),
-        "metadata": {"route": route, "query_mode": resolved_query_mode},
+        "metadata": {
+            "route": route,
+            "query_mode": resolved_query_mode,
+            "source_scope": resolved_source_scope,
+            "source_usage": resolved_source_usage,
+        },
         "query_mode": resolved_query_mode,
         "trace_id": trace_id,
         "file_selection": dict(file_selection or {}),
@@ -240,6 +295,7 @@ def _runtime_error_event(
     route: str,
     requested_mode: str,
     actual_mode: str,
+    source_scope: str = "",
     detail: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = {
@@ -252,6 +308,7 @@ def _runtime_error_event(
         "requested_mode": requested_mode,
         "actual_mode": actual_mode,
         "route": route,
+        "source_scope": source_scope,
     }
     if detail:
         payload["detail"] = dict(detail)
@@ -314,22 +371,55 @@ def _adapt_request(request: Request, payload: AskRequest, trace_id: str) -> tupl
     return adapted, None
 
 
+def _upstream_file_context(adapted_request: GatewayAskRequest) -> dict[str, Any] | None:
+    route = str(adapted_request.route or "").strip()
+    if route not in {"pdf_qa", "tabular_qa", "hybrid_qa"}:
+        return None
+
+    execution_files = list(adapted_request.execution_files or adapted_request.used_files or [])
+    used_files = list(adapted_request.used_files or adapted_request.execution_files or [])
+    file_selection = dict(adapted_request.file_selection or {})
+
+    return {
+        "route_hint": route,
+        "strategy": str(file_selection.get("strategy") or "gateway"),
+        "selection_semantic": str(file_selection.get("selection_semantic") or "upstream_selected"),
+        "turn_mode": str(adapted_request.turn_mode or file_selection.get("turn_mode") or "kb_only"),
+        "allow_kb_verification": bool(adapted_request.allow_kb_verification),
+        "selected_file_ids": list(adapted_request.selected_file_ids or file_selection.get("selected_file_ids") or []),
+        "used_files": used_files,
+        "execution_files": execution_files,
+        "needs_clarification": False,
+    }
+
+
 def _resolve_route_context(adapted_request: GatewayAskRequest, request: Request) -> tuple[str, dict[str, Any] | None, list[dict[str, Any]], dict[str, Any]]:
     logger = request.app.logger if hasattr(request.app, "logger") else None
-    file_context = resolve_gateway_file_context(adapted_request=adapted_request, logger=logger)
     route = adapted_request.route
-    if file_context and not adapted_request.route_was_explicit:
-        route = str(file_context.get("route_hint") or route)
+    explicit_upstream_file_route = adapted_request.route_was_explicit and route in {"pdf_qa", "tabular_qa", "hybrid_qa"}
+    if explicit_upstream_file_route:
+        file_context = _upstream_file_context(adapted_request)
+    else:
+        file_context = resolve_gateway_file_context(adapted_request=adapted_request, logger=logger)
+        if file_context and not adapted_request.route_was_explicit:
+            route = str(file_context.get("route_hint") or route)
     used_files = list((file_context or {}).get("used_files") or adapted_request.used_files or adapted_request.execution_files or [])
-    file_selection = {}
+    file_selection = dict(adapted_request.file_selection or {})
     if file_context:
         file_selection = {
-            "strategy": str(file_context.get("strategy") or ""),
-            "selection_semantic": str(file_context.get("selection_semantic") or ""),
-            "turn_mode": str(file_context.get("turn_mode") or adapted_request.turn_mode or "kb_only"),
-            "allow_kb_verification": bool(file_context.get("allow_kb_verification", adapted_request.allow_kb_verification)),
-            "selected_file_ids": list(file_context.get("selected_file_ids") or []),
+            **file_selection,
+            "strategy": str(file_context.get("strategy") or file_selection.get("strategy") or ""),
+            "selection_semantic": str(file_context.get("selection_semantic") or file_selection.get("selection_semantic") or ""),
+            "selected_file_ids": list(file_context.get("selected_file_ids") or file_selection.get("selected_file_ids") or []),
         }
+        if not explicit_upstream_file_route:
+            file_selection["turn_mode"] = str(file_context.get("turn_mode") or adapted_request.turn_mode or file_selection.get("turn_mode") or "kb_only")
+            file_selection["allow_kb_verification"] = bool(file_context.get("allow_kb_verification", adapted_request.allow_kb_verification))
+    if adapted_request.source_scope:
+        file_selection["source_scope"] = adapted_request.source_scope
+    file_selection["kb_enabled"] = bool(adapted_request.kb_enabled)
+    if adapted_request.primary_file_id is not None:
+        file_selection["primary_file_id"] = adapted_request.primary_file_id
     return route, file_context, used_files, file_selection
 
 
@@ -396,7 +486,36 @@ def _iter_route_events(
             is_cancelled=should_cancel,
         )
         return
-    if route in {"tabular_qa", "hybrid_qa"}:
+    if route == "tabular_qa":
+        logger.info("fastqa dispatching to %s handler", route)
+        yield from iter_tabular_route_events(
+            app_state=request.app.state,
+            adapted_request=adapted_request,
+            file_context=file_context,
+            route=route,
+            sse_event=lambda event: event,
+            is_cancelled=should_cancel,
+        )
+        return
+
+    if route == "hybrid_qa":
+        scope_tokens = {part.strip().lower() for part in str(adapted_request.source_scope or "").split("+") if part.strip()}
+        wants_pdf_only = ("pdf" in scope_tokens) and ("table" not in scope_tokens)
+        if wants_pdf_only:
+            logger.info("fastqa dispatching hybrid_qa(pdf-only) to pdf handler")
+            resolved_ctx = dict(file_context or {})
+            # Make KB verification explicit for the PDF streaming layer.
+            resolved_ctx["allow_kb_verification"] = bool(adapted_request.allow_kb_verification or adapted_request.kb_enabled)
+            resolved_ctx.setdefault("turn_mode", str(adapted_request.turn_mode or "mixed"))
+            yield from iter_pdf_route_events(
+                app_state=request.app.state,
+                adapted_request=adapted_request,
+                file_context=resolved_ctx,
+                sse_event=lambda event: event,
+                is_cancelled=should_cancel,
+            )
+            return
+
         logger.info("fastqa dispatching to %s handler", route)
         yield from iter_tabular_route_events(
             app_state=request.app.state,
@@ -422,6 +541,16 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
     route, file_context, used_files, file_selection = _resolve_route_context(adapted_request, request)
     requested_mode = adapted_request.requested_mode
     actual_mode = adapted_request.actual_mode or "fast"
+    source_scope = str(adapted_request.source_scope or file_selection.get("source_scope") or "")
+    source_usage = _source_usage_from_scope(source_scope)
+
+    def _enrich_outbound_event(payload: dict[str, Any]) -> dict[str, Any]:
+        enriched = dict(payload or {})
+        enriched["trace_id"] = str(enriched.get("trace_id") or trace_id)
+        enriched["route"] = route
+        enriched["source_scope"] = str(enriched.get("source_scope") or source_scope)
+        enriched["source_usage"] = dict(enriched.get("source_usage") or source_usage)
+        return enriched
     done_emitted = False
     metadata_emitted = False
     logger = _request_logger(request, trace_id, route)
@@ -486,6 +615,7 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
             event_type = str(event.get("type") or "").strip().lower()
             if event_type == "done":
                 done_event = dict(event)
+                done_event["route"] = route
                 query_mode = _event_query_mode(done_event, route)
                 if not metadata_emitted:
                     metadata_emitted = True
@@ -494,6 +624,8 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
                         requested_mode=requested_mode,
                         actual_mode=actual_mode,
                         trace_id=trace_id,
+                        source_scope=source_scope,
+                        source_usage=source_usage,
                         query_mode=query_mode,
                     )
                 raw_reference_objects = done_event.get("reference_objects")
@@ -512,12 +644,16 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
                 done_event.setdefault("query_mode", query_mode)
                 done_event["used_files"] = list(done_event.get("used_files") or used_files)
                 done_event["file_selection"] = dict(done_event.get("file_selection") or file_selection)
+                done_event.setdefault("source_scope", source_scope)
+                done_event.setdefault("source_usage", dict(source_usage))
                 done_event["metadata"] = {
                     **dict(done_event.get("metadata") or {}),
                     "requested_mode": requested_mode,
                     "actual_mode": actual_mode,
-                    "route": str(done_event.get("route") or route),
+                    "route": route,
                     "query_mode": query_mode,
+                    "source_scope": str(done_event.get("source_scope") or source_scope),
+                    "source_usage": dict(done_event.get("source_usage") or source_usage),
                 }
                 logger.info(
                     "fastqa done event route=%s query_mode=%s refs=%s timings=%s content_chars=%s",
@@ -528,7 +664,7 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
                     len(str(done_event.get("final_answer") or "")),
                 )
                 done_emitted = True
-                yield done_event
+                yield _enrich_outbound_event(done_event)
                 continue
             if event_type == "metadata":
                 metadata_event = dict(event)
@@ -536,8 +672,10 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
                 metadata_event.setdefault("actual_mode", actual_mode)
                 metadata_event.setdefault("route", route)
                 metadata_event.setdefault("trace_id", trace_id)
+                metadata_event.setdefault("source_scope", source_scope)
+                metadata_event.setdefault("source_usage", dict(source_usage))
                 metadata_emitted = True
-                yield metadata_event
+                yield _enrich_outbound_event(metadata_event)
                 continue
             if event_type == "error":
                 error_event = dict(event)
@@ -545,6 +683,7 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
                 error_event.setdefault("requested_mode", requested_mode)
                 error_event.setdefault("actual_mode", actual_mode)
                 error_event.setdefault("route", route)
+                error_event.setdefault("source_scope", source_scope)
                 if not metadata_emitted:
                     metadata_emitted = True
                     yield _metadata_event(
@@ -552,6 +691,8 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
                         requested_mode=requested_mode,
                         actual_mode=actual_mode,
                         trace_id=trace_id,
+                        source_scope=source_scope,
+                        source_usage=source_usage,
                         query_mode=_event_query_mode(error_event, route),
                     )
                 logger.warning(
@@ -560,7 +701,7 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
                     error_event.get("code") or "",
                     error_event.get("error") or error_event.get("message") or "",
                 )
-                yield error_event
+                yield _enrich_outbound_event(error_event)
                 if not done_emitted:
                     done_emitted = True
                     yield _done_event(
@@ -568,10 +709,12 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
                         used_files=used_files,
                         trace_id=trace_id,
                         file_selection=file_selection,
+                        source_scope=source_scope,
+                        source_usage=source_usage,
                         query_mode=_event_query_mode(error_event, route),
                     )
                 return
-            yield event
+            yield _enrich_outbound_event(dict(event))
         if not cancel_event.is_set() and not done_emitted:
             if not metadata_emitted:
                 yield _metadata_event(
@@ -579,10 +722,12 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
                     requested_mode=requested_mode,
                     actual_mode=actual_mode,
                     trace_id=trace_id,
+                    source_scope=source_scope,
+                    source_usage=source_usage,
                     query_mode=route,
                 )
             logger.info("fastqa stream finished without explicit done event; emitting synthetic done route=%s", route)
-            yield _done_event(route=route, used_files=used_files, trace_id=trace_id, file_selection=file_selection, query_mode=route)
+            yield _done_event(route=route, used_files=used_files, trace_id=trace_id, file_selection=file_selection, source_scope=source_scope, source_usage=source_usage, query_mode=route)
     except Exception as exc:
         logger.error("fastqa stream execution failed route=%s error=%s", route, exc, exc_info=True)
         if not metadata_emitted:
@@ -591,6 +736,8 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
                 requested_mode=requested_mode,
                 actual_mode=actual_mode,
                 trace_id=trace_id,
+                source_scope=source_scope,
+                source_usage=source_usage,
                 query_mode=route,
             )
         yield _runtime_error_event(
@@ -600,9 +747,10 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
             route=route,
             requested_mode=requested_mode,
             actual_mode=actual_mode,
+            source_scope=source_scope,
             detail={"exception_type": exc.__class__.__name__},
         )
-        yield _done_event(route=route, used_files=used_files, trace_id=trace_id, file_selection=file_selection, query_mode=route)
+        yield _done_event(route=route, used_files=used_files, trace_id=trace_id, file_selection=file_selection, source_scope=source_scope, source_usage=source_usage, query_mode=route)
     finally:
         limiter.release()
 
@@ -655,9 +803,11 @@ def _collect_sync_result(events: list[dict[str, Any]], *, trace_id: str, request
     references: list[str] = []
     reference_objects: list[dict[str, Any]] = []
     timings: dict[str, Any] = {}
-    metadata: dict[str, Any] = {"requested_mode": requested_mode, "actual_mode": actual_mode, "route": route, "query_mode": route}
+    metadata: dict[str, Any] = {"requested_mode": requested_mode, "actual_mode": actual_mode, "route": route, "query_mode": route, "source_scope": "", "source_usage": _source_usage_from_scope("")}
     error_payload: dict[str, Any] | None = None
     file_selection: dict[str, Any] = {}
+    source_scope = ""
+    source_usage = _source_usage_from_scope(source_scope)
     for event in events:
         event_type = str(event.get("type") or "").strip().lower()
         if event_type == "content":
@@ -670,6 +820,12 @@ def _collect_sync_result(events: list[dict[str, Any]], *, trace_id: str, request
             timings = dict(event.get("timings") or {})
             metadata = {**metadata, **dict(event.get("metadata") or {})}
             file_selection = dict(event.get("file_selection") or {})
+            source_scope = str(event.get("source_scope") or metadata.get("source_scope") or file_selection.get("source_scope") or source_scope)
+            source_usage = dict(event.get("source_usage") or metadata.get("source_usage") or _source_usage_from_scope(source_scope))
+        elif event_type == "metadata":
+            metadata = {**metadata, **dict(event)}
+            source_scope = str(event.get("source_scope") or metadata.get("source_scope") or source_scope)
+            source_usage = dict(event.get("source_usage") or metadata.get("source_usage") or _source_usage_from_scope(source_scope))
         elif event_type == "error" and error_payload is None:
             error_payload = dict(event)
     links = build_reference_links(references)
@@ -678,13 +834,15 @@ def _collect_sync_result(events: list[dict[str, Any]], *, trace_id: str, request
         "final_answer": "".join(contents),
         "query_mode": metadata.get("query_mode") or route,
         "route": metadata.get("route") or route,
+        "source_scope": source_scope,
+        "source_usage": source_usage,
         "timings": timings,
         "references": references,
         "reference_objects": reference_objects,
         "reference_links": links,
         "pdf_links": links,
         "doi_locations": [],
-        "metadata": metadata,
+        "metadata": {**metadata, "source_scope": source_scope, "source_usage": source_usage},
         "trace_id": trace_id,
         "used_files": used_files,
         "file_selection": file_selection,

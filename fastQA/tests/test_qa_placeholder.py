@@ -330,9 +330,9 @@ def test_fast_mode_stream_invokes_optional_persistence_hooks(monkeypatch):
         calls["assistant"] = kwargs
 
     def _events(**_kwargs):
-        yield {"type": "metadata", "query_mode": "生成驱动检索（PDF溯源）", "route": "kb_qa", "trace_id": "trace-hook"}
+        yield {"type": "metadata", "query_mode": "生成驱动检索（PDF溯源）", "route": "kb_qa", "trace_id": "trace-hook", "source_scope": "pdf+kb", "source_usage": {"pdf_used": True, "table_used": False, "kb_used": True}}
         yield {"type": "content", "content": "hello"}
-        yield {"type": "done", "route": "kb_qa", "references": ["10.1/a"], "trace_id": "trace-hook", "timings": {"stage1": 1.0}}
+        yield {"type": "done", "route": "kb_qa", "references": ["10.1/a"], "trace_id": "trace-hook", "timings": {"stage1": 1.0}, "source_scope": "pdf+kb", "source_usage": {"pdf_used": True, "table_used": False, "kb_used": True}}
 
     monkeypatch.setattr("app.routers.qa.qa_kb_service.iter_answer_events", _events)
     monkeypatch.setattr(app.state, "persist_user_message_hook", _persist_user_message_hook, raising=False)
@@ -353,6 +353,8 @@ def test_fast_mode_stream_invokes_optional_persistence_hooks(monkeypatch):
     assert calls["assistant"]["summary"]["done_seen"] is True
     assert calls["assistant"]["summary"]["references"] == ["10.1/a"]
     assert calls["assistant"]["summary"]["reference_objects"] == [{"doi": "10.1/a"}]
+    assert calls["assistant"]["summary"]["source_scope"] == "pdf+kb"
+    assert calls["assistant"]["summary"]["source_usage"] == {"pdf_used": True, "table_used": False, "kb_used": True}
 
 
 def test_fast_mode_stream_skips_assistant_persistence_without_done(monkeypatch):

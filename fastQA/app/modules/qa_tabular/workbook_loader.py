@@ -8,6 +8,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from app.modules.storage.uploaded_file_storage import materialize_uploaded_file
+
 
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
@@ -183,9 +185,10 @@ def _load_excel(local_path: Path) -> list[dict[str, Any]]:
 
 
 def load_workbook(file_item: dict) -> dict[str, Any]:
-    local_path_text = str(file_item.get("local_path") or "").strip()
+    resolved_file_item = materialize_uploaded_file(file_item=file_item)
+    local_path_text = str(resolved_file_item.get("local_path") or "").strip()
     if not local_path_text:
-        raise RuntimeError("missing local_path for uploaded table")
+        raise RuntimeError("missing readable source for uploaded table")
     local_path = Path(local_path_text)
     if not local_path.exists() or not local_path.is_file():
         raise RuntimeError(f"table file not found: {local_path_text}")
@@ -199,21 +202,22 @@ def load_workbook(file_item: dict) -> dict[str, Any]:
         raise RuntimeError(f"unsupported tabular suffix: {suffix}")
 
     return {
-        "file_id": _safe_int(file_item.get("file_id"), 0),
-        "file_name": str(file_item.get("file_name") or local_path.name),
+        "file_id": _safe_int(resolved_file_item.get("file_id"), 0),
+        "file_name": str(resolved_file_item.get("file_name") or local_path.name),
         "local_path": str(local_path),
-        "storage_ref": str(file_item.get("storage_ref") or ""),
-        "signature": build_file_signature(file_item),
+        "storage_ref": str(resolved_file_item.get("storage_ref") or ""),
+        "signature": build_file_signature(resolved_file_item),
         "sheets": sheets,
     }
 
 
 def load_workbook_cached(file_item: dict) -> dict[str, Any]:
-    signature = build_file_signature(file_item)
+    resolved_file_item = materialize_uploaded_file(file_item=file_item)
+    signature = build_file_signature(resolved_file_item)
     cached = _WORKBOOK_CACHE.get(signature)
     if isinstance(cached, dict):
         return cached
-    workbook = load_workbook(file_item)
+    workbook = load_workbook(resolved_file_item)
     _WORKBOOK_CACHE.set(signature, workbook)
     return workbook
 

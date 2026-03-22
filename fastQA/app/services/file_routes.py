@@ -10,6 +10,8 @@ from app.modules.file_context.service import resolve_request_file_context
 from app.modules.qa_pdf.llm_factory import init_llm
 from app.modules.qa_pdf.service import pdf_qa_service
 from app.modules.qa_tabular.service import qa_tabular_service
+from app.modules.generation_pipeline.synthesis_postprocess import build_top_reference_context
+from app.modules.storage.uploaded_file_storage import materialize_uploaded_files
 from app.services.file_qa_helpers import (
     clean_answer_for_frontend,
     filter_literature_markers_for_streaming,
@@ -35,6 +37,62 @@ def _env_int(*names: str, default: int) -> int:
     return default
 
 
+
+def _scope_tokens(value: object) -> set[str]:
+    return {part.strip().lower() for part in str(value or "").split("+") if part.strip()}
+
+
+def _extract_kb_dois_from_metadatas(metadatas: list[object], *, limit: int = 15) -> list[str]:
+    dois: list[str] = []
+    for item in list(metadatas or []):
+        if not isinstance(item, dict):
+            continue
+        doi = str(item.get("doi") or "").strip()
+        if not doi or doi in dois:
+            continue
+        dois.append(doi)
+        if len(dois) >= limit:
+            break
+    return dois
+
+
+def _format_kb_evidence_context(*, retrieval_results: dict[str, object] | None, limit: int = 6) -> str:
+    if not retrieval_results:
+        return ""
+    docs = list(retrieval_results.get("documents") or [])
+    metas = list(retrieval_results.get("metadatas") or [])
+    rows: list[str] = []
+    for idx in range(min(limit, len(docs), len(metas))):
+        meta = metas[idx] if isinstance(metas[idx], dict) else {}
+        doi = str((meta or {}).get("doi") or "").strip()
+        title = str((meta or {}).get("title") or (meta or {}).get("file_name") or "").strip()
+        section = str((meta or {}).get("section") or "").strip()
+        header = f"[KB{idx + 1}]"
+        if title:
+            header += f" {title}"
+        if doi:
+            header += f" | DOI={doi}"
+        if section:
+            header += f" | {section}"
+        rows.append(header)
+        content = str(docs[idx] or "").strip()
+        if content:
+            rows.append(content[:900])
+    return "\n".join(rows).strip()
+
+
+def _kb_reference_instruction(*, retrieval_results: dict[str, object] | None, logger: object, user_question: str) -> tuple[list[str], str]:
+    ranked, instruction = build_top_reference_context(
+        retrieval_results=retrieval_results,
+        logger=logger,
+        user_question=user_question,
+        topk=None,
+        min_citations=None,
+        element_guard=None,
+        pdf_chunks=None,
+    )
+    dois = [doi for doi, _score in ranked if doi]
+    return dois, str(instruction or "")
 def _iter_decoded_events(events: Iterable[Any]) -> Iterator[dict[str, Any]]:
     for item in events:
         if isinstance(item, dict):
@@ -122,6 +180,18 @@ def get_pdf_bindings(app_state: Any, logger: Any):
     return bindings
 
 
+def _pdf_agent_for_request(*, app_state: Any, logger: Any, allow_kb_verification: bool) -> Any:
+    if not allow_kb_verification:
+        return SimpleNamespace(llm=get_aux_llm(app_state, logger))
+    try:
+        from app.services.file_route_service import file_route_service
+
+        # Provides `smart_query()` for KB verification in PDF streaming when generation runtime is ready.
+        return file_route_service._build_pdf_agent(app_state=app_state)
+    except Exception:
+        return SimpleNamespace(llm=get_aux_llm(app_state, logger))
+
+
 def resolve_gateway_file_context(*, adapted_request: Any, logger: Any) -> dict[str, Any] | None:
     candidate_files = adapted_request.execution_files or adapted_request.used_files
     current_pdf_path = str(adapted_request.current_pdf_path or adapted_request.pdf_path or "").strip()
@@ -149,11 +219,14 @@ def iter_pdf_route_events(
     logger = getattr(app_state, "logger", None)
     bindings = get_pdf_bindings(app_state, logger)
     redis_service = getattr(app_state, "redis_service", None)
-    execution_files = list(
-        (file_context or {}).get("execution_files")
-        or adapted_request.execution_files
-        or adapted_request.used_files
-        or []
+    execution_files = materialize_uploaded_files(
+        file_items=list(
+            (file_context or {}).get("execution_files")
+            or adapted_request.execution_files
+            or adapted_request.used_files
+            or []
+        ),
+        logger=logger,
     )
     pdf_files = [
         item
@@ -168,8 +241,15 @@ def iter_pdf_route_events(
         or adapted_request.pdf_path
         or ""
     ).strip()
+    if pdf_files and not pdf_path:
+        yield {
+            "type": "error",
+            "error": "execution_file_unavailable",
+            "message": "uploaded file is not ready for direct reading yet; retry later or refresh file metadata",
+        }
+        return
     if not pdf_path and not pdf_files:
-        yield {"type": "error", "error": "pdf_path_missing", "message": "PDF branch selected but no local PDF path is available"}
+        yield {"type": "error", "error": "pdf_path_missing", "message": "PDF branch selected but no readable PDF source is available"}
         return
 
     pdf_content = None
@@ -195,12 +275,12 @@ def iter_pdf_route_events(
             pdf_path=pdf_path,
             pdf_content=pdf_content,
             performance_mode="speed",
-            allow_kb_verification=bool(
+            allow_kb_verification=(allow_kb_verification := bool(
                 (file_context or {}).get("allow_kb_verification", adapted_request.allow_kb_verification)
-            ),
+            )),
             turn_mode=str((file_context or {}).get("turn_mode") or adapted_request.turn_mode or "file_only"),
             selected_pdf_files=pdf_files,
-            agent=SimpleNamespace(llm=get_aux_llm(app_state, logger)),
+            agent=_pdf_agent_for_request(app_state=app_state, logger=logger, allow_kb_verification=allow_kb_verification),
             executor=None,
             timeout_error_cls=FutureTimeoutError,
             sse_event=sse_event or (lambda event: event),
@@ -239,20 +319,118 @@ def iter_tabular_route_events(
     is_cancelled: Callable[[], bool] | None = None,
 ):
     logger = getattr(app_state, "logger", None)
-    execution_files = list(
-        (file_context or {}).get("execution_files")
-        or adapted_request.execution_files
-        or adapted_request.used_files
-        or []
+    execution_files = materialize_uploaded_files(
+        file_items=list(
+            (file_context or {}).get("execution_files")
+            or adapted_request.execution_files
+            or adapted_request.used_files
+            or []
+        ),
+        logger=logger,
     )
     bindings = get_pdf_bindings(app_state, logger)
+
+    source_scope = str(
+        getattr(adapted_request, "source_scope", "")
+        or (file_context or {}).get("source_scope")
+        or ""
+    ).strip()
+    tokens = _scope_tokens(source_scope)
+    wants_kb = ("kb" in tokens) or bool(getattr(adapted_request, "kb_enabled", False))
+
+    table_files = [
+        item
+        for item in execution_files
+        if isinstance(item, dict) and str(item.get("file_type") or "").strip().lower() in {"excel", "csv", "table", "xls", "xlsx"}
+    ]
+    readable_table_files = [item for item in table_files if str(item.get("local_path") or "").strip()]
+    if table_files and not readable_table_files:
+        yield {
+            "type": "error",
+            "error": "execution_file_unavailable",
+            "message": "uploaded file is not ready for direct reading yet; retry later or refresh file metadata",
+        }
+        return
+
+    # Allow KB verification in mixed file routes when KB is part of the declared scope.
+    allow_kb_verification = bool(
+        (file_context or {}).get("allow_kb_verification", getattr(adapted_request, "allow_kb_verification", False))
+        or wants_kb
+    )
+
+    kb_evidence_context = ""
+    kb_reference_instruction = ""
+    kb_references: list[str] = []
+
+    if wants_kb:
+        runtime = getattr(app_state, "generation_runtime", None)
+        if runtime is None:
+            yield {
+                "type": "step",
+                "step": "kb_retrieval",
+                "status": "error",
+                "message": "KB 已开启，但 generation_runtime 不可用",
+            }
+        else:
+            try:
+                yield {
+                    "type": "step",
+                    "step": "kb_planning",
+                    "status": "running",
+                    "message": "正在生成检索规划（KB）",
+                }
+                stage1 = runtime.stage1_pre_answer_and_planning(str(adapted_request.question or ""))
+                retrieval_claims = list((stage1 or {}).get("retrieval_claims") or [])
+
+                yield {
+                    "type": "step",
+                    "step": "kb_retrieval",
+                    "status": "running",
+                    "message": "正在检索知识库（KB）",
+                }
+                retrieval_results = runtime.stage2_targeted_retrieval(
+                    retrieval_claims=retrieval_claims,
+                    n_results_per_claim=int(getattr(adapted_request, "n_results_per_claim", None) or 10),
+                    user_question=str(adapted_request.question or ""),
+                    should_cancel=is_cancelled,
+                    active_stream_count=getattr(adapted_request, "active_stream_count", None),
+                )
+                kb_evidence_context = _format_kb_evidence_context(retrieval_results=retrieval_results, limit=6)
+                _ranked_dois, kb_reference_instruction = _kb_reference_instruction(
+                    retrieval_results=retrieval_results,
+                    logger=logger,
+                    user_question=str(adapted_request.question or ""),
+                )
+                kb_references = _extract_kb_dois_from_metadatas(
+                    list((retrieval_results or {}).get("metadatas") or []),
+                    limit=15,
+                )
+                yield {
+                    "type": "step",
+                    "step": "kb_retrieval",
+                    "status": "success",
+                    "message": f"KB 检索完成：候选DOI={len(kb_references)}",
+                }
+            except Exception as exc:
+                yield {
+                    "type": "step",
+                    "step": "kb_retrieval",
+                    "status": "error",
+                    "message": f"KB 检索失败: {exc}",
+                }
+
     yield {"type": "step", "step": "dispatch", "route": route, "message": "进入表格/混合问答分支"}
     for event in _iter_decoded_events(
         qa_tabular_service.iter_answer_events(
             question=adapted_request.question,
             used_files=execution_files,
             route_hint=route,
-            agent=SimpleNamespace(llm=get_aux_llm(app_state, logger)),
+            source_scope=source_scope,
+            kb_enabled=wants_kb,
+            kb_evidence_context=kb_evidence_context,
+            kb_reference_instruction=kb_reference_instruction,
+            kb_references=kb_references,
+            agent=_pdf_agent_for_request(app_state=app_state, logger=logger, allow_kb_verification=allow_kb_verification),
             sse_event=sse_event or (lambda event: event),
             sleep_fn=lambda _value: None,
             clean_answer_for_frontend=clean_answer_for_frontend,

@@ -78,6 +78,8 @@ class AskStreamSummary:
     timings: dict[str, Any] = field(default_factory=dict)
     trace_id: str = ""
     file_selection: dict[str, Any] = field(default_factory=dict)
+    source_scope: str = ""
+    source_usage: dict[str, Any] = field(default_factory=dict)
     done_seen: bool = False
 
 
@@ -106,6 +108,10 @@ class AskStreamTap:
                 self.summary.assistant_content += str(payload.get("content") or "")
             elif event_type == "metadata":
                 self.summary.query_mode = str(payload.get("query_mode") or self.summary.query_mode)
+                self.summary.source_scope = str(payload.get("source_scope") or self.summary.source_scope)
+                source_usage = payload.get("source_usage")
+                if isinstance(source_usage, dict):
+                    self.summary.source_usage = source_usage
             elif event_type == "step":
                 self._upsert_summary_step(payload)
             elif event_type == "done":
@@ -125,6 +131,10 @@ class AskStreamTap:
                 if isinstance(timings, dict):
                     self.summary.timings = timings
                 self.summary.trace_id = str(payload.get("trace_id") or self.summary.trace_id)
+                self.summary.source_scope = str(payload.get("source_scope") or self.summary.source_scope)
+                source_usage = payload.get("source_usage")
+                if isinstance(source_usage, dict):
+                    self.summary.source_usage = source_usage
                 file_selection = payload.get("file_selection")
                 if isinstance(file_selection, dict):
                     self.summary.file_selection = file_selection

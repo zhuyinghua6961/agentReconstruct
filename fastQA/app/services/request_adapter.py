@@ -5,6 +5,10 @@ from typing import Any, Mapping
 
 _ALLOWED_MODE = "fast"
 _ALLOWED_ROUTES = {"kb_qa", "pdf_qa", "tabular_qa", "hybrid_qa"}
+_TABLE_FILE_TYPES = {"excel", "csv", "table", "xls", "xlsx"}
+_SOURCE_SCOPE_ORDER = ("pdf", "table", "kb")
+_SOURCE_SCOPE_TOKENS = set(_SOURCE_SCOPE_ORDER)
+_HYBRID_SOURCE_SCOPES = {"pdf+kb", "table+kb", "pdf+table", "pdf+table+kb"}
 
 
 class RequestAdapterError(ValueError):
@@ -31,6 +35,8 @@ class GatewayAskRequest:
     actual_mode: str = _ALLOWED_MODE
     route: str = "kb_qa"
     route_was_explicit: bool = False
+    source_scope: str = ""
+    kb_enabled: bool = False
     turn_mode: str = "kb_only"
     allow_kb_verification: bool = False
     trace_id: str = ""
@@ -40,6 +46,9 @@ class GatewayAskRequest:
     options: dict[str, Any] = field(default_factory=dict)
     used_files: list[dict[str, Any]] = field(default_factory=list)
     execution_files: list[dict[str, Any]] = field(default_factory=list)
+    selected_file_ids: list[int] = field(default_factory=list)
+    primary_file_id: int | None = None
+    file_selection: dict[str, Any] = field(default_factory=dict)
     pdf_context: dict[str, Any] = field(default_factory=dict)
     pdf_path: str = ""
     current_pdf_path: str = ""
@@ -54,6 +63,11 @@ class GatewayAskRequest:
             "use_generation_driven": self.request_use_generation_driven,
             "request_use_generation_driven": self.request_use_generation_driven,
             "route_hint": self.route,
+            "source_scope": self.source_scope,
+            "kb_enabled": self.kb_enabled,
+            "selected_file_ids": list(self.selected_file_ids),
+            "primary_file_id": self.primary_file_id,
+            "file_selection": dict(self.file_selection),
             "n_results_per_claim": self.n_results_per_claim,
             "active_stream_count": self.active_stream_count,
             "trace_id": self.trace_id,
@@ -105,6 +119,31 @@ def _as_file_list(value: Any) -> list[dict[str, Any]]:
     return [dict(item) for item in value if isinstance(item, dict)]
 
 
+def _as_int_list(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for item in value:
+        parsed = _coerce_positive_int(item)
+        if parsed is None or parsed in seen:
+            continue
+        seen.add(parsed)
+        normalized.append(parsed)
+    return normalized
+
+
+def _file_ids(files: list[dict[str, Any]]) -> set[int]:
+    normalized: set[int] = set()
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        parsed = _coerce_positive_int(item.get("file_id"))
+        if parsed is not None:
+            normalized.add(parsed)
+    return normalized
+
+
 def _file_types(files: list[dict[str, Any]]) -> set[str]:
     return {
         str(item.get("file_type") or "").strip().lower()
@@ -127,7 +166,7 @@ def _infer_route(
     file_items = execution_files or used_files
     file_types = _file_types(file_items)
     has_pdf = bool(pdf_path) or use_pdf or ("pdf" in file_types)
-    has_table = bool(file_types & {"excel", "csv"})
+    has_table = bool(file_types & _TABLE_FILE_TYPES)
     if has_pdf and has_table:
         return "hybrid_qa"
     if has_pdf:
@@ -146,6 +185,70 @@ def _infer_turn_mode(*, route: str, turn_mode: str, allow_kb_verification: bool)
     if allow_kb_verification:
         return "mixed"
     return "file_only"
+
+
+def _normalize_source_scope(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    tokens = [part.strip().lower() for part in raw.split("+") if part.strip()]
+    if not tokens:
+        return ""
+    if any(token not in _SOURCE_SCOPE_TOKENS for token in tokens):
+        raise RequestAdapterError(
+            code="source_scope_invalid",
+            message="unsupported source_scope for fastQA",
+            detail={"source_scope": raw},
+        )
+    ordered_tokens = [token for token in _SOURCE_SCOPE_ORDER if token in set(tokens)]
+    return "+".join(ordered_tokens)
+
+
+def _infer_source_scope(*, route: str, has_pdf: bool, has_table: bool, kb_enabled: bool) -> str:
+    if route == "pdf_qa":
+        return "pdf"
+    if route == "tabular_qa":
+        return "table"
+    if route == "hybrid_qa":
+        if has_pdf and has_table:
+            return "pdf+table+kb" if kb_enabled else "pdf+table"
+        if has_pdf:
+            return "pdf+kb" if kb_enabled else "pdf"
+        if has_table:
+            return "table+kb" if kb_enabled else "table"
+        return "pdf+table+kb" if kb_enabled else "pdf+table"
+    if kb_enabled:
+        return "kb"
+    return "kb"
+
+
+def _route_requires_pdf(*, route: str, source_scope: str) -> bool:
+    return route == "pdf_qa" or source_scope in {"pdf+kb", "pdf+table", "pdf+table+kb"}
+
+
+def _route_requires_table(*, route: str, source_scope: str) -> bool:
+    return route == "tabular_qa" or source_scope in {"table+kb", "pdf+table", "pdf+table+kb"}
+
+
+def _validate_route_source_scope(*, route: str, source_scope: str) -> None:
+    if route == "pdf_qa" and source_scope != "pdf":
+        raise RequestAdapterError(
+            code="source_scope_invalid",
+            message="pdf_qa requires source_scope=pdf",
+            detail={"route": route, "source_scope": source_scope},
+        )
+    if route == "tabular_qa" and source_scope != "table":
+        raise RequestAdapterError(
+            code="source_scope_invalid",
+            message="tabular_qa requires source_scope=table",
+            detail={"route": route, "source_scope": source_scope},
+        )
+    if route == "hybrid_qa" and source_scope not in _HYBRID_SOURCE_SCOPES:
+        raise RequestAdapterError(
+            code="source_scope_invalid",
+            message="hybrid_qa requires source_scope=pdf+kb, table+kb, pdf+table, or pdf+table+kb",
+            detail={"route": route, "source_scope": source_scope},
+        )
 
 
 def adapt_gateway_ask_payload(payload: Mapping[str, Any]) -> GatewayAskRequest:
@@ -188,38 +291,60 @@ def adapt_gateway_ask_payload(payload: Mapping[str, Any]) -> GatewayAskRequest:
         )
 
     options = _as_options(source.get("options"))
-    all_files = execution_files or used_files
-    present_types = _file_types(all_files)
+    raw_file_selection = _as_options(source.get("file_selection"))
+    selected_file_ids = _as_int_list(source.get("selected_file_ids")) or _as_int_list(raw_file_selection.get("selected_file_ids"))
+    primary_file_id = _coerce_positive_int(source.get("primary_file_id")) or _coerce_positive_int(raw_file_selection.get("primary_file_id"))
+    file_items = execution_files or used_files
+    available_file_ids = _file_ids(file_items)
+    if primary_file_id is not None:
+        if selected_file_ids and primary_file_id not in selected_file_ids:
+            raise RequestAdapterError(
+                code="primary_file_invalid",
+                message="primary_file_id must be included in selected_file_ids",
+                detail={"primary_file_id": primary_file_id, "selected_file_ids": list(selected_file_ids)},
+            )
+        if available_file_ids and primary_file_id not in available_file_ids:
+            raise RequestAdapterError(
+                code="primary_file_invalid",
+                message="primary_file_id must reference one of the execution files",
+                detail={"primary_file_id": primary_file_id, "execution_file_ids": sorted(available_file_ids)},
+            )
+    present_types = _file_types(file_items)
     has_pdf = bool(pdf_path) or _coerce_bool(source.get("use_pdf")) or ("pdf" in present_types)
-    has_table = bool(present_types & {"excel", "csv"})
+    has_table = bool(present_types & _TABLE_FILE_TYPES)
     has_file_resolution_context = bool(_coerce_positive_int(source.get("conversation_id"))) or bool(pdf_context)
-    if route == "pdf_qa" and not has_pdf:
+
+    source_scope = _normalize_source_scope(source.get("source_scope") or raw_file_selection.get("source_scope"))
+    kb_enabled = _coerce_bool(
+        source.get(
+            "kb_enabled",
+            raw_file_selection.get("kb_enabled", "kb" in source_scope or route == "kb_qa"),
+        ),
+        default=("kb" in source_scope or route == "kb_qa"),
+    )
+    if not source_scope:
+        source_scope = _infer_source_scope(route=route, has_pdf=has_pdf, has_table=has_table, kb_enabled=kb_enabled)
+
+    if route in {"pdf_qa", "tabular_qa", "hybrid_qa"}:
+        _validate_route_source_scope(route=route, source_scope=source_scope)
+
+    if _route_requires_pdf(route=route, source_scope=source_scope) and not has_pdf:
         if has_file_resolution_context:
             has_pdf = True
         else:
             raise RequestAdapterError(
                 code="execution_files_required",
-                message="pdf_qa requires a PDF file or pdf_path",
-                detail={"route": route},
+                message="pdf_qa requires a PDF file or pdf_path" if route == "pdf_qa" else "selected source_scope requires at least one PDF file",
+                detail={"route": route, "source_scope": source_scope},
             )
-    if route == "tabular_qa" and not has_table:
+    if _route_requires_table(route=route, source_scope=source_scope) and not has_table:
         if has_file_resolution_context:
             has_table = True
         else:
             raise RequestAdapterError(
                 code="execution_files_required",
-                message="tabular_qa requires at least one table file",
-                detail={"route": route},
-            )
-    if route == "hybrid_qa" and not (has_pdf and has_table):
-        if has_file_resolution_context:
-            has_pdf = True
-            has_table = True
-        else:
-            raise RequestAdapterError(
-                code="execution_files_required",
-                message="hybrid_qa requires both PDF and table files",
-                detail={"route": route},
+                message="tabular_qa requires at least one table file" if route == "tabular_qa" else "selected source_scope requires at least one table file",
+                detail={"route": route, "source_scope": source_scope},
             )
 
     n_results_per_claim = _coerce_positive_int(source.get("n_results_per_claim")) or _coerce_positive_int(options.get("n_results_per_claim")) or 10
@@ -228,6 +353,14 @@ def adapt_gateway_ask_payload(payload: Mapping[str, Any]) -> GatewayAskRequest:
     request_use_generation_driven = _coerce_bool(
         source.get("use_generation_driven", options.get("use_generation_driven", False))
     )
+
+    file_selection = dict(raw_file_selection)
+    file_selection["source_scope"] = source_scope
+    file_selection["kb_enabled"] = kb_enabled
+    if selected_file_ids:
+        file_selection["selected_file_ids"] = list(selected_file_ids)
+    if primary_file_id is not None:
+        file_selection["primary_file_id"] = primary_file_id
 
     return GatewayAskRequest(
         question=question,
@@ -238,6 +371,8 @@ def adapt_gateway_ask_payload(payload: Mapping[str, Any]) -> GatewayAskRequest:
         actual_mode=actual_mode,
         route=route,
         route_was_explicit=bool(str(source.get("route") or source.get("route_hint") or "").strip()),
+        source_scope=source_scope,
+        kb_enabled=kb_enabled,
         turn_mode=_infer_turn_mode(
             route=route,
             turn_mode=str(source.get("turn_mode") or ""),
@@ -251,6 +386,9 @@ def adapt_gateway_ask_payload(payload: Mapping[str, Any]) -> GatewayAskRequest:
         options=options,
         used_files=used_files,
         execution_files=execution_files,
+        selected_file_ids=selected_file_ids,
+        primary_file_id=primary_file_id,
+        file_selection=file_selection,
         pdf_context=pdf_context,
         pdf_path=pdf_path,
         current_pdf_path=str(

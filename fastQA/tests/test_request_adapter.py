@@ -1,3 +1,5 @@
+import pytest
+
 from app.services.request_adapter import RequestAdapterError, adapt_gateway_ask_payload
 
 
@@ -40,12 +42,14 @@ def test_adapter_accepts_pdf_route_and_execution_files():
             "question": "总结这篇文献",
             "requested_mode": "fast",
             "route": "pdf_qa",
+            "source_scope": "pdf",
             "execution_files": [{"file_id": 1, "file_type": "pdf", "local_path": "/tmp/demo.pdf"}],
             "turn_mode": "file_only",
         }
     )
 
     assert request.route == "pdf_qa"
+    assert request.source_scope == "pdf"
     assert request.execution_files[0]["file_id"] == 1
     assert request.turn_mode == "file_only"
 
@@ -60,6 +64,7 @@ def test_adapter_infers_file_routes_when_route_not_provided():
     )
     assert pdf_request.route == "pdf_qa"
     assert pdf_request.route_was_explicit is False
+    assert pdf_request.source_scope == "pdf"
 
     hybrid_request = adapt_gateway_ask_payload(
         {
@@ -72,6 +77,7 @@ def test_adapter_infers_file_routes_when_route_not_provided():
         }
     )
     assert hybrid_request.route == "hybrid_qa"
+    assert hybrid_request.source_scope == "pdf+table"
 
 
 def test_adapter_uses_route_hint_fallback_and_defaults():
@@ -106,6 +112,46 @@ def test_adapter_accepts_legacy_top_level_generation_fields():
     assert request.active_stream_count == 4
 
 
+def test_adapter_preserves_gateway_file_selection_contract():
+    request = adapt_gateway_ask_payload(
+        {
+            "question": "结合文件和知识库分析",
+            "requested_mode": "fast",
+            "route": "hybrid_qa",
+            "source_scope": "pdf+table+kb",
+            "kb_enabled": True,
+            "selected_file_ids": ["11", 12],
+            "primary_file_id": "11",
+            "file_selection": {
+                "strategy": "gateway",
+                "selection_semantic": "upstream_selected",
+            },
+            "execution_files": [
+                {"file_id": 11, "file_type": "pdf", "local_path": "/tmp/demo.pdf"},
+                {"file_id": 12, "file_type": "excel", "local_path": "/tmp/demo.xlsx"},
+            ],
+        }
+    )
+
+    assert request.source_scope == "pdf+table+kb"
+    assert request.kb_enabled is True
+    assert request.selected_file_ids == [11, 12]
+    assert request.primary_file_id == 11
+    assert request.file_selection == {
+        "strategy": "gateway",
+        "selection_semantic": "upstream_selected",
+        "source_scope": "pdf+table+kb",
+        "kb_enabled": True,
+        "selected_file_ids": [11, 12],
+        "primary_file_id": 11,
+    }
+    assert request.to_qakb_payload()["source_scope"] == "pdf+table+kb"
+    assert request.to_qakb_payload()["kb_enabled"] is True
+    assert request.to_qakb_payload()["selected_file_ids"] == [11, 12]
+    assert request.to_qakb_payload()["primary_file_id"] == 11
+    assert request.to_qakb_payload()["file_selection"]["strategy"] == "gateway"
+
+
 def test_adapter_rejects_non_fast_mode():
     try:
         adapt_gateway_ask_payload({"question": "hello", "requested_mode": "thinking"})
@@ -132,6 +178,7 @@ def test_adapter_rejects_pdf_route_without_pdf_input():
                 "question": "hello",
                 "requested_mode": "fast",
                 "route": "pdf_qa",
+                "source_scope": "pdf",
                 "execution_files": [{"file_id": 2, "file_type": "excel", "local_path": "/tmp/demo.xlsx"}],
             }
         )
@@ -149,6 +196,7 @@ def test_adapter_rejects_hybrid_route_without_both_pdf_and_table():
                 "question": "hello",
                 "requested_mode": "fast",
                 "route": "hybrid_qa",
+                "source_scope": "pdf+table",
                 "execution_files": [{"file_id": 1, "file_type": "pdf", "local_path": "/tmp/demo.pdf"}],
             }
         )
@@ -157,6 +205,76 @@ def test_adapter_rejects_hybrid_route_without_both_pdf_and_table():
         assert exc.detail["route"] == "hybrid_qa"
     else:
         raise AssertionError("expected RequestAdapterError")
+
+
+@pytest.mark.parametrize(
+    ("route", "source_scope", "execution_files"),
+    [
+        ("pdf_qa", "table", [{"file_id": 2, "file_type": "excel", "local_path": "/tmp/demo.xlsx"}]),
+        ("tabular_qa", "pdf", [{"file_id": 1, "file_type": "pdf", "local_path": "/tmp/demo.pdf"}]),
+        ("hybrid_qa", "pdf", [{"file_id": 1, "file_type": "pdf", "local_path": "/tmp/demo.pdf"}]),
+    ],
+)
+def test_adapter_rejects_route_and_source_scope_mismatch(route, source_scope, execution_files):
+    with pytest.raises(RequestAdapterError) as exc_info:
+        adapt_gateway_ask_payload(
+            {
+                "question": "hello",
+                "requested_mode": "fast",
+                "route": route,
+                "source_scope": source_scope,
+                "execution_files": execution_files,
+            }
+        )
+
+    assert exc_info.value.code == "source_scope_invalid"
+    assert exc_info.value.detail["route"] == route
+    assert exc_info.value.detail["source_scope"] == source_scope
+
+
+@pytest.mark.parametrize(
+    ("source_scope", "execution_files"),
+    [
+        ("pdf+kb", [{"file_id": 1, "file_type": "excel", "local_path": "/tmp/demo.xlsx"}]),
+        ("table+kb", [{"file_id": 1, "file_type": "pdf", "local_path": "/tmp/demo.pdf"}]),
+        ("pdf+table", [{"file_id": 1, "file_type": "pdf", "local_path": "/tmp/demo.pdf"}]),
+        ("pdf+table+kb", [{"file_id": 1, "file_type": "excel", "local_path": "/tmp/demo.xlsx"}]),
+    ],
+)
+def test_adapter_rejects_hybrid_source_scope_when_required_file_types_are_missing(source_scope, execution_files):
+    with pytest.raises(RequestAdapterError) as exc_info:
+        adapt_gateway_ask_payload(
+            {
+                "question": "hello",
+                "requested_mode": "fast",
+                "route": "hybrid_qa",
+                "source_scope": source_scope,
+                "execution_files": execution_files,
+            }
+        )
+
+    assert exc_info.value.code == "execution_files_required"
+    assert exc_info.value.detail["route"] == "hybrid_qa"
+    assert exc_info.value.detail["source_scope"] == source_scope
+
+
+def test_adapter_rejects_invalid_primary_file_id():
+    with pytest.raises(RequestAdapterError) as exc_info:
+        adapt_gateway_ask_payload(
+            {
+                "question": "hello",
+                "requested_mode": "fast",
+                "route": "pdf_qa",
+                "source_scope": "pdf",
+                "selected_file_ids": [2],
+                "primary_file_id": 1,
+                "execution_files": [{"file_id": 2, "file_type": "pdf", "local_path": "/tmp/demo.pdf"}],
+            }
+        )
+
+    assert exc_info.value.code == "primary_file_invalid"
+    assert exc_info.value.detail["primary_file_id"] == 1
+    assert exc_info.value.detail["selected_file_ids"] == [2]
 
 
 def test_adapter_truncates_chat_history_to_last_ten_messages():

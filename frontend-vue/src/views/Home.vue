@@ -3,6 +3,7 @@ import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
 import { useChatStore } from '../stores/chatStore'
 import { api } from '../services/api'
 import { formatTime, formatAnswer, formatStreamingAnswer } from '../utils'
+import { mergeSelectedFileIdsAfterUpload, resolveUploadedFileDisplayNumber } from '../utils/fileSelection'
 import PdfReader from '../components/PdfReader.vue'
 
 const PINNED_CHATS_COLLAPSED_KEY = 'lfp.sidebar.pinned-collapsed.v1'
@@ -1317,13 +1318,13 @@ async function handleFileSelect(event) {
         })
         const uploadedFileId = Number(result?.document?.file_id || 0)
         if (uploadedFileId > 0) {
-          selectedFileIds.value = [uploadedFileId]
+          selectedFileIds.value = mergeSelectedFileIdsAfterUpload(selectedFileIds.value, uploadedFileId)
         }
         const parsedTitle = String(result?.document?.title || '').trim()
         if (parsedTitle && store.currentChat?.title === uploadConversationTitle) {
           await store.updateCurrentChatTitle(parsedTitle, { persist: true })
         }
-        store.addSystemMessage(`✅ PDF上传成功: ${result.document.title || file.name} (#${result.document.file_id})`)
+        store.addSystemMessage(`✅ PDF上传成功: ${result.document.title || file.name} (#${resolveUploadedFileDisplayNumber(result.document)})`)
         inputMessage.value = `请帮我总结一下这篇文献的主要内容`
         startFileStatusPolling()
       }
@@ -1334,12 +1335,12 @@ async function handleFileSelect(event) {
       if (result) {
         const uploadedFileId = Number(result?.file_id || 0)
         if (uploadedFileId > 0) {
-          selectedFileIds.value = [uploadedFileId]
+          selectedFileIds.value = mergeSelectedFileIdsAfterUpload(selectedFileIds.value, uploadedFileId)
         }
         if (store.currentChat?.title === '新对话') {
           await store.updateCurrentChatTitle(uploadConversationTitle, { persist: true, onlyIfPlaceholder: true })
         }
-        store.addSystemMessage(`✅ Excel上传成功: ${result.title || file.name} (#${result.file_id})`)
+        store.addSystemMessage(`✅ Excel上传成功: ${result.title || file.name} (#${resolveUploadedFileDisplayNumber(result)})`)
         inputMessage.value = `请帮我分析一下这个表格的数据`
         result = { success: true }  // 标记为成功
         startFileStatusPolling()

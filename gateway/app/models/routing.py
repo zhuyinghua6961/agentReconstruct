@@ -8,6 +8,7 @@ from typing import Any, Literal
 ModeName = Literal["fast", "thinking", "patent"]
 RouteName = Literal["kb_qa", "pdf_qa", "tabular_qa", "hybrid_qa"]
 TurnMode = Literal["kb_only", "file_only", "mixed"]
+SourceScope = Literal["pdf", "table", "pdf+kb", "table+kb", "pdf+table", "pdf+table+kb"]
 
 
 @dataclass(frozen=True)
@@ -32,3 +33,8 @@ class RouteDecision:
     allow_kb_verification: bool
     needs_clarification: bool
     clarification_message: str
+    source_scope: SourceScope | None = None
+    kb_enabled: bool = False
+    selected_file_ids: list[int] = field(default_factory=list)
+    primary_file_id: int | None = None
+    file_selection: dict[str, Any] = field(default_factory=dict)

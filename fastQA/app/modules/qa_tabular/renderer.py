@@ -65,28 +65,53 @@ def _build_tabular_prompt(
     result: dict[str, Any],
     route_hint: str,
     pdf_evidence_context: str = "",
+    kb_evidence_context: str = "",
+    kb_reference_instruction: str = "",
+    source_scope: str = "",
 ) -> tuple[str, str]:
     context_text = build_tabular_result_context(file_name=file_name, plan=plan, result=result)
     hybrid_mode = str(route_hint).strip().lower() == "hybrid_qa"
+    resolved_scope = str(source_scope or "").strip()
+
     if hybrid_mode:
-        prompt = (
-            "你是磷酸铁锂领域的混合文件分析助手。"
-            "表格执行结果是真实计算结果，必须优先依据这些结果作答。"
-            "文献证据只能用于解释和验证，不能覆盖表格结果。\n\n"
-            f"用户问题:\n{question}\n\n"
-            f"表格执行结果:\n{context_text}\n\n"
-            f"文献证据:\n{pdf_evidence_context or '无可用文献证据'}\n\n"
-            "请输出：1) 直接结论 2) 数据依据 3) 文献补充/不确定项"
-        )
+        lines: list[str] = [
+            "你是磷酸铁锂领域的混合文件分析助手。表格执行结果是真实计算结果，必须优先依据这些结果作答。证据内容（文献/知识库）只能用于解释和验证，不能覆盖表格结果。",
+            "",
+            "用户问题:",
+            str(question or ""),
+            "",
+            "表格执行结果:",
+            str(context_text or ""),
+            "",
+            "文献证据:",
+            str(pdf_evidence_context or "无可用文献证据"),
+            "",
+            "知识库证据:",
+            str(kb_evidence_context or "无可用知识库证据"),
+            "",
+        ]
+        if resolved_scope:
+            lines.extend([f"source_scope={resolved_scope}", ""])
+        instruction = str(kb_reference_instruction or "").strip()
+        if instruction:
+            lines.extend([instruction, ""])
+        lines.append("请输出：1) 直接结论 2) 数据依据 3) 证据补充/不确定项")
+        prompt = "\n".join(lines)
     else:
-        prompt = (
-            "你是磷酸铁锂领域的表格分析助手。"
-            "下面的表格执行结果来自后端真实计算，不允许编造。"
-            "请基于执行结果直接回答用户问题；若信息不足，要明确指出。\n\n"
-            f"用户问题:\n{question}\n\n"
-            f"表格执行结果:\n{context_text}\n\n"
-            "请用简洁中文回答，并优先给出结论。"
+        prompt = "\n".join(
+            [
+                "你是磷酸铁锂领域的表格分析助手。下面的表格执行结果来自后端真实计算，不允许编造。请基于执行结果直接回答用户问题；若信息不足，要明确指出。",
+                "",
+                "用户问题:",
+                str(question or ""),
+                "",
+                "表格执行结果:",
+                str(context_text or ""),
+                "",
+                "请用简洁中文回答，并优先给出结论。",
+            ]
         )
+
     return prompt, context_text
 
 
@@ -127,6 +152,9 @@ def build_tabular_answer(
     route_hint: str,
     llm: Any,
     pdf_evidence_context: str = "",
+    kb_evidence_context: str = "",
+    kb_reference_instruction: str = "",
+    source_scope: str = "",
 ) -> str:
     prompt, _context_text = _build_tabular_prompt(
         question=question,
@@ -135,6 +163,9 @@ def build_tabular_answer(
         result=result,
         route_hint=route_hint,
         pdf_evidence_context=pdf_evidence_context,
+        kb_evidence_context=kb_evidence_context,
+        kb_reference_instruction=kb_reference_instruction,
+        source_scope=source_scope,
     )
     if llm is None:
         return _render_fallback_answer(question=question, file_name=file_name, result=result)
@@ -156,6 +187,9 @@ def iter_tabular_answer(
     route_hint: str,
     llm: Any,
     pdf_evidence_context: str = "",
+    kb_evidence_context: str = "",
+    kb_reference_instruction: str = "",
+    source_scope: str = "",
 ) -> Iterator[str]:
     prompt, _context_text = _build_tabular_prompt(
         question=question,
@@ -164,6 +198,9 @@ def iter_tabular_answer(
         result=result,
         route_hint=route_hint,
         pdf_evidence_context=pdf_evidence_context,
+        kb_evidence_context=kb_evidence_context,
+        kb_reference_instruction=kb_reference_instruction,
+        source_scope=source_scope,
     )
     if llm is None:
         yield _render_fallback_answer(question=question, file_name=file_name, result=result)

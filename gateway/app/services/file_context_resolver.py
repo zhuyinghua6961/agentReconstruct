@@ -72,12 +72,25 @@ _MIXED_HINTS = (
     "结合数据库",
     "knowledge base",
 )
+_MIXED_ACTION_HINTS = (
+    "结合",
+    "并",
+    "同时",
+    "一起",
+    "参考",
+    "补充",
+    "验证",
+    "讲解",
+    "解释",
+    "分析",
+)
 _FILE_ROUTE_HINTS = {"pdf_qa", "tabular_qa", "hybrid_qa", "file_only", "mixed"}
 
 _DIRECT_ORDINAL_PATTERN = re.compile(r"第\s*([0-9零〇一二两三四五六七八九十]+)\s*个(?:文献|文件|表格|pdf|excel|csv)?")
 _FRONT_ORDINAL_PATTERN = re.compile(r"前\s*([0-9零〇一二两三四五六七八九十]+)\s*个(?:文献|文件|表格|pdf|excel|csv)?")
 _BACK_ORDINAL_PATTERN = re.compile(r"后\s*([0-9零〇一二两三四五六七八九十]+)\s*个(?:文献|文件|表格|pdf|excel|csv)?")
 _REVERSE_ORDINAL_PATTERN = re.compile(r"倒数第\s*([0-9零〇一二两三四五六七八九十]+)\s*个(?:文献|文件|表格|pdf|excel|csv)?")
+_DEICTIC_COUNT_PATTERN = re.compile(r"这\s*([0-9零〇一二两三四五六七八九十]+)\s*(?:篇(?:文献|论文)|个(?:文件|表格|pdf|excel|csv))")
 _EXPLICIT_REF_PATTERN = re.compile(r"#\s*(\d+)")
 
 
@@ -113,14 +126,15 @@ class FileContextResolver:
         lower = text.lower()
         explicit_refs = self._extract_explicit_refs(text)
         ordinal_selection = self._extract_ordinal_selection(text=text, candidates=all_available_ids)
+        deictic_count_selection = self._extract_deictic_count_selection(text=text, candidates=candidate_ids)
         singular_ref = self._contains_any(lower, _SINGULAR_FILE_REFS)
         plural_ref = self._contains_any(lower, _PLURAL_FILE_REFS)
         latest_ref = self._contains_any(lower, _LATEST_FILE_REFS)
-        mixed_intent = self._contains_any(lower, _MIXED_HINTS)
+        mixed_intent = self._detect_mixed_intent(lower)
         table_focus = self._question_has_table_focus(lower=lower, active_rows=active_rows, candidate_ids=candidate_ids)
         file_name_focus = self._question_has_file_name_focus(lower=lower, file_map=file_map, candidate_ids=candidate_ids)
 
-        strong_file_intent = bool(explicit_refs or ordinal_selection or singular_ref or plural_ref or latest_ref)
+        strong_file_intent = bool(explicit_refs or ordinal_selection or deictic_count_selection or singular_ref or plural_ref or latest_ref)
         upload_file_intent = self._contains_any(lower, _UPLOAD_CONTEXT_WORDS) and bool(candidate_ids or newly_uploaded_ids)
         generic_file_topic = self._contains_any(lower, _GENERIC_FILE_WORDS)
         file_intent = strong_file_intent or upload_file_intent or table_focus or file_name_focus
@@ -142,6 +156,15 @@ class FileContextResolver:
                 route=self._route_for_selection(selected_ids=ordinal_selection, file_map=file_map, table_focus=table_focus),
                 selected_file_ids=ordinal_selection,
                 strategy="ordinal_ref",
+                allow_kb_verification=mixed_intent,
+                file_map=file_map,
+            )
+
+        if deictic_count_selection:
+            return self._file_turn(
+                route=self._route_for_selection(selected_ids=deictic_count_selection, file_map=file_map, table_focus=table_focus),
+                selected_file_ids=deictic_count_selection,
+                strategy="deictic_count_scope",
                 allow_kb_verification=mixed_intent,
                 file_map=file_map,
             )
@@ -389,6 +412,19 @@ class FileContextResolver:
                 return [candidates[-index]]
         return []
 
+    def _extract_deictic_count_selection(self, *, text: str, candidates: list[int]) -> list[int]:
+        if not candidates:
+            return []
+        counts = self._extract_numbers(_DEICTIC_COUNT_PATTERN, text)
+        if not counts:
+            return []
+        count = counts[0]
+        if count <= 0:
+            return []
+        if count == len(candidates):
+            return candidates[:count]
+        return []
+
     def _extract_numbers(self, pattern: re.Pattern[str], text: str) -> list[int]:
         result: list[int] = []
         seen: set[int] = set()
@@ -426,6 +462,14 @@ class FileContextResolver:
 
     def _contains_any(self, text: str, tokens: tuple[str, ...]) -> bool:
         return any(token in text for token in tokens)
+
+    def _detect_mixed_intent(self, text: str) -> bool:
+        if self._contains_any(text, _MIXED_HINTS):
+            return True
+        has_kb_token = ("知识库" in text) or ("knowledge base" in text) or (" kb " in f" {text} ")
+        if not has_kb_token:
+            return False
+        return self._contains_any(text, _MIXED_ACTION_HINTS)
 
     def _normalize_int_list(self, value: Any) -> list[int]:
         if not isinstance(value, list):

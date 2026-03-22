@@ -11,10 +11,10 @@ def test_normalize_thinking_event_into_step():
 def test_ask_stream_tap_collects_done_summary():
     tap = AskStreamTap()
     events = [
-        {"type": "metadata", "query_mode": "kb_qa"},
+        {"type": "metadata", "query_mode": "kb_qa", "source_scope": "pdf+kb", "source_usage": {"pdf_used": True, "table_used": False, "kb_used": True}},
         {"type": "content", "content": "hello "},
         {"type": "content", "content": "world"},
-        {"type": "done", "route": "kb_qa", "references": [{"doi": "x"}], "trace_id": "t-1"},
+        {"type": "done", "route": "kb_qa", "references": [{"doi": "x"}], "trace_id": "t-1", "source_scope": "pdf+kb", "source_usage": {"pdf_used": True, "table_used": False, "kb_used": True}},
     ]
     wrapped = list(tap.wrap(events))
     assert wrapped[-1]["type"] == "done"
@@ -23,3 +23,5 @@ def test_ask_stream_tap_collects_done_summary():
     assert tap.summary.route == "kb_qa"
     assert tap.summary.trace_id == "t-1"
     assert tap.summary.reference_objects == [{"doi": "x"}]
+    assert tap.summary.source_scope == "pdf+kb"
+    assert tap.summary.source_usage == {"pdf_used": True, "table_used": False, "kb_used": True}

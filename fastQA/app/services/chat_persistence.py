@@ -80,6 +80,8 @@ def _persist_assistant_summary_sync(
         'used_files': list((summary or {}).get('used_files') or []),
         'timings': dict((summary or {}).get('timings') or {}),
         'file_selection': dict((summary or {}).get('file_selection') or {}),
+        'source_scope': str((summary or {}).get('source_scope') or '').strip(),
+        'source_usage': dict((summary or {}).get('source_usage') or {}),
         'requested_mode': str(requested_mode or '').strip(),
         'actual_mode': str(actual_mode or '').strip(),
     }
