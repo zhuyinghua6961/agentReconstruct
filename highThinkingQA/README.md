@@ -23,7 +23,7 @@ This directory now contains a first-phase copied closure from the root `highThin
 - `env_loader.py`
 - env templates
 
-The root-level implementation still exists as the rollback baseline.
+The former root-level implementation has been archived under `archive/root-highthinking-legacy-2026-03-23/` as the rollback baseline. Active highThinkingQA papers and vectordb now live under `resource/highThinkingQA/`.
 
 ## Scope
 

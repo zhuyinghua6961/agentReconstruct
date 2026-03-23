@@ -8,6 +8,8 @@
 - `fastQA/`：快速问答后端，默认 `8008`
 - `highThinkingQA/`：思考问答后端，默认 `8009`
 - `resource/`：共享资源、配置、运行态目录
+- `archive/root-highthinking-legacy-2026-03-23/`：已归档的根目录旧版 highThinking backend baseline
+- `resource/highThinkingQA/`：highThinkingQA 仍在使用的 papers 与 vectordb 资源
 
 旧的根目录前端已迁出为本地备份，不再作为当前联调入口。
 

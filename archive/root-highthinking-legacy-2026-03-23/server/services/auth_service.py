@@ -45,6 +45,13 @@ class TokenService:
     def __init__(self) -> None:
         secret = str(os.getenv("JWT_SECRET", "") or "").strip() or "dev-only-secret-change-me"
         self._salt = "highthinking.auth.access"
+        compat_raw = str(os.getenv("JWT_COMPATIBLE_ACCESS_SALTS", "agentcode.auth.access") or "").strip()
+        compat_values = [item.strip() for item in compat_raw.replace(";", ",").split(",") if item.strip()]
+        salts: list[str] = [self._salt]
+        for value in compat_values:
+            if value not in salts:
+                salts.append(value)
+        self._decode_salts = tuple(salts)
         self._expire_seconds = int(os.getenv("JWT_EXPIRE_SECONDS", "86400") or "86400")
         self._serializer = URLSafeTimedSerializer(secret)
 
@@ -59,15 +66,18 @@ class TokenService:
     def decode_access_token(self, token: str) -> dict[str, Any] | None:
         if not token or not str(token).strip():
             return None
-        try:
-            data = self._serializer.loads(
-                str(token).strip(),
-                salt=self._salt,
-                max_age=self._expire_seconds,
-            )
-            return data if isinstance(data, dict) else None
-        except (BadSignature, BadTimeSignature, SignatureExpired):
-            return None
+        token_text = str(token).strip()
+        for salt in self._decode_salts:
+            try:
+                data = self._serializer.loads(
+                    token_text,
+                    salt=salt,
+                    max_age=self._expire_seconds,
+                )
+                return data if isinstance(data, dict) else None
+            except (BadSignature, BadTimeSignature, SignatureExpired):
+                continue
+        return None
 
 
 class AuthService:
