@@ -109,3 +109,31 @@ def test_programmatic_insert_dois_reuses_sentence_and_doc_embeddings():
     assert call_counter["材料性能显著提升。"] == 1
     assert call_counter["材料性能显著提升与循环稳定性改善。"] == 1
     assert call_counter["完全无关的检索片段。"] == 1
+
+
+def test_programmatic_insert_dois_preserves_markdown_block_boundaries():
+    agent = _Agent(use_sentence_embeddings=False, require_pdf_evidence_for_doi=False)
+    retrieval_results = {
+        "all_metadatas": [{"doi": "10.1/a"}, {"doi": "10.1/b"}],
+        "all_documents": ["开头结论。", "液相极化增强。"],
+        "all_distances": [0.1, 0.1],
+    }
+
+    answer = """开头结论。
+
+## 机理分析
+- 液相极化增强。"""
+    result = programmatic_insert_dois(
+        agent=agent,
+        answer=answer,
+        retrieval_results=retrieval_results,
+        similarity_threshold=None,
+        question="q",
+        validate_and_fix_doi_fn=lambda doi: doi,
+        aligner_cls=None,
+        logger=_Logger(),
+    )
+
+    assert "(doi=10.1/a)\n\n## 机理分析" in result
+    assert "## 机理分析\n- 液相极化增强。 (doi=10.1/b)" in result
+

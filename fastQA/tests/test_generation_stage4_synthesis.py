@@ -9,6 +9,7 @@ from app.modules.generation_pipeline.synthesis_postprocess import (
     log_top5_coverage,
     resolve_stage4_reference_policy,
 )
+from app.modules.generation_pipeline.reference_alignment import align_dois_with_pdf_chunks
 from app.modules.generation_pipeline.synthesis_streaming import iter_stage4_synthesis_with_pdf_chunks
 
 
@@ -47,6 +48,7 @@ def _logger():
         info=lambda *args, **kwargs: None,
         warning=lambda *args, **kwargs: None,
         error=lambda *args, **kwargs: None,
+        debug=lambda *args, **kwargs: None,
     )
 
 
@@ -267,4 +269,27 @@ def test_build_references_from_pdf_chunks_prefers_pdf_preview_over_html_md_chunk
     assert len(references) == 1
     assert references[0]["sample_text"].startswith("clean pdf preview")
 
+
+
+
+def test_align_dois_with_pdf_chunks_preserves_markdown_block_boundaries():
+    logger = _logger()
+    result = align_dois_with_pdf_chunks(
+        """开头结论。
+
+## 机理分析
+- 液相极化增强。""",
+        {
+            "10.1/a": [
+                {"text": "开头结论。" + "补充证据" * 20, "page": 1},
+                {"text": "液相极化增强。" + "补充证据" * 20, "page": 2},
+            ]
+        },
+        emb_model=None,
+        threshold=0.1,
+        logger=logger,
+    )
+
+    assert "(doi=10.1/a)\n\n## 机理分析" in result
+    assert "## 机理分析\n- 液相极化增强。 (doi=10.1/a)" in result
 

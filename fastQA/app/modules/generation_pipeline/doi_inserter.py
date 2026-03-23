@@ -17,6 +17,24 @@ def _cosine_similarity(a, b) -> float:
     return sum(x * y for x, y in zip(a, b)) / (na * nb)
 
 
+_SENTENCE_WITH_SUFFIX_RE = re.compile(r".*?(?<=[。！？?!.；;])\s*|.+$", re.DOTALL)
+
+
+def _iter_sentence_units(answer: str) -> list[tuple[str, str]]:
+    units: list[tuple[str, str]] = []
+    for chunk in _SENTENCE_WITH_SUFFIX_RE.findall(answer or ""):
+        if chunk == "":
+            continue
+        match = re.match(r"(?s)(.*?)(\s*)$", chunk)
+        if match:
+            units.append((match.group(1), match.group(2)))
+        else:
+            units.append((chunk, ""))
+    if not units and answer:
+        units.append((answer, ""))
+    return units
+
+
 def programmatic_insert_dois(
     *,
     agent: Any,
@@ -146,7 +164,8 @@ def programmatic_insert_dois(
 
     if getattr(agent, "use_new_aligner", False) and aligner_cls:
         try:
-            sentences = re.split(r"(?<=[。！？?!.；;])\s*", answer)
+            sentence_units = _iter_sentence_units(answer)
+            sentences = [body for body, _suffix in sentence_units]
             aligner = aligner_cls(
                 literature_expert=agent.literature_expert,
                 seq_weight=seq_weight,
@@ -159,12 +178,12 @@ def programmatic_insert_dois(
             out_sentences = []
             align_map = {a["sentence_idx"]: a for a in alignments}
             used_dois = set()
-            for idx, sent in enumerate(sentences):
-                s = sent
+            for idx, (sent, suffix) in enumerate(sentence_units):
+                s = sent + suffix
                 if idx in align_map:
                     doi_to_insert = align_map[idx]["doi"]
                     used_dois.add(doi_to_insert)
-                    s = s.rstrip() + f" (doi={doi_to_insert})"
+                    s = sent.rstrip() + f" (doi={doi_to_insert})" + suffix
                 out_sentences.append(s)
 
             new_answer = "".join(out_sentences)
@@ -191,9 +210,8 @@ def programmatic_insert_dois(
         except Exception as e:
             logger.warning(f"⚠️ 新 aligner 执行失败，回退到旧逻辑: {e}")
 
-    sentence_split_pattern = r"(?<=[。！？?!.；;])\s*"
-    raw_sentences = re.split(sentence_split_pattern, answer)
-    effective_sentences = [item.strip() for item in raw_sentences if str(item or "").strip()]
+    sentence_units = _iter_sentence_units(answer)
+    effective_sentences = [body.strip() for body, _suffix in sentence_units if str(body or "").strip()]
     logger.info(
         "ℹ️ 程序化DOI插入开始 candidate_docs=%s answer_sentences=%s embedding_enabled=%s",
         len(candidate_docs),
@@ -206,10 +224,11 @@ def programmatic_insert_dois(
     verified_pass_count = 0
     verified_fail_count = 0
 
-    for sent in raw_sentences:
+    for sent, suffix in sentence_units:
+        original_chunk = sent + suffix
         sent_strip = sent.strip()
         if not sent_strip:
-            out_sentences.append(sent)
+            out_sentences.append(original_chunk)
             continue
 
         cleaned_sent = sent_strip
@@ -229,9 +248,9 @@ def programmatic_insert_dois(
 
         if not cleaned_sent or re.match(r"^[^\w\u4e00-\u9fff]*$", cleaned_sent):
             if doi_found:
-                out_sentences.append(sent)
+                out_sentences.append(original_chunk)
                 continue
-            out_sentences.append(sent)
+            out_sentences.append(original_chunk)
             continue
 
         sent_strip = cleaned_sent
@@ -343,7 +362,7 @@ def programmatic_insert_dois(
             if verify_pass:
                 used_dois.add(doi_to_insert)
                 verified_pass_count += 1
-                new_sent = sent.rstrip() + f" (doi={doi_to_insert})"
+                new_sent = sent.rstrip() + f" (doi={doi_to_insert})" + suffix
                 out_sentences.append(new_sent)
                 logger.info(
                     f"   ✅ 句子对齐并验证通过：'{sent_strip[:80]}...' -> doi={doi_to_insert} "
@@ -361,7 +380,7 @@ def programmatic_insert_dois(
                 )
             else:
                 verified_fail_count += 1
-                out_sentences.append(sent)
+                out_sentences.append(original_chunk)
                 logger.info(
                     f"   ⚠️ 句子对齐但验证未通过，跳过插入：'{sent_strip[:80]}...' -> doi={doi_to_insert} "
                     f"(score={best_score:.3f}) verify={verify_details}"
@@ -377,7 +396,7 @@ def programmatic_insert_dois(
                     }
                 )
         else:
-            out_sentences.append(sent)
+            out_sentences.append(original_chunk)
 
     new_answer = "".join(out_sentences)
     elapsed = time.perf_counter() - started_at

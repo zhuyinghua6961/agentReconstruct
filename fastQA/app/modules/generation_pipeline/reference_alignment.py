@@ -11,6 +11,24 @@ from app.modules.generation_pipeline.text_processing import extract_question_key
 from app.modules.generation_pipeline.feature_flags import env_int
 
 
+_SENTENCE_WITH_SUFFIX_RE = re.compile(r".*?(?<=[。！？?!.；;])\s*|.+$", re.DOTALL)
+
+
+def _iter_sentence_units(answer: str) -> list[tuple[str, str]]:
+    units: list[tuple[str, str]] = []
+    for chunk in _SENTENCE_WITH_SUFFIX_RE.findall(answer or ""):
+        if chunk == "":
+            continue
+        match = re.match(r"(?s)(.*?)(\s*)$", chunk)
+        if match:
+            units.append((match.group(1), match.group(2)))
+        else:
+            units.append((chunk, ""))
+    if not units and answer:
+        units.append((answer, ""))
+    return units
+
+
 def extract_dois_from_results(retrieval_results: Dict[str, Any]) -> List[str]:
     """Extract unique valid DOI values from retrieval metadata."""
     metadatas = retrieval_results.get("metadatas", [])
@@ -95,20 +113,20 @@ def align_dois_with_pdf_chunks(
 
     logger.info(f"   📊 共有 {len(candidate_chunks)} 个候选PDF chunks")
 
-    sentence_split_pattern = r"(?<=[。！？?!.；;])\s*"
-    sentences = re.split(sentence_split_pattern, answer)
+    sentence_units = _iter_sentence_units(answer)
 
     out_sentences = []
     inserted_count = 0
 
-    for sent in sentences:
+    for sent, suffix in sentence_units:
+        original_chunk = sent + suffix
         sent_strip = sent.strip()
         if not sent_strip:
-            out_sentences.append(sent)
+            out_sentences.append(original_chunk)
             continue
 
         if re.search(r"\(doi\s*=", sent, re.IGNORECASE):
-            out_sentences.append(sent)
+            out_sentences.append(original_chunk)
             continue
 
         best_chunk = None
@@ -137,12 +155,12 @@ def align_dois_with_pdf_chunks(
 
         if best_chunk and best_score >= threshold:
             doi = best_chunk["doi"]
-            new_sent = sent.rstrip() + f" (doi={doi})"
+            new_sent = sent.rstrip() + f" (doi={doi})" + suffix
             out_sentences.append(new_sent)
             inserted_count += 1
             logger.debug(f"   ✅ 对齐成功: '{sent_strip[:50]}...' -> {doi} (score={best_score:.3f})")
         else:
-            out_sentences.append(sent)
+            out_sentences.append(original_chunk)
 
     new_answer = "".join(out_sentences)
     logger.info(f"   ✅ DOI对齐完成: 插入了 {inserted_count} 个DOI")
