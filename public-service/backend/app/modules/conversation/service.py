@@ -1057,6 +1057,105 @@ class ConversationService:
         except Exception as exc:
             return {"success": False, "error": str(exc), "code": "CONVERSATION_LIST_ERROR"}
 
+
+    def _find_message_by_idempotency_key(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        role: str,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        target_role = str(role or "").strip().lower()
+        target_key = str(idempotency_key or "").strip()
+        if not target_role or not target_key:
+            return None
+        for item in messages:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("role") or "").strip().lower() != target_role:
+                continue
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            if str(metadata.get("idempotency_key") or "").strip() == target_key:
+                return item
+        return None
+
+    def _build_authority_summary(self) -> dict[str, Any]:
+        return {
+            "short_summary": "",
+            "memory_facts": [],
+            "open_threads": [],
+        }
+
+    def _build_authority_conversation_state(self, *, messages: list[dict[str, Any]]) -> dict[str, Any]:
+        last_turn_route = ""
+        last_focus_file_ids: list[int] = []
+        last_assistant_trace_id = ""
+        for item in reversed(messages):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("role") or "").strip().lower() != "assistant":
+                continue
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            last_turn_route = str(metadata.get("route") or "").strip().lower()
+            last_assistant_trace_id = str(metadata.get("trace_id") or "").strip()
+            seen: set[int] = set()
+            used_files = metadata.get("used_files") if isinstance(metadata.get("used_files"), list) else []
+            for file_item in used_files:
+                if not isinstance(file_item, dict):
+                    continue
+                file_id = self._safe_int(file_item.get("file_id"), default=0)
+                if file_id <= 0 or file_id in seen:
+                    continue
+                seen.add(file_id)
+                last_focus_file_ids.append(file_id)
+            break
+        return {
+            "last_turn_route": last_turn_route,
+            "last_focus_file_ids": last_focus_file_ids,
+            "last_assistant_trace_id": last_assistant_trace_id,
+        }
+
+    def _build_context_snapshot_payload(
+        self,
+        *,
+        row: dict[str, Any],
+        user_id: int,
+        conversation_id: int,
+        document: dict[str, Any],
+    ) -> dict[str, Any]:
+        messages = self._prepare_response_messages(document.get("messages") or [])
+        recent_turns: list[dict[str, Any]] = []
+        for idx, item in enumerate(messages, start=1):
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            recent_turns.append(
+                {
+                    "message_id": str(item.get("message_id") or f"m_{idx:06d}"),
+                    "role": str(item.get("role") or "assistant"),
+                    "content": str(item.get("content") or ""),
+                    "created_at": self._to_iso(item.get("created_at"), fallback=self._now_iso()),
+                    "trace_id": str(metadata.get("trace_id") or "").strip(),
+                }
+            )
+        meta = document.get("meta") if isinstance(document.get("meta"), dict) else {}
+        created_at = self._to_iso(meta.get("created_at") or row.get("created_at"), fallback=self._now_iso())
+        updated_at = self._to_iso(meta.get("updated_at") or row.get("updated_at"), fallback=created_at)
+        snapshot_version = self._safe_int(
+            row.get("chat_json_version"),
+            default=self._safe_int(meta.get("message_count"), default=len(recent_turns)),
+        )
+        return {
+            "success": True,
+            "data": {
+                "conversation_id": int(conversation_id),
+                "user_id": int(user_id),
+                "snapshot_version": max(0, int(snapshot_version)),
+                "updated_at": updated_at,
+                "summary": self._build_authority_summary(),
+                "recent_turns": recent_turns,
+                "conversation_state": self._build_authority_conversation_state(messages=messages),
+            },
+        }
+
     def get_conversation_detail(self, *, user_id: int, conversation_id: int) -> dict[str, Any]:
         try:
             redis_service = self._get_redis_service()
@@ -1120,6 +1219,51 @@ class ConversationService:
         except Exception as exc:
             return {"success": False, "error": str(exc), "code": "CONVERSATION_FETCH_ERROR"}
 
+
+    def get_conversation_context_snapshot(self, *, user_id: int, conversation_id: int) -> dict[str, Any]:
+        try:
+            row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id)
+            if not row:
+                return {"success": False, "error": "conversation_not_found", "code": "NOT_FOUND"}
+            with self._json_store.conversation_lock(user_id=user_id, conversation_id=conversation_id):
+                row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id) or row
+                document, bootstrapped = self._load_or_bootstrap_document(
+                    row=row,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    prefer_cached_detail=False,
+                )
+                if bootstrapped:
+                    self._persist_document_and_index(
+                        row=row,
+                        user_id=user_id,
+                        conversation_id=conversation_id,
+                        document=document,
+                    )
+                    self._repo.set_message_count(
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        message_count=len(document.get("messages") or []),
+                        touch_updated_at=False,
+                    )
+                row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id) or row
+                self._refresh_detail_cache(
+                    row=row,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    document=document,
+                )
+            return self._build_context_snapshot_payload(
+                row=row,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                document=document,
+            )
+        except DatabaseUnavailableError as exc:
+            return {"success": False, "error": exc.message, "code": exc.code}
+        except Exception as exc:
+            return {"success": False, "error": str(exc), "code": "CONTEXT_SNAPSHOT_ERROR"}
+
     def get_latest_turn_context(self, *, user_id: int, conversation_id: int) -> dict[str, Any]:
         try:
             row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id)
@@ -1168,6 +1312,286 @@ class ConversationService:
             return {"success": False, "error": exc.message, "code": exc.code}
         except Exception as exc:
             return {"success": False, "error": str(exc), "code": "CONTEXT_FETCH_ERROR"}
+
+
+    def add_authority_user_message(
+        self,
+        *,
+        user_id: int,
+        conversation_id: int,
+        trace_id: str,
+        source_service: str,
+        route: str,
+        requested_mode: str,
+        actual_mode: str,
+        idempotency_key: str,
+        content: str,
+        context_hints: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        content_text = str(content or "").strip()
+        idempotency_text = str(idempotency_key or "").strip()
+        source_service_text = str(source_service or "").strip()
+        if not content_text:
+            return {"success": False, "error": "empty_content", "code": "VALIDATION_ERROR"}
+        if not idempotency_text:
+            return {"success": False, "error": "idempotency_key_required", "code": "VALIDATION_ERROR"}
+        if source_service_text not in {"fastQA", "highThinkingQA"}:
+            return {"success": False, "error": "invalid_source_service", "code": "VALIDATION_ERROR"}
+        try:
+            row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id)
+            if not row:
+                return {"success": False, "error": "conversation_not_found", "code": "NOT_FOUND"}
+            deduped = False
+            with self._json_store.conversation_lock(user_id=user_id, conversation_id=conversation_id):
+                row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id) or row
+                document, _ = self._load_or_bootstrap_document(
+                    row=row,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    prefer_cached_detail=False,
+                )
+                messages = document.get("messages") if isinstance(document.get("messages"), list) else []
+                existing = self._find_message_by_idempotency_key(
+                    messages=messages,
+                    role="user",
+                    idempotency_key=idempotency_text,
+                )
+                if isinstance(existing, dict):
+                    message_payload = existing
+                    deduped = True
+                else:
+                    now_iso = self._now_iso()
+                    metadata = {
+                        "trace_id": str(trace_id or "").strip(),
+                        "source_service": source_service_text,
+                        "route": str(route or "").strip(),
+                        "requested_mode": str(requested_mode or "").strip(),
+                        "actual_mode": str(actual_mode or "").strip(),
+                        "idempotency_key": idempotency_text,
+                        "context_hints": dict(context_hints or {}),
+                    }
+                    message_payload = {
+                        "message_id": self._next_message_id(messages),
+                        "role": "user",
+                        "content": content_text,
+                        "created_at": now_iso,
+                        "status": "done",
+                        "metadata": metadata,
+                    }
+                    messages.append(message_payload)
+                    document["messages"] = messages
+                    meta = document.get("meta") if isinstance(document.get("meta"), dict) else {}
+                    meta["title"] = str(row.get("title") or meta.get("title") or "New Conversation")
+                    meta["updated_at"] = now_iso
+                    meta["message_count"] = len(messages)
+                    meta["last_message_at"] = now_iso
+                    document["meta"] = meta
+                    self._persist_document_and_index(
+                        row=row,
+                        user_id=user_id,
+                        conversation_id=conversation_id,
+                        document=document,
+                    )
+                    self._repo.set_message_count(
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        message_count=len(messages),
+                        touch_updated_at=False,
+                    )
+                row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id) or row
+                self._refresh_detail_cache(
+                    row=row,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    document=document,
+                )
+            self._refresh_primary_list_cache(user_id=user_id)
+            return {
+                "success": True,
+                "conversation_id": int(conversation_id),
+                "message_id": str(message_payload.get("message_id") or ""),
+                "trace_id": str(trace_id or "").strip(),
+                "idempotency_key": idempotency_text,
+                "created_at": self._to_iso(message_payload.get("created_at"), fallback=self._now_iso()),
+                "deduped": deduped,
+            }
+        except DatabaseUnavailableError as exc:
+            return {"success": False, "error": exc.message, "code": exc.code}
+        except Exception as exc:
+            return {"success": False, "error": str(exc), "code": "AUTHORITY_USER_WRITE_ERROR"}
+
+    def accept_authority_assistant_async(
+        self,
+        *,
+        user_id: int,
+        conversation_id: int,
+        trace_id: str,
+        source_service: str,
+        route: str,
+        requested_mode: str,
+        actual_mode: str,
+        idempotency_key: str,
+        final_event: dict[str, Any],
+    ) -> dict[str, Any]:
+        idempotency_text = str(idempotency_key or "").strip()
+        source_service_text = str(source_service or "").strip()
+        answer_text = str((final_event or {}).get("answer_text") or "").strip()
+        if not idempotency_text:
+            return {"success": False, "error": "idempotency_key_required", "code": "VALIDATION_ERROR"}
+        if not answer_text:
+            return {"success": False, "error": "empty_answer_text", "code": "VALIDATION_ERROR"}
+        if source_service_text not in {"fastQA", "highThinkingQA"}:
+            return {"success": False, "error": "invalid_source_service", "code": "VALIDATION_ERROR"}
+        try:
+            row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id)
+            if not row:
+                return {"success": False, "error": "conversation_not_found", "code": "NOT_FOUND"}
+            document, _ = self._load_or_bootstrap_document(
+                row=row,
+                conversation_id=conversation_id,
+                user_id=user_id,
+                prefer_cached_detail=False,
+            )
+            messages = document.get("messages") if isinstance(document.get("messages"), list) else []
+            existing = self._find_message_by_idempotency_key(
+                messages=messages,
+                role="assistant",
+                idempotency_key=idempotency_text,
+            )
+            if isinstance(existing, dict):
+                return {
+                    "success": True,
+                    "accepted": True,
+                    "conversation_id": int(conversation_id),
+                    "event_id": f"assistant-async:{conversation_id}:{trace_id}",
+                    "trace_id": str(trace_id or "").strip(),
+                    "idempotency_key": idempotency_text,
+                    "status": "accepted",
+                    "deduped": True,
+                }
+            queued = self._repo.enqueue_authority_assistant_task(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                trace_id=trace_id,
+                source_service=source_service_text,
+                route=route,
+                requested_mode=requested_mode,
+                actual_mode=actual_mode,
+                idempotency_key=idempotency_text,
+                final_event=dict(final_event or {}),
+            )
+            return {
+                "success": True,
+                "accepted": True,
+                "conversation_id": int(conversation_id),
+                "event_id": f"assistant-async:{conversation_id}:{trace_id}",
+                "trace_id": str(trace_id or "").strip(),
+                "idempotency_key": idempotency_text,
+                "status": "accepted",
+                "deduped": bool(queued.get("deduped")),
+                "task_id": int(queued.get("task_id") or 0),
+            }
+        except DatabaseUnavailableError as exc:
+            return {"success": False, "error": exc.message, "code": exc.code}
+        except Exception as exc:
+            return {"success": False, "error": str(exc), "code": "AUTHORITY_ASSISTANT_ACCEPT_ERROR"}
+
+    def materialize_authority_assistant_task(self, *, task: dict[str, Any]) -> dict[str, Any]:
+        metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+        conversation_id = self._safe_int(task.get("conversation_id"), default=0)
+        user_id = self._safe_int(task.get("user_id"), default=0)
+        idempotency_text = str(metadata.get("idempotency_key") or "").strip()
+        if conversation_id <= 0 or user_id <= 0 or not idempotency_text:
+            return {"success": False, "error": "invalid_task_payload", "code": "VALIDATION_ERROR"}
+        final_event = metadata.get("final_event") if isinstance(metadata.get("final_event"), dict) else {}
+        answer_text = str(final_event.get("answer_text") or task.get("content") or "").strip()
+        if not answer_text:
+            return {"success": False, "error": "empty_answer_text", "code": "VALIDATION_ERROR"}
+        try:
+            row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id)
+            if not row:
+                return {"success": False, "error": "conversation_not_found", "code": "NOT_FOUND"}
+            with self._json_store.conversation_lock(user_id=user_id, conversation_id=conversation_id):
+                row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id) or row
+                document, _ = self._load_or_bootstrap_document(
+                    row=row,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    prefer_cached_detail=False,
+                )
+                messages = document.get("messages") if isinstance(document.get("messages"), list) else []
+                existing = self._find_message_by_idempotency_key(
+                    messages=messages,
+                    role="assistant",
+                    idempotency_key=idempotency_text,
+                )
+                if isinstance(existing, dict):
+                    message_payload = existing
+                else:
+                    now_iso = self._now_iso()
+                    assistant_metadata = {
+                        "trace_id": str(metadata.get("trace_id") or "").strip(),
+                        "source_service": str(metadata.get("source_service") or "").strip(),
+                        "route": str(metadata.get("route") or "").strip(),
+                        "requested_mode": str(metadata.get("requested_mode") or "").strip(),
+                        "actual_mode": str(metadata.get("actual_mode") or "").strip(),
+                        "idempotency_key": idempotency_text,
+                        "used_files": list(final_event.get("used_files") or []),
+                        "references": list(final_event.get("references") or []),
+                        "steps": list(final_event.get("steps") or []),
+                        "timings": dict(final_event.get("timings") or {}),
+                        "done_seen": True,
+                    }
+                    message_payload = {
+                        "message_id": self._next_message_id(messages),
+                        "role": "assistant",
+                        "content": answer_text,
+                        "created_at": now_iso,
+                        "status": "done",
+                        "metadata": assistant_metadata,
+                        "references": list(final_event.get("references") or []),
+                        "steps": list(final_event.get("steps") or []),
+                        "done_seen": True,
+                    }
+                    messages.append(message_payload)
+                    document["messages"] = messages
+                    meta = document.get("meta") if isinstance(document.get("meta"), dict) else {}
+                    meta["title"] = str(row.get("title") or meta.get("title") or "New Conversation")
+                    meta["updated_at"] = now_iso
+                    meta["message_count"] = len(messages)
+                    meta["last_message_at"] = now_iso
+                    document["meta"] = meta
+                    self._persist_document_and_index(
+                        row=row,
+                        user_id=user_id,
+                        conversation_id=conversation_id,
+                        document=document,
+                    )
+                    self._repo.set_message_count(
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        message_count=len(messages),
+                        touch_updated_at=False,
+                    )
+                    row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id) or row
+                    self._refresh_detail_cache(
+                        row=row,
+                        user_id=user_id,
+                        conversation_id=conversation_id,
+                        document=document,
+                    )
+            self._refresh_primary_list_cache(user_id=user_id)
+            return {
+                "success": True,
+                "conversation_id": int(conversation_id),
+                "message_id": str(message_payload.get("message_id") or ""),
+                "trace_id": str(metadata.get("trace_id") or "").strip(),
+                "idempotency_key": idempotency_text,
+            }
+        except DatabaseUnavailableError as exc:
+            return {"success": False, "error": exc.message, "code": exc.code}
+        except Exception as exc:
+            return {"success": False, "error": str(exc), "code": "AUTHORITY_ASSISTANT_MATERIALIZE_ERROR"}
 
     def add_message(
         self,

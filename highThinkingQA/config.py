@@ -30,6 +30,9 @@ SERVICE_STATE_ROOT = resolve_service_root("STATE")
 SERVICE_RUNTIME_ROOT = resolve_service_root("RUNTIME")
 SERVICE_ASSET_ROOT = resolve_service_root("ASSET")
 
+_CONVERSATION_AUTHORITY_TARGETS = frozenset({"legacy", "public_service", "shadow_public_service"})
+_PRODUCTION_APP_ENVS = frozenset({"prod", "production"})
+
 
 def _get_bool(name: str, default: bool) -> bool:
     raw = str(os.getenv(name, "1" if default else "0") or "").strip().lower()
@@ -50,6 +53,57 @@ def _get_int(name: str, default: int, *, minimum: int | None = None, maximum: in
     if maximum is not None:
         value = min(maximum, value)
     return value
+
+
+def _get_optional_conversation_target(name: str) -> str | None:
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return None
+    if raw not in _CONVERSATION_AUTHORITY_TARGETS:
+        raise ValueError(f"unsupported {name}: {raw}")
+    return raw
+
+
+def _get_conversation_target(name: str, default: str) -> str:
+    return _get_optional_conversation_target(name) or default
+
+
+def _get_bool_from_names(*, names: tuple[str, ...], default: bool) -> bool:
+    for name in names:
+        raw = str(os.getenv(name, "") or "").strip()
+        if not raw:
+            continue
+        normalized = raw.lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return bool(default)
+
+
+def _resolve_conversation_rollout(app_env: str) -> tuple[str, str, str, str, bool]:
+    execution_key = "CONVERSATION_EXECUTION_AUTHORITY_TARGET"
+    execution_target = _get_conversation_target(execution_key, "legacy")
+    assistant_write_target = _get_conversation_target("CONVERSATION_ASSISTANT_WRITE_TARGET", "legacy")
+    user_write_target = _get_optional_conversation_target("CONVERSATION_USER_WRITE_TARGET")
+    context_read_target = _get_optional_conversation_target("CONVERSATION_CONTEXT_READ_TARGET")
+    if user_write_target is not None or context_read_target is not None:
+        if user_write_target != context_read_target:
+            if str(app_env or "").strip().lower() in _PRODUCTION_APP_ENVS:
+                raise ValueError("split authority rollout is not allowed in production")
+        elif not str(os.getenv(execution_key, "") or "").strip():
+            execution_target = user_write_target or context_read_target or execution_target
+    overlay_enabled = _get_bool_from_names(
+        names=("CONVERSATION_OVERLAY_ENABLED", "CONVERSATION_OVERLAY_READWRITE_ENABLED"),
+        default=False,
+    )
+    return (
+        execution_target,
+        execution_target,
+        execution_target,
+        assistant_write_target,
+        overlay_enabled,
+    )
 
 
 def _resolve_relative_path(raw: str, *, base_dir: Path) -> Path:
@@ -164,6 +218,15 @@ class HttpServiceSettings:
 
 
 @dataclass(frozen=True)
+class ConversationRolloutSettings:
+    execution_authority_target: str
+    execution_user_write_target: str
+    execution_context_read_target: str
+    assistant_write_target: str
+    overlay_enabled: bool
+
+
+@dataclass(frozen=True)
 class GunicornSettings:
     bind_host: str
     bind_port: int
@@ -265,6 +328,19 @@ def get_http_service_settings() -> HttpServiceSettings:
     )
 
 
+
+def get_conversation_rollout_settings() -> ConversationRolloutSettings:
+    app_env = str(os.getenv("APP_ENV", "dev") or "dev").strip()
+    execution_authority_target, execution_user_write_target, execution_context_read_target, assistant_write_target, overlay_enabled = _resolve_conversation_rollout(app_env)
+    return ConversationRolloutSettings(
+        execution_authority_target=execution_authority_target,
+        execution_user_write_target=execution_user_write_target,
+        execution_context_read_target=execution_context_read_target,
+        assistant_write_target=assistant_write_target,
+        overlay_enabled=overlay_enabled,
+    )
+
+
 def get_gunicorn_settings() -> GunicornSettings:
     http_settings = get_http_service_settings()
     return GunicornSettings(
@@ -282,6 +358,7 @@ def get_gunicorn_settings() -> GunicornSettings:
 
 SETTINGS = get_runtime_settings()
 HTTP_SETTINGS = get_http_service_settings()
+CONVERSATION_ROLLOUT_SETTINGS = get_conversation_rollout_settings()
 GUNICORN_SETTINGS = get_gunicorn_settings()
 
 DASHSCOPE_API_KEY = SETTINGS.dashscope_api_key
@@ -346,6 +423,11 @@ ENABLE_CORS = HTTP_SETTINGS.enable_cors
 CORS_ORIGINS = HTTP_SETTINGS.cors_origins
 APP_RUNTIME_ROOT = HTTP_SETTINGS.runtime_root
 APP_RUNTIME_LOGS_DIR = HTTP_SETTINGS.runtime_logs_dir
+CONVERSATION_EXECUTION_AUTHORITY_TARGET = CONVERSATION_ROLLOUT_SETTINGS.execution_authority_target
+CONVERSATION_EXECUTION_USER_WRITE_TARGET = CONVERSATION_ROLLOUT_SETTINGS.execution_user_write_target
+CONVERSATION_EXECUTION_CONTEXT_READ_TARGET = CONVERSATION_ROLLOUT_SETTINGS.execution_context_read_target
+CONVERSATION_ASSISTANT_WRITE_TARGET = CONVERSATION_ROLLOUT_SETTINGS.assistant_write_target
+CONVERSATION_OVERLAY_ENABLED = CONVERSATION_ROLLOUT_SETTINGS.overlay_enabled
 GUNICORN_BIND_HOST = GUNICORN_SETTINGS.bind_host
 GUNICORN_BIND_PORT = GUNICORN_SETTINGS.bind_port
 GUNICORN_WORKER_CLASS = GUNICORN_SETTINGS.worker_class

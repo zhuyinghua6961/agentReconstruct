@@ -96,12 +96,30 @@ class SystemService:
                 if isinstance(active_keys, set):
                     upload_status["active_tasks"] = len(active_keys)
 
+            assistant_inbox_status = dict(getattr(runtime, "authority_assistant_inbox_status", {}) or {})
+            assistant_inbox_thread = getattr(runtime, "authority_assistant_inbox_thread", None)
+            assistant_inbox_status["thread_alive"] = bool(assistant_inbox_thread.is_alive()) if assistant_inbox_thread is not None and hasattr(assistant_inbox_thread, "is_alive") else bool(assistant_inbox_status.get("thread_alive"))
+            if not assistant_inbox_status:
+                assistant_inbox_status = {
+                    "state": "uninitialized",
+                    "thread_alive": False,
+                    "loops": 0,
+                    "last_summary": None,
+                    "last_error": "",
+                    "last_run_at": None,
+                    "backlog": 0,
+                    "processing": 0,
+                    "failed": 0,
+                    "enabled": True,
+                }
+
             status = {
                 "has_current_answer_context": bool(runtime.current_answer_context and runtime.current_answer_context.strip()),
                 "current_answer_preview": (runtime.current_answer_context[:500] + "...") if runtime.current_answer_context else "",
                 "latest_background_file": None,
                 "latest_background_file_mtime": None,
                 "conversation_outbox": outbox_status,
+                "authority_assistant_inbox": assistant_inbox_status,
                 "upload_processing": upload_status,
                 "qa_cache": self._cache_status(),
             }

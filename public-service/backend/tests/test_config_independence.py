@@ -21,6 +21,12 @@ def config_module(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.delenv("LOCAL_STORAGE_ROOT", raising=False)
     monkeypatch.delenv("PUBLIC_SERVICE_PORT", raising=False)
     monkeypatch.delenv("MYSQL_HOST", raising=False)
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.delenv("CONVERSATION_EXECUTION_AUTHORITY_TARGET", raising=False)
+    monkeypatch.delenv("CONVERSATION_ASSISTANT_WRITE_TARGET", raising=False)
+    monkeypatch.delenv("CONVERSATION_OVERLAY_ENABLED", raising=False)
+    monkeypatch.delenv("CONVERSATION_USER_WRITE_TARGET", raising=False)
+    monkeypatch.delenv("CONVERSATION_CONTEXT_READ_TARGET", raising=False)
     monkeypatch.chdir(tmp_path)
     import app.core.config as config
     import app.core.env_loader as env_loader
@@ -87,3 +93,40 @@ def test_relative_overrides_resolve_under_data_root(config_module, monkeypatch: 
     assert settings.translation_cache_dir == root / "cache/translations"
     assert settings.logs_dir == root / "logs-custom"
     assert settings.local_storage_root == root / "storage-custom"
+
+
+def test_conversation_rollout_flags_keep_execution_authority_coupled(
+    config_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CONVERSATION_EXECUTION_AUTHORITY_TARGET", "public_service")
+    monkeypatch.setenv("CONVERSATION_ASSISTANT_WRITE_TARGET", "legacy")
+    monkeypatch.setenv("CONVERSATION_OVERLAY_ENABLED", "1")
+    config_module.get_settings.cache_clear()
+
+    settings = config_module.get_settings()
+
+    assert settings.conversation_execution_authority_target == "public_service"
+    assert settings.conversation_execution_user_write_target == "public_service"
+    assert settings.conversation_execution_context_read_target == "public_service"
+    assert settings.conversation_assistant_write_target == "legacy"
+    assert settings.conversation_overlay_enabled is True
+
+
+def test_conversation_split_execution_authority_is_rejected_in_production(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("CONVERSATION_USER_WRITE_TARGET", "legacy")
+    monkeypatch.setenv("CONVERSATION_CONTEXT_READ_TARGET", "public_service")
+    monkeypatch.chdir(tmp_path)
+
+    import app.core.config as config
+    import app.core.env_loader as env_loader
+
+    importlib.reload(env_loader)
+    reloaded = importlib.reload(config)
+    reloaded.get_settings.cache_clear()
+    with pytest.raises(ValueError, match="split authority"):
+        reloaded.get_settings()

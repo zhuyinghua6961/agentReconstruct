@@ -12,6 +12,8 @@ from app.core.env_loader import load_env
 load_env(override_existing=False)
 
 _DEFAULT_DATA_ROOT = Path("/tmp/public-service")
+_CONVERSATION_AUTHORITY_TARGETS = frozenset({"legacy", "public_service", "shadow_public_service"})
+_PRODUCTION_APP_ENVS = frozenset({"prod", "production"})
 
 
 def _get_bool(name: str, default: bool) -> bool:
@@ -33,6 +35,56 @@ def _get_int(name: str, default: int, *, minimum: int | None = None, maximum: in
     if maximum is not None:
         value = min(maximum, value)
     return value
+
+
+def _get_optional_conversation_target(name: str) -> str | None:
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return None
+    if raw not in _CONVERSATION_AUTHORITY_TARGETS:
+        raise ValueError(f"unsupported {name}: {raw}")
+    return raw
+
+
+def _get_conversation_target(name: str, default: str) -> str:
+    return _get_optional_conversation_target(name) or default
+
+
+def _get_bool_from_names(*, names: tuple[str, ...], default: bool) -> bool:
+    for name in names:
+        raw = str(os.getenv(name, "") or "").strip()
+        if raw:
+            normalized = raw.lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+    return bool(default)
+
+
+def _resolve_conversation_rollout(app_env: str) -> tuple[str, str, str, str, bool]:
+    execution_key = "CONVERSATION_EXECUTION_AUTHORITY_TARGET"
+    execution_target = _get_conversation_target(execution_key, "legacy")
+    assistant_write_target = _get_conversation_target("CONVERSATION_ASSISTANT_WRITE_TARGET", "legacy")
+    user_write_target = _get_optional_conversation_target("CONVERSATION_USER_WRITE_TARGET")
+    context_read_target = _get_optional_conversation_target("CONVERSATION_CONTEXT_READ_TARGET")
+    if user_write_target is not None or context_read_target is not None:
+        if user_write_target != context_read_target:
+            if str(app_env or "").strip().lower() in _PRODUCTION_APP_ENVS:
+                raise ValueError("split authority rollout is not allowed in production")
+        elif not str(os.getenv(execution_key, "") or "").strip():
+            execution_target = user_write_target or context_read_target or execution_target
+    overlay_enabled = _get_bool_from_names(
+        names=("CONVERSATION_OVERLAY_ENABLED", "CONVERSATION_OVERLAY_READWRITE_ENABLED"),
+        default=False,
+    )
+    return (
+        execution_target,
+        execution_target,
+        execution_target,
+        assistant_write_target,
+        overlay_enabled,
+    )
 
 
 def _resolve_data_root() -> Path:
@@ -95,6 +147,11 @@ class Settings:
     translation_cache_dir: Path
     logs_dir: Path
     local_storage_root: Path
+    conversation_execution_authority_target: str
+    conversation_execution_user_write_target: str
+    conversation_execution_context_read_target: str
+    conversation_assistant_write_target: str
+    conversation_overlay_enabled: bool
     conversation_legacy_fallback_enabled: bool
 
     @property
@@ -130,6 +187,8 @@ class Settings:
 def get_settings() -> Settings:
     cors_raw = str(os.getenv("PUBLIC_SERVICE_CORS_ORIGINS", os.getenv("BACKEND_CORS_ORIGINS", "*")) or "*").strip()
     cors_origins = [item.strip() for item in cors_raw.split(",") if item.strip()] or ["*"]
+    app_env = str(os.getenv("APP_ENV", "development") or "development").strip()
+    conversation_execution_authority_target, conversation_execution_user_write_target, conversation_execution_context_read_target, conversation_assistant_write_target, conversation_overlay_enabled = _resolve_conversation_rollout(app_env)
     data_root = _resolve_data_root()
     uploads_dir = _resolve_under_root(os.getenv("UPLOAD_DIR"), data_root=data_root, default="uploads")
     papers_dir = _resolve_under_root(os.getenv("PAPERS_DIR"), data_root=data_root, default="papers")
@@ -152,7 +211,7 @@ def get_settings() -> Settings:
     )
     return Settings(
         app_name=str(os.getenv("PUBLIC_SERVICE_APP_NAME", "agentCode Public Service") or "agentCode Public Service").strip(),
-        app_env=str(os.getenv("APP_ENV", "development") or "development").strip(),
+        app_env=app_env,
         debug=_get_bool("PUBLIC_SERVICE_DEBUG", False),
         host=str(os.getenv("PUBLIC_SERVICE_HOST", "0.0.0.0") or "0.0.0.0").strip(),
         port=_get_int("PUBLIC_SERVICE_PORT", 8102, minimum=1, maximum=65535),
@@ -189,5 +248,10 @@ def get_settings() -> Settings:
         translation_cache_dir=translation_cache_dir,
         logs_dir=logs_dir,
         local_storage_root=local_storage_root,
+        conversation_execution_authority_target=conversation_execution_authority_target,
+        conversation_execution_user_write_target=conversation_execution_user_write_target,
+        conversation_execution_context_read_target=conversation_execution_context_read_target,
+        conversation_assistant_write_target=conversation_assistant_write_target,
+        conversation_overlay_enabled=conversation_overlay_enabled,
         conversation_legacy_fallback_enabled=_get_bool("PUBLIC_SERVICE_ENABLE_LEGACY_CONVERSATION_FALLBACK", False),
     )

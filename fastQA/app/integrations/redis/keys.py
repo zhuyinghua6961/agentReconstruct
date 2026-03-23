@@ -32,6 +32,9 @@ class RedisKeyFactory:
     def stream(self, *segments: object) -> str:
         return self.join("stream", *segments)
 
+    def pending(self, *segments: object) -> str:
+        return self.join("pending", *segments)
+
 
 def build_key_factory(prefix: str) -> RedisKeyFactory:
     return RedisKeyFactory(prefix=_normalize_segment(prefix))

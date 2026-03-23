@@ -13,6 +13,7 @@ from app.core.runtime import lifespan
 from app.modules.admin_users.api import router as admin_users_router
 from app.modules.auth.api import router as auth_router
 from app.modules.conversation.api import router as conversation_router
+from app.modules.conversation.internal_api import router as conversation_internal_router
 from app.modules.documents.api import router as documents_router
 from app.modules.quota.api import router as quota_router
 from app.modules.system.api import router as system_router
@@ -25,6 +26,7 @@ DEFAULT_ROUTERS: tuple[APIRouter, ...] = (
     admin_users_router,
     quota_router,
     conversation_router,
+    conversation_internal_router,
     documents_router,
     uploads_router,
 )

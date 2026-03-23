@@ -35,6 +35,19 @@ def test_system_service_background_status_contract(tmp_path):
     }
     runtime.conversation_outbox_thread = SimpleNamespace(is_alive=lambda: True)
     runtime.upload_processing_worker = SimpleNamespace(enabled=True, _active_keys={(1, 2), (2, 3)})
+    runtime.authority_assistant_inbox_status = {
+        "state": "running",
+        "thread_alive": False,
+        "loops": 2,
+        "last_summary": {"done": 1},
+        "last_error": "",
+        "last_run_at": "2026-03-14T00:00:01+08:00",
+        "backlog": 3,
+        "processing": 1,
+        "failed": 0,
+        "enabled": True,
+    }
+    runtime.authority_assistant_inbox_thread = SimpleNamespace(is_alive=lambda: True)
     runtime.logs_dir = tmp_path / "logs"
     runtime.logs_dir.mkdir()
     older = runtime.logs_dir / "background_programmatic_insert_older.json"
@@ -52,6 +65,8 @@ def test_system_service_background_status_contract(tmp_path):
     assert payload["status"]["has_current_answer_context"] is True
     assert payload["status"]["current_answer_preview"] == "context-body..."
     assert payload["status"]["conversation_outbox"]["thread_alive"] is True
+    assert payload["status"]["authority_assistant_inbox"]["thread_alive"] is True
+    assert payload["status"]["authority_assistant_inbox"]["backlog"] == 3
     assert payload["status"]["upload_processing"]["active_tasks"] == 2
     assert payload["status"]["latest_background_file"].endswith("background_programmatic_insert_newer.json")
     assert payload["status"]["qa_cache"]["metrics"]["stage1"]["cache_hit"] == 1
@@ -270,6 +285,72 @@ def test_runtime_starts_and_stops_conversation_outbox_worker():
     assert runtime.conversation_outbox_stop_event.set_called is True
     assert runtime.conversation_outbox_thread.joined is True
     assert runtime.component_status["conversation_outbox"]["status"] == "stopped"
+
+
+def test_runtime_starts_and_stops_authority_assistant_inbox_worker():
+    runtime = create_runtime(get_settings())
+    runtime.component_status["database"] = {"status": "ok"}
+    runtime.conversation_repository = object()
+    runtime.conversation_service = object()
+
+    class _FakeWorker:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.config = SimpleNamespace(poll_interval_ms=10)
+
+    class _FakeEvent:
+        def __init__(self):
+            self.set_called = False
+
+        def is_set(self):
+            return self.set_called
+
+        def set(self):
+            self.set_called = True
+
+        def wait(self, _seconds):
+            return None
+
+    class _FakeThread:
+        def __init__(self, *, target, args, name, daemon):
+            self.target = target
+            self.args = args
+            self.name = name
+            self.daemon = daemon
+            self.started = False
+            self.joined = False
+            self._alive = False
+
+        def start(self):
+            self.started = True
+            self._alive = True
+
+        def is_alive(self):
+            return self._alive
+
+        def join(self, timeout=None):
+            _ = timeout
+            self.joined = True
+            self._alive = False
+
+    runtime_module._start_authority_assistant_inbox_worker(
+        runtime,
+        worker_cls=_FakeWorker,
+        thread_cls=_FakeThread,
+        event_cls=_FakeEvent,
+    )
+
+    assert isinstance(runtime.authority_assistant_inbox_worker, _FakeWorker)
+    assert runtime.authority_assistant_inbox_worker.kwargs["repository"] is runtime.conversation_repository
+    assert runtime.authority_assistant_inbox_worker.kwargs["conversation_service"] is runtime.conversation_service
+    assert runtime.authority_assistant_inbox_thread.started is True
+    assert runtime.component_status["authority_assistant_inbox"]["detail"] == "authority assistant inbox worker starting"
+
+    runtime_module._stop_authority_assistant_inbox_worker(runtime)
+
+    assert runtime.authority_assistant_inbox_stop_event.set_called is True
+    assert runtime.authority_assistant_inbox_thread.joined is True
+    assert runtime.component_status["authority_assistant_inbox"]["status"] == "stopped"
 
 
 def test_runtime_starts_conversation_outbox_worker_even_when_database_is_degraded():

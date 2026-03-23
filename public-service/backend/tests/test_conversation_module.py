@@ -69,9 +69,11 @@ class _MemoryConversationRepo:
     def __init__(self) -> None:
         self._next_conversation_id = 1
         self._next_file_id = 1
+        self._next_assistant_task_id = 1
         self.conversations: dict[int, dict] = {}
         self.messages: dict[int, list[dict]] = {}
         self.files: dict[int, list[dict]] = {}
+        self.assistant_tasks: dict[int, dict] = {}
 
     def create_conversation(self, *, user_id: int, title: str) -> int:
         conversation_id = self._next_conversation_id
@@ -215,6 +217,106 @@ class _MemoryConversationRepo:
         if self.get_conversation(conversation_id=conversation_id, user_id=user_id) is None:
             return []
         return [dict(item) for item in self.messages.get(int(conversation_id), [])]
+
+    def get_authority_assistant_task(self, *, task_id: int) -> dict | None:
+        row = self.assistant_tasks.get(int(task_id))
+        return copy.deepcopy(row) if row else None
+
+    def enqueue_authority_assistant_task(
+        self,
+        *,
+        conversation_id: int,
+        user_id: int,
+        trace_id: str,
+        source_service: str,
+        route: str,
+        requested_mode: str,
+        actual_mode: str,
+        idempotency_key: str,
+        final_event: dict[str, object],
+    ) -> dict:
+        for row in self.assistant_tasks.values():
+            if int(row.get("conversation_id") or 0) != int(conversation_id):
+                continue
+            if int(row.get("user_id") or 0) != int(user_id):
+                continue
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            if str(metadata.get("idempotency_key") or "") == str(idempotency_key or ""):
+                return {"task_id": int(row["id"]), "deduped": True, "metadata": copy.deepcopy(metadata)}
+        task_id = self._next_assistant_task_id
+        self._next_assistant_task_id += 1
+        metadata = {
+            "authority_assistant_async": True,
+            "assistant_async_state": "pending",
+            "trace_id": str(trace_id or ""),
+            "source_service": str(source_service or ""),
+            "route": str(route or ""),
+            "requested_mode": str(requested_mode or ""),
+            "actual_mode": str(actual_mode or ""),
+            "idempotency_key": str(idempotency_key or ""),
+            "final_event": copy.deepcopy(final_event or {}),
+            "processing_started_at": None,
+            "materialized_message_id": "",
+            "last_error": "",
+        }
+        self.assistant_tasks[int(task_id)] = {
+            "id": int(task_id),
+            "conversation_id": int(conversation_id),
+            "user_id": int(user_id),
+            "content": str((final_event or {}).get("answer_text") or ""),
+            "metadata": metadata,
+        }
+        return {"task_id": int(task_id), "deduped": False, "metadata": copy.deepcopy(metadata)}
+
+    def claim_pending_authority_assistant_tasks(self, *, limit: int) -> list[dict]:
+        claimed: list[dict] = []
+        for task_id in sorted(self.assistant_tasks):
+            if len(claimed) >= int(limit):
+                break
+            row = self.assistant_tasks[int(task_id)]
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            if str(metadata.get("assistant_async_state") or "") != "pending":
+                continue
+            metadata["assistant_async_state"] = "processing"
+            metadata["processing_started_at"] = "now"
+            claimed.append(copy.deepcopy(row))
+        return claimed
+
+    def mark_authority_assistant_task_done(self, *, task_id: int, materialized_message_id: str, note: str = "ok") -> int:
+        row = self.assistant_tasks.get(int(task_id))
+        if row is None:
+            return 0
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        metadata["assistant_async_state"] = "done"
+        metadata["materialized_message_id"] = str(materialized_message_id or "")
+        metadata["processing_started_at"] = None
+        metadata["last_error"] = str(note or "")
+        return 1
+
+    def mark_authority_assistant_task_failed(self, *, task_id: int, last_error: str) -> int:
+        row = self.assistant_tasks.get(int(task_id))
+        if row is None:
+            return 0
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        metadata["assistant_async_state"] = "failed"
+        metadata["processing_started_at"] = None
+        metadata["last_error"] = str(last_error or "")
+        return 1
+
+    def authority_assistant_inbox_status(self) -> dict:
+        backlog = 0
+        processing = 0
+        failed = 0
+        for row in self.assistant_tasks.values():
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            state = str(metadata.get("assistant_async_state") or "")
+            if state == "pending":
+                backlog += 1
+            elif state == "processing":
+                processing += 1
+            elif state == "failed":
+                failed += 1
+        return {"backlog": backlog, "processing": processing, "failed": failed, "enabled": True}
 
     def add_uploaded_file(
         self,
@@ -752,6 +854,222 @@ def test_add_message_does_not_bootstrap_from_stale_cache_when_json_is_missing():
         assert [item["content"] for item in detail["data"]["messages"]] == ["real"]
         assert detail["data"]["message_count"] == 1
 
+
+
+def test_authority_user_write_is_immediately_visible_to_context_snapshot():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Authority Snapshot")
+        conversation_id = int(created["data"]["conversation_id"])
+
+        written = service.add_authority_user_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-1",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key="conv-1:trace-1:user",
+            content="hello authority",
+            context_hints={"selected_file_ids": [11], "last_turn_route_hint": "kb_qa"},
+        )
+
+        assert written["success"] is True
+        assert written["deduped"] is False
+        assert written["message_id"] == "m_000001"
+
+        snapshot = service.get_conversation_context_snapshot(user_id=7, conversation_id=conversation_id)
+
+        assert snapshot["success"] is True
+        assert snapshot["data"]["conversation_id"] == conversation_id
+        assert snapshot["data"]["user_id"] == 7
+        assert snapshot["data"]["snapshot_version"] >= 2
+        assert snapshot["data"]["summary"] == {
+            "short_summary": "",
+            "memory_facts": [],
+            "open_threads": [],
+        }
+        assert snapshot["data"]["recent_turns"] == [
+            {
+                "message_id": "m_000001",
+                "role": "user",
+                "content": "hello authority",
+                "created_at": written["created_at"],
+                "trace_id": "trace-1",
+            }
+        ]
+        assert snapshot["data"]["conversation_state"] == {
+            "last_turn_route": "",
+            "last_focus_file_ids": [],
+            "last_assistant_trace_id": "",
+        }
+
+
+def test_authority_user_write_dedupes_same_idempotency_key():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Authority Dedupe")
+        conversation_id = int(created["data"]["conversation_id"])
+
+        first = service.add_authority_user_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-2",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key="conv-1:trace-2:user",
+            content="same message",
+            context_hints={},
+        )
+        second = service.add_authority_user_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-2",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key="conv-1:trace-2:user",
+            content="same message",
+            context_hints={},
+        )
+
+        assert first["success"] is True
+        assert first["deduped"] is False
+        assert second["success"] is True
+        assert second["deduped"] is True
+        assert second["message_id"] == first["message_id"]
+
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+        assert detail["success"] is True
+        assert [item["content"] for item in detail["data"]["messages"]] == ["same message"]
+        assert detail["data"]["message_count"] == 1
+
+        snapshot = service.get_conversation_context_snapshot(user_id=7, conversation_id=conversation_id)
+        assert snapshot["success"] is True
+        assert len(snapshot["data"]["recent_turns"]) == 1
+
+
+def test_authority_context_snapshot_uses_last_assistant_state():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Authority State")
+        conversation_id = int(created["data"]["conversation_id"])
+
+        user_added = service.add_authority_user_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-3-user",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key="conv-1:trace-3:user",
+            content="question",
+            context_hints={},
+        )
+        assert user_added["success"] is True
+
+        assistant_added = service.add_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            role="assistant",
+            content="answer",
+            metadata={
+                "trace_id": "trace-3-assistant",
+                "route": "hybrid_qa",
+                "used_files": [{"file_id": 5}, {"file_id": 9}],
+            },
+        )
+        assert assistant_added["success"] is True
+
+        snapshot = service.get_conversation_context_snapshot(user_id=7, conversation_id=conversation_id)
+
+        assert snapshot["success"] is True
+        assert [item["role"] for item in snapshot["data"]["recent_turns"]] == ["user", "assistant"]
+        assert snapshot["data"]["conversation_state"] == {
+            "last_turn_route": "hybrid_qa",
+            "last_focus_file_ids": [5, 9],
+            "last_assistant_trace_id": "trace-3-assistant",
+        }
+
+
+def test_authority_context_snapshot_rejects_wrong_owner():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Authority Ownership")
+        conversation_id = int(created["data"]["conversation_id"])
+
+        snapshot = service.get_conversation_context_snapshot(user_id=8, conversation_id=conversation_id)
+
+        assert snapshot == {"success": False, "error": "conversation_not_found", "code": "NOT_FOUND"}
 
 def test_conversation_detail_rejects_stale_cache_when_db_activity_is_newer():
     repo = _MemoryConversationRepo()

@@ -29,6 +29,9 @@ SERVICE_ASSET_ROOT = resolve_service_root("ASSET")
 
 load_workspace_env(override_existing=False)
 
+_CONVERSATION_AUTHORITY_TARGETS = frozenset({"legacy", "public_service", "shadow_public_service"})
+_PRODUCTION_APP_ENVS = frozenset({"prod", "production"})
+
 
 def _get_bool(name: str, default: bool) -> bool:
     raw = str(os.getenv(name, "1" if default else "0") or "").strip().lower()
@@ -49,6 +52,57 @@ def _get_int(name: str, default: int, *, minimum: int | None = None, maximum: in
     if maximum is not None:
         value = min(maximum, value)
     return value
+
+
+def _get_optional_conversation_target(name: str) -> str | None:
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return None
+    if raw not in _CONVERSATION_AUTHORITY_TARGETS:
+        raise ValueError(f"unsupported {name}: {raw}")
+    return raw
+
+
+def _get_conversation_target(name: str, default: str) -> str:
+    return _get_optional_conversation_target(name) or default
+
+
+def _get_bool_from_names(*, names: tuple[str, ...], default: bool) -> bool:
+    for name in names:
+        raw = str(os.getenv(name, "") or "").strip()
+        if not raw:
+            continue
+        normalized = raw.lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return bool(default)
+
+
+def _resolve_conversation_rollout(app_env: str) -> tuple[str, str, str, str, bool]:
+    execution_key = "CONVERSATION_EXECUTION_AUTHORITY_TARGET"
+    execution_target = _get_conversation_target(execution_key, "legacy")
+    assistant_write_target = _get_conversation_target("CONVERSATION_ASSISTANT_WRITE_TARGET", "legacy")
+    user_write_target = _get_optional_conversation_target("CONVERSATION_USER_WRITE_TARGET")
+    context_read_target = _get_optional_conversation_target("CONVERSATION_CONTEXT_READ_TARGET")
+    if user_write_target is not None or context_read_target is not None:
+        if user_write_target != context_read_target:
+            if str(app_env or "").strip().lower() in _PRODUCTION_APP_ENVS:
+                raise ValueError("split authority rollout is not allowed in production")
+        elif not str(os.getenv(execution_key, "") or "").strip():
+            execution_target = user_write_target or context_read_target or execution_target
+    overlay_enabled = _get_bool_from_names(
+        names=("CONVERSATION_OVERLAY_ENABLED", "CONVERSATION_OVERLAY_READWRITE_ENABLED"),
+        default=False,
+    )
+    return (
+        execution_target,
+        execution_target,
+        execution_target,
+        assistant_write_target,
+        overlay_enabled,
+    )
 
 
 def _resolve_under_root(raw: str | None, *, root: Path, default: str) -> Path:
@@ -100,6 +154,11 @@ class Settings:
     sse_heartbeat_sec: int
     chat_persist_enabled: bool
     chat_persist_async: bool
+    conversation_execution_authority_target: str
+    conversation_execution_user_write_target: str
+    conversation_execution_context_read_target: str
+    conversation_assistant_write_target: str
+    conversation_overlay_enabled: bool
     vector_db_path: Path
     vector_db_summary_path: Path
     vector_db_pdf_path: Path
@@ -146,11 +205,14 @@ def get_settings() -> Settings:
     cors_raw = str(os.getenv("BACKEND_CORS_ORIGINS", "*") or "*").strip()
     cors_origins = [item.strip() for item in cors_raw.split(",") if item.strip()] or ["*"]
     fastapi_host = str(os.getenv("FASTAPI_HOST", os.getenv("BACKEND_HOST", "0.0.0.0")) or "0.0.0.0").strip()
+    app_env = str(os.getenv("APP_ENV", "development") or "development").strip()
     raw_fastapi_port = str(os.getenv("FASTAPI_PORT", os.getenv("BACKEND_PORT", "8012")) or "8012").strip()
     try:
         fastapi_port_default = int(raw_fastapi_port)
     except Exception:
         fastapi_port_default = 8012
+
+    conversation_execution_authority_target, conversation_execution_user_write_target, conversation_execution_context_read_target, conversation_assistant_write_target, conversation_overlay_enabled = _resolve_conversation_rollout(app_env)
 
     state_root = Path(SERVICE_STATE_ROOT)
     runtime_root = Path(SERVICE_RUNTIME_ROOT)
@@ -158,7 +220,7 @@ def get_settings() -> Settings:
 
     return Settings(
         app_name=str(os.getenv("FASTAPI_APP_NAME", "fastQA FastAPI") or "fastQA FastAPI").strip(),
-        app_env=str(os.getenv("APP_ENV", "development") or "development").strip(),
+        app_env=app_env,
         debug=_get_bool("FASTAPI_DEBUG", False),
         host=fastapi_host or "0.0.0.0",
         port=_get_int("FASTAPI_PORT", fastapi_port_default, minimum=1, maximum=65535),
@@ -199,6 +261,11 @@ def get_settings() -> Settings:
         ),
         chat_persist_enabled=_get_bool("CHAT_PERSIST_ENABLED", False),
         chat_persist_async=_get_bool("CHAT_PERSIST_ASYNC", True),
+        conversation_execution_authority_target=conversation_execution_authority_target,
+        conversation_execution_user_write_target=conversation_execution_user_write_target,
+        conversation_execution_context_read_target=conversation_execution_context_read_target,
+        conversation_assistant_write_target=conversation_assistant_write_target,
+        conversation_overlay_enabled=conversation_overlay_enabled,
         vector_db_path=_resolve_under_root(os.getenv("VECTOR_DB_PATH"), root=state_root, default="vector_database"),
         vector_db_summary_path=_resolve_under_root(os.getenv("VECTOR_DB_SUMMARY_PATH"), root=state_root, default="vector_database"),
         vector_db_pdf_path=_resolve_under_root(os.getenv("VECTOR_DB_PDF_PATH"), root=state_root, default="vector_database_pdf"),

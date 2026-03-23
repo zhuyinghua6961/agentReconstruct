@@ -133,7 +133,7 @@ def test_apply_default_doi_runtime_settings_populates_flags():
     assert target.strict_action == "remove"
 
 
-def test_create_app_registers_async_persistence_hooks_when_enabled(monkeypatch):
+def test_create_app_registers_authority_hooks_when_enabled(monkeypatch):
     monkeypatch.setenv("CHAT_PERSIST_ENABLED", "1")
     monkeypatch.setenv("CHAT_PERSIST_ASYNC", "1")
 
@@ -142,6 +142,7 @@ def test_create_app_registers_async_persistence_hooks_when_enabled(monkeypatch):
     app = create_app()
 
     assert app.state.persist_user_message_hook is not None
+    assert app.state.load_conversation_context_hook is not None
     assert app.state.persist_assistant_summary_hook is not None
-    assert app.state.persist_user_message_hook.keywords["async_enabled"] is True
+    assert app.state.persist_user_message_hook.keywords["async_enabled"] is False
     assert app.state.persist_assistant_summary_hook.keywords["async_enabled"] is True

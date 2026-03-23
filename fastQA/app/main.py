@@ -13,7 +13,7 @@ from app.core.runtime import bootstrap_generation_runtime, bootstrap_redis, clos
 from app.modules.documents.api import router as documents_router
 from app.routers.health import router as health_router
 from app.routers.qa import router as qa_router
-from app.services.chat_persistence import persist_assistant_summary, persist_user_message
+from app.services.chat_persistence import load_conversation_context, persist_assistant_summary, persist_user_message
 from app.services.limits import AskConcurrencyLimiter
 
 
@@ -53,7 +53,8 @@ def create_app() -> FastAPI:
     app.state.shared_llm_adapter = None
     app.state.shared_llm_adapter_ready = False
     app.state.pdf_web_bindings = None
-    app.state.persist_user_message_hook = partial(persist_user_message, async_enabled=settings.chat_persist_async) if settings.chat_persist_enabled else None
+    app.state.persist_user_message_hook = partial(persist_user_message, async_enabled=False) if settings.chat_persist_enabled else None
+    app.state.load_conversation_context_hook = load_conversation_context if settings.chat_persist_enabled else None
     app.state.persist_assistant_summary_hook = partial(persist_assistant_summary, async_enabled=settings.chat_persist_async) if settings.chat_persist_enabled else None
     bootstrap_redis(app.state)
     bootstrap_generation_runtime(app.state)

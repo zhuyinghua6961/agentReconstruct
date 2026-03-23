@@ -8,6 +8,16 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, BaseException):
+        return str(value)
+    return value
+
+
 @dataclass
 class AppError(Exception):
     message: str
@@ -53,7 +63,7 @@ def register_exception_handlers(app: FastAPI) -> None:
                 "success": False,
                 "error": "validation_error",
                 "code": "VALIDATION_ERROR",
-                "details": {"errors": exc.errors()},
+                "details": {"errors": _json_safe(exc.errors())},
             },
         )
 

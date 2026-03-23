@@ -3,7 +3,15 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
+import pytest
+
 import env_loader
+
+
+def _reload_config_module():
+    import config
+
+    return importlib.reload(config)
 
 
 def test_load_workspace_env_respects_file_precedence(tmp_path, monkeypatch):
@@ -105,7 +113,13 @@ def test_config_derives_service_roots_from_resource_root(tmp_path, monkeypatch):
     monkeypatch.delenv("PROMPTS_DIR", raising=False)
     monkeypatch.delenv("UPLOAD_DIR", raising=False)
     monkeypatch.delenv("CHAT_JSON_BASE_DIR", raising=False)
-    monkeypatch.delenv("CHROMA_PERSIST_DIR", raising=False)
+    monkeypatch.setenv("CHROMA_PERSIST_DIR", "")
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.delenv("CONVERSATION_EXECUTION_AUTHORITY_TARGET", raising=False)
+    monkeypatch.delenv("CONVERSATION_ASSISTANT_WRITE_TARGET", raising=False)
+    monkeypatch.delenv("CONVERSATION_OVERLAY_ENABLED", raising=False)
+    monkeypatch.delenv("CONVERSATION_USER_WRITE_TARGET", raising=False)
+    monkeypatch.delenv("CONVERSATION_CONTEXT_READ_TARGET", raising=False)
 
     import config
 
@@ -154,7 +168,7 @@ def test_config_maps_service_roots_to_state_runtime_and_assets(tmp_path, monkeyp
     monkeypatch.delenv("PROMPTS_DIR", raising=False)
     monkeypatch.delenv("UPLOAD_DIR", raising=False)
     monkeypatch.delenv("CHAT_JSON_BASE_DIR", raising=False)
-    monkeypatch.delenv("CHROMA_PERSIST_DIR", raising=False)
+    monkeypatch.setenv("CHROMA_PERSIST_DIR", "")
 
     import config
 
@@ -170,3 +184,31 @@ def test_config_maps_service_roots_to_state_runtime_and_assets(tmp_path, monkeyp
     assert reloaded.PROMPTS_DIR == str((asset_root / "prompts").resolve())
     assert reloaded.APP_RUNTIME_ROOT == str(runtime_root)
     assert reloaded.APP_RUNTIME_LOGS_DIR == str((runtime_root / "logs").resolve())
+
+
+def test_config_conversation_rollout_flags_keep_execution_authority_coupled(monkeypatch):
+    monkeypatch.setenv("CONVERSATION_EXECUTION_AUTHORITY_TARGET", "public_service")
+    monkeypatch.setenv("CONVERSATION_ASSISTANT_WRITE_TARGET", "legacy")
+    monkeypatch.setenv("CONVERSATION_OVERLAY_ENABLED", "1")
+    monkeypatch.delenv("CONVERSATION_USER_WRITE_TARGET", raising=False)
+    monkeypatch.delenv("CONVERSATION_CONTEXT_READ_TARGET", raising=False)
+
+    reloaded = _reload_config_module()
+
+    assert reloaded.CONVERSATION_EXECUTION_AUTHORITY_TARGET == "public_service"
+    assert reloaded.CONVERSATION_EXECUTION_USER_WRITE_TARGET == "public_service"
+    assert reloaded.CONVERSATION_EXECUTION_CONTEXT_READ_TARGET == "public_service"
+    assert reloaded.CONVERSATION_ASSISTANT_WRITE_TARGET == "legacy"
+    assert reloaded.CONVERSATION_OVERLAY_ENABLED is True
+
+
+def test_config_split_execution_authority_is_rejected_in_production(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("CONVERSATION_USER_WRITE_TARGET", "legacy")
+    monkeypatch.setenv("CONVERSATION_CONTEXT_READ_TARGET", "public_service")
+    monkeypatch.delenv("CONVERSATION_EXECUTION_AUTHORITY_TARGET", raising=False)
+
+    import config
+
+    with pytest.raises(ValueError, match="split authority"):
+        importlib.reload(config)

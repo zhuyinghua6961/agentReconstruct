@@ -43,6 +43,7 @@ def test_build_key_factory_namespaces_segments():
     assert factory.cache("conversation", "list", 1) == "agentcode:cache:conversation:list:1"
     assert factory.lock("qa", "stage1", "abc") == "agentcode:lock:qa:stage1:abc"
     assert factory.stream("ask", "fast") == "agentcode:stream:ask:fast"
+    assert factory.pending("conversation", "assistant", 7, 12) == "agentcode:pending:conversation:assistant:7:12"
 
 
 def test_redis_service_json_roundtrip_and_expire():

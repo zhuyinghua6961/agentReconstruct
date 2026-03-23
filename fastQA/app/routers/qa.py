@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from threading import Event
 import uuid
 from typing import Any, Iterator, Literal
 
+import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -137,25 +139,47 @@ def _resolve_user_id(request: Request, payload: AskRequest) -> tuple[int | None,
     return header_user_id or payload_user_id, None
 
 
-def _call_optional_hook(*, request: Request, hook_name: str, kwargs: dict[str, Any]) -> None:
+def _authority_target(request: Request, attribute_name: str) -> str:
+    settings = getattr(request.app.state, "settings", None)
+    return str(getattr(settings, attribute_name, "") or "").strip().lower()
+
+
+def _require_authority_user_write(request: Request) -> bool:
+    return _authority_target(request, "conversation_execution_user_write_target") == "public_service"
+
+
+def _require_authority_context_read(request: Request) -> bool:
+    return _authority_target(request, "conversation_execution_context_read_target") == "public_service"
+
+
+def _call_hook(*, request: Request, hook_name: str, kwargs: dict[str, Any], strict: bool = False) -> Any:
     hook = getattr(request.app.state, hook_name, None)
     if not callable(hook):
-        return
+        if strict:
+            raise RuntimeError(f"fastqa required hook missing: {hook_name}")
+        return None
     logger = getattr(request.app, "logger", None)
     try:
-        hook(**kwargs)
+        return hook(**kwargs)
     except Exception:
+        if strict:
+            raise
         if logger is not None:
             logger.warning("fastqa optional hook failed: %s", hook_name, exc_info=True)
+        return None
 
 
 def _persist_user_message_if_needed(*, request: Request, adapted_request: GatewayAskRequest, route: str, trace_id: str) -> None:
     conversation_id = _conversation_id_int(adapted_request.conversation_id)
     if conversation_id is None:
         return
-    _call_optional_hook(
+    strict = _require_authority_user_write(request)
+    if strict and _positive_int(adapted_request.user_id) is None:
+        raise RuntimeError("fastqa authority user write requires user_id")
+    result = _call_hook(
         request=request,
         hook_name="persist_user_message_hook",
+        strict=strict,
         kwargs={
             "user_id": adapted_request.user_id,
             "conversation_id": conversation_id,
@@ -167,6 +191,67 @@ def _persist_user_message_if_needed(*, request: Request, adapted_request: Gatewa
             "payload": adapted_request,
         },
     )
+    if strict and not isinstance(result, dict):
+        raise RuntimeError("fastqa authority user write returned no result")
+
+
+def _apply_authority_context(
+    *,
+    adapted_request: GatewayAskRequest,
+    authority_context: dict[str, Any] | None,
+) -> GatewayAskRequest:
+    if not isinstance(authority_context, dict):
+        return adapted_request
+    chat_history = authority_context.get("chat_history")
+    normalized_chat_history = [dict(item) for item in chat_history if isinstance(item, dict)] if isinstance(chat_history, list) else list(adapted_request.chat_history)
+    merged_options = dict(adapted_request.options or {})
+    snapshot = authority_context.get("snapshot")
+    if isinstance(snapshot, dict):
+        merged_options["authority_context_snapshot"] = snapshot
+    conversation_state = authority_context.get("conversation_state")
+    if isinstance(conversation_state, dict):
+        merged_options["authority_conversation_state"] = conversation_state
+    summary = authority_context.get("summary")
+    if isinstance(summary, dict):
+        merged_options["authority_summary"] = summary
+    pending_overlay = authority_context.get("pending_overlay")
+    if isinstance(pending_overlay, dict):
+        merged_options["authority_pending_overlay"] = dict(pending_overlay)
+    if authority_context.get("snapshot_version") is not None:
+        merged_options["authority_snapshot_version"] = authority_context.get("snapshot_version")
+    return replace(adapted_request, chat_history=normalized_chat_history, options=merged_options)
+
+
+def _load_conversation_context_if_needed(
+    *,
+    request: Request,
+    adapted_request: GatewayAskRequest,
+    route: str,
+    trace_id: str,
+) -> GatewayAskRequest:
+    conversation_id = _conversation_id_int(adapted_request.conversation_id)
+    if conversation_id is None:
+        return adapted_request
+    strict = _require_authority_context_read(request)
+    if strict and _positive_int(adapted_request.user_id) is None:
+        raise RuntimeError("fastqa authority context read requires user_id")
+    authority_context = _call_hook(
+        request=request,
+        hook_name="load_conversation_context_hook",
+        strict=strict,
+        kwargs={
+            "user_id": adapted_request.user_id,
+            "conversation_id": conversation_id,
+            "trace_id": trace_id,
+            "route": route,
+            "requested_mode": adapted_request.requested_mode,
+            "actual_mode": adapted_request.actual_mode,
+            "payload": adapted_request,
+        },
+    )
+    if strict and not isinstance(authority_context, dict):
+        raise RuntimeError("fastqa authority context read returned no snapshot")
+    return _apply_authority_context(adapted_request=adapted_request, authority_context=authority_context)
 
 
 def _persist_assistant_summary_if_needed(
@@ -183,7 +268,7 @@ def _persist_assistant_summary_if_needed(
     summary = tap.summary
     if not summary.done_seen:
         return
-    _call_optional_hook(
+    _call_hook(
         request=request,
         hook_name="persist_assistant_summary_hook",
         kwargs={
@@ -285,6 +370,40 @@ def _done_event(
         "trace_id": trace_id,
         "file_selection": dict(file_selection or {}),
     }
+
+
+def _authority_preflight_error_response(
+    *,
+    trace_id: str,
+    route: str,
+    requested_mode: str,
+    actual_mode: str,
+    exc: Exception,
+) -> JSONResponse:
+    status_code = 500
+    code = "FASTQA_AUTHORITY_PRECONDITION_FAILED"
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = 503 if exc.response.status_code >= 500 else 502
+        code = "FASTQA_AUTHORITY_HTTP_ERROR"
+    elif isinstance(exc, httpx.RequestError):
+        status_code = 503
+        code = "FASTQA_AUTHORITY_UNAVAILABLE"
+    elif isinstance(exc, ValueError):
+        status_code = 502
+        code = "FASTQA_AUTHORITY_CONTRACT_INVALID"
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "success": False,
+            "code": code,
+            "error": str(exc) or "fastQA authority preflight failed",
+            "message": str(exc) or "fastQA authority preflight failed",
+            "trace_id": trace_id,
+            "requested_mode": requested_mode,
+            "actual_mode": actual_mode,
+            "route": route,
+        },
+    )
 
 
 def _runtime_error_event(
@@ -871,7 +990,23 @@ def ask(payload: AskRequest, request: Request):
         return JSONResponse(status_code=status_code, content=error_payload)
     cancel_event = Event()
     route, file_context, used_files, _file_selection = _resolve_route_context(adapted_request, request)
-    _persist_user_message_if_needed(request=request, adapted_request=adapted_request, route=route, trace_id=trace_id)
+    try:
+        _persist_user_message_if_needed(request=request, adapted_request=adapted_request, route=route, trace_id=trace_id)
+        adapted_request = _load_conversation_context_if_needed(
+            request=request,
+            adapted_request=adapted_request,
+            route=route,
+            trace_id=trace_id,
+        )
+    except Exception as exc:
+        limiter.release()
+        return _authority_preflight_error_response(
+            trace_id=trace_id,
+            route=route,
+            requested_mode=adapted_request.requested_mode,
+            actual_mode=adapted_request.actual_mode,
+            exc=exc,
+        )
     try:
         events = list(
             _wrap_stream_with_tap(
@@ -919,7 +1054,23 @@ def ask_stream(payload: AskRequest, request: Request):
     if not limiter.try_acquire():
         error_payload, status_code = _busy_payload(request=request)
         return JSONResponse(status_code=status_code, content=error_payload)
-    _persist_user_message_if_needed(request=request, adapted_request=adapted_request, route=route, trace_id=trace_id)
+    try:
+        _persist_user_message_if_needed(request=request, adapted_request=adapted_request, route=route, trace_id=trace_id)
+        adapted_request = _load_conversation_context_if_needed(
+            request=request,
+            adapted_request=adapted_request,
+            route=route,
+            trace_id=trace_id,
+        )
+    except Exception as exc:
+        limiter.release()
+        return _authority_preflight_error_response(
+            trace_id=trace_id,
+            route=route,
+            requested_mode=adapted_request.requested_mode,
+            actual_mode=adapted_request.actual_mode,
+            exc=exc,
+        )
     return sse_response(
         request=request,
         source=_wrap_stream_with_tap(

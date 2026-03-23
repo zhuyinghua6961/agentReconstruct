@@ -3,7 +3,17 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
+import pytest
+
 import app.core.env_loader as env_loader
+
+
+def _reload_config_module():
+    import app.core.config as config
+
+    reloaded = importlib.reload(config)
+    reloaded.get_settings.cache_clear()
+    return reloaded
 
 
 def test_iter_workspace_env_files_uses_service_config_root(tmp_path, monkeypatch):
@@ -58,6 +68,12 @@ def test_config_derives_service_roots_from_resource_root(tmp_path, monkeypatch):
     monkeypatch.delenv("CHAT_JSON_BASE_DIR", raising=False)
     monkeypatch.delenv("MATERIAL_AGENT_PROMPTS_DIR", raising=False)
     monkeypatch.delenv("FASTQA_LOGS_DIR", raising=False)
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.delenv("CONVERSATION_EXECUTION_AUTHORITY_TARGET", raising=False)
+    monkeypatch.delenv("CONVERSATION_ASSISTANT_WRITE_TARGET", raising=False)
+    monkeypatch.delenv("CONVERSATION_OVERLAY_ENABLED", raising=False)
+    monkeypatch.delenv("CONVERSATION_USER_WRITE_TARGET", raising=False)
+    monkeypatch.delenv("CONVERSATION_CONTEXT_READ_TARGET", raising=False)
 
     import app.core.config as config
 
@@ -112,3 +128,34 @@ def test_iter_workspace_env_files_falls_back_to_workspace_when_resource_config_m
     )
 
     assert env_loader.iter_workspace_env_files() == env_loader.ENV_FILE_CANDIDATES
+
+
+def test_config_conversation_rollout_flags_keep_execution_authority_coupled(monkeypatch):
+    monkeypatch.setenv("CONVERSATION_EXECUTION_AUTHORITY_TARGET", "public_service")
+    monkeypatch.setenv("CONVERSATION_ASSISTANT_WRITE_TARGET", "legacy")
+    monkeypatch.setenv("CONVERSATION_OVERLAY_ENABLED", "1")
+    monkeypatch.delenv("CONVERSATION_USER_WRITE_TARGET", raising=False)
+    monkeypatch.delenv("CONVERSATION_CONTEXT_READ_TARGET", raising=False)
+
+    config = _reload_config_module()
+    settings = config.get_settings()
+
+    assert settings.conversation_execution_authority_target == "public_service"
+    assert settings.conversation_execution_user_write_target == "public_service"
+    assert settings.conversation_execution_context_read_target == "public_service"
+    assert settings.conversation_assistant_write_target == "legacy"
+    assert settings.conversation_overlay_enabled is True
+
+
+def test_config_split_execution_authority_is_rejected_in_production(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("CONVERSATION_USER_WRITE_TARGET", "legacy")
+    monkeypatch.setenv("CONVERSATION_CONTEXT_READ_TARGET", "public_service")
+    monkeypatch.delenv("CONVERSATION_EXECUTION_AUTHORITY_TARGET", raising=False)
+
+    import app.core.config as config
+
+    reloaded = importlib.reload(config)
+    reloaded.get_settings.cache_clear()
+    with pytest.raises(ValueError, match="split authority"):
+        reloaded.get_settings()

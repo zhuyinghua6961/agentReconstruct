@@ -320,6 +320,165 @@ class ConversationRepository:
             row.pop("metadata_json", None)
         return rows
 
+    def _assistant_inbox_metadata(self, row: dict[str, Any]) -> dict[str, Any] | None:
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        if metadata.get("authority_assistant_async") is not True:
+            return None
+        return metadata
+
+    def _list_assistant_inbox_rows(self, *, conversation_id: int | None = None, user_id: int | None = None) -> list[dict[str, Any]]:
+        clauses = ["role = %s"]
+        params: list[Any] = ["assistant"]
+        if conversation_id is not None:
+            clauses.append("conversation_id = %s")
+            params.append(int(conversation_id))
+        if user_id is not None:
+            clauses.append("user_id = %s")
+            params.append(int(user_id))
+        rows = self._execute_query(
+            f"""
+            SELECT id, conversation_id, user_id, role, content, metadata_json, created_at
+            FROM conversation_messages
+            WHERE {' AND '.join(clauses)}
+            ORDER BY created_at ASC, id ASC
+            """,
+            tuple(params),
+        )
+        normalized: list[dict[str, Any]] = []
+        for row in rows:
+            metadata_raw = row.get("metadata_json")
+            if isinstance(metadata_raw, str):
+                try:
+                    row["metadata"] = json.loads(metadata_raw)
+                except Exception:
+                    row["metadata"] = {}
+            else:
+                row["metadata"] = metadata_raw or {}
+            row.pop("metadata_json", None)
+            if self._assistant_inbox_metadata(row) is None:
+                continue
+            normalized.append(row)
+        return normalized
+
+    def get_authority_assistant_task(self, *, task_id: int) -> dict[str, Any] | None:
+        rows = self._list_assistant_inbox_rows()
+        for row in rows:
+            if int(row.get("id") or 0) == int(task_id):
+                return row
+        return None
+
+    def enqueue_authority_assistant_task(
+        self,
+        *,
+        conversation_id: int,
+        user_id: int,
+        trace_id: str,
+        source_service: str,
+        route: str,
+        requested_mode: str,
+        actual_mode: str,
+        idempotency_key: str,
+        final_event: dict[str, Any],
+    ) -> dict[str, Any]:
+        for row in self._list_assistant_inbox_rows(conversation_id=conversation_id, user_id=user_id):
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            if str(metadata.get("idempotency_key") or "").strip() == str(idempotency_key or "").strip():
+                return {"task_id": int(row.get("id") or 0), "deduped": True, "metadata": metadata}
+        created_at = now_beijing()
+        metadata = {
+            "authority_assistant_async": True,
+            "assistant_async_state": "pending",
+            "trace_id": str(trace_id or "").strip(),
+            "source_service": str(source_service or "").strip(),
+            "route": str(route or "").strip(),
+            "requested_mode": str(requested_mode or "").strip(),
+            "actual_mode": str(actual_mode or "").strip(),
+            "idempotency_key": str(idempotency_key or "").strip(),
+            "final_event": dict(final_event or {}),
+            "accepted_at": created_at.isoformat(timespec="seconds"),
+            "processing_started_at": None,
+            "materialized_message_id": "",
+            "last_error": "",
+        }
+        metadata_json = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+        task_id = self._execute_update(
+            """
+            INSERT INTO conversation_messages (conversation_id, user_id, role, content, metadata_json, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (
+                int(conversation_id),
+                int(user_id),
+                "assistant",
+                str((final_event or {}).get("answer_text") or ""),
+                metadata_json,
+                created_at,
+            ),
+        )
+        return {"task_id": int(task_id), "deduped": False, "metadata": metadata}
+
+    def claim_pending_authority_assistant_tasks(self, *, limit: int) -> list[dict[str, Any]]:
+        claimed: list[dict[str, Any]] = []
+        for row in self._list_assistant_inbox_rows():
+            if len(claimed) >= max(1, int(limit)):
+                break
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            if str(metadata.get("assistant_async_state") or "").strip() != "pending":
+                continue
+            updated = dict(metadata)
+            updated["assistant_async_state"] = "processing"
+            updated["processing_started_at"] = now_beijing().isoformat(timespec="seconds")
+            metadata_json = json.dumps(updated, ensure_ascii=False, separators=(",", ":"))
+            affected = self._execute_update(
+                "UPDATE conversation_messages SET metadata_json = %s WHERE id = %s",
+                (metadata_json, int(row.get("id") or 0)),
+            )
+            if int(affected or 0) <= 0:
+                continue
+            refreshed = self.get_authority_assistant_task(task_id=int(row.get("id") or 0))
+            if refreshed is not None:
+                claimed.append(refreshed)
+        return claimed
+
+    def mark_authority_assistant_task_done(self, *, task_id: int, materialized_message_id: str, note: str = "ok") -> int:
+        row = self.get_authority_assistant_task(task_id=task_id)
+        if row is None:
+            return 0
+        metadata = dict(row.get("metadata") or {})
+        metadata["assistant_async_state"] = "done"
+        metadata["materialized_message_id"] = str(materialized_message_id or "")
+        metadata["processing_started_at"] = None
+        metadata["last_error"] = str(note or "")
+        metadata_json = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+        return self._execute_update("UPDATE conversation_messages SET metadata_json = %s WHERE id = %s", (metadata_json, int(task_id)))
+
+    def mark_authority_assistant_task_failed(self, *, task_id: int, last_error: str) -> int:
+        row = self.get_authority_assistant_task(task_id=task_id)
+        if row is None:
+            return 0
+        metadata = dict(row.get("metadata") or {})
+        metadata["assistant_async_state"] = "failed"
+        metadata["processing_started_at"] = None
+        metadata["last_error"] = str(last_error or "")
+        metadata_json = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+        return self._execute_update("UPDATE conversation_messages SET metadata_json = %s WHERE id = %s", (metadata_json, int(task_id)))
+
+    def authority_assistant_inbox_status(self) -> dict[str, Any]:
+        rows = self._list_assistant_inbox_rows()
+        backlog = 0
+        processing = 0
+        failed = 0
+        for row in rows:
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            state = str(metadata.get("assistant_async_state") or "").strip()
+            if state == "pending":
+                backlog += 1
+            elif state == "processing":
+                processing += 1
+            elif state == "failed":
+                failed += 1
+        return {"backlog": backlog, "processing": processing, "failed": failed, "enabled": True}
+
     def add_uploaded_file(
         self,
         *,

@@ -22,6 +22,7 @@ from app.integrations.storage.local import LocalStorageBackend
 from app.integrations.storage.minio import MinIOStorageBackend
 from app.modules.auth.repository import AuthRepository
 from app.modules.auth.service import AuthService, set_auth_service
+from app.modules.conversation.assistant_inbox import AuthorityAssistantInboxWorker
 from app.modules.conversation.outbox import ConversationOutboxRepository
 from app.modules.conversation.outbox_worker import ChatJsonOutboxWorker
 from app.modules.conversation.upload_processing_worker import UploadProcessingWorker
@@ -82,6 +83,10 @@ class PublicServiceRuntime:
     storage_backend: Any | None = None
     conversation_outbox_worker: Any | None = None
     conversation_outbox_stop_event: Any | None = None
+    authority_assistant_inbox_worker: Any | None = None
+    authority_assistant_inbox_thread: Any | None = None
+    authority_assistant_inbox_stop_event: Any | None = None
+    authority_assistant_inbox_status: dict[str, Any] = field(default_factory=dict)
 
 
 def _set_component_status(
@@ -418,6 +423,18 @@ def create_runtime(settings: Settings | None = None) -> PublicServiceRuntime:
         "last_error": "",
         "last_run_at": None,
     }
+    runtime.authority_assistant_inbox_status = {
+        "state": "uninitialized",
+        "thread_alive": False,
+        "loops": 0,
+        "last_summary": None,
+        "last_error": "",
+        "last_run_at": None,
+        "backlog": 0,
+        "processing": 0,
+        "failed": 0,
+        "enabled": True,
+    }
     _set_component_status(runtime, "public_modules", status="ok", detail="public service modules wired")
     _bootstrap_database(runtime)
     _bootstrap_redis(runtime)
@@ -434,6 +451,25 @@ def _outbox_wait_seconds(worker: Any) -> float:
         return max(0.05, float(getattr(getattr(worker, "config", None), "poll_interval_ms", 1000)) / 1000.0)
     except Exception:
         return 1.0
+
+
+def _authority_assistant_inbox_wait_seconds(worker: Any) -> float:
+    try:
+        return max(0.05, float(getattr(getattr(worker, "config", None), "poll_interval_ms", 1000)) / 1000.0)
+    except Exception:
+        return 1.0
+
+
+def _authority_assistant_inbox_probe(runtime: PublicServiceRuntime) -> dict[str, Any]:
+    repo = getattr(runtime, "conversation_repository", None)
+    if repo is None or not hasattr(repo, "authority_assistant_inbox_status"):
+        return {}
+    try:
+        status = repo.authority_assistant_inbox_status()
+    except Exception as exc:
+        logger.warning("authority assistant inbox probe failed: %s", exc)
+        return {"probe_error": str(exc)}
+    return dict(status or {})
 
 
 def _run_conversation_outbox_loop(runtime: PublicServiceRuntime) -> None:
@@ -527,6 +563,159 @@ def _run_conversation_outbox_loop(runtime: PublicServiceRuntime) -> None:
         status="stopped",
         detail="conversation outbox worker stopped",
         extra={"thread_alive": False},
+    )
+
+
+def _run_authority_assistant_inbox_loop(runtime: PublicServiceRuntime) -> None:
+    worker = runtime.authority_assistant_inbox_worker
+    stop_event = runtime.authority_assistant_inbox_stop_event
+    if worker is None or stop_event is None:
+        return
+
+    snapshot = _authority_assistant_inbox_probe(runtime)
+    runtime.health_flags["authority_assistant_inbox"] = "running"
+    runtime.authority_assistant_inbox_status.update({"state": "running", "thread_alive": True, **snapshot})
+    _set_component_status(
+        runtime,
+        "authority_assistant_inbox",
+        status="ok",
+        detail="authority assistant inbox worker running",
+        extra={"thread_alive": True, **snapshot},
+    )
+
+    while not stop_event.is_set():
+        try:
+            summary = worker.run_once()
+            loops = int(runtime.authority_assistant_inbox_status.get("loops") or 0) + 1
+            snapshot = _authority_assistant_inbox_probe(runtime)
+            runtime.health_flags["authority_assistant_inbox"] = "ok"
+            runtime.authority_assistant_inbox_status.update(
+                {
+                    "state": "running",
+                    "thread_alive": True,
+                    "loops": loops,
+                    "last_summary": dict(summary),
+                    "last_error": "",
+                    "last_run_at": _now_iso(),
+                    **snapshot,
+                }
+            )
+            current_status = str(((runtime.component_status or {}).get("authority_assistant_inbox") or {}).get("status") or "").strip().lower()
+            if current_status != "ok":
+                _set_component_status(
+                    runtime,
+                    "authority_assistant_inbox",
+                    status="ok",
+                    detail="authority assistant inbox worker running",
+                    extra={"thread_alive": True, **snapshot},
+                )
+        except DatabaseUnavailableError as exc:
+            snapshot = _authority_assistant_inbox_probe(runtime)
+            runtime.health_flags["authority_assistant_inbox"] = "degraded"
+            runtime.authority_assistant_inbox_status.update(
+                {
+                    "state": "degraded",
+                    "thread_alive": True,
+                    "last_error": str(exc),
+                    "last_run_at": _now_iso(),
+                    **snapshot,
+                }
+            )
+            _set_component_status(
+                runtime,
+                "authority_assistant_inbox",
+                status="degraded",
+                detail="authority assistant inbox worker waiting for database",
+                error=str(exc),
+                extra={"thread_alive": True, **snapshot},
+            )
+        except Exception as exc:
+            logger.exception("authority assistant inbox worker loop failed")
+            snapshot = _authority_assistant_inbox_probe(runtime)
+            runtime.health_flags["authority_assistant_inbox"] = "degraded"
+            runtime.authority_assistant_inbox_status.update(
+                {
+                    "state": "degraded",
+                    "thread_alive": True,
+                    "last_error": str(exc),
+                    "last_run_at": _now_iso(),
+                    **snapshot,
+                }
+            )
+            _set_component_status(
+                runtime,
+                "authority_assistant_inbox",
+                status="degraded",
+                detail="authority assistant inbox worker loop failed",
+                error=str(exc),
+                extra={"thread_alive": True, **snapshot},
+            )
+        stop_event.wait(_authority_assistant_inbox_wait_seconds(worker))
+
+    snapshot = _authority_assistant_inbox_probe(runtime)
+    runtime.health_flags["authority_assistant_inbox"] = "stopped"
+    runtime.authority_assistant_inbox_status.update({"state": "stopped", "thread_alive": False, **snapshot})
+    _set_component_status(
+        runtime,
+        "authority_assistant_inbox",
+        status="stopped",
+        detail="authority assistant inbox worker stopped",
+        extra={"thread_alive": False, **snapshot},
+    )
+
+
+def _start_authority_assistant_inbox_worker(
+    runtime: PublicServiceRuntime,
+    *,
+    worker_cls: type[AuthorityAssistantInboxWorker] = AuthorityAssistantInboxWorker,
+    thread_cls: type[Thread] = Thread,
+    event_cls: type[Event] = Event,
+) -> None:
+    stop_event = event_cls()
+    worker = worker_cls(
+        repository=runtime.conversation_repository,
+        conversation_service=runtime.conversation_service,
+    )
+    thread = thread_cls(
+        target=_run_authority_assistant_inbox_loop,
+        args=(runtime,),
+        name="authority-assistant-inbox-worker",
+        daemon=True,
+    )
+    runtime.authority_assistant_inbox_worker = worker
+    runtime.authority_assistant_inbox_stop_event = stop_event
+    runtime.authority_assistant_inbox_thread = thread
+    snapshot = _authority_assistant_inbox_probe(runtime)
+    runtime.authority_assistant_inbox_status.update({"state": "starting", "thread_alive": False, "last_error": "", **snapshot})
+    _set_component_status(
+        runtime,
+        "authority_assistant_inbox",
+        status="ok",
+        detail="authority assistant inbox worker starting",
+        extra={"thread_alive": False, **snapshot},
+    )
+    thread.start()
+
+
+def _stop_authority_assistant_inbox_worker(runtime: PublicServiceRuntime, *, join_timeout: float = 2.0) -> None:
+    stop_event = runtime.authority_assistant_inbox_stop_event
+    thread = runtime.authority_assistant_inbox_thread
+    if stop_event is not None:
+        stop_event.set()
+    if thread is not None and hasattr(thread, "join"):
+        try:
+            thread.join(timeout=join_timeout)
+        except Exception:
+            logger.warning("authority assistant inbox worker join failed", exc_info=True)
+    snapshot = _authority_assistant_inbox_probe(runtime)
+    thread_alive = bool(thread.is_alive()) if thread is not None and hasattr(thread, "is_alive") else False
+    runtime.authority_assistant_inbox_status.update({"state": "stopped", "thread_alive": thread_alive, **snapshot})
+    _set_component_status(
+        runtime,
+        "authority_assistant_inbox",
+        status="stopped",
+        detail="authority assistant inbox worker stopped",
+        extra={"thread_alive": thread_alive, **snapshot},
     )
 
 
@@ -632,6 +821,7 @@ async def lifespan(app: FastAPI):
     app.state.redis_service = runtime.redis_service
     runtime.health_flags["startup"] = "ok"
     _start_conversation_outbox_worker(runtime)
+    _start_authority_assistant_inbox_worker(runtime)
     try:
         yield
     finally:
@@ -641,5 +831,6 @@ async def lifespan(app: FastAPI):
                 worker.shutdown(wait=False)
             except Exception:
                 logger.warning("upload processing worker shutdown failed", exc_info=True)
+        _stop_authority_assistant_inbox_worker(runtime)
         _stop_conversation_outbox_worker(runtime)
         runtime.health_flags["shutdown"] = "ok"

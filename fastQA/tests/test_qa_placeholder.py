@@ -5,6 +5,7 @@ from contextlib import contextmanager
 
 from app.main import app
 from app.routers.qa import AskRequest, ask, ask_stream
+from app.services import chat_persistence
 
 
 class _FakeRequest:
@@ -451,3 +452,198 @@ def test_fast_mode_stream_preserves_reference_objects_while_keeping_reference_st
     assert response.status_code == 200
     assert '"references": ["10.1/a"]' in body
     assert '"reference_objects": [{"doi": "10.1/a", "chunk_count": 2, "sample_text": "demo"}]' in body
+
+
+def test_fast_mode_stream_fail_fast_when_authority_user_write_fails(monkeypatch):
+    def _persist_user_message_hook(**_kwargs):
+        raise RuntimeError("authority down")
+
+    monkeypatch.setattr("app.routers.qa._require_authority_user_write", lambda _request: True)
+    monkeypatch.setattr(app.state, "persist_user_message_hook", _persist_user_message_hook, raising=False)
+
+    response = ask_stream(
+        AskRequest(question="hello", requested_mode="fast", conversation_id=12, user_id=7),
+        _FakeRequest(app, "/api/ask_stream"),
+    )
+
+    assert response.status_code == 500
+    payload = _decode_json_response(response)
+    assert payload["code"] == "FASTQA_AUTHORITY_PRECONDITION_FAILED"
+    assert payload["error"] == "authority down"
+
+
+
+def test_fast_mode_stream_fail_fast_when_authority_context_read_fails(monkeypatch):
+    def _persist_user_message_hook(**_kwargs):
+        return {"success": True}
+
+    def _load_conversation_context_hook(**_kwargs):
+        raise RuntimeError("snapshot down")
+
+    monkeypatch.setattr("app.routers.qa._require_authority_context_read", lambda _request: True)
+    monkeypatch.setattr(app.state, "persist_user_message_hook", _persist_user_message_hook, raising=False)
+    monkeypatch.setattr(app.state, "load_conversation_context_hook", _load_conversation_context_hook, raising=False)
+
+    response = ask_stream(
+        AskRequest(question="hello", requested_mode="fast", conversation_id=12, user_id=7),
+        _FakeRequest(app, "/api/ask_stream"),
+    )
+
+    assert response.status_code == 500
+    payload = _decode_json_response(response)
+    assert payload["code"] == "FASTQA_AUTHORITY_PRECONDITION_FAILED"
+    assert payload["error"] == "snapshot down"
+
+
+
+def test_fast_mode_sync_ask_applies_authority_context_before_execution(monkeypatch):
+    captured = {}
+
+    def _persist_user_message_hook(**_kwargs):
+        return {"success": True}
+
+    def _load_conversation_context_hook(**_kwargs):
+        return {
+            "chat_history": [{"role": "assistant", "content": "previous answer", "trace_id": "trace-prev"}],
+            "snapshot": {"conversation_id": 12},
+            "conversation_state": {"last_turn_route": "kb_qa"},
+            "summary": {"short_summary": "summary"},
+            "snapshot_version": 3,
+        }
+
+    def _frames(**kwargs):
+        captured["chat_history"] = kwargs["adapted_request"].chat_history
+        captured["options"] = kwargs["adapted_request"].options
+        yield {"type": "metadata", "route": "kb_qa", "query_mode": "kb_qa"}
+        yield {"type": "content", "content": "hello"}
+        yield {"type": "done", "route": "kb_qa", "references": []}
+
+    monkeypatch.setattr("app.routers.qa._require_authority_context_read", lambda _request: True)
+    monkeypatch.setattr(app.state, "persist_user_message_hook", _persist_user_message_hook, raising=False)
+    monkeypatch.setattr(app.state, "load_conversation_context_hook", _load_conversation_context_hook, raising=False)
+    monkeypatch.setattr("app.routers.qa._iter_route_frames", _frames)
+
+    response = ask(
+        AskRequest(question="hello", requested_mode="fast", conversation_id=12, user_id=7),
+        _FakeRequest(app, "/api/ask"),
+    )
+    payload = _decode_json_response(response)
+
+    assert response.status_code == 200
+    assert payload["final_answer"] == "hello"
+    assert captured["chat_history"] == [{"role": "assistant", "content": "previous answer", "trace_id": "trace-prev"}]
+    assert captured["options"]["authority_context_snapshot"] == {"conversation_id": 12}
+    assert captured["options"]["authority_conversation_state"] == {"last_turn_route": "kb_qa"}
+    assert captured["options"]["authority_summary"] == {"short_summary": "summary"}
+    assert captured["options"]["authority_snapshot_version"] == 3
+
+
+def test_fast_mode_sync_ask_keeps_pending_overlay_metadata_in_options(monkeypatch):
+    captured = {}
+
+    def _persist_user_message_hook(**_kwargs):
+        return {"success": True}
+
+    def _load_conversation_context_hook(**_kwargs):
+        return {
+            "chat_history": [
+                {"role": "assistant", "content": "previous answer", "trace_id": "trace-prev"},
+                {"role": "assistant", "content": "pending final", "trace_id": "trace-pending"},
+            ],
+            "snapshot": {"conversation_id": 12},
+            "conversation_state": {"last_turn_route": "kb_qa"},
+            "summary": {"short_summary": "summary"},
+            "snapshot_version": 3,
+            "pending_overlay": {"trace_id": "trace-pending", "route": "kb_qa", "assistant_content": "pending final"},
+        }
+
+    def _frames(**kwargs):
+        captured["chat_history"] = kwargs["adapted_request"].chat_history
+        captured["options"] = kwargs["adapted_request"].options
+        yield {"type": "metadata", "route": "kb_qa", "query_mode": "kb_qa"}
+        yield {"type": "content", "content": "hello"}
+        yield {"type": "done", "route": "kb_qa", "references": []}
+
+    monkeypatch.setattr("app.routers.qa._require_authority_context_read", lambda _request: True)
+    monkeypatch.setattr(app.state, "persist_user_message_hook", _persist_user_message_hook, raising=False)
+    monkeypatch.setattr(app.state, "load_conversation_context_hook", _load_conversation_context_hook, raising=False)
+    monkeypatch.setattr("app.routers.qa._iter_route_frames", _frames)
+
+    response = ask(
+        AskRequest(question="hello", requested_mode="fast", conversation_id=12, user_id=7),
+        _FakeRequest(app, "/api/ask"),
+    )
+    payload = _decode_json_response(response)
+
+    assert response.status_code == 200
+    assert payload["final_answer"] == "hello"
+    assert captured["chat_history"][-1] == {"role": "assistant", "content": "pending final", "trace_id": "trace-pending"}
+    assert captured["options"]["authority_pending_overlay"] == {
+        "trace_id": "trace-pending",
+        "route": "kb_qa",
+        "assistant_content": "pending final",
+    }
+
+
+def test_fast_mode_sync_ask_ignores_pending_overlay_redis_failure(monkeypatch):
+    calls = {}
+    captured = {}
+
+    class _Client:
+        def read_context_snapshot(self, **kwargs):
+            return {
+                "conversation_id": 12,
+                "user_id": 7,
+                "snapshot_version": 3,
+                "updated_at": "2026-03-22T12:35:00Z",
+                "summary": {"short_summary": "demo", "memory_facts": [], "open_threads": []},
+                "recent_turns": [
+                    {
+                        "message_id": "msg-1",
+                        "role": "assistant",
+                        "content": "previous answer",
+                        "created_at": "2026-03-22T12:34:56Z",
+                        "trace_id": "trace-prev",
+                    }
+                ],
+                "conversation_state": {"last_turn_route": "kb_qa", "last_focus_file_ids": [8], "last_assistant_trace_id": "trace-prev"},
+            }
+
+    def _persist_user_message_hook(**_kwargs):
+        return {"success": True}
+
+    def _load_pending_assistant_overlay(**_kwargs):
+        calls["overlay_attempted"] = True
+        raise RuntimeError("redis down")
+
+    def _frames(**kwargs):
+        captured["chat_history"] = kwargs["adapted_request"].chat_history
+        yield {"type": "metadata", "route": "kb_qa", "query_mode": "kb_qa"}
+        yield {"type": "content", "content": "hello"}
+        yield {"type": "done", "route": "kb_qa", "references": []}
+
+    monkeypatch.setattr(chat_persistence, "_get_authority_client", lambda: _Client())
+    monkeypatch.setattr(chat_persistence, "_load_pending_assistant_overlay", _load_pending_assistant_overlay, raising=False)
+    monkeypatch.setattr("app.routers.qa._require_authority_context_read", lambda _request: True)
+    monkeypatch.setattr(app.state, "persist_user_message_hook", _persist_user_message_hook, raising=False)
+    monkeypatch.setattr(app.state, "load_conversation_context_hook", chat_persistence.load_conversation_context, raising=False)
+    monkeypatch.setattr("app.routers.qa._iter_route_frames", _frames)
+
+    response = ask(
+        AskRequest(question="hello", requested_mode="fast", conversation_id=12, user_id=7),
+        _FakeRequest(app, "/api/ask"),
+    )
+    payload = _decode_json_response(response)
+
+    assert response.status_code == 200
+    assert payload["final_answer"] == "hello"
+    assert calls["overlay_attempted"] is True
+    assert captured["chat_history"] == [
+        {
+            "role": "assistant",
+            "content": "previous answer",
+            "trace_id": "trace-prev",
+            "created_at": "2026-03-22T12:34:56Z",
+            "message_id": "msg-1",
+        }
+    ]
