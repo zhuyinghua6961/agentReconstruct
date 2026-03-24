@@ -2,37 +2,61 @@
 set -euo pipefail
 
 PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+RESOURCE_DIR="$(cd "$PROJECT_ROOT/../resource" 2>/dev/null && pwd || true)"
 APP_DIR="$PROJECT_ROOT/backend"
 RUNTIME_DIR="$PROJECT_ROOT/.runtime"
-PID_FILE="$RUNTIME_DIR/public-service-gunicorn.pid"
-LOG_FILE="$RUNTIME_DIR/public-service-gunicorn.log"
-mkdir -p "$RUNTIME_DIR"
-
-if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-  echo "public-service gunicorn already running: pid=$(cat "$PID_FILE")"
-  exit 0
+LOG_DIR_DEFAULT="$PROJECT_ROOT/.runtime/logs"
+if [[ -n "${RESOURCE_DIR:-}" ]]; then
+  LOG_DIR_DEFAULT="$RESOURCE_DIR/logs/dev/public-service"
 fi
+PID_FILE="$RUNTIME_DIR/public-service-gunicorn.pid"
+STARTUP_LOG_FILE="$LOG_DIR_DEFAULT/public-service-startup.log"
+ACCESS_LOG_FILE="$LOG_DIR_DEFAULT/public-service-access.log"
+ERROR_LOG_FILE="$LOG_DIR_DEFAULT/public-service-error.log"
+mkdir -p "$RUNTIME_DIR" "$LOG_DIR_DEFAULT"
 
 export PUBLIC_SERVICE_PORT="${PUBLIC_SERVICE_PORT:-8102}"
 export PUBLIC_SERVICE_ENV_FILES="${PUBLIC_SERVICE_ENV_FILES:-$PROJECT_ROOT/config.shared.env:$PROJECT_ROOT/config.secret.env}"
 export PUBLIC_SERVICE_GUNICORN_WORKERS="${PUBLIC_SERVICE_GUNICORN_WORKERS:-8}"
 
-conda run --no-capture-output -n agent gunicorn \
-  -k uvicorn.workers.UvicornWorker \
-  app.main:app \
-  --chdir "$APP_DIR" \
-  --bind "0.0.0.0:${PUBLIC_SERVICE_PORT}" \
-  --workers "${PUBLIC_SERVICE_GUNICORN_WORKERS}" \
-  --timeout 600 \
-  --daemon \
-  --pid "$PID_FILE" \
-  --access-logfile "$LOG_FILE" \
-  --error-logfile "$LOG_FILE"
+print_logs() {
+  echo "startup_log=$STARTUP_LOG_FILE"
+  echo "access_log=$ACCESS_LOG_FILE"
+  echo "error_log=$ERROR_LOG_FILE"
+}
 
-sleep 2
-if [[ ! -f "$PID_FILE" ]] || ! kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-  echo "public-service gunicorn failed to start; inspect $LOG_FILE"
-  exit 1
+if [[ -f "$PID_FILE" ]]; then
+  EXISTING_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
+  if [[ -n "${EXISTING_PID:-}" ]] && kill -0 "$EXISTING_PID" 2>/dev/null; then
+    echo "public-service gunicorn already running: pid=$EXISTING_PID"
+    print_logs
+    exit 0
+  fi
+  rm -f "$PID_FILE"
 fi
 
-echo "public-service gunicorn started: pid=$(cat "$PID_FILE") port=${PUBLIC_SERVICE_PORT} log=$LOG_FILE"
+: > "$STARTUP_LOG_FILE"
+: > "$ACCESS_LOG_FILE"
+: > "$ERROR_LOG_FILE"
+
+nohup conda run --no-capture-output -n agent gunicorn   -k uvicorn.workers.UvicornWorker   app.main:app   --chdir "$APP_DIR"   --bind "0.0.0.0:${PUBLIC_SERVICE_PORT}"   --workers "${PUBLIC_SERVICE_GUNICORN_WORKERS}"   --timeout 600   --pid "$PID_FILE"   --capture-output   --access-logfile "$ACCESS_LOG_FILE"   --error-logfile "$ERROR_LOG_FILE"   >"$STARTUP_LOG_FILE" 2>&1 &
+
+LAUNCHER_PID=$!
+for _ in $(seq 1 30); do
+  if [[ -f "$PID_FILE" ]]; then
+    PID="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [[ -n "${PID:-}" ]] && kill -0 "$PID" 2>/dev/null; then
+      echo "public-service gunicorn started: pid=$PID port=${PUBLIC_SERVICE_PORT}"
+      print_logs
+      exit 0
+    fi
+  fi
+  if ! kill -0 "$LAUNCHER_PID" 2>/dev/null; then
+    break
+  fi
+  sleep 1
+done
+
+echo "public-service gunicorn failed to start; inspect $STARTUP_LOG_FILE and $ERROR_LOG_FILE"
+print_logs
+exit 1

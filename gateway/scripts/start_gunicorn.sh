@@ -2,15 +2,17 @@
 set -euo pipefail
 
 PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+RESOURCE_DIR="$(cd "$PROJECT_ROOT/../resource" 2>/dev/null && pwd || true)"
 RUNTIME_DIR="$PROJECT_ROOT/.runtime"
-PID_FILE="$RUNTIME_DIR/gateway-gunicorn.pid"
-LOG_FILE="$RUNTIME_DIR/gateway-gunicorn.log"
-mkdir -p "$RUNTIME_DIR"
-
-if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-  echo "gateway gunicorn already running: pid=$(cat "$PID_FILE")"
-  exit 0
+LOG_DIR_DEFAULT="$PROJECT_ROOT/.runtime/logs"
+if [[ -n "${RESOURCE_DIR:-}" ]]; then
+  LOG_DIR_DEFAULT="$RESOURCE_DIR/logs/dev/gateway"
 fi
+PID_FILE="$RUNTIME_DIR/gateway-gunicorn.pid"
+STARTUP_LOG_FILE="$LOG_DIR_DEFAULT/gateway-startup.log"
+ACCESS_LOG_FILE="$LOG_DIR_DEFAULT/gateway-access.log"
+ERROR_LOG_FILE="$LOG_DIR_DEFAULT/gateway-error.log"
+mkdir -p "$RUNTIME_DIR" "$LOG_DIR_DEFAULT"
 
 export GATEWAY_PORT="${GATEWAY_PORT:-8101}"
 export GATEWAY_GUNICORN_WORKERS="${GATEWAY_GUNICORN_WORKERS:-8}"
@@ -20,22 +22,44 @@ export THINKING_BACKEND_BASE_URL="${THINKING_BACKEND_BASE_URL:-http://127.0.0.1:
 export PATENT_BACKEND_BASE_URL="${PATENT_BACKEND_BASE_URL:-http://127.0.0.1:8010}"
 export GATEWAY_CONVERSATION_FILE_PROVIDER="${GATEWAY_CONVERSATION_FILE_PROVIDER:-public_http}"
 
-conda run --no-capture-output -n agent gunicorn \
-  -k uvicorn.workers.UvicornWorker \
-  app.main:app \
-  --chdir "$PROJECT_ROOT" \
-  --bind "0.0.0.0:${GATEWAY_PORT}" \
-  --workers "${GATEWAY_GUNICORN_WORKERS}" \
-  --timeout 600 \
-  --daemon \
-  --pid "$PID_FILE" \
-  --access-logfile "$LOG_FILE" \
-  --error-logfile "$LOG_FILE"
+print_logs() {
+  echo "startup_log=$STARTUP_LOG_FILE"
+  echo "access_log=$ACCESS_LOG_FILE"
+  echo "error_log=$ERROR_LOG_FILE"
+}
 
-sleep 2
-if [[ ! -f "$PID_FILE" ]] || ! kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-  echo "gateway gunicorn failed to start; inspect $LOG_FILE"
-  exit 1
+if [[ -f "$PID_FILE" ]]; then
+  EXISTING_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
+  if [[ -n "${EXISTING_PID:-}" ]] && kill -0 "$EXISTING_PID" 2>/dev/null; then
+    echo "gateway gunicorn already running: pid=$EXISTING_PID"
+    print_logs
+    exit 0
+  fi
+  rm -f "$PID_FILE"
 fi
 
-echo "gateway gunicorn started: pid=$(cat "$PID_FILE") port=${GATEWAY_PORT} log=$LOG_FILE"
+: > "$STARTUP_LOG_FILE"
+: > "$ACCESS_LOG_FILE"
+: > "$ERROR_LOG_FILE"
+
+nohup conda run --no-capture-output -n agent gunicorn   -k uvicorn.workers.UvicornWorker   app.main:app   --chdir "$PROJECT_ROOT"   --bind "0.0.0.0:${GATEWAY_PORT}"   --workers "${GATEWAY_GUNICORN_WORKERS}"   --timeout 600   --pid "$PID_FILE"   --capture-output   --access-logfile "$ACCESS_LOG_FILE"   --error-logfile "$ERROR_LOG_FILE"   >"$STARTUP_LOG_FILE" 2>&1 &
+
+LAUNCHER_PID=$!
+for _ in $(seq 1 30); do
+  if [[ -f "$PID_FILE" ]]; then
+    PID="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [[ -n "${PID:-}" ]] && kill -0 "$PID" 2>/dev/null; then
+      echo "gateway gunicorn started: pid=$PID port=${GATEWAY_PORT}"
+      print_logs
+      exit 0
+    fi
+  fi
+  if ! kill -0 "$LAUNCHER_PID" 2>/dev/null; then
+    break
+  fi
+  sleep 1
+done
+
+echo "gateway gunicorn failed to start; inspect $STARTUP_LOG_FILE and $ERROR_LOG_FILE"
+print_logs
+exit 1

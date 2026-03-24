@@ -32,5 +32,7 @@ config.secret.env
 .vendor/
 
 archive/frontend-vue-legacy/
+archive/*legacy*/
 fastQA/logs/
 highThinkingQA/vectordb/
+resource/logs/

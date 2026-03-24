@@ -28,7 +28,7 @@ terminate_pid() {
 }
 
 if [[ -f "$PID_FILE" ]]; then
-  PID="$(cat "$PID_FILE")"
+  PID="$(cat "$PID_FILE" 2>/dev/null || true)"
   terminate_pid "$PID"
 fi
 

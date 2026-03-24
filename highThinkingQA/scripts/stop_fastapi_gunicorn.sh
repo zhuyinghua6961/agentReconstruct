@@ -10,8 +10,8 @@ if [[ -n "${RESOURCE_DIR:-}" ]]; then
 fi
 
 export HIGHTHINKINGQA_SERVICE_RUNTIME_ROOT="${HIGHTHINKINGQA_SERVICE_RUNTIME_ROOT:-$SERVICE_RUNTIME_ROOT_DEFAULT}"
-PID_FILE="$HIGHTHINKINGQA_SERVICE_RUNTIME_ROOT/gunicorn.pid"
 PORT="${APP_PORT:-8009}"
+PID_FILE="$HIGHTHINKINGQA_SERVICE_RUNTIME_ROOT/gunicorn.pid"
 
 terminate_pid() {
   local pid="$1"
@@ -29,7 +29,7 @@ terminate_pid() {
 }
 
 if [[ -f "$PID_FILE" ]]; then
-  PID="$(cat "$PID_FILE")"
+  PID="$(cat "$PID_FILE" 2>/dev/null || true)"
   terminate_pid "$PID"
 fi
 
