@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.core.timezone import now_beijing
 from typing import Any
@@ -326,6 +326,24 @@ class ConversationRepository:
             return None
         return metadata
 
+    def _assistant_inbox_datetime(self, value: Any) -> datetime | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw)
+        except Exception:
+            return None
+
+    def _assistant_inbox_is_due(self, metadata: dict[str, Any], *, now: datetime) -> bool:
+        state = str(metadata.get("assistant_async_state") or "").strip()
+        if state == "pending":
+            return True
+        if state != "failed":
+            return False
+        due_at = self._assistant_inbox_datetime(metadata.get("next_retry_at"))
+        return due_at is None or due_at <= now
+
     def _list_assistant_inbox_rows(self, *, conversation_id: int | None = None, user_id: int | None = None) -> list[dict[str, Any]]:
         clauses = ["role = %s"]
         params: list[Any] = ["assistant"]
@@ -399,6 +417,10 @@ class ConversationRepository:
             "processing_started_at": None,
             "materialized_message_id": "",
             "last_error": "",
+            "attempt_count": 0,
+            "next_retry_at": None,
+            "failed_at": None,
+            "dead_at": None,
         }
         metadata_json = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
         task_id = self._execute_update(
@@ -419,15 +441,17 @@ class ConversationRepository:
 
     def claim_pending_authority_assistant_tasks(self, *, limit: int) -> list[dict[str, Any]]:
         claimed: list[dict[str, Any]] = []
+        now = now_beijing()
         for row in self._list_assistant_inbox_rows():
             if len(claimed) >= max(1, int(limit)):
                 break
             metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-            if str(metadata.get("assistant_async_state") or "").strip() != "pending":
+            if not self._assistant_inbox_is_due(metadata, now=now):
                 continue
             updated = dict(metadata)
             updated["assistant_async_state"] = "processing"
-            updated["processing_started_at"] = now_beijing().isoformat(timespec="seconds")
+            updated["processing_started_at"] = now.isoformat(timespec="seconds")
+            updated["next_retry_at"] = None
             metadata_json = json.dumps(updated, ensure_ascii=False, separators=(",", ":"))
             affected = self._execute_update(
                 "UPDATE conversation_messages SET metadata_json = %s WHERE id = %s",
@@ -439,6 +463,33 @@ class ConversationRepository:
             if refreshed is not None:
                 claimed.append(refreshed)
         return claimed
+
+    def reclaim_stuck_authority_assistant_tasks(self, *, timeout_seconds: int) -> int:
+        rows = self._list_assistant_inbox_rows()
+        reclaimed = 0
+        now = now_beijing()
+        timeout_delta = timedelta(seconds=max(1, int(timeout_seconds)))
+        for row in rows:
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            if str(metadata.get("assistant_async_state") or "").strip() != "processing":
+                continue
+            started_at = self._assistant_inbox_datetime(metadata.get("processing_started_at"))
+            if started_at is None or started_at + timeout_delta > now:
+                continue
+            updated = dict(metadata)
+            updated["assistant_async_state"] = "failed"
+            updated["processing_started_at"] = None
+            updated["last_error"] = "processing_timeout"
+            updated["next_retry_at"] = now.isoformat(timespec="seconds")
+            updated["failed_at"] = now.isoformat(timespec="seconds")
+            metadata_json = json.dumps(updated, ensure_ascii=False, separators=(",", ":"))
+            affected = self._execute_update(
+                "UPDATE conversation_messages SET metadata_json = %s WHERE id = %s",
+                (metadata_json, int(row.get("id") or 0)),
+            )
+            if int(affected or 0) > 0:
+                reclaimed += 1
+        return reclaimed
 
     def mark_authority_assistant_task_done(self, *, task_id: int, materialized_message_id: str, note: str = "ok") -> int:
         row = self.get_authority_assistant_task(task_id=task_id)
@@ -457,9 +508,39 @@ class ConversationRepository:
         if row is None:
             return 0
         metadata = dict(row.get("metadata") or {})
+        now = now_beijing().isoformat(timespec="seconds")
         metadata["assistant_async_state"] = "failed"
         metadata["processing_started_at"] = None
         metadata["last_error"] = str(last_error or "")
+        metadata["failed_at"] = now
+        metadata_json = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+        return self._execute_update("UPDATE conversation_messages SET metadata_json = %s WHERE id = %s", (metadata_json, int(task_id)))
+
+    def mark_authority_assistant_task_retry(self, *, task_id: int, last_error: str, next_retry_at: datetime) -> int:
+        row = self.get_authority_assistant_task(task_id=task_id)
+        if row is None:
+            return 0
+        metadata = dict(row.get("metadata") or {})
+        metadata["assistant_async_state"] = "failed"
+        metadata["processing_started_at"] = None
+        metadata["last_error"] = str(last_error or "")
+        metadata["attempt_count"] = int(metadata.get("attempt_count") or 0) + 1
+        metadata["next_retry_at"] = next_retry_at.isoformat(timespec="seconds")
+        metadata["failed_at"] = now_beijing().isoformat(timespec="seconds")
+        metadata_json = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+        return self._execute_update("UPDATE conversation_messages SET metadata_json = %s WHERE id = %s", (metadata_json, int(task_id)))
+
+    def mark_authority_assistant_task_dead(self, *, task_id: int, last_error: str) -> int:
+        row = self.get_authority_assistant_task(task_id=task_id)
+        if row is None:
+            return 0
+        metadata = dict(row.get("metadata") or {})
+        metadata["assistant_async_state"] = "dead"
+        metadata["processing_started_at"] = None
+        metadata["last_error"] = str(last_error or "")
+        metadata["attempt_count"] = int(metadata.get("attempt_count") or 0) + 1
+        metadata["next_retry_at"] = None
+        metadata["dead_at"] = now_beijing().isoformat(timespec="seconds")
         metadata_json = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
         return self._execute_update("UPDATE conversation_messages SET metadata_json = %s WHERE id = %s", (metadata_json, int(task_id)))
 
@@ -468,6 +549,7 @@ class ConversationRepository:
         backlog = 0
         processing = 0
         failed = 0
+        dead = 0
         for row in rows:
             metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
             state = str(metadata.get("assistant_async_state") or "").strip()
@@ -477,7 +559,9 @@ class ConversationRepository:
                 processing += 1
             elif state == "failed":
                 failed += 1
-        return {"backlog": backlog, "processing": processing, "failed": failed, "enabled": True}
+            elif state == "dead":
+                dead += 1
+        return {"backlog": backlog, "processing": processing, "failed": failed, "dead": dead, "enabled": True}
 
     def add_uploaded_file(
         self,

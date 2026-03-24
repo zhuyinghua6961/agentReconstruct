@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from server.schemas.request_models import AskRequest
+from server.services import chat_persistence
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1, maximum: int | None = None) -> int:
@@ -105,20 +106,25 @@ def _apply_history_budget(turns: list[dict[str, str]]) -> list[dict[str, str]]:
     return budgeted
 
 
-def _load_server_context_snapshot(*, user_id: int | None, conversation_id: int | None) -> tuple[list[dict[str, str]], dict[str, Any]]:
+def _load_server_context_snapshot(*, request: AskRequest, user_id: int | None, conversation_id: int | None) -> tuple[list[dict[str, str]], dict[str, Any]]:
     if user_id is None or conversation_id is None:
         return [], {}
     try:
-        from server.services.conversation.conversation_service import conversation_service
-
-        result = conversation_service.get_conversation_context_snapshot(user_id=user_id, conversation_id=conversation_id)
+        context = chat_persistence.load_conversation_context(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            trace_id=str(request.trace_id or ""),
+            route=str(request.route or "thinking_qa"),
+            requested_mode=str(request.requested_mode or request.mode or "thinking"),
+            actual_mode=str(request.actual_mode or request.mode or "thinking"),
+            payload=None,
+        )
     except Exception:
         return [], {}
-    if not isinstance(result, dict) or not result.get("success"):
+    if not isinstance(context, dict):
         return [], {}
-    data = result.get("data") if isinstance(result.get("data"), dict) else {}
-    messages = data.get("messages") if isinstance(data.get("messages"), list) else []
-    summary = data.get("summary")
+    messages = context.get("chat_history") if isinstance(context.get("chat_history"), list) else []
+    summary = context.get("summary")
     return _normalize_turns(messages), dict(summary) if isinstance(summary, dict) else {}
 
 
@@ -127,7 +133,7 @@ def build_conversation_context(*, request: AskRequest) -> ConversationContext:
     user_id = _safe_int(request.user_id)
     conversation_id = _safe_int(request.conversation_id)
 
-    server_turns, server_summary = _load_server_context_snapshot(user_id=user_id, conversation_id=conversation_id)
+    server_turns, server_summary = _load_server_context_snapshot(request=request, user_id=user_id, conversation_id=conversation_id)
     request_turns = _normalize_turns(list(request.chat_history or []))
     merged_turns = _merge_turns(server_turns=server_turns, request_turns=request_turns)
     if merged_turns and merged_turns[-1]["role"] == "user" and merged_turns[-1]["content"] == raw_question:

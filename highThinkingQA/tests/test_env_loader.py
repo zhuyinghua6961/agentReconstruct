@@ -212,3 +212,29 @@ def test_config_split_execution_authority_is_rejected_in_production(monkeypatch)
 
     with pytest.raises(ValueError, match="split authority"):
         importlib.reload(config)
+
+
+def test_config_defaults_conversation_rollout_to_public_service(tmp_path, monkeypatch):
+    config_root = (tmp_path / 'config').resolve()
+    config_root.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setenv('HIGHTHINKINGQA_SERVICE_CONFIG_ROOT', str(config_root))
+    monkeypatch.delenv('HIGHTHINKINGQA_ENV_FILE', raising=False)
+    monkeypatch.delenv('HIGHTHINKINGQA_ENV_FILES', raising=False)
+    monkeypatch.delenv('SERVICE_ENV_FILE', raising=False)
+    monkeypatch.delenv('SERVICE_ENV_FILES', raising=False)
+    monkeypatch.delenv('CONVERSATION_EXECUTION_AUTHORITY_TARGET', raising=False)
+    monkeypatch.delenv('CONVERSATION_ASSISTANT_WRITE_TARGET', raising=False)
+    monkeypatch.delenv('CONVERSATION_OVERLAY_ENABLED', raising=False)
+    monkeypatch.delenv('CONVERSATION_USER_WRITE_TARGET', raising=False)
+    monkeypatch.delenv('CONVERSATION_CONTEXT_READ_TARGET', raising=False)
+
+    import config
+
+    reloaded = importlib.reload(config)
+
+    assert reloaded.CONVERSATION_EXECUTION_AUTHORITY_TARGET == 'public_service'
+    assert reloaded.CONVERSATION_EXECUTION_USER_WRITE_TARGET == 'public_service'
+    assert reloaded.CONVERSATION_EXECUTION_CONTEXT_READ_TARGET == 'public_service'
+    assert reloaded.CONVERSATION_ASSISTANT_WRITE_TARGET == 'public_service'
+    assert reloaded.CONVERSATION_OVERLAY_ENABLED is False

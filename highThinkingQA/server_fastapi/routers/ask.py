@@ -28,6 +28,7 @@ from server.services.ask_service import (
     execute_ask,
     stream_ask_events,
 )
+from server.services import chat_persistence
 from server.services.conversation.conversation_service import conversation_service
 from server_fastapi.auth.deps import AuthContext, require_auth_context
 from server_fastapi.http import read_json_payload
@@ -187,27 +188,16 @@ def _persist_user_message_if_needed(*, request: Request, ask_request) -> None:
     conversation_id = _conversation_id_int(ask_request.conversation_id)
     if not user_id or not conversation_id:
         return
-    if _chat_persist_async_enabled(request):
-        get_default_dispatcher().submit(
-            key=_persistence_key(user_id=user_id, conversation_id=conversation_id),
-            fn=_persist_message_task,
-            kwargs={
-                "logger": request.app.logger,
-                "user_id": user_id,
-                "conversation_id": conversation_id,
-                "role": "user",
-                "content": ask_request.question,
-                "metadata": {"source": "ask_stream"},
-            },
-        )
-        return
-    _persist_message_task(
-        logger=request.app.logger,
+    chat_persistence.persist_user_message(
         user_id=user_id,
         conversation_id=conversation_id,
-        role="user",
-        content=ask_request.question,
-        metadata={"source": "ask_stream"},
+        question=str(ask_request.question or ""),
+        trace_id=str(getattr(ask_request, "trace_id", "") or ""),
+        route=str(getattr(ask_request, "route", "thinking_qa") or "thinking_qa"),
+        requested_mode=str(getattr(ask_request, "requested_mode", getattr(ask_request, "mode", "thinking")) or "thinking"),
+        actual_mode=str(getattr(ask_request, "actual_mode", getattr(ask_request, "mode", "thinking")) or "thinking"),
+        payload=ask_request,
+        async_enabled=_chat_persist_async_enabled(request),
     )
 
 
@@ -224,47 +214,16 @@ def _persist_assistant_message_if_needed(*, request: Request, ask_request, summa
     content = str(summary.get("assistant_content") or "").strip()
     if not content:
         return
-    meta = {
-        "source": "ask_stream",
-        "query_mode": str(summary.get("query_mode") or ""),
-        "references": summary.get("references") or [],
-        "reference_links": summary.get("reference_links") or [],
-        "pdf_links": summary.get("pdf_links") or [],
-        "doi_locations": summary.get("doi_locations") or {},
-        "steps": summary.get("steps") or [],
-        "route": str(summary.get("route") or ""),
-        "used_files": summary.get("used_files") or [],
-        "timings": summary.get("timings") or {},
-        "trace_id": str(summary.get("trace_id") or ""),
-        "file_selection": summary.get("file_selection") or {},
-        "done_seen": bool(summary.get("done_seen")),
-    }
-
-    def _persist_and_refresh_summary() -> None:
-        result = conversation_service.add_message(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            role="assistant",
-            content=content,
-            metadata=meta,
-        )
-        if not result.get("success"):
-            request.app.logger.warning("conversation assistant message persist skipped: %s", result)
-            return
-        refresh = conversation_service.refresh_conversation_summary(
-            user_id=user_id,
-            conversation_id=conversation_id,
-        )
-        if not refresh.get("success"):
-            request.app.logger.warning("conversation summary refresh skipped: %s", refresh)
-
-    if _chat_persist_async_enabled(request):
-        get_default_dispatcher().submit(
-            key=_persistence_key(user_id=user_id, conversation_id=conversation_id),
-            fn=_persist_and_refresh_summary,
-        )
-        return
-    _persist_and_refresh_summary()
+    chat_persistence.persist_assistant_summary(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        trace_id=str(getattr(ask_request, "trace_id", "") or ""),
+        route=str(getattr(ask_request, "route", "thinking_qa") or "thinking_qa"),
+        requested_mode=str(getattr(ask_request, "requested_mode", getattr(ask_request, "mode", "thinking")) or "thinking"),
+        actual_mode=str(getattr(ask_request, "actual_mode", getattr(ask_request, "mode", "thinking")) or "thinking"),
+        summary=dict(summary or {}),
+        async_enabled=_chat_persist_async_enabled(request),
+    )
 
 
 def _build_stream_response(*, request: Request, ask_request, trace_id: str, slot) -> StreamingResponse:

@@ -6,7 +6,7 @@ from app.integrations.redis import RedisService
 from app.integrations.storage.local import LocalStorageBackend
 from app.modules.conversation.json_store import ConversationJsonStore
 from app.modules.conversation.service import ConversationService
-from app.modules.conversation.assistant_inbox import AuthorityAssistantInboxWorker
+from app.modules.conversation.assistant_inbox import AuthorityAssistantInboxWorker, AuthorityAssistantInboxConfig
 from test_conversation_module import _FakeRedis, _MemoryConversationRepo, _OutboxRecorder
 
 
@@ -127,3 +127,144 @@ def test_accept_authority_assistant_async_dedupes_and_materializes_once():
         assert detail["success"] is True
         assert [item["content"] for item in detail["data"]["messages"]] == ["answer once"]
         assert detail["data"]["message_count"] == 1
+
+
+class _RetryRepo:
+    def __init__(self, *, tasks=None, reclaimed=0):
+        self.tasks = list(tasks or [])
+        self.reclaimed = int(reclaimed)
+        self.retry_calls: list[dict] = []
+        self.dead_calls: list[dict] = []
+        self.failed_calls: list[dict] = []
+        self.done_calls: list[dict] = []
+
+    def reclaim_stuck_authority_assistant_tasks(self, *, timeout_seconds: int) -> int:
+        self.last_reclaim_timeout = int(timeout_seconds)
+        return self.reclaimed
+
+    def claim_pending_authority_assistant_tasks(self, *, limit: int):
+        return list(self.tasks[:limit])
+
+    def mark_authority_assistant_task_retry(self, *, task_id: int, last_error: str, next_retry_at):
+        self.retry_calls.append({
+            "task_id": task_id,
+            "last_error": last_error,
+            "next_retry_at": next_retry_at,
+        })
+        return 1
+
+    def mark_authority_assistant_task_dead(self, *, task_id: int, last_error: str):
+        self.dead_calls.append({
+            "task_id": task_id,
+            "last_error": last_error,
+        })
+        return 1
+
+    def mark_authority_assistant_task_failed(self, *, task_id: int, last_error: str):
+        self.failed_calls.append({
+            "task_id": task_id,
+            "last_error": last_error,
+        })
+        return 1
+
+    def mark_authority_assistant_task_done(self, *, task_id: int, materialized_message_id: str, note: str = "ok"):
+        self.done_calls.append({
+            "task_id": task_id,
+            "materialized_message_id": materialized_message_id,
+            "note": note,
+        })
+        return 1
+
+
+def test_authority_assistant_inbox_worker_retries_failed_materialization_before_dead():
+    repo = _RetryRepo(
+        tasks=[
+            {
+                "id": 11,
+                "conversation_id": 7,
+                "user_id": 5,
+                "metadata": {
+                    "assistant_async_state": "pending",
+                    "attempt_count": 0,
+                },
+            }
+        ]
+    )
+
+    class _FailingService:
+        def materialize_authority_assistant_task(self, *, task):
+            raise RuntimeError("boom")
+
+    worker = AuthorityAssistantInboxWorker(
+        repository=repo,
+        conversation_service=_FailingService(),
+        config=AuthorityAssistantInboxConfig(max_attempts=3, retry_base_seconds=1, retry_max_seconds=4, processing_timeout_seconds=30),
+    )
+
+    summary = worker.run_once(limit=10)
+
+    assert summary["reclaimed"] == 0
+    assert summary["claimed"] == 1
+    assert summary["retry"] == 1
+    assert summary["dead"] == 0
+    assert repo.retry_calls[0]["task_id"] == 11
+    assert repo.retry_calls[0]["last_error"] == "boom"
+
+
+def test_authority_assistant_inbox_worker_marks_dead_after_max_attempts():
+    repo = _RetryRepo(
+        tasks=[
+            {
+                "id": 12,
+                "conversation_id": 7,
+                "user_id": 5,
+                "metadata": {
+                    "assistant_async_state": "failed",
+                    "attempt_count": 2,
+                },
+            }
+        ]
+    )
+
+    class _FailingService:
+        def materialize_authority_assistant_task(self, *, task):
+            return {"success": False, "error": "still-bad"}
+
+    worker = AuthorityAssistantInboxWorker(
+        repository=repo,
+        conversation_service=_FailingService(),
+        config=AuthorityAssistantInboxConfig(max_attempts=3, retry_base_seconds=1, retry_max_seconds=4, processing_timeout_seconds=30),
+    )
+
+    summary = worker.run_once(limit=10)
+
+    assert summary["claimed"] == 1
+    assert summary["retry"] == 0
+    assert summary["dead"] == 1
+    assert repo.dead_calls == [{"task_id": 12, "last_error": "still-bad"}]
+
+
+def test_authority_assistant_inbox_worker_reclaims_stuck_processing_before_claiming():
+    repo = _RetryRepo(tasks=[], reclaimed=2)
+
+    class _Service:
+        def materialize_authority_assistant_task(self, *, task):
+            return {"success": True, "message_id": "m-1"}
+
+    worker = AuthorityAssistantInboxWorker(
+        repository=repo,
+        conversation_service=_Service(),
+        config=AuthorityAssistantInboxConfig(max_attempts=3, retry_base_seconds=1, retry_max_seconds=4, processing_timeout_seconds=45),
+    )
+
+    summary = worker.run_once(limit=10)
+
+    assert summary == {
+        "claimed": 0,
+        "done": 0,
+        "retry": 0,
+        "dead": 0,
+        "skipped": 0,
+        "reclaimed": 2,
+    }
+    assert repo.last_reclaim_timeout == 45

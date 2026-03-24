@@ -59,6 +59,60 @@ class InlineExecutor:
         return ImmediateFuture(result=fn(*args, **kwargs))
 
 
+def test_build_conversation_context_uses_chat_persistence_snapshot(monkeypatch):
+    authority_calls: list[dict] = []
+
+    def fake_load_conversation_context(**kwargs):
+        authority_calls.append(dict(kwargs))
+        return {
+            "chat_history": [
+                {"role": "user", "content": "上一轮问题"},
+                {"role": "assistant", "content": "上一轮回答"},
+            ],
+            "summary": {"topic": "authority-summary"},
+            "conversation_state": {"last_turn_route": "thinking_qa"},
+            "snapshot_version": 5,
+            "pending_overlay": None,
+        }
+
+    monkeypatch.setattr(
+        "server.services.conversation_context_service.chat_persistence",
+        type("FakeChatPersistence", (), {"load_conversation_context": staticmethod(fake_load_conversation_context)})(),
+        raising=False,
+    )
+
+    context = build_conversation_context(
+        request=AskRequest(
+            question="这一轮问题",
+            mode="thinking",
+            requested_mode="thinking",
+            actual_mode="thinking",
+            route="thinking_qa",
+            user_id=7,
+            conversation_id=11,
+            chat_history=[],
+            options={},
+        )
+    )
+
+    assert authority_calls == [
+        {
+            "user_id": 7,
+            "conversation_id": 11,
+            "trace_id": "",
+            "route": "thinking_qa",
+            "requested_mode": "thinking",
+            "actual_mode": "thinking",
+            "payload": None,
+        }
+    ]
+    assert context.summary == {"topic": "authority-summary"}
+    assert context.recent_turns == [
+        {"role": "user", "content": "上一轮问题"},
+        {"role": "assistant", "content": "上一轮回答"},
+    ]
+
+
 def test_execute_ask_uses_shared_executor(monkeypatch):
     state = type("State", (), {"final_answer": "alpha [10.1000/demo, Preamble]", "timings": {"total": 0.1}, "error": ""})()
     executor = DummyExecutor(ImmediateFuture(result=state))
@@ -756,3 +810,65 @@ def test_execute_ask_metadata_marks_summary_available(monkeypatch):
 
     assert result["metadata"]["summary_available"] is True
     assert result["metadata"]["summary_updated_at"] == "2026-03-17T10:00:00+08:00"
+
+
+def test_execute_ask_logs_runtime_diagnostics(monkeypatch, caplog):
+    state = type("State", (), {"final_answer": "alpha", "timings": {"total": 0.1}, "error": ""})()
+
+    monkeypatch.setattr("server.services.ask_service._get_agent_executor", lambda: InlineExecutor())
+    monkeypatch.setattr(
+        "server.services.ask_service.build_conversation_context",
+        lambda request: ConversationContext(
+            raw_question=request.question,
+            recent_turns=[{"role": "user", "content": "上一轮问题"}],
+            summary={"topic": "lfp"},
+            conversation_id=11,
+            user_id=7,
+        ),
+    )
+    monkeypatch.setattr(
+        "server.services.ask_service.rewrite_question",
+        lambda question, conversation_context=None: type(
+            "RewriteResult",
+            (),
+            {
+                "effective_question": "rewrite-alpha",
+                "rewritten": True,
+                "summary_used": True,
+                "reason": "summary_disambiguation",
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        "server.services.ask_service._run_agent_for_profile",
+        lambda question, profile, **kwargs: state,
+    )
+    monkeypatch.setattr(
+        "server.services.ask_service._log_runtime_resource_snapshot",
+        lambda **kwargs: None,
+        raising=False,
+    )
+
+    caplog.set_level("INFO")
+    result = execute_ask(
+        request=AskRequest(
+            question="demo",
+            mode="thinking",
+            requested_mode="thinking",
+            actual_mode="thinking",
+            route="thinking_qa",
+            user_id=7,
+            conversation_id=11,
+            chat_history=[],
+            options={},
+        ),
+        timeout_seconds=10,
+        trace_id="req_test",
+    )
+
+    joined = "\n".join(record.getMessage() for record in caplog.records)
+    assert "execute_ask start" in joined
+    assert "conversation_context ready" in joined
+    assert "question_rewrite ready" in joined
+    assert "execute_ask done" in joined
+    assert result["final_answer"] == "alpha"

@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 _ALLOWED_MODES = {"fast", "thinking", "patent"}
 
 
+def _should_gateway_persist(*, actual_mode: str) -> bool:
+    return actual_mode != "thinking"
+
+
 def _legacy_mode(payload: AskRequest) -> str:
     requested_mode = str(getattr(payload, "requested_mode", "fast") or "fast").strip().lower()
     body_mode = str(getattr(payload, "mode", "") or "").strip().lower()
@@ -182,14 +186,15 @@ async def _proxy_ask(request: Request, payload: AskRequest, mode: str) -> JSONRe
         trace_id=trace_id,
     )
     persistence_service = request.app.state.conversation_persistence_service
-    try:
-        await persistence_service.persist_user_message(
-            request=request,
-            conversation_id=payload.conversation_id,
-            content=payload.question,
-        )
-    except Exception as exc:
-        logger.warning("gateway user persistence skipped: %s", exc)
+    if _should_gateway_persist(actual_mode=route_decision.actual_mode):
+        try:
+            await persistence_service.persist_user_message(
+                request=request,
+                conversation_id=payload.conversation_id,
+                content=payload.question,
+            )
+        except Exception as exc:
+            logger.warning("gateway user persistence skipped: %s", exc)
     path = f"/api/{route_decision.actual_mode}/ask"
     response = await proxy_service.forward_json(
         request=request,
@@ -197,7 +202,7 @@ async def _proxy_ask(request: Request, payload: AskRequest, mode: str) -> JSONRe
         path=path,
         payload=upstream_payload,
     )
-    if response.status_code < 400:
+    if response.status_code < 400 and _should_gateway_persist(actual_mode=route_decision.actual_mode):
         try:
             payload_json = json.loads(response.body.decode("utf-8"))
             data = payload_json.get("data") if isinstance(payload_json, dict) else payload_json
@@ -244,14 +249,15 @@ async def _proxy_ask_stream(request: Request, payload: AskRequest, mode: str):
         trace_id=trace_id,
     )
     persistence_service = request.app.state.conversation_persistence_service
-    try:
-        await persistence_service.persist_user_message(
-            request=request,
-            conversation_id=payload.conversation_id,
-            content=payload.question,
-        )
-    except Exception as exc:
-        logger.warning("gateway user persistence skipped: %s", exc)
+    if _should_gateway_persist(actual_mode=route_decision.actual_mode):
+        try:
+            await persistence_service.persist_user_message(
+                request=request,
+                conversation_id=payload.conversation_id,
+                content=payload.question,
+            )
+        except Exception as exc:
+            logger.warning("gateway user persistence skipped: %s", exc)
     path = f"/api/{route_decision.actual_mode}/ask_stream"
     try:
         handle: StreamingProxyHandle = await proxy_service.open_json_stream(
@@ -278,20 +284,25 @@ async def _proxy_ask_stream(request: Request, payload: AskRequest, mode: str):
 
     async def _persisting_body_iter():
         try:
-            async for chunk in persistence_service.extract_stream(
-                body_iter=handle.body_iter(),
-                summary=summary,
-            ):
-                yield chunk
-        finally:
-            try:
-                await persistence_service.persist_assistant_summary(
-                    request=request,
-                    conversation_id=payload.conversation_id,
+            if _should_gateway_persist(actual_mode=route_decision.actual_mode):
+                async for chunk in persistence_service.extract_stream(
+                    body_iter=handle.body_iter(),
                     summary=summary,
-                )
-            except Exception as exc:
-                logger.warning("gateway assistant persistence skipped: %s", exc)
+                ):
+                    yield chunk
+            else:
+                async for chunk in handle.body_iter():
+                    yield chunk
+        finally:
+            if _should_gateway_persist(actual_mode=route_decision.actual_mode):
+                try:
+                    await persistence_service.persist_assistant_summary(
+                        request=request,
+                        conversation_id=payload.conversation_id,
+                        summary=summary,
+                    )
+                except Exception as exc:
+                    logger.warning("gateway assistant persistence skipped: %s", exc)
 
     return StreamingResponse(
         _persisting_body_iter(),

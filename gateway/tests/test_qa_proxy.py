@@ -103,7 +103,10 @@ def test_mode_ask_routes_plain_question_to_requested_backend():
     assert response.headers["x-gateway-backend"] == "thinking"
 
 
-def test_mode_ask_routes_file_question_to_fast_backend():
+def test_mode_ask_fast_persists_user_and_assistant_messages():
+    original_persistence = app.state.conversation_persistence_service
+    fake_persistence = _FakeConversationPersistenceService()
+    app.state.conversation_persistence_service = fake_persistence
     captured = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -111,16 +114,55 @@ def test_mode_ask_routes_file_question_to_fast_backend():
         captured["body"] = json.loads(request.content.decode("utf-8"))
         return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
 
-    with _TransportGuard(handler):
-        client = TestClient(app)
-        response = client.post(
-            "/api/thinking/ask",
-            json={
-                "question": "请总结这篇文献",
-                "requested_mode": "thinking",
-                "pdf_context": {"selected_ids": [11]},
-            },
-        )
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            response = client.post(
+                "/api/fast/ask",
+                json={
+                    "question": "plain qa",
+                    "requested_mode": "fast",
+                    "conversation_id": 7,
+                },
+            )
+    finally:
+        app.state.conversation_persistence_service = original_persistence
+
+    assert response.status_code == 200
+    assert captured["url"].endswith("/api/fast/ask")
+    assert captured["body"]["actual_mode"] == "fast"
+    assert fake_persistence.user_calls[0]["conversation_id"] == 7
+    assert fake_persistence.user_calls[0]["content"] == "plain qa"
+    assert fake_persistence.assistant_calls[0]["conversation_id"] == 7
+    assert fake_persistence.assistant_calls[0]["summary"].assistant_content == "ok"
+    assert response.headers["x-gateway-backend"] == "fast"
+
+
+def test_mode_ask_routes_file_question_to_fast_backend():
+    original_persistence = app.state.conversation_persistence_service
+    fake_persistence = _FakeConversationPersistenceService()
+    app.state.conversation_persistence_service = fake_persistence
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            response = client.post(
+                "/api/thinking/ask",
+                json={
+                    "question": "请总结这篇文献",
+                    "requested_mode": "thinking",
+                    "conversation_id": 42,
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            )
+    finally:
+        app.state.conversation_persistence_service = original_persistence
 
     assert response.status_code == 200
     assert captured["url"].endswith("/api/fast/ask")
@@ -129,8 +171,59 @@ def test_mode_ask_routes_file_question_to_fast_backend():
     assert captured["body"]["source_scope"] == "pdf"
     assert captured["body"]["kb_enabled"] is False
     assert captured["body"]["selected_file_ids"] == [11]
+    assert fake_persistence.user_calls[0]["conversation_id"] == 42
+    assert fake_persistence.user_calls[0]["content"] == "请总结这篇文献"
+    assert fake_persistence.assistant_calls[0]["conversation_id"] == 42
+    assert fake_persistence.assistant_calls[0]["summary"].assistant_content == "ok"
     assert response.headers["x-gateway-backend"] == "fast"
 
+def test_mode_ask_routes_mixed_question_to_fast_backend():
+    original = app.state.conversation_file_service
+    original_persistence = app.state.conversation_persistence_service
+    app.state.conversation_file_service = _ConversationFilesStub(
+        [
+            ConversationFileRow(
+                file_id=11,
+                file_type="pdf",
+                file_name="battery-paper.pdf",
+            )
+        ]
+    )
+    fake_persistence = _FakeConversationPersistenceService()
+    app.state.conversation_persistence_service = fake_persistence
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            response = client.post(
+                "/api/thinking/ask",
+                json={
+                    "question": "请结合知识库总结这篇文献",
+                    "requested_mode": "thinking",
+                    "conversation_id": 101,
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            )
+    finally:
+        app.state.conversation_file_service = original
+        app.state.conversation_persistence_service = original_persistence
+
+    assert response.status_code == 200
+    assert captured["url"].endswith("/api/fast/ask")
+    assert captured["body"]["actual_mode"] == "fast"
+    assert captured["body"]["route"] == "hybrid_qa"
+    assert captured["body"]["source_scope"] == "pdf+kb"
+    assert fake_persistence.user_calls[0]["conversation_id"] == 101
+    assert fake_persistence.user_calls[0]["content"] == "请结合知识库总结这篇文献"
+    assert fake_persistence.assistant_calls[0]["conversation_id"] == 101
+    assert fake_persistence.assistant_calls[0]["summary"].assistant_content == "ok"
+    assert response.headers["x-gateway-backend"] == "fast"
 
 def test_v1_ask_stream_alias_routes_to_requested_backend():
     def handler(request: httpx.Request) -> httpx.Response:
@@ -157,6 +250,41 @@ def test_v1_ask_stream_alias_routes_to_requested_backend():
     assert response.status_code == 200
     assert b'"type":"content"' in body
     assert response.headers["x-gateway-backend"] == "thinking"
+
+
+def test_mode_ask_stream_routes_file_question_to_fast_backend():
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        assert str(request.url).endswith("/api/fast/ask_stream")
+        return httpx.Response(
+            200,
+            content=(
+                b'data: {"type":"metadata","query_mode":"fast","route":"pdf_qa"}\n\n'
+                b'data: {"type":"content","content":"hello"}\n\n'
+                b'data: {"type":"done","final_answer":"hello","route":"pdf_qa"}\n\n'
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        with client.stream(
+            "POST",
+            "/api/thinking/ask_stream",
+            json={
+                "question": "请总结这篇文献",
+                "requested_mode": "thinking",
+                "pdf_context": {"selected_ids": [11]},
+            },
+        ) as response:
+            body = b"".join(response.iter_bytes())
+
+    assert response.status_code == 200
+    assert b'"type":"done"' in body
+    assert calls == ["/api/fast/ask_stream"]
+    assert response.headers["x-gateway-backend"] == "fast"
 
 
 def test_mode_ask_stream_passthroughs_sse():
@@ -242,6 +370,81 @@ def test_mode_ask_stream_persists_user_and_assistant_messages():
     assert fake_persistence.assistant_calls[0]["summary"].done_seen is True
     assert fake_persistence.assistant_calls[0]["summary"].reference_links[0]["doi"] == "10.1/demo"
 
+
+def test_mode_ask_thinking_skips_public_message_persistence():
+    original_persistence = app.state.conversation_persistence_service
+    fake_persistence = _FakeConversationPersistenceService()
+    app.state.conversation_persistence_service = fake_persistence
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/api/thinking/ask":
+            return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            response = client.post(
+                "/api/thinking/ask",
+                json={
+                    "question": "plain qa",
+                    "requested_mode": "thinking",
+                    "conversation_id": 42,
+                },
+            )
+    finally:
+        app.state.conversation_persistence_service = original_persistence
+
+    assert response.status_code == 200
+    assert calls == ["/api/thinking/ask"]
+    assert fake_persistence.user_calls == []
+    assert fake_persistence.assistant_calls == []
+    assert response.headers["x-gateway-backend"] == "thinking"
+
+def test_mode_ask_stream_thinking_skips_public_message_persistence():
+    original_persistence = app.state.conversation_persistence_service
+    fake_persistence = _FakeConversationPersistenceService()
+    app.state.conversation_persistence_service = fake_persistence
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/api/thinking/ask_stream":
+            return httpx.Response(
+                200,
+                content=(
+                    b'data: {"type":"metadata","query_mode":"thinking"}\n\n'
+                    b'data: {"type":"content","content":"hello"}\n\n'
+                    b'data: {"type":"done","final_answer":"hello"}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            with client.stream(
+                "POST",
+                "/api/thinking/ask_stream",
+                json={
+                    "question": "plain qa",
+                    "requested_mode": "thinking",
+                    "conversation_id": 42,
+                },
+            ) as response:
+                body = b"".join(response.iter_bytes())
+    finally:
+        app.state.conversation_persistence_service = original_persistence
+
+    assert response.status_code == 200
+    assert b'"type":"done"' in body
+    assert calls == ["/api/thinking/ask_stream"]
+    assert fake_persistence.user_calls == []
+    assert fake_persistence.assistant_calls == []
+    assert response.headers["x-gateway-backend"] == "thinking"
 
 def test_mode_ask_uses_conversation_file_metadata_for_table_route():
     original = app.state.conversation_file_service

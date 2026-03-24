@@ -83,8 +83,8 @@ def _get_bool_from_names(*, names: tuple[str, ...], default: bool) -> bool:
 
 def _resolve_conversation_rollout(app_env: str) -> tuple[str, str, str, str, bool]:
     execution_key = "CONVERSATION_EXECUTION_AUTHORITY_TARGET"
-    execution_target = _get_conversation_target(execution_key, "legacy")
-    assistant_write_target = _get_conversation_target("CONVERSATION_ASSISTANT_WRITE_TARGET", "legacy")
+    execution_target = _get_conversation_target(execution_key, "public_service")
+    assistant_write_target = _get_conversation_target("CONVERSATION_ASSISTANT_WRITE_TARGET", "public_service")
     user_write_target = _get_optional_conversation_target("CONVERSATION_USER_WRITE_TARGET")
     context_read_target = _get_optional_conversation_target("CONVERSATION_CONTEXT_READ_TARGET")
     if user_write_target is not None or context_read_target is not None:
