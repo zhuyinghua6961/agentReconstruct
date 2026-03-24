@@ -5,7 +5,11 @@ from typing import Any, Protocol
 
 
 class GenerationRuntime(Protocol):
-    def stage1_pre_answer_and_planning(self, user_question: str) -> dict[str, Any]:
+    def stage1_pre_answer_and_planning(
+        self,
+        user_question: str,
+        conversation_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         ...
 
     def stage2_targeted_retrieval(
@@ -63,6 +67,10 @@ class QaKbRequest:
     n_results_per_claim: int = 10
     active_stream_count: int | None = None
     trace_id: str = ""
+    recent_turns_for_llm: list[dict[str, Any]] = field(default_factory=list)
+    summary_for_llm: dict[str, Any] = field(default_factory=dict)
+    conversation_state: dict[str, Any] = field(default_factory=dict)
+    source_selection: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

@@ -9,6 +9,7 @@ from app.modules.qa_kb.md_expansion import evaluate_stage3_pdf_skip, merge_pdf_c
 from app.modules.qa_kb.models import GenerationRuntime, QaKbExecutionResult, QaKbPipelineMode, QaKbRequest
 from app.modules.qa_kb.orchestrators.generation import GenerationPipelineOrchestrator
 from app.modules.qa_kb.streaming import iter_result_events
+from app.services.conversation_context_builder import normalize_conversation_context
 from app.services.stream_contract import normalize_stream_event
 
 
@@ -90,6 +91,7 @@ class QaKbService:
         should_cancel: Callable[[], bool] | None = None,
         active_stream_count: int | None = None,
         logger: Any | None = None,
+        conversation_context: dict[str, Any] | None = None,
     ) -> QaKbExecutionResult:
         return self._generation_orchestrator.run(
             question=question,
@@ -99,6 +101,7 @@ class QaKbService:
             should_cancel=should_cancel,
             active_stream_count=active_stream_count,
             logger=logger or self._logger,
+            conversation_context=conversation_context,
         )
 
     def iter_generation_answer_events(
@@ -113,6 +116,7 @@ class QaKbService:
         active_stream_count: int | None = None,
         logger: Any | None = None,
         chunk_size: int = 120,
+        conversation_context: dict[str, Any] | None = None,
     ) -> Iterator[Any]:
         yield from self._generation_orchestrator.stream(
             question=question,
@@ -124,6 +128,7 @@ class QaKbService:
             logger=logger or self._logger,
             sse_event=sse_event,
             chunk_size=chunk_size,
+            conversation_context=conversation_context,
         )
 
     def iter_answer_events(
@@ -137,6 +142,7 @@ class QaKbService:
         env_get: Callable[[str, str], str] | None = None,
         logger: Any | None = None,
         chunk_size: int = 120,
+        conversation_context: dict[str, Any] | None = None,
     ) -> Iterator[Any]:
         log = logger or self._logger
         resolved_mode = self.resolve_pipeline_mode(
@@ -147,6 +153,13 @@ class QaKbService:
 
         def _emit(payload: dict[str, Any]) -> Any:
             return sse_event(normalize_stream_event(dict(payload or {})))
+
+        conversation_context = normalize_conversation_context(
+            recent_turns_for_llm=request.recent_turns_for_llm,
+            summary_for_llm=request.summary_for_llm,
+            conversation_state=request.conversation_state,
+            source_selection=request.source_selection,
+        )
 
         if not resolved_mode.use_generation_driven:
             yield _emit(
@@ -170,6 +183,7 @@ class QaKbService:
             active_stream_count=request.active_stream_count,
             logger=log,
             chunk_size=chunk_size,
+            conversation_context=conversation_context,
         )
 
     def iter_result_events(

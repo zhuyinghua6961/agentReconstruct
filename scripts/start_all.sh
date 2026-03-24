@@ -18,8 +18,8 @@ for service in "${SERVICES[@]}"; do
     echo "[error] $service did not bind to :$port"
     exit 1
   fi
-  if ! probe_health "$service"; then
-    echo "[error] $service bound to :$port but health probe failed"
+  if ! wait_for_service_health "$service" 60; then
+    echo "[error] $service bound to :$port but did not become healthy within timeout"
     exit 1
   fi
 done

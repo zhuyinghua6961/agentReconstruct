@@ -168,3 +168,16 @@ probe_health() {
   url="$(service_health_url "$service")"
   curl -fsS --max-time 5 "$url" >/dev/null 2>&1
 }
+
+wait_for_service_health() {
+  local service="$1"
+  local timeout="${2:-60}"
+
+  for _ in $(seq 1 "$timeout"); do
+    if probe_health "$service"; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}

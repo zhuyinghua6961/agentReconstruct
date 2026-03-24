@@ -1079,9 +1079,36 @@ class ConversationService:
                 return item
         return None
 
-    def _build_authority_summary(self) -> dict[str, Any]:
+    def _build_authority_recent_turns(self, *, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        recent_turns: list[dict[str, Any]] = []
+        for idx, item in enumerate(messages, start=1):
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "").strip().lower()
+            if role not in {"user", "assistant"}:
+                continue
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            recent_turns.append(
+                {
+                    "message_id": str(item.get("message_id") or f"m_{idx:06d}"),
+                    "role": role,
+                    "content": str(item.get("content") or ""),
+                    "created_at": self._to_iso(item.get("created_at"), fallback=self._now_iso()),
+                    "trace_id": str(metadata.get("trace_id") or "").strip(),
+                }
+            )
+        return recent_turns
+
+    def _build_authority_summary(self, *, recent_turns: list[dict[str, Any]]) -> dict[str, Any]:
+        short_summary_parts: list[str] = []
+        for item in recent_turns[-4:]:
+            role = str(item.get("role") or "").strip().lower()
+            content = " ".join(str(item.get("content") or "").split())
+            if role not in {"user", "assistant"} or not content:
+                continue
+            short_summary_parts.append(f"{role}: {content}")
         return {
-            "short_summary": "",
+            "short_summary": " ".join(short_summary_parts),
             "memory_facts": [],
             "open_threads": [],
         }
@@ -1124,18 +1151,7 @@ class ConversationService:
         document: dict[str, Any],
     ) -> dict[str, Any]:
         messages = self._prepare_response_messages(document.get("messages") or [])
-        recent_turns: list[dict[str, Any]] = []
-        for idx, item in enumerate(messages, start=1):
-            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-            recent_turns.append(
-                {
-                    "message_id": str(item.get("message_id") or f"m_{idx:06d}"),
-                    "role": str(item.get("role") or "assistant"),
-                    "content": str(item.get("content") or ""),
-                    "created_at": self._to_iso(item.get("created_at"), fallback=self._now_iso()),
-                    "trace_id": str(metadata.get("trace_id") or "").strip(),
-                }
-            )
+        recent_turns = self._build_authority_recent_turns(messages=messages)
         meta = document.get("meta") if isinstance(document.get("meta"), dict) else {}
         created_at = self._to_iso(meta.get("created_at") or row.get("created_at"), fallback=self._now_iso())
         updated_at = self._to_iso(meta.get("updated_at") or row.get("updated_at"), fallback=created_at)
@@ -1150,7 +1166,7 @@ class ConversationService:
                 "user_id": int(user_id),
                 "snapshot_version": max(0, int(snapshot_version)),
                 "updated_at": updated_at,
-                "summary": self._build_authority_summary(),
+                "summary": self._build_authority_summary(recent_turns=recent_turns),
                 "recent_turns": recent_turns,
                 "conversation_state": self._build_authority_conversation_state(messages=messages),
             },

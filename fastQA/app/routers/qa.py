@@ -17,6 +17,7 @@ from app.modules.qa_kb.models import QaKbRequest
 from app.modules.qa_kb.service import qa_kb_service
 from app.modules.qa_kb.streaming import build_reference_links, normalize_reference_objects, normalize_references
 from app.services.file_routes import iter_pdf_route_events, iter_tabular_route_events, resolve_gateway_file_context
+from app.services.conversation_context_builder import build_conversation_context
 from app.services.request_adapter import GatewayAskRequest, RequestAdapterError, adapt_gateway_ask_payload
 from app.services.stream_contract import AskStreamTap
 
@@ -203,7 +204,7 @@ def _apply_authority_context(
     if not isinstance(authority_context, dict):
         return adapted_request
     chat_history = authority_context.get("chat_history")
-    normalized_chat_history = [dict(item) for item in chat_history if isinstance(item, dict)] if isinstance(chat_history, list) else list(adapted_request.chat_history)
+    normalized_chat_history = [dict(item) for item in chat_history if isinstance(item, dict)] if isinstance(chat_history, list) else list(adapted_request.authority_chat_history)
     merged_options = dict(adapted_request.options or {})
     snapshot = authority_context.get("snapshot")
     if isinstance(snapshot, dict):
@@ -219,7 +220,14 @@ def _apply_authority_context(
         merged_options["authority_pending_overlay"] = dict(pending_overlay)
     if authority_context.get("snapshot_version") is not None:
         merged_options["authority_snapshot_version"] = authority_context.get("snapshot_version")
-    return replace(adapted_request, chat_history=normalized_chat_history, options=merged_options)
+    return replace(
+        adapted_request,
+        chat_history=normalized_chat_history,
+        authority_chat_history=normalized_chat_history,
+        authority_conversation_state=dict(conversation_state or {}),
+        authority_summary=dict(summary or {}),
+        options=merged_options,
+    )
 
 
 def _load_conversation_context_if_needed(
@@ -578,6 +586,18 @@ def _iter_route_events(
         server_active_stream_count = None
         if limiter is not None:
             server_active_stream_count = int(limiter.snapshot().active)
+        conversation_context = build_conversation_context(
+            current_question=adapted_request.question,
+            request_chat_history=adapted_request.request_chat_history,
+            authority_chat_history=adapted_request.authority_chat_history,
+            authority_summary=adapted_request.authority_summary,
+            authority_conversation_state=adapted_request.authority_conversation_state,
+            source_scope=adapted_request.source_scope,
+            selected_file_ids=adapted_request.selected_file_ids,
+            used_files=adapted_request.used_files,
+            execution_files=adapted_request.execution_files,
+            primary_file_id=adapted_request.primary_file_id,
+        )
         qa_request = QaKbRequest(
             question=adapted_request.question,
             request_use_generation_driven=adapted_request.request_use_generation_driven,
@@ -585,6 +605,10 @@ def _iter_route_events(
             n_results_per_claim=adapted_request.n_results_per_claim,
             active_stream_count=server_active_stream_count,
             trace_id=adapted_request.trace_id,
+            recent_turns_for_llm=conversation_context["recent_turns_for_llm"],
+            summary_for_llm=conversation_context["summary_for_llm"],
+            conversation_state=conversation_context["conversation_state"],
+            source_selection=conversation_context["source_selection"],
         )
         yield from qa_kb_service.iter_answer_events(
             request=qa_request,

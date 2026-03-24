@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from typing import Any
 
@@ -26,6 +27,66 @@ def _normalize_question(question: str) -> str:
 
 def _question_hash(question: str) -> str:
     return hashlib.sha256(_normalize_question(question).encode("utf-8")).hexdigest()
+
+
+def _canonicalize_context(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _canonicalize_context(value[key]) for key in sorted(value.keys(), key=lambda item: str(item))}
+    if isinstance(value, list):
+        return [_canonicalize_context(item) for item in value]
+    if isinstance(value, tuple):
+        return [_canonicalize_context(item) for item in value]
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _normalize_prompt_text(value: Any) -> str:
+    return " ".join(str(value or "").split()).strip()
+
+
+def _stage1_prompt_relevant_context(conversation_context: dict[str, Any] | None) -> dict[str, Any]:
+    source = conversation_context or {}
+    summary = source.get("summary_for_llm") if isinstance(source, dict) else {}
+    turns = source.get("recent_turns_for_llm") if isinstance(source, dict) else []
+
+    normalized_turns: list[dict[str, Any]] = []
+    if isinstance(turns, list):
+        for item in turns:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "").strip().lower()
+            content = _normalize_prompt_text(item.get("content"))
+            if role not in {"user", "assistant"} or not content:
+                continue
+            normalized_turns.append({"role": role, "content": content})
+
+    normalized_summary: dict[str, Any] = {}
+    if isinstance(summary, dict):
+        short_summary = _normalize_prompt_text(summary.get("short_summary"))
+        if short_summary:
+            normalized_summary["short_summary"] = short_summary
+        open_threads = [str(item).strip() for item in list(summary.get("open_threads") or [])]
+        open_threads = [item for item in open_threads if item]
+        if open_threads:
+            normalized_summary["open_threads"] = open_threads
+        memory_facts = [str(item).strip() for item in list(summary.get("memory_facts") or [])]
+        memory_facts = [item for item in memory_facts if item]
+        if memory_facts:
+            normalized_summary["memory_facts"] = memory_facts
+
+    return {
+        "recent_turns_for_llm": normalized_turns,
+        "summary_for_llm": normalized_summary,
+    }
+
+
+def _conversation_context_hash(conversation_context: dict[str, Any] | None) -> str:
+    canonical = _canonicalize_context(_stage1_prompt_relevant_context(conversation_context))
+    payload = json.dumps(canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _runtime_model_name(runtime: Any) -> str:
@@ -56,6 +117,7 @@ def build_stage1_cache_key(
     redis_service: RedisService,
     runtime: Any,
     question: str,
+    conversation_context: dict[str, Any] | None = None,
     route_hint: str = "kb_qa",
 ) -> str:
     return redis_service.key_factory.cache(
@@ -66,6 +128,7 @@ def build_stage1_cache_key(
         _runtime_model_name(runtime),
         _runtime_prompt_version(runtime),
         _question_hash(question),
+        _conversation_context_hash(conversation_context),
     )
 
 
@@ -74,6 +137,7 @@ def build_stage1_lock_key(
     redis_service: RedisService,
     runtime: Any,
     question: str,
+    conversation_context: dict[str, Any] | None = None,
     route_hint: str = "kb_qa",
 ) -> str:
     return redis_service.key_factory.lock(
@@ -84,6 +148,7 @@ def build_stage1_lock_key(
         _runtime_model_name(runtime),
         _runtime_prompt_version(runtime),
         _question_hash(question),
+        _conversation_context_hash(conversation_context),
     )
 
 
@@ -92,6 +157,7 @@ def get_cached_stage1_result(
     redis_service: RedisService | None,
     runtime: Any,
     question: str,
+    conversation_context: dict[str, Any] | None = None,
     route_hint: str = "kb_qa",
 ) -> dict[str, Any] | None:
     if redis_service is None or not redis_service.available:
@@ -101,6 +167,7 @@ def get_cached_stage1_result(
             redis_service=redis_service,
             runtime=runtime,
             question=question,
+            conversation_context=conversation_context,
             route_hint=route_hint,
         ),
         default=None,
@@ -125,6 +192,7 @@ def cache_stage1_result(
     runtime: Any,
     question: str,
     stage1_result: dict[str, Any],
+    conversation_context: dict[str, Any] | None = None,
     route_hint: str = "kb_qa",
 ) -> bool:
     if redis_service is None or not redis_service.available:
@@ -143,6 +211,7 @@ def cache_stage1_result(
             redis_service=redis_service,
             runtime=runtime,
             question=question,
+            conversation_context=conversation_context,
             route_hint=route_hint,
         ),
         payload,

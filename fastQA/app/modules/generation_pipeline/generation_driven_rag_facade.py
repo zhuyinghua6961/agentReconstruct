@@ -182,7 +182,11 @@ class GenerationDrivenRAG:
             )
         return self._query_expander
 
-    def stage1_pre_answer_and_planning(self, user_question: str) -> Dict[str, Any]:
+    def stage1_pre_answer_and_planning(
+        self,
+        user_question: str,
+        conversation_context: dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
         return run_stage1_pre_answer_and_planning_impl(
             user_question=user_question,
             stage1_prompt=self.stage1_prompt,
@@ -190,6 +194,7 @@ class GenerationDrivenRAG:
             client=self.client,
             model=self.model,
             logger=logger,
+            conversation_context=conversation_context,
         )
 
     def stage2_targeted_retrieval(

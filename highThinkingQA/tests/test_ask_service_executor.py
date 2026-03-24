@@ -181,6 +181,91 @@ def test_stream_ask_events_forwards_content_before_done(monkeypatch):
     assert frames[4]["final_answer"] == "final-alpha [DOI: 10.1000/demo]"
 
 
+
+def test_stream_ask_events_passes_sanitized_conversation_context_to_agent(monkeypatch):
+    state = type("State", (), {"final_answer": "alpha", "timings": {"total": 0.1}, "error": ""})()
+    captured = {}
+
+    def fake_run_agent(question, profile, **kwargs):
+        captured["conversation_context"] = kwargs["conversation_context"]
+        return state
+
+    monkeypatch.setattr("server.services.ask_service._get_agent_executor", lambda: InlineExecutor())
+    monkeypatch.setattr("server.services.ask_service._run_agent_for_profile", fake_run_agent)
+    monkeypatch.setattr(
+        "server.services.ask_service.build_conversation_context",
+        lambda request: ConversationContext(
+            raw_question="那它冬天呢",
+            recent_turns=[
+                {
+                    "role": "user",
+                    "content": "介绍磷酸铁锂",
+                    "trace_id": "trace-u1",
+                    "steps": [{"name": "retrieve"}],
+                },
+                {
+                    "role": "assistant",
+                    "content": "它低温性能一般",
+                    "timings": {"total_ms": 12},
+                    "source_usage": [{"doi": "10.1000/demo"}],
+                },
+            ],
+            summary={
+                "topic": "磷酸铁锂",
+                "recent_focus": "低温性能",
+                "updated_at": "2026-03-17T10:00:00+08:00",
+                "steps": [{"name": "retrieve"}],
+                "timings": {"total_ms": 123},
+                "file_selection": {"picked": ["paper-a"]},
+                "source_usage": [{"doi": "10.1000/demo"}],
+                "trace_id": "trace-1",
+            },
+            conversation_id=11,
+            user_id=7,
+        ),
+    )
+    monkeypatch.setattr(
+        "server.services.ask_service.rewrite_question",
+        lambda **kwargs: type(
+            "RewriteResult",
+            (),
+            {
+                "raw_question": kwargs["raw_question"],
+                "effective_question": kwargs["raw_question"],
+                "rewrite_applied": False,
+                "rewrite_reason": "self_contained",
+            },
+        )(),
+    )
+
+    frames = list(
+        stream_ask_events(
+            request=AskRequest(
+                question="那它冬天呢",
+                mode="thinking",
+                user_id=7,
+                conversation_id=11,
+                chat_history=[],
+                options={},
+            ),
+            timeout_seconds=10,
+            heartbeat_seconds=1,
+            trace_id="req_test",
+        )
+    )
+
+    assert frames[-1]["type"] == "done"
+    assert captured["conversation_context"]["recent_turns"] == [
+        {"role": "user", "content": "介绍磷酸铁锂"},
+        {"role": "assistant", "content": "它低温性能一般"},
+    ]
+    assert captured["conversation_context"]["summary"]["topic"] == "磷酸铁锂"
+    assert "steps" not in captured["conversation_context"]["summary"]
+    assert "timings" not in captured["conversation_context"]["summary"]
+    assert "file_selection" not in captured["conversation_context"]["summary"]
+    assert "source_usage" not in captured["conversation_context"]["summary"]
+    assert "trace_id" not in captured["conversation_context"]["summary"]
+
 def test_adapt_answer_for_frontend_converts_bracket_citations():
     assert _adapt_answer_for_frontend("A [10.1000/demo, Preamble] B") == "A [DOI: 10.1000/demo] B"
 

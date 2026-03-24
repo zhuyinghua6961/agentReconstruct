@@ -651,7 +651,7 @@ def test_mode_ask_with_public_http_provider_forwards_auth_and_trace():
     assert captured["body"]["route"] == "tabular_qa"
 
 
-def test_v1_ask_alias_accepts_legacy_mode_field():
+def test_v1_ask_alias_accepts_legacy_mode_field_routes_backend():
     captured = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -672,7 +672,7 @@ def test_v1_ask_alias_accepts_legacy_mode_field():
     assert response.headers["x-gateway-backend"] == "thinking"
 
 
-def test_v1_ask_alias_accepts_legacy_mode_field():
+def test_v1_ask_alias_accepts_legacy_mode_field_sets_actual_mode():
     captured = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -852,3 +852,63 @@ def test_mode_ask_short_circuits_clarification_in_gateway():
     assert response.status_code == 400
     assert response.json()["code"] == "FILE_SELECTION_CLARIFICATION_REQUIRED"
     assert calls == []
+
+def test_mode_ask_forwards_chat_history_without_pdf_context():
+    captured = {}
+    chat_history = [
+        {"role": "user", "content": "第一轮问题"},
+        {"role": "assistant", "content": "第一轮回答"},
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        response = client.post(
+            "/api/thinking/ask",
+            json={
+                "question": "plain qa",
+                "requested_mode": "thinking",
+                "conversation_id": 7,
+                "chat_history": chat_history,
+                "pdf_context": {"selected_ids": [11], "last_focus_ids": [11]},
+            },
+        )
+
+    assert response.status_code == 200
+    assert captured["url"].endswith("/api/thinking/ask")
+    assert captured["body"]["chat_history"] == chat_history
+    assert "pdf_context" not in captured["body"]
+    assert captured["body"]["route"] == "kb_qa"
+    assert captured["body"]["actual_mode"] == "thinking"
+
+
+def test_mode_ask_stream_short_circuits_clarification_in_gateway():
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        with client.stream(
+            "POST",
+            "/api/thinking/ask_stream",
+            json={
+                "question": "请继续总结这篇文献",
+                "requested_mode": "thinking",
+                "pdf_context": {"selected_ids": [11, 22]},
+            },
+        ) as response:
+            body = b"".join(response.iter_bytes())
+
+    assert response.status_code == 200
+    assert calls == []
+    assert b'"type":"metadata"' in body
+    assert b'FILE_SELECTION_CLARIFICATION_REQUIRED' in body
+    assert response.headers["content-type"].startswith("text/event-stream")
+

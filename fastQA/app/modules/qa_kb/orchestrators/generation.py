@@ -48,6 +48,13 @@ def _consume_stage4_result(stage4_output: Any, logger: Any) -> dict[str, Any]:
     return {"success": False, "error": "stage4_output_invalid"}
 
 
+
+
+def _final_query_mode(*, provided: Any, skip_pdf: bool) -> str:
+    value = str(provided or "").strip()
+    if value:
+        return value
+    return "生成驱动检索（MD直读）" if skip_pdf else "生成驱动检索（PDF溯源）"
 def _model_identity_shortcut(question: str) -> str | None:
     qlow = str(question or "").lower()
     model_queries = (
@@ -116,16 +123,38 @@ class GenerationPipelineOrchestrator:
             raw=raw,
         )
 
-    def _run_stage1(self, *, question: str, runtime: GenerationRuntime, redis_service: RedisService | None) -> dict[str, Any]:
-        cached = get_cached_stage1_result(redis_service=redis_service, runtime=runtime, question=question)
+    def _run_stage1(
+        self,
+        *,
+        question: str,
+        runtime: GenerationRuntime,
+        redis_service: RedisService | None,
+        conversation_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        cached = get_cached_stage1_result(
+            redis_service=redis_service,
+            runtime=runtime,
+            question=question,
+            conversation_context=conversation_context,
+        )
         if cached is not None:
             increment_cache_metric("stage1", "cache_hit")
             return cached
         increment_cache_metric("stage1", "cache_miss")
 
         def _compute() -> dict[str, Any]:
-            result = self.stage1.run(runtime=runtime, user_question=question)
-            cache_stage1_result(redis_service=redis_service, runtime=runtime, question=question, stage1_result=result)
+            result = self.stage1.run(
+                runtime=runtime,
+                user_question=question,
+                conversation_context=conversation_context,
+            )
+            cache_stage1_result(
+                redis_service=redis_service,
+                runtime=runtime,
+                question=question,
+                stage1_result=result,
+                conversation_context=conversation_context,
+            )
             return result
 
         if redis_service is None or not redis_service.available:
@@ -133,9 +162,19 @@ class GenerationPipelineOrchestrator:
 
         return run_singleflight(
             redis_service=redis_service,
-            lock_key=build_stage1_lock_key(redis_service=redis_service, runtime=runtime, question=question),
+            lock_key=build_stage1_lock_key(
+                redis_service=redis_service,
+                runtime=runtime,
+                question=question,
+                conversation_context=conversation_context,
+            ),
             namespace="stage1",
-            read_cached_fn=lambda: get_cached_stage1_result(redis_service=redis_service, runtime=runtime, question=question),
+            read_cached_fn=lambda: get_cached_stage1_result(
+                redis_service=redis_service,
+                runtime=runtime,
+                question=question,
+                conversation_context=conversation_context,
+            ),
             compute_fn=_compute,
         )
 
@@ -318,6 +357,7 @@ class GenerationPipelineOrchestrator:
         should_cancel: Callable[[], bool] | None,
         active_stream_count: int | None,
         logger: Any,
+        conversation_context: dict[str, Any] | None = None,
     ) -> QaKbExecutionResult | dict[str, Any]:
         timings: dict[str, float] = {}
         logger.info(
@@ -344,7 +384,12 @@ class GenerationPipelineOrchestrator:
         stage1_result = self._timed(
             timings,
             "stage1",
-            lambda: self._run_stage1(question=question, runtime=runtime, redis_service=redis_service),
+            lambda: self._run_stage1(
+                question=question,
+                runtime=runtime,
+                redis_service=redis_service,
+                conversation_context=conversation_context,
+            ),
         )
         if not stage1_result.get("success"):
             return QaKbExecutionResult(
@@ -473,6 +518,7 @@ class GenerationPipelineOrchestrator:
         should_cancel: Callable[[], bool] | None,
         active_stream_count: int | None,
         logger: Any,
+        conversation_context: dict[str, Any] | None = None,
     ) -> QaKbExecutionResult:
         prepared = self._prepare(
             question=question,
@@ -482,6 +528,7 @@ class GenerationPipelineOrchestrator:
             should_cancel=should_cancel,
             active_stream_count=active_stream_count,
             logger=logger,
+            conversation_context=conversation_context,
         )
         if isinstance(prepared, QaKbExecutionResult):
             return prepared
@@ -513,7 +560,7 @@ class GenerationPipelineOrchestrator:
             metadata=QaKbExecutionMetadata(
                 route="kb_qa",
                 pipeline_mode="new",
-                query_mode=str(synthesis_result.get("query_mode") or "生成驱动检索（PDF溯源）"),
+                query_mode=_final_query_mode(provided=synthesis_result.get("query_mode"), skip_pdf=prepared["skip_pdf"]),
                 use_generation_driven=True,
                 doi_count=len(prepared["dois"]),
                 chunk_count=sum(len(chunks) for chunks in prepared["pdf_chunks"].values()),
@@ -537,6 +584,7 @@ class GenerationPipelineOrchestrator:
         logger: Any,
         sse_event: Callable[[dict[str, Any]], Any],
         chunk_size: int = 120,
+        conversation_context: dict[str, Any] | None = None,
     ) -> Iterator[Any]:
         timings: dict[str, float] = {}
         logger.info(
@@ -569,7 +617,12 @@ class GenerationPipelineOrchestrator:
         stage1_result = self._timed(
             timings,
             "stage1",
-            lambda: self._run_stage1(question=question, runtime=runtime, redis_service=redis_service),
+            lambda: self._run_stage1(
+                question=question,
+                runtime=runtime,
+                redis_service=redis_service,
+                conversation_context=conversation_context,
+            ),
         )
         logger.info(
             "fastqa stream stage1 returned success=%s keys=%s question=%s",
@@ -716,7 +769,7 @@ class GenerationPipelineOrchestrator:
             yield sse_event(
                 {
                     "type": "thinking",
-                    "content": f"📄 阶段三：加载 {len(dois)} 个文献的原文（提取 top 8 个最相关chunk）...",
+                    "content": f"📄 阶段三：加载 {len(dois)} 个文献的原文（提取 top 3 个最相关chunk）...",
                 }
             )
             pdf_chunks = self._timed(
@@ -747,7 +800,6 @@ class GenerationPipelineOrchestrator:
         yield sse_event(
             {
                 "type": "metadata",
-                "query_mode": "生成驱动检索（PDF溯源）",
                 "route": "kb_qa",
                 "pipeline_mode": "new",
                 "use_generation_driven": 1,
@@ -828,7 +880,7 @@ class GenerationPipelineOrchestrator:
         yield sse_event(
             {
                 "type": "done",
-                "query_mode": str(final_result.get("query_mode") or "生成驱动检索（PDF溯源）"),
+                "query_mode": _final_query_mode(provided=final_result.get("query_mode"), skip_pdf=skip_pdf),
                 "route": "kb_qa",
                 "doi_count": len(dois),
                 "chunk_count": sum(len(chunks) for chunks in pdf_chunks.values()),

@@ -31,6 +31,10 @@ class GatewayAskRequest:
     conversation_id: int | None = None
     user_id: int | None = None
     chat_history: list[dict[str, Any]] = field(default_factory=list)
+    request_chat_history: list[dict[str, Any]] = field(default_factory=list)
+    authority_chat_history: list[dict[str, Any]] = field(default_factory=list)
+    authority_summary: dict[str, Any] = field(default_factory=dict)
+    authority_conversation_state: dict[str, Any] = field(default_factory=dict)
     requested_mode: str = _ALLOWED_MODE
     actual_mode: str = _ALLOWED_MODE
     route: str = "kb_qa"
@@ -60,6 +64,10 @@ class GatewayAskRequest:
             "conversation_id": self.conversation_id,
             "user_id": self.user_id,
             "chat_history": list(self.chat_history),
+            "request_chat_history": list(self.request_chat_history),
+            "authority_chat_history": list(self.authority_chat_history),
+            "authority_summary": dict(self.authority_summary),
+            "authority_conversation_state": dict(self.authority_conversation_state),
             "use_generation_driven": self.request_use_generation_driven,
             "request_use_generation_driven": self.request_use_generation_driven,
             "route_hint": self.route,
@@ -362,11 +370,14 @@ def adapt_gateway_ask_payload(payload: Mapping[str, Any]) -> GatewayAskRequest:
     if primary_file_id is not None:
         file_selection["primary_file_id"] = primary_file_id
 
+    request_chat_history = _as_history(source.get("chat_history"))
+
     return GatewayAskRequest(
         question=question,
         conversation_id=_coerce_positive_int(source.get("conversation_id")),
         user_id=_coerce_positive_int(source.get("user_id")) or _coerce_positive_int(options.get("user_id")),
-        chat_history=_as_history(source.get("chat_history")),
+        chat_history=list(request_chat_history),
+        request_chat_history=request_chat_history,
         requested_mode=requested_mode,
         actual_mode=actual_mode,
         route=route,

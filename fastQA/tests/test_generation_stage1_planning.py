@@ -16,6 +16,20 @@ class _FakeClient:
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=self.content))])
 
 
+class _ResponseFormatRejectingClient(_FakeClient):
+    def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        if "response_format" in kwargs:
+            raise RuntimeError("response_format not supported")
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=self.content))])
+
+
+class _AlwaysFailingClient(_FakeClient):
+    def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        raise RuntimeError("invalid api key")
+
+
 class _Logger:
     def info(self, *args, **kwargs):
         return None
@@ -95,3 +109,70 @@ def test_stage1_planning_does_not_synthesize_claims_from_user_question():
     assert result["success"] is True
     assert result["deep_answer"] == ""
     assert result["retrieval_claims"] == []
+
+
+def test_stage1_planning_retries_without_response_format_when_backend_rejects_it():
+    client = _ResponseFormatRejectingClient('{"deep_answer":"answer","retrieval_claims":[]}')
+    result = run_stage1_pre_answer_and_planning(
+        user_question="what is lfp?",
+        stage1_prompt="prompt",
+        vector_db_context="context",
+        client=client,
+        model="gpt-test",
+        logger=_Logger(),
+    )
+
+    assert result["success"] is True
+    assert result["deep_answer"] == "answer"
+    assert len(client.calls) == 2
+    assert client.calls[0]["response_format"] == {"type": "json_object"}
+    assert "response_format" not in client.calls[1]
+
+
+def test_stage1_planning_includes_normalized_conversation_context_in_user_message():
+    client = _FakeClient('{"deep_answer":"answer","retrieval_claims":[]}')
+    run_stage1_pre_answer_and_planning(
+        user_question="what is lfp?",
+        stage1_prompt="prompt",
+        vector_db_context="context",
+        client=client,
+        model="gpt-test",
+        logger=_Logger(),
+        conversation_context={
+            "recent_turns_for_llm": [
+                {"role": "user", "content": "  explain   LFP  "},
+                {"role": "assistant", "content": "  safe   chemistry "},
+                {"role": "assistant", "content": "   "},
+            ],
+            "summary_for_llm": {
+                "short_summary": " discussing   LFP ",
+                "open_threads": [" cycle life ", "   "],
+                "memory_facts": [" cathode ", ""],
+                "trace_id": "should-not-leak",
+            },
+        },
+    )
+
+    user_message = client.calls[0]["messages"][1]["content"]
+    assert "会话摘要：discussing LFP" in user_message
+    assert "待继续话题：cycle life" in user_message
+    assert "已知事实：cathode" in user_message
+    assert "用户: explain LFP" in user_message
+    assert "助手: safe chemistry" in user_message
+    assert "should-not-leak" not in user_message
+
+
+def test_stage1_planning_does_not_retry_without_response_format_for_unrelated_errors():
+    client = _AlwaysFailingClient('ignored')
+    result = run_stage1_pre_answer_and_planning(
+        user_question="what is lfp?",
+        stage1_prompt="prompt",
+        vector_db_context="context",
+        client=client,
+        model="gpt-test",
+        logger=_Logger(),
+    )
+
+    assert result["success"] is False
+    assert len(client.calls) == 1
+    assert client.calls[0]["response_format"] == {"type": "json_object"}

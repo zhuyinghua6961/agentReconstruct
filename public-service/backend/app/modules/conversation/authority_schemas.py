@@ -33,23 +33,23 @@ class AuthorityUserWriteRequest(AuthorityRequestBase):
 
 
 class AuthorityConversationSummary(BaseModel):
-    short_summary: str = ""
-    memory_facts: list[dict[str, Any]] = Field(default_factory=list)
-    open_threads: list[dict[str, Any]] = Field(default_factory=list)
+    short_summary: str = Field(default="", description="Minimal authority-generated summary from final user/assistant turns only.")
+    memory_facts: list[dict[str, Any]] = Field(default_factory=list, description="Stable placeholder for future authority memory extraction.")
+    open_threads: list[dict[str, Any]] = Field(default_factory=list, description="Stable placeholder for unresolved conversation threads.")
 
 
 class AuthorityRecentTurn(BaseModel):
     message_id: str
-    role: str
+    role: Literal["user", "assistant"] = Field(description="Only final conversation roles are exposed by authority snapshots.")
     content: str
     created_at: datetime
-    trace_id: str
+    trace_id: str = Field(default="", description="Trace identifier for the final turn; execution traces themselves are excluded.")
 
 
 class AuthorityConversationState(BaseModel):
-    last_turn_route: str | None = None
-    last_focus_file_ids: list[int] = Field(default_factory=list)
-    last_assistant_trace_id: str | None = None
+    last_turn_route: str | None = Field(default=None, description="Last assistant route selected by the QA authority flow.")
+    last_focus_file_ids: list[int] = Field(default_factory=list, description="File identifiers derived from the last assistant turn's used files.")
+    last_assistant_trace_id: str | None = Field(default=None, description="Trace identifier of the last assistant final turn.")
 
 
 class AuthorityContextSnapshotRequest(AuthorityRequestBase):

@@ -194,6 +194,132 @@ def test_internal_context_snapshot_read_does_not_require_idempotency_key(monkeyp
     }
 
 
+def test_internal_context_snapshot_contract_filters_non_final_messages(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="authority snapshot contract")
+        conversation_id = int(created["data"]["conversation_id"])
+        written = service.add_authority_user_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trc_fast_user_001",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key=f"{conversation_id}:trc_fast_user_001:user",
+            content="What changed in the experiment?",
+            context_hints={"selected_file_ids": [3], "last_turn_route_hint": "kb_qa"},
+        )
+        assert written["success"] is True
+        added = service.add_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            role="assistant",
+            content="The temperature increased by 5C.",
+            metadata={
+                "trace_id": "trc_fast_assistant_001",
+                "route": "kb_qa",
+                "used_files": [{"file_id": 3}],
+                "steps": [{"stage": "retrieve"}],
+                "timings": {"latency_ms": 42},
+                "debug": {"planner": "legacy"},
+            },
+        )
+        assert added["success"] is True
+
+        with service._json_store.conversation_lock(user_id=7, conversation_id=conversation_id):
+            document = service._json_store.load_document(user_id=7, conversation_id=conversation_id)
+            messages = document.get("messages") if isinstance(document.get("messages"), list) else []
+            messages.append(
+                {
+                    "message_id": "m_999999",
+                    "role": "system",
+                    "content": "trace: internal retrieval context",
+                    "created_at": written["created_at"],
+                    "metadata": {
+                        "trace_id": "trc_internal_ignored",
+                        "steps": [{"stage": "debug"}],
+                        "timings": {"latency_ms": 1},
+                    },
+                }
+            )
+            document["messages"] = messages
+            service._json_store.write_document(user_id=7, conversation_id=conversation_id, document=document)
+
+        response = client.get(
+            f"/internal/conversations/{conversation_id}/context-snapshot",
+            params=_snapshot_query(conversation_id=conversation_id, trace_id="trc_fast_read_001"),
+            headers=_internal_headers("fastQA"),
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["role"] for item in payload["recent_turns"]] == ["user", "assistant"]
+    assert [item["content"] for item in payload["recent_turns"]] == [
+        "What changed in the experiment?",
+        "The temperature increased by 5C.",
+    ]
+    assert payload["conversation_state"] == {
+        "last_turn_route": "kb_qa",
+        "last_focus_file_ids": [3],
+        "last_assistant_trace_id": "trc_fast_assistant_001",
+    }
+    assert sorted(payload["summary"].keys()) == ["memory_facts", "open_threads", "short_summary"]
+
+
+def test_internal_context_snapshot_generates_minimal_summary(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="authority snapshot summary")
+        conversation_id = int(created["data"]["conversation_id"])
+        written = service.add_authority_user_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trc_fast_user_002",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key=f"{conversation_id}:trc_fast_user_002:user",
+            content="Summarize the last finding.",
+            context_hints={},
+        )
+        assert written["success"] is True
+        added = service.add_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            role="assistant",
+            content="The last finding is that the catalyst stayed stable for 48 hours.",
+            metadata={
+                "trace_id": "trc_fast_assistant_002",
+                "route": "kb_qa",
+                "steps": [{"stage": "answer"}],
+                "timings": {"latency_ms": 84},
+            },
+        )
+        assert added["success"] is True
+
+        response = client.get(
+            f"/internal/conversations/{conversation_id}/context-snapshot",
+            params=_snapshot_query(conversation_id=conversation_id, trace_id="trc_fast_read_002"),
+            headers=_internal_headers("fastQA"),
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"] == {
+        "short_summary": (
+            "user: Summarize the last finding. "
+            "assistant: The last finding is that the catalyst stayed stable for 48 hours."
+        ),
+        "memory_facts": [],
+        "open_threads": [],
+    }
+
+
 def test_internal_user_write_rejects_missing_idempotency_key(monkeypatch):
     monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
 

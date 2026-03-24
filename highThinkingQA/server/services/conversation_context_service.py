@@ -26,6 +26,8 @@ _MAX_RECENT_MESSAGES = _env_int("MULTITURN_RECENT_MESSAGES", 8, minimum=1, maxim
 _MAX_MESSAGE_CHARS = _env_int("MULTITURN_MESSAGE_MAX_CHARS", 800, minimum=50, maximum=4000)
 _MAX_TOTAL_CHARS = _env_int("MULTITURN_TOTAL_MAX_CHARS", 4000, minimum=200, maximum=20000)
 
+_SUMMARY_EXCLUDED_KEYS = {"steps", "timings", "file_selection", "source_usage", "trace_id"}
+
 
 @dataclass(frozen=True)
 class ConversationContext:
@@ -106,6 +108,32 @@ def _apply_history_budget(turns: list[dict[str, str]]) -> list[dict[str, str]]:
     return budgeted
 
 
+def _sanitize_summary(summary: dict[str, Any] | Any) -> dict[str, Any]:
+    if not isinstance(summary, dict):
+        return {}
+    sanitized: dict[str, Any] = {}
+    for key, value in summary.items():
+        key_text = str(key or "").strip()
+        if not key_text or key_text in _SUMMARY_EXCLUDED_KEYS:
+            continue
+        sanitized[key_text] = value
+    short_summary = _normalize_text(sanitized.get("short_summary"), max_chars=1200)
+    if short_summary:
+        sanitized["short_summary"] = short_summary
+        sanitized.setdefault("recent_focus", short_summary)
+    return sanitized
+
+
+def sanitize_conversation_context(context: ConversationContext) -> ConversationContext:
+    return ConversationContext(
+        raw_question=_normalize_text(context.raw_question, max_chars=4000),
+        recent_turns=_apply_history_budget(_normalize_turns(list(context.recent_turns or []))),
+        summary=_sanitize_summary(context.summary),
+        conversation_id=_safe_int(context.conversation_id),
+        user_id=_safe_int(context.user_id),
+    )
+
+
 def _load_server_context_snapshot(*, request: AskRequest, user_id: int | None, conversation_id: int | None) -> tuple[list[dict[str, str]], dict[str, Any]]:
     if user_id is None or conversation_id is None:
         return [], {}
@@ -139,13 +167,15 @@ def build_conversation_context(*, request: AskRequest) -> ConversationContext:
     if merged_turns and merged_turns[-1]["role"] == "user" and merged_turns[-1]["content"] == raw_question:
         merged_turns = merged_turns[:-1]
 
-    return ConversationContext(
-        raw_question=raw_question,
-        recent_turns=_apply_history_budget(merged_turns),
-        summary=server_summary,
-        conversation_id=conversation_id,
-        user_id=user_id,
+    return sanitize_conversation_context(
+        ConversationContext(
+            raw_question=raw_question,
+            recent_turns=_apply_history_budget(merged_turns),
+            summary=server_summary,
+            conversation_id=conversation_id,
+            user_id=user_id,
+        )
     )
 
 
-__all__ = ["ConversationContext", "build_conversation_context"]
+__all__ = ["ConversationContext", "build_conversation_context", "sanitize_conversation_context"]

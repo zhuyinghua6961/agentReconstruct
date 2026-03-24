@@ -111,7 +111,8 @@ class FileContextResolver:
         raw_selected_ids = self._normalize_int_list(ctx.get("selected_ids"))
         raw_newly_uploaded_ids = self._normalize_int_list(ctx.get("newly_uploaded_ids"))
         raw_all_available_ids = self._normalize_int_list(ctx.get("all_available_ids"))
-        raw_last_focus_ids = self._normalize_int_list(ctx.get("last_focus_ids"))
+        raw_last_focus_source = ctx.get("last_focus_ids") if "last_focus_ids" in ctx else ctx.get("last_focus_file_ids")
+        raw_last_focus_ids = self._normalize_int_list(raw_last_focus_source)
 
         selected_ids = self._filter_known_ids(raw_selected_ids, file_map) or raw_selected_ids
         newly_uploaded_ids = self._filter_known_ids(raw_newly_uploaded_ids, file_map) or raw_newly_uploaded_ids

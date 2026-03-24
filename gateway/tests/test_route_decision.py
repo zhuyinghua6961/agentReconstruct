@@ -288,3 +288,34 @@ def test_mixed_question_with_file_before_knowledge_base_routes_to_pdf_kb():
     assert routed.route == "hybrid_qa"
     assert routed.source_scope == "pdf+kb"
     assert routed.kb_enabled is True
+
+def test_last_focus_ids_explicit_empty_overrides_alias_value():
+    decision = resolver.resolve(
+        question="请继续总结这篇文献",
+        pdf_context={
+            "all_available_ids": [11, 22],
+            "last_focus_ids": [],
+            "last_focus_file_ids": [22],
+            "last_turn_route": "pdf_qa",
+        },
+        available_files=[PDF, PDF_2],
+    )
+    assert decision.needs_clarification is True
+    assert decision.strategy == "clarify_required"
+
+
+def test_last_focus_file_ids_alias_reuses_previous_file_route():
+    decision = resolver.resolve(
+        question="请继续总结这篇文献",
+        pdf_context={
+            "all_available_ids": [11, 22],
+            "last_focus_file_ids": [22],
+            "last_turn_route": "pdf_qa",
+        },
+        available_files=[PDF, PDF_2],
+    )
+    assert decision.needs_clarification is False
+    assert decision.selected_file_ids == [22]
+    assert decision.strategy == "last_focus"
+    assert decision.route == "pdf_qa"
+

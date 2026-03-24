@@ -148,6 +148,49 @@ def test_orchestrator_run_returns_final_result_when_stage4_succeeds():
     assert result.metadata.source_count == 1
 
 
+
+def test_orchestrator_passes_conversation_context_to_stage1():
+    runtime = _Runtime(
+        stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": []},
+        stage2_payload={"success": False, "error": "retrieval_failed"},
+        doi_payload=[],
+        stage25_payload={},
+        stage3_payload={},
+        stage4_payload=[],
+    )
+    captured: dict[str, object] = {}
+
+    class _Stage1:
+        def run(self, *, runtime, user_question, conversation_context=None):
+            captured["runtime"] = runtime
+            captured["user_question"] = user_question
+            captured["conversation_context"] = conversation_context
+            return {"success": True, "deep_answer": "deep", "retrieval_claims": []}
+
+    orchestrator = GenerationPipelineOrchestrator(stage1=_Stage1())
+
+    result = orchestrator.run(
+        question="hello",
+        runtime=runtime,
+        redis_service=None,
+        n_results_per_claim=5,
+        should_cancel=None,
+        active_stream_count=None,
+        logger=_logger(),
+        conversation_context={
+            "recent_turns_for_llm": [{"role": "assistant", "content": "prev"}],
+            "summary_for_llm": {"short_summary": "sum"},
+        },
+    )
+
+    assert result.success is True
+    assert captured["user_question"] == "hello"
+    assert captured["conversation_context"] == {
+        "recent_turns_for_llm": [{"role": "assistant", "content": "prev"}],
+        "summary_for_llm": {"short_summary": "sum"},
+    }
+
+
 def test_orchestrator_stream_emits_content_and_done():
     runtime = _Runtime(
         stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]},
@@ -233,7 +276,7 @@ def test_orchestrator_stream_emits_legacy_stage_copy_for_pdf_path():
         "📝 阶段一：生成深度预回答与检索规划...",
         "🔍 阶段二：检索高匹配度DOI...",
         "🧩 阶段二点五：尝试MD原文扩展检索...",
-        "📄 阶段三：加载 1 个文献的原文（提取 top 8 个最相关chunk）...",
+        "📄 阶段三：加载 1 个文献的原文（提取 top 3 个最相关chunk）...",
         "✍️ 阶段四：综合预回答与原文chunk生成答案...",
     ]
 
@@ -385,3 +428,126 @@ def test_orchestrator_stream_reuses_cached_stage25_and_stage3_results():
     assert stage3.calls == 1
     assert metrics["stage25"]["cache_hit"] >= 1
     assert metrics["stage3"]["cache_hit"] >= 1
+
+
+def test_orchestrator_stream_metadata_does_not_hardcode_query_mode_before_final_result():
+    runtime = _Runtime(
+        stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]},
+        stage2_payload={"success": True, "documents": ["doc"], "metadatas": [{"doi": "10.1"}], "distances": [0.1]},
+        doi_payload=["10.1"],
+        stage25_payload={"enabled": False, "applied": False, "md_chunks_by_doi": {}, "stats": {}},
+        stage3_payload={"10.1": [{"text": "evidence"}]},
+        stage4_payload=[{"success": True, "final_answer": "final", "query_mode": "自定义查询模式", "references": [{"doi": "10.1"}]}],
+    )
+    orchestrator = GenerationPipelineOrchestrator()
+
+    events = list(
+        orchestrator.stream(
+            question="hello",
+            runtime=runtime,
+            redis_service=None,
+            n_results_per_claim=5,
+            should_cancel=None,
+            active_stream_count=None,
+            logger=_logger(),
+            sse_event=lambda payload: payload,
+        )
+    )
+
+    metadata_event = next(event for event in events if event.get("type") == "metadata")
+    done_event = events[-1]
+    assert "query_mode" not in metadata_event
+    assert done_event["query_mode"] == "自定义查询模式"
+
+
+def test_orchestrator_stream_passes_conversation_context_to_stage1():
+    runtime = _Runtime(
+        stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": []},
+        stage2_payload={"success": False, "error": "retrieval_failed"},
+        doi_payload=[],
+        stage25_payload={},
+        stage3_payload={},
+        stage4_payload=[],
+    )
+    captured: dict[str, object] = {}
+
+    class _Stage1:
+        def run(self, *, runtime, user_question, conversation_context=None):
+            captured["runtime"] = runtime
+            captured["user_question"] = user_question
+            captured["conversation_context"] = conversation_context
+            return {"success": True, "deep_answer": "deep", "retrieval_claims": []}
+
+    orchestrator = GenerationPipelineOrchestrator(stage1=_Stage1())
+
+    events = list(
+        orchestrator.stream(
+            question="hello",
+            runtime=runtime,
+            redis_service=None,
+            n_results_per_claim=5,
+            should_cancel=None,
+            active_stream_count=None,
+            logger=_logger(),
+            sse_event=lambda payload: payload,
+            conversation_context={
+                "recent_turns_for_llm": [{"role": "assistant", "content": "prev"}],
+                "summary_for_llm": {"short_summary": "sum"},
+            },
+        )
+    )
+
+    assert events[-1]["type"] == "done"
+    assert captured["conversation_context"] == {
+        "recent_turns_for_llm": [{"role": "assistant", "content": "prev"}],
+        "summary_for_llm": {"short_summary": "sum"},
+    }
+
+
+def test_orchestrator_uses_md_query_mode_when_stage4_omits_query_mode():
+    runtime = _Runtime(
+        stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]},
+        stage2_payload={"success": True, "documents": ["doc"], "metadatas": [{"doi": "10.1"}], "distances": [0.1]},
+        doi_payload=["10.1"],
+        stage25_payload={
+            "enabled": True,
+            "applied": True,
+            "md_chunks_by_doi": {"10.1": [{"text": "md evidence"}]},
+            "stats": {"hit_doi_count": 1, "total_md_chunks": 1},
+        },
+        stage3_payload={},
+        stage4_payload=[{"success": True, "final_answer": "final", "references": [{"doi": "10.1"}]}],
+    )
+    orchestrator = GenerationPipelineOrchestrator(
+        evaluate_stage3_pdf_skip_fn=lambda **_kwargs: {
+            "should_skip": True,
+            "reason": "md_evidence_threshold",
+            "hit_doi_count": 1,
+            "total_md_chunks": 1,
+        }
+    )
+
+    run_result = orchestrator.run(
+        question="hello",
+        runtime=runtime,
+        redis_service=None,
+        n_results_per_claim=5,
+        should_cancel=None,
+        active_stream_count=None,
+        logger=_logger(),
+    )
+    stream_events = list(
+        orchestrator.stream(
+            question="hello",
+            runtime=runtime,
+            redis_service=None,
+            n_results_per_claim=5,
+            should_cancel=None,
+            active_stream_count=None,
+            logger=_logger(),
+            sse_event=lambda payload: payload,
+        )
+    )
+
+    assert run_result.metadata.query_mode == "生成驱动检索（MD直读）"
+    assert stream_events[-1]["query_mode"] == "生成驱动检索（MD直读）"

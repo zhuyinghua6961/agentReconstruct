@@ -15,7 +15,7 @@ from typing import Any, Generator
 
 import config
 from server.schemas.request_models import AskRequest
-from server.services.conversation_context_service import ConversationContext, build_conversation_context
+from server.services.conversation_context_service import ConversationContext, build_conversation_context, sanitize_conversation_context
 from server.services.mode_profiles import RuntimeProfile, get_runtime_profile
 from server.services.query_rewrite_service import QuestionRewriteResult, rewrite_question
 from server.storage.paper_storage import normalize_doi
@@ -487,7 +487,7 @@ def _run_agent_for_profile(question: str, profile: RuntimeProfile, **callbacks: 
 
 
 def _prepare_execution(request: AskRequest) -> tuple[ConversationContext, QuestionRewriteResult]:
-    context = build_conversation_context(request=request)
+    context = sanitize_conversation_context(build_conversation_context(request=request))
     try:
         rewrite = rewrite_question(
             raw_question=context.raw_question,

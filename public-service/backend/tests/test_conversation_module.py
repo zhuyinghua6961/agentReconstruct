@@ -902,7 +902,7 @@ def test_authority_user_write_is_immediately_visible_to_context_snapshot():
         assert snapshot["data"]["user_id"] == 7
         assert snapshot["data"]["snapshot_version"] >= 2
         assert snapshot["data"]["summary"] == {
-            "short_summary": "",
+            "short_summary": "user: hello authority",
             "memory_facts": [],
             "open_threads": [],
         }
@@ -1043,6 +1043,156 @@ def test_authority_context_snapshot_uses_last_assistant_state():
             "last_focus_file_ids": [5, 9],
             "last_assistant_trace_id": "trace-3-assistant",
         }
+
+
+def test_authority_context_snapshot_filters_non_final_messages():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Authority Contract")
+        conversation_id = int(created["data"]["conversation_id"])
+
+        user_added = service.add_authority_user_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-contract-user",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key=f"{conversation_id}:trace-contract-user:user",
+            content="Need the final answer only.",
+            context_hints={},
+        )
+        assert user_added["success"] is True
+
+        assistant_added = service.add_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            role="assistant",
+            content="Final answer only.",
+            metadata={
+                "trace_id": "trace-contract-assistant",
+                "route": "kb_qa",
+                "used_files": [{"file_id": 21}],
+                "steps": [{"stage": "retrieve"}],
+                "timings": {"latency_ms": 20},
+            },
+        )
+        assert assistant_added["success"] is True
+
+        with service._json_store.conversation_lock(user_id=7, conversation_id=conversation_id):
+            document = service._json_store.load_document(user_id=7, conversation_id=conversation_id)
+            messages = document.get("messages") if isinstance(document.get("messages"), list) else []
+            messages.append(
+                {
+                    "message_id": "m_999999",
+                    "role": "system",
+                    "content": "debug trace should stay out of recent turns",
+                    "created_at": user_added["created_at"],
+                    "metadata": {
+                        "trace_id": "trace-internal",
+                        "steps": [{"stage": "debug"}],
+                        "timings": {"latency_ms": 1},
+                    },
+                }
+            )
+            document["messages"] = messages
+            service._json_store.write_document(user_id=7, conversation_id=conversation_id, document=document)
+
+        snapshot = service.get_conversation_context_snapshot(user_id=7, conversation_id=conversation_id)
+
+        assert snapshot["success"] is True
+        assert [item["role"] for item in snapshot["data"]["recent_turns"]] == ["user", "assistant"]
+        assert [item["content"] for item in snapshot["data"]["recent_turns"]] == [
+            "Need the final answer only.",
+            "Final answer only.",
+        ]
+        assert snapshot["data"]["conversation_state"] == {
+            "last_turn_route": "kb_qa",
+            "last_focus_file_ids": [21],
+            "last_assistant_trace_id": "trace-contract-assistant",
+        }
+
+
+
+def test_authority_context_snapshot_builds_minimal_summary_from_recent_turns():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Authority Summary")
+        conversation_id = int(created["data"]["conversation_id"])
+
+        user_added = service.add_authority_user_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-summary-user",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key=f"{conversation_id}:trace-summary-user:user",
+            content="Summarize the conversation.",
+            context_hints={},
+        )
+        assert user_added["success"] is True
+
+        assistant_added = service.add_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            role="assistant",
+            content="The conversation is about catalyst stability over 48 hours.",
+            metadata={
+                "trace_id": "trace-summary-assistant",
+                "route": "kb_qa",
+                "steps": [{"stage": "answer"}],
+                "timings": {"latency_ms": 66},
+            },
+        )
+        assert assistant_added["success"] is True
+
+        snapshot = service.get_conversation_context_snapshot(user_id=7, conversation_id=conversation_id)
+
+        assert snapshot["success"] is True
+        assert snapshot["data"]["summary"] == {
+            "short_summary": (
+                "user: Summarize the conversation. "
+                "assistant: The conversation is about catalyst stability over 48 hours."
+            ),
+            "memory_facts": [],
+            "open_threads": [],
+        }
+
 
 
 def test_authority_context_snapshot_rejects_wrong_owner():
