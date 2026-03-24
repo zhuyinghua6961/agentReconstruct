@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import logging
 import threading
+from logging.handlers import WatchedFileHandler
+from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 import config
 from server.runtime.request_context import clear_trace_id, generate_trace_id, get_trace_id, set_trace_id
@@ -15,11 +17,52 @@ from server_fastapi.errors import register_exception_handlers
 from server_fastapi.routers import register_routers
 
 
+_APP_LOG_FILE_NAME = "highThinkingQA-app.log"
+_APP_LOG_HANDLER_NAME = "highThinkingQA.app.file"
+_APP_LOG_FORMAT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
+
+
+def _configure_application_logging(settings: config.HttpServiceSettings) -> logging.Logger:
+    log_level = getattr(logging, settings.app_log_level, logging.INFO)
+    log_dir = Path(settings.runtime_logs_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / _APP_LOG_FILE_NAME
+
+    root_logger = logging.getLogger()
+    current_root_level = root_logger.level if root_logger.level != logging.NOTSET else log_level
+    root_logger.setLevel(min(current_root_level, log_level))
+
+    file_handler = None
+    for handler in list(root_logger.handlers):
+        if getattr(handler, "name", "") != _APP_LOG_HANDLER_NAME:
+            continue
+        if Path(getattr(handler, "baseFilename", "")) == log_path:
+            file_handler = handler
+            break
+        root_logger.removeHandler(handler)
+        handler.close()
+
+    if file_handler is None:
+        file_handler = WatchedFileHandler(log_path, encoding="utf-8")
+        file_handler.set_name(_APP_LOG_HANDLER_NAME)
+        root_logger.addHandler(file_handler)
+
+    file_handler.setLevel(log_level)
+    file_handler.setFormatter(logging.Formatter(_APP_LOG_FORMAT))
+
+    for logger_name in ("server", "server_fastapi", "agent_core"):
+        package_logger = logging.getLogger(logger_name)
+        current_level = package_logger.level if package_logger.level != logging.NOTSET else log_level
+        package_logger.setLevel(min(current_level, log_level))
+        package_logger.propagate = True
+
+    return logging.getLogger("server_fastapi")
+
+
 def create_app() -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     settings = config.HTTP_SETTINGS
-    app.logger = logging.getLogger("server_fastapi")
-    app.logger.setLevel(getattr(logging, settings.app_log_level, logging.INFO))
+    app.logger = _configure_application_logging(settings)
 
     app.state.config = {
         "APP_ENV": settings.app_env,

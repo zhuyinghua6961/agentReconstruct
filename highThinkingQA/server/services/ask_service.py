@@ -5,6 +5,7 @@ from __future__ import annotations
 import concurrent.futures
 import atexit
 import logging
+import os
 import queue
 import re
 import threading
@@ -76,6 +77,101 @@ def _chunk_text(text: str, *, chunk_size: int = 700) -> list[str]:
     if not content:
         return []
     return [content[i : i + chunk_size] for i in range(0, len(content), chunk_size)]
+
+
+def _short_text(value: Any, *, limit: int = 160) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}..."
+
+
+def _bool_attr(value: Any, *names: str) -> bool:
+    for name in names:
+        try:
+            attr = getattr(value, name)
+        except Exception:
+            continue
+        if attr is None:
+            continue
+        return bool(attr)
+    return False
+
+
+def _text_attr(value: Any, *names: str) -> str:
+    for name in names:
+        try:
+            attr = getattr(value, name)
+        except Exception:
+            continue
+        if attr is None:
+            continue
+        text = str(attr).strip()
+        if text:
+            return text
+    return ""
+
+
+def _log_conversation_context_ready(*, trace_id: str, context: ConversationContext) -> None:
+    summary_payload = context.summary if isinstance(context.summary, dict) else {}
+    summary_keys = sorted(str(key) for key in summary_payload.keys())[:10]
+    logger.info(
+        "[trace_id=%s] conversation_context ready conversation_id=%s user_id=%s recent_turns=%s summary_available=%s summary_keys=%s raw_question=%s",
+        trace_id,
+        context.conversation_id,
+        context.user_id,
+        len(context.recent_turns),
+        bool(summary_payload),
+        summary_keys,
+        _short_text(context.raw_question),
+    )
+
+
+def _log_question_rewrite_ready(*, trace_id: str, rewrite: Any) -> None:
+    rewrite_applied = _bool_attr(rewrite, "rewrite_applied", "rewritten")
+    summary_used = _bool_attr(rewrite, "summary_used")
+    logger.info(
+        "[trace_id=%s] question_rewrite ready rewrite_applied=%s summary_used=%s reason=%s effective_question=%s",
+        trace_id,
+        rewrite_applied,
+        summary_used,
+        _text_attr(rewrite, "rewrite_reason", "reason") or "unknown",
+        _short_text(_text_attr(rewrite, "effective_question") or ""),
+    )
+
+
+def _log_runtime_resource_snapshot(*, trace_id: str, mode: str, route: str | None = None) -> None:
+    papers_dir = str(config.PAPERS_DIR or "")
+    chroma_dir = str(config.CHROMA_PERSIST_DIR or "")
+    collection_name = str(config.CHROMA_COLLECTION_NAME or "")
+    papers_exists = os.path.isdir(papers_dir)
+    chroma_exists = os.path.isdir(chroma_dir)
+    chroma_sqlite = os.path.join(chroma_dir, "chroma.sqlite3") if chroma_dir else ""
+    chroma_sqlite_exists = bool(chroma_sqlite) and os.path.exists(chroma_sqlite)
+    collection_count: int | None = None
+    collection_error = ""
+    try:
+        from ingest.vector_store import get_collection_count, get_or_create_collection
+
+        collection = get_or_create_collection()
+        collection_count = int(get_collection_count(collection))
+    except Exception as exc:  # pragma: no cover - diagnostic fallback
+        collection_error = f"{type(exc).__name__}: {exc}"
+    logger.info(
+        "[trace_id=%s] runtime_resource_snapshot mode=%s route=%s papers_dir=%s papers_exists=%s chroma_persist_dir=%s chroma_exists=%s chroma_sqlite=%s sqlite_exists=%s chroma_collection=%s collection_count=%s collection_error=%s",
+        trace_id,
+        mode,
+        str(route or ""),
+        papers_dir,
+        papers_exists,
+        chroma_dir,
+        chroma_exists,
+        chroma_sqlite,
+        chroma_sqlite_exists,
+        collection_name,
+        collection_count if collection_count is not None else "unknown",
+        collection_error or "",
+    )
 
 
 def _normalize_step_status(raw: str, *, default: str = "processing") -> str:
@@ -413,6 +509,9 @@ def execute_ask(
         request.conversation_id,
         str(context.raw_question or "")[:120],
     )
+    _log_conversation_context_ready(trace_id=trace_id, context=context)
+    _log_question_rewrite_ready(trace_id=trace_id, rewrite=rewrite)
+    _log_runtime_resource_snapshot(trace_id=trace_id, mode=profile.mode, route=request.route)
 
     future = _get_agent_executor().submit(
         _run_agent_for_profile,
@@ -445,6 +544,13 @@ def execute_ask(
     frontend_answer = _adapt_answer_for_frontend(state.final_answer)
     references = _extract_references(state.final_answer)
     links = _build_reference_links(references)
+    logger.info(
+        "[trace_id=%s] execute_ask done answer_chars=%s references=%s timings=%s",
+        trace_id,
+        len(frontend_answer),
+        len(references),
+        dict(getattr(state, "timings", {}) or {}),
+    )
     return {
         "final_answer": frontend_answer,
         "timings": state.timings,
@@ -474,6 +580,9 @@ def stream_ask_events(
         request.conversation_id,
         str(context.raw_question or "")[:120],
     )
+    _log_conversation_context_ready(trace_id=trace_id, context=context)
+    _log_question_rewrite_ready(trace_id=trace_id, rewrite=rewrite)
+    _log_runtime_resource_snapshot(trace_id=trace_id, mode=profile.mode, route=request.route)
     event_queue: queue.Queue[Any] = queue.Queue()
     stop_token = object()
     result_holder: dict[str, Any] = {}

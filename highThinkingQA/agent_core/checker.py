@@ -12,11 +12,26 @@ from typing import Optional
 from openai import OpenAI
 
 import config
-from agent_core.llm_client import chat_completion, load_prompt_template
+from agent_core.llm_client import chat_completion, get_llm_client, load_prompt_template
 from agent_core.synthesizer import format_retrieved_passages
 from retriever.vector_retriever import RetrievedChunk
 
 logger = logging.getLogger(__name__)
+
+_CHECKER_REQUEST_TIMEOUT_SECONDS = 60.0
+
+
+class CheckerTimeoutError(RuntimeError):
+    """Checker request exceeded its per-call timeout."""
+
+
+def _is_timeout_error(exc: Exception) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
+    name = type(exc).__name__.lower()
+    message = str(exc).lower()
+    return "timeout" in name or "timed out" in message or "read operation timed out" in message
+
 _BRACKET_CITATION_PATTERN = re.compile(r"\[(10\.\d{4,9}/[-._;()/:A-Z0-9]+)(?:,\s*([^\]]+))?\]", re.IGNORECASE)
 
 
@@ -139,6 +154,9 @@ def check_answer(
         - passed: True 表示所有引用均准确
         - issues: 问题列表，每项含 claim/citation/problem
     """
+    if client is None:
+        client = get_llm_client(max_retries=0)
+
     evidence_index = _build_evidence_index(all_retrieved_chunks)
     precheck_issues = _programmatic_precheck(answer, evidence_index)
     if precheck_issues:
@@ -154,14 +172,20 @@ def check_answer(
         retrieved_passages=retrieved_passages,
     )
 
-    raw = chat_completion(
-        prompt=prompt,
-        client=client,
-        model=config.CHECKER_MODEL,
-        enable_thinking=True,
-        max_tokens=4096,
-        temperature=0.3,
-    )
+    try:
+        raw = chat_completion(
+            prompt=prompt,
+            client=client,
+            model=config.CHECKER_MODEL,
+            enable_thinking=True,
+            max_tokens=4096,
+            temperature=0.3,
+            timeout_seconds=_CHECKER_REQUEST_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        if _is_timeout_error(exc):
+            raise CheckerTimeoutError("checker llm request timed out") from exc
+        raise
 
     passed, issues = _parse_check_result(raw)
 

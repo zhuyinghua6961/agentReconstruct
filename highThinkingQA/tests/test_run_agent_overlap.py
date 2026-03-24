@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 
 from agent_core.graph import _run_pre_answer_retrieval_pipeline, run_agent
 
@@ -9,7 +10,7 @@ from agent_core.graph import _run_pre_answer_retrieval_pipeline, run_agent
 def test_run_agent_starts_pipeline_after_decompose_without_waiting_for_direct(monkeypatch):
     pipeline_started = threading.Event()
 
-    monkeypatch.setattr("agent_core.graph.get_llm_client", lambda: object())
+    monkeypatch.setattr("agent_core.graph.get_llm_client", lambda *args, **kwargs: object())
     monkeypatch.setattr("agent_core.graph.get_async_llm_client", lambda: object())
     monkeypatch.setattr("agent_core.graph.get_embedding_client", lambda: object())
     monkeypatch.setattr("agent_core.graph.get_or_create_collection", lambda: object())
@@ -40,7 +41,7 @@ def test_run_agent_starts_pipeline_after_decompose_without_waiting_for_direct(mo
 
 
 def test_run_agent_uses_stage_specific_thinking_flags(monkeypatch):
-    monkeypatch.setattr("agent_core.graph.get_llm_client", lambda: object())
+    monkeypatch.setattr("agent_core.graph.get_llm_client", lambda *args, **kwargs: object())
     monkeypatch.setattr("agent_core.graph.get_async_llm_client", lambda: object())
     monkeypatch.setattr("agent_core.graph.get_embedding_client", lambda: object())
     monkeypatch.setattr("agent_core.graph.get_or_create_collection", lambda: object())
@@ -71,7 +72,7 @@ def test_run_agent_uses_stage_specific_thinking_flags(monkeypatch):
 
 
 def test_run_agent_streams_draft_chunks_and_keeps_final_answer(monkeypatch):
-    monkeypatch.setattr("agent_core.graph.get_llm_client", lambda: object())
+    monkeypatch.setattr("agent_core.graph.get_llm_client", lambda *args, **kwargs: object())
     monkeypatch.setattr("agent_core.graph.get_async_llm_client", lambda: object())
     monkeypatch.setattr("agent_core.graph.get_embedding_client", lambda: object())
     monkeypatch.setattr("agent_core.graph.get_or_create_collection", lambda: object())
@@ -95,8 +96,43 @@ def test_run_agent_streams_draft_chunks_and_keeps_final_answer(monkeypatch):
     assert state.final_answer == "draft-chunk"
 
 
+
+
+def test_run_agent_streaming_synthesis_disables_thinking_for_smoother_first_chunk(monkeypatch):
+    monkeypatch.setattr("agent_core.graph.get_llm_client", lambda *args, **kwargs: object())
+    monkeypatch.setattr("agent_core.graph.get_async_llm_client", lambda: object())
+    monkeypatch.setattr("agent_core.graph.get_embedding_client", lambda: object())
+    monkeypatch.setattr("agent_core.graph.get_or_create_collection", lambda: object())
+    monkeypatch.setattr("agent_core.graph.direct_answer", lambda *args, **kwargs: "direct")
+    monkeypatch.setattr("agent_core.graph.decompose_question", lambda *args, **kwargs: ["q1"])
+    monkeypatch.setattr(
+        "agent_core.graph._run_pre_answer_retrieval_pipeline",
+        lambda **kwargs: (["a1"], [[]], {"pre_answer_completed_at": 0.1, "retrieval_completed_at": 0.2}),
+    )
+
+    captured = {}
+
+    def fake_synthesize_answer_stream(**kwargs):
+        captured["enable_thinking"] = kwargs.get("enable_thinking")
+        return iter(["draft"])
+
+    monkeypatch.setattr("agent_core.graph.synthesize_answer_stream", fake_synthesize_answer_stream)
+
+    streamed_chunks = []
+    state = run_agent(
+        "demo",
+        stream_callback=streamed_chunks.append,
+        max_check_loops=0,
+        enable_thinking=True,
+    )
+
+    assert state.error == ""
+    assert streamed_chunks == ["draft"]
+    assert captured["enable_thinking"] is False
+
+
 def test_run_agent_emits_step5_check_and_revise_progress(monkeypatch):
-    monkeypatch.setattr("agent_core.graph.get_llm_client", lambda: object())
+    monkeypatch.setattr("agent_core.graph.get_llm_client", lambda *args, **kwargs: object())
     monkeypatch.setattr("agent_core.graph.get_async_llm_client", lambda: object())
     monkeypatch.setattr("agent_core.graph.get_embedding_client", lambda: object())
     monkeypatch.setattr("agent_core.graph.get_or_create_collection", lambda: object())
@@ -140,7 +176,7 @@ def test_run_agent_emits_step5_check_and_revise_progress(monkeypatch):
 
 
 def test_run_agent_emits_step3_retrieval_progress(monkeypatch):
-    monkeypatch.setattr("agent_core.graph.get_llm_client", lambda: object())
+    monkeypatch.setattr("agent_core.graph.get_llm_client", lambda *args, **kwargs: object())
     monkeypatch.setattr("agent_core.graph.get_async_llm_client", lambda: object())
     monkeypatch.setattr("agent_core.graph.get_embedding_client", lambda: object())
     monkeypatch.setattr("agent_core.graph.get_or_create_collection", lambda: object())
@@ -213,3 +249,135 @@ def test_pre_answer_pipeline_flushes_partial_batch_after_wait(monkeypatch):
         if item["stage"] == "step3" and "submitted_batches" in item.get("data", {})
     ]
     assert [item["data"]["submitted_batches"] for item in step3_submit_events] == [1, 2, 3]
+
+
+
+
+
+def test_run_agent_uses_no_retry_client_for_checker_and_reviser(monkeypatch):
+    clients = []
+
+    def fake_get_llm_client(*, max_retries=None):
+        client = {"max_retries": max_retries, "index": len(clients)}
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr("agent_core.graph.get_llm_client", fake_get_llm_client)
+    monkeypatch.setattr("agent_core.graph.get_async_llm_client", lambda: object())
+    monkeypatch.setattr("agent_core.graph.get_embedding_client", lambda: object())
+    monkeypatch.setattr("agent_core.graph.get_or_create_collection", lambda: object())
+    monkeypatch.setattr("agent_core.graph.direct_answer", lambda *args, **kwargs: "direct")
+    monkeypatch.setattr("agent_core.graph.decompose_question", lambda *args, **kwargs: ["q1"])
+    monkeypatch.setattr(
+        "agent_core.graph._run_pre_answer_retrieval_pipeline",
+        lambda **kwargs: (["a1"], [[object()]], {"pre_answer_completed_at": 0.1, "retrieval_completed_at": 0.2}),
+    )
+    monkeypatch.setattr("agent_core.graph.synthesize_answer", lambda **kwargs: "draft-answer")
+
+    seen = {}
+
+    def fake_check_answer(**kwargs):
+        seen["check"] = kwargs["client"]
+        return False, [{"problem": "bad citation"}]
+
+    def fake_revise_answer(**kwargs):
+        seen["revise"] = kwargs["client"]
+        return "revised-answer"
+
+    monkeypatch.setattr("agent_core.graph.check_answer", fake_check_answer)
+    monkeypatch.setattr("agent_core.graph.revise_answer", fake_revise_answer)
+
+    state = run_agent("demo", max_check_loops=1)
+
+    assert state.error == ""
+    assert state.final_answer == "revised-answer"
+    assert seen["check"]["max_retries"] == 0
+    assert seen["revise"]["max_retries"] == 0
+
+
+def test_run_agent_enforces_wall_clock_timeout_for_checker(monkeypatch):
+    monkeypatch.setattr("agent_core.graph._CHECKER_WALL_CLOCK_TIMEOUT_SECONDS", 0.01, raising=False)
+    monkeypatch.setattr("agent_core.graph.get_llm_client", lambda *args, **kwargs: object())
+    monkeypatch.setattr("agent_core.graph.get_async_llm_client", lambda: object())
+    monkeypatch.setattr("agent_core.graph.get_embedding_client", lambda: object())
+    monkeypatch.setattr("agent_core.graph.get_or_create_collection", lambda: object())
+    monkeypatch.setattr("agent_core.graph.direct_answer", lambda *args, **kwargs: "direct")
+    monkeypatch.setattr("agent_core.graph.decompose_question", lambda *args, **kwargs: ["q1"])
+    monkeypatch.setattr(
+        "agent_core.graph._run_pre_answer_retrieval_pipeline",
+        lambda **kwargs: (["a1"], [[object()]], {"pre_answer_completed_at": 0.1, "retrieval_completed_at": 0.2}),
+    )
+    monkeypatch.setattr("agent_core.graph.synthesize_answer", lambda **kwargs: "draft-answer")
+
+    def slow_check_answer(**kwargs):
+        time.sleep(0.05)
+        return True, []
+
+    monkeypatch.setattr("agent_core.graph.check_answer", slow_check_answer)
+
+    progress_events = []
+    state = run_agent("demo", progress_callback=progress_events.append, max_check_loops=1)
+
+    assert state.error == ""
+    assert state.final_answer == "draft-answer"
+    check_error = next(item for item in progress_events if item["stage"] == "step5_check" and item["status"] == "error")
+    assert "超时" in check_error["message"]
+    assert check_error["data"]["elapsed_seconds"] < 0.2
+
+def test_run_agent_forces_output_when_checker_times_out(monkeypatch):
+    monkeypatch.setattr("agent_core.graph.get_llm_client", lambda *args, **kwargs: object())
+    monkeypatch.setattr("agent_core.graph.get_async_llm_client", lambda: object())
+    monkeypatch.setattr("agent_core.graph.get_embedding_client", lambda: object())
+    monkeypatch.setattr("agent_core.graph.get_or_create_collection", lambda: object())
+    monkeypatch.setattr("agent_core.graph.direct_answer", lambda *args, **kwargs: "direct")
+    monkeypatch.setattr("agent_core.graph.decompose_question", lambda *args, **kwargs: ["q1"])
+    monkeypatch.setattr(
+        "agent_core.graph._run_pre_answer_retrieval_pipeline",
+        lambda **kwargs: (["a1"], [[object()]], {"pre_answer_completed_at": 0.1, "retrieval_completed_at": 0.2}),
+    )
+    monkeypatch.setattr("agent_core.graph.synthesize_answer", lambda **kwargs: "draft-answer")
+
+    def raise_timeout(**kwargs):
+        raise TimeoutError("checker timed out")
+
+    monkeypatch.setattr("agent_core.graph.check_answer", raise_timeout)
+
+    progress_events = []
+    state = run_agent("demo", progress_callback=progress_events.append, max_check_loops=1)
+
+    assert state.error == ""
+    assert state.final_answer == "draft-answer"
+    assert state.check_passed is False
+    assert state.check_loops == 1
+    check_error = next(item for item in progress_events if item["stage"] == "step5_check" and item["status"] == "error")
+    assert "超时" in check_error["message"]
+
+
+
+def test_run_agent_forces_output_when_reviser_times_out(monkeypatch):
+    monkeypatch.setattr("agent_core.graph.get_llm_client", lambda *args, **kwargs: object())
+    monkeypatch.setattr("agent_core.graph.get_async_llm_client", lambda: object())
+    monkeypatch.setattr("agent_core.graph.get_embedding_client", lambda: object())
+    monkeypatch.setattr("agent_core.graph.get_or_create_collection", lambda: object())
+    monkeypatch.setattr("agent_core.graph.direct_answer", lambda *args, **kwargs: "direct")
+    monkeypatch.setattr("agent_core.graph.decompose_question", lambda *args, **kwargs: ["q1"])
+    monkeypatch.setattr(
+        "agent_core.graph._run_pre_answer_retrieval_pipeline",
+        lambda **kwargs: (["a1"], [[object()]], {"pre_answer_completed_at": 0.1, "retrieval_completed_at": 0.2}),
+    )
+    monkeypatch.setattr("agent_core.graph.synthesize_answer", lambda **kwargs: "draft-answer")
+    monkeypatch.setattr("agent_core.graph.check_answer", lambda **kwargs: (False, [{"problem": "bad citation"}]))
+
+    def raise_timeout(**kwargs):
+        raise TimeoutError("reviser timed out")
+
+    monkeypatch.setattr("agent_core.graph.revise_answer", raise_timeout)
+
+    progress_events = []
+    state = run_agent("demo", progress_callback=progress_events.append, max_check_loops=1)
+
+    assert state.error == ""
+    assert state.final_answer == "draft-answer"
+    assert state.check_passed is False
+    revise_error = next(item for item in progress_events if item["stage"] == "step5_revise" and item["status"] == "error")
+    assert "超时" in revise_error["message"]

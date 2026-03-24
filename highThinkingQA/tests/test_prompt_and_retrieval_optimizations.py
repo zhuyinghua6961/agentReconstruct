@@ -111,3 +111,23 @@ def test_vector_store_default_client_and_collection_are_cached(monkeypatch):
     assert client_a is client_b
     assert collection_a is collection_b
     assert created_clients == ["/tmp/chroma-a"]
+
+
+def test_get_or_create_collection_logs_runtime_resource_status(monkeypatch, caplog, tmp_path):
+    class DummyClient:
+        def get_or_create_collection(self, name, metadata):
+            return {"name": name, "metadata": metadata}
+
+    monkeypatch.setattr("ingest.vector_store._get_chroma_client_cached", lambda path: DummyClient())
+    monkeypatch.setattr("ingest.vector_store.config.CHROMA_PERSIST_DIR", str(tmp_path / "vectordb"))
+    monkeypatch.setattr("ingest.vector_store.config.CHROMA_COLLECTION_NAME", "demo")
+    get_or_create_collection.__globals__["_get_default_collection_cached"].cache_clear()
+
+    caplog.set_level("INFO")
+    collection = get_or_create_collection()
+
+    joined = "\n".join(record.getMessage() for record in caplog.records)
+    assert "vector_store collection ready" in joined
+    assert "demo" in joined
+    assert str(tmp_path / "vectordb") in joined
+    assert collection["name"] == "demo"

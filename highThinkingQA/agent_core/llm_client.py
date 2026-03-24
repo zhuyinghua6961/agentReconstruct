@@ -5,6 +5,7 @@ LLM 客户端封装
 """
 
 import logging
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional, Generator
@@ -23,22 +24,28 @@ def _require_api_key(*, api_key: str, env_name: str) -> str:
     raise RuntimeError(f"{env_name} is not configured")
 
 
-def get_llm_client() -> OpenAI:
+def get_llm_client(*, max_retries: int | None = None) -> OpenAI:
     """获取 LLM API 客户端"""
     api_key = _require_api_key(api_key=config.LLM_API_KEY, env_name="DASHSCOPE_API_KEY")
-    return OpenAI(
-        api_key=api_key,
-        base_url=config.LLM_BASE_URL,
-    )
+    kwargs = {
+        "api_key": api_key,
+        "base_url": config.LLM_BASE_URL,
+    }
+    if max_retries is not None:
+        kwargs["max_retries"] = int(max_retries)
+    return OpenAI(**kwargs)
 
 
-def get_async_llm_client() -> AsyncOpenAI:
+def get_async_llm_client(*, max_retries: int | None = None) -> AsyncOpenAI:
     """获取异步 LLM API 客户端。"""
     api_key = _require_api_key(api_key=config.LLM_API_KEY, env_name="DASHSCOPE_API_KEY")
-    return AsyncOpenAI(
-        api_key=api_key,
-        base_url=config.LLM_BASE_URL,
-    )
+    kwargs = {
+        "api_key": api_key,
+        "base_url": config.LLM_BASE_URL,
+    }
+    if max_retries is not None:
+        kwargs["max_retries"] = int(max_retries)
+    return AsyncOpenAI(**kwargs)
 
 
 def _build_kwargs(
@@ -96,6 +103,7 @@ def chat_completion(
     max_tokens: int = 4096,
     enable_thinking: Optional[bool] = None,
     model: Optional[str] = None,
+    timeout_seconds: Optional[float] = None,
 ) -> str:
     """
     调用 LLM 获取回复。
@@ -122,6 +130,9 @@ def chat_completion(
 
     kwargs = _build_kwargs(messages, temperature, max_tokens, enable_thinking, model=model)
 
+    if timeout_seconds is not None:
+        kwargs["timeout"] = float(timeout_seconds)
+
     response = client.chat.completions.create(**kwargs)
 
     # 记录思考内容（调试用）
@@ -140,6 +151,7 @@ def chat_completion_stream(
     max_tokens: int = 8192,
     enable_thinking: Optional[bool] = None,
     model: Optional[str] = None,
+    timeout_seconds: Optional[float] = None,
 ) -> Generator[str, None, None]:
     """
     流式调用 LLM，逐块 yield 回复文本。
@@ -166,10 +178,15 @@ def chat_completion_stream(
     messages.append({"role": "user", "content": prompt})
 
     kwargs = _build_kwargs(messages, temperature, max_tokens, enable_thinking, stream=True, model=model)
+    if timeout_seconds is not None:
+        kwargs["timeout"] = float(timeout_seconds)
 
     response = client.chat.completions.create(**kwargs)
 
     reasoning_chunks = []
+    started_at = time.time()
+    first_reasoning_logged = False
+    first_content_logged = False
 
     for chunk in response:
         if not chunk.choices:
@@ -182,10 +199,16 @@ def chat_completion_stream(
             reasoning = (delta.model_extra or {}).get("reasoning_content")
         if reasoning:
             reasoning_chunks.append(reasoning)
+            if not first_reasoning_logged:
+                first_reasoning_logged = True
+                logger.info("LLM stream first_reasoning_chunk elapsed=%.3fs chars=%s", time.time() - started_at, len(reasoning))
             continue
 
         # 输出最终回答内容
         if delta.content:
+            if not first_content_logged:
+                first_content_logged = True
+                logger.info("LLM stream first_content_chunk elapsed=%.3fs chars=%s", time.time() - started_at, len(delta.content))
             yield delta.content
 
     # 记录完整思考过程

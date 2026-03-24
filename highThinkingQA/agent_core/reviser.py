@@ -11,9 +11,24 @@ from typing import Optional
 from openai import OpenAI
 
 import config
-from agent_core.llm_client import chat_completion, load_prompt_template
+from agent_core.llm_client import chat_completion, get_llm_client, load_prompt_template
 
 logger = logging.getLogger(__name__)
+
+_REVISER_REQUEST_TIMEOUT_SECONDS = 60.0
+
+
+class ReviserTimeoutError(RuntimeError):
+    """Reviser request exceeded its per-call timeout."""
+
+
+def _is_timeout_error(exc: Exception) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
+    name = type(exc).__name__.lower()
+    message = str(exc).lower()
+    return "timeout" in name or "timed out" in message or "read operation timed out" in message
+
 
 
 def _format_issues(issues: list[dict]) -> str:
@@ -54,6 +69,9 @@ def revise_answer(
     Returns:
         修正后的完整答案
     """
+    if client is None:
+        client = get_llm_client(max_retries=0)
+
     issues_text = _format_issues(issues)
 
     template = load_prompt_template("revise.txt")
@@ -63,14 +81,20 @@ def revise_answer(
         issues=issues_text,
     )
 
-    revised = chat_completion(
-        prompt=prompt,
-        client=client,
-        model=config.CHECKER_MODEL,
-        enable_thinking=False,
-        max_tokens=8192,
-        temperature=0.3,
-    )
+    try:
+        revised = chat_completion(
+            prompt=prompt,
+            client=client,
+            model=config.CHECKER_MODEL,
+            enable_thinking=False,
+            max_tokens=8192,
+            temperature=0.3,
+            timeout_seconds=_REVISER_REQUEST_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        if _is_timeout_error(exc):
+            raise ReviserTimeoutError("reviser llm request timed out") from exc
+        raise
 
     logger.info(f"Reviser 修改完成: {len(revised)} chars")
     return revised

@@ -14,6 +14,25 @@ from ingest.vector_store import batch_query_collection, get_or_create_collection
 logger = logging.getLogger(__name__)
 
 
+def _short_query(value: str, *, limit: int = 120) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}..."
+
+
+def _top_doi_summary(chunks: list["RetrievedChunk"], *, limit: int = 5) -> list[str]:
+    seen: list[str] = []
+    for chunk in chunks:
+        doi = str(chunk.doi or "").strip()
+        if not doi or doi in seen:
+            continue
+        seen.append(doi)
+        if len(seen) >= limit:
+            break
+    return seen
+
+
 @dataclass
 class RetrievedChunk:
     """检索到的文段"""
@@ -82,7 +101,7 @@ def retrieve(
                 distance=results["distances"][0][i] if results["distances"] else 0.0,
             ))
 
-    logger.info(f"检索完成: query长度={len(query)}, 返回 {len(chunks)} 个文段")
+    logger.info("检索完成: query=%s query长度=%s top_k=%s 返回=%s top_dois=%s", _short_query(query), len(query), top_k, len(chunks), _top_doi_summary(chunks))
     return chunks
 
 
@@ -144,7 +163,7 @@ def batch_retrieve(
     all_results = []
     for idx, query in enumerate(queries):
         results = _parse_retrieved_chunks(raw_results, index=idx)
-        logger.info(f"批量检索完成: query长度={len(query)}, 返回 {len(results)} 个文段")
+        logger.info("批量检索完成: query=%s query长度=%s top_k=%s 返回=%s top_dois=%s", _short_query(query), len(query), top_k, len(results), _top_doi_summary(results))
         all_results.append(results)
 
     return all_results

@@ -16,6 +16,29 @@ from ingest.chunker import Chunk
 logger = logging.getLogger(__name__)
 
 
+def _log_collection_ready(*, path: str, name: str, collection: chromadb.Collection) -> None:
+    sqlite_path = os.path.join(path, "chroma.sqlite3") if path else ""
+    try:
+        count = collection.count()
+    except Exception as exc:  # pragma: no cover - diagnostic fallback
+        count = f"error:{type(exc).__name__}"
+        logger.warning(
+            "vector_store collection count failed persist_dir=%s collection=%s error=%s",
+            path,
+            name,
+            exc,
+        )
+    logger.info(
+        "vector_store collection ready persist_dir=%s path_exists=%s sqlite_path=%s sqlite_exists=%s collection=%s count=%s",
+        path,
+        os.path.isdir(path),
+        sqlite_path,
+        os.path.exists(sqlite_path) if sqlite_path else False,
+        name,
+        count,
+    )
+
+
 def get_chroma_client() -> chromadb.PersistentClient:
     """获取 Chroma 持久化客户端"""
     return _get_chroma_client_cached(config.CHROMA_PERSIST_DIR)
@@ -33,19 +56,27 @@ def get_or_create_collection(
     """获取或创建 Chroma Collection"""
     if client is None:
         return _get_default_collection_cached(config.CHROMA_PERSIST_DIR, config.CHROMA_COLLECTION_NAME)
-    return client.get_or_create_collection(
+    collection = client.get_or_create_collection(
         name=config.CHROMA_COLLECTION_NAME,
         metadata={"hnsw:space": "cosine"},  # 使用余弦相似度
     )
+    _log_collection_ready(
+        path=config.CHROMA_PERSIST_DIR,
+        name=config.CHROMA_COLLECTION_NAME,
+        collection=collection,
+    )
+    return collection
 
 
 @lru_cache(maxsize=8)
 def _get_default_collection_cached(path: str, name: str) -> chromadb.Collection:
     client = _get_chroma_client_cached(path)
-    return client.get_or_create_collection(
+    collection = client.get_or_create_collection(
         name=name,
         metadata={"hnsw:space": "cosine"},
     )
+    _log_collection_ready(path=path, name=name, collection=collection)
+    return collection
 
 
 def add_chunks(
@@ -123,6 +154,8 @@ def query_collection(
         n_results=top_k,
         include=["documents", "metadatas", "distances"],
     )
+    hit_count = len(results.get("ids", [[]])[0]) if results.get("ids") else 0
+    logger.info("vector_store query done top_k=%s hit_count=%s", top_k, hit_count)
 
     return results
 
@@ -155,6 +188,13 @@ def batch_query_collection(
         query_embeddings=query_embeddings,
         n_results=top_k,
         include=["documents", "metadatas", "distances"],
+    )
+    hit_count = sum(len(items or []) for items in (results.get("ids") or []))
+    logger.info(
+        "vector_store batch_query done query_count=%s top_k=%s hit_count=%s",
+        len(query_embeddings),
+        top_k,
+        hit_count,
     )
 
     return results

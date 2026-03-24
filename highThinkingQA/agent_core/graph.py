@@ -25,14 +25,16 @@ from agent_core.decomposer import decompose_question
 from agent_core.llm_client import get_async_llm_client, get_llm_client
 from agent_core.sub_answerer import iter_pre_answers_async, pre_answer_all
 from agent_core.synthesizer import synthesize_answer, synthesize_answer_stream
-from agent_core.checker import check_answer
-from agent_core.reviser import revise_answer
+from agent_core.checker import CheckerTimeoutError, check_answer
+from agent_core.reviser import ReviserTimeoutError, revise_answer
 from retriever.vector_retriever import batch_retrieve, RetrievedChunk
 from ingest.embedder import get_embedding_client
 from ingest.vector_store import get_or_create_collection
 
 logger = logging.getLogger(__name__)
 _PARTIAL_RETRIEVAL_FLUSH_WAIT_SECONDS = 0.8
+_CHECKER_WALL_CLOCK_TIMEOUT_SECONDS = 60.0
+_REVISER_WALL_CLOCK_TIMEOUT_SECONDS = 60.0
 
 
 def _trace_prefix(trace_id: str | None) -> str:
@@ -45,6 +47,24 @@ def _short_text(value: str, *, limit: int = 120) -> str:
     if len(text) <= limit:
         return text
     return f"{text[:limit]}..."
+
+
+def _call_with_wall_clock_timeout(
+    *,
+    func: Callable[..., Any],
+    timeout_seconds: float,
+    timeout_error: Exception,
+    **kwargs: Any,
+) -> Any:
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(func, **kwargs)
+    try:
+        return future.result(timeout=max(0.001, float(timeout_seconds)))
+    except concurrent.futures.TimeoutError as exc:
+        future.cancel()
+        raise timeout_error from exc
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 @dataclass
@@ -339,6 +359,7 @@ def run_agent(
     total_start = time.time()
     working_question = state.effective_question or state.question
     resolved_enable_thinking = config.LLM_ENABLE_THINKING if enable_thinking is None else bool(enable_thinking)
+    resolved_stream_synthesis_enable_thinking = False if stream_callback else resolved_enable_thinking
     resolved_direct_answer_enable_thinking = (
         config.DIRECT_ANSWER_ENABLE_THINKING if enable_thinking is None else bool(enable_thinking)
     )
@@ -384,6 +405,7 @@ def run_agent(
         )
         direct_llm_client = get_llm_client()
         pipeline_llm_client = get_llm_client()
+        verification_llm_client = get_llm_client(max_retries=0)
         async_llm_client = get_async_llm_client()
         embedding_client = get_embedding_client()
 
@@ -552,7 +574,7 @@ def run_agent(
                 all_retrieved_chunks=state.retrieved_chunks,
                 sub_questions=state.sub_questions,
                 client=pipeline_llm_client,
-                enable_thinking=resolved_enable_thinking,
+                enable_thinking=resolved_stream_synthesis_enable_thinking,
             ):
                 _raise_if_cancelled()
                 if chunk:
@@ -633,12 +655,39 @@ def run_agent(
                 )
 
                 check_started_at = time.time()
-                passed, issues = check_answer(
-                    question=working_question,
-                    answer=current_answer,
-                    all_retrieved_chunks=state.retrieved_chunks,
-                    client=pipeline_llm_client,
-                )
+                try:
+                    passed, issues = _call_with_wall_clock_timeout(
+                        func=check_answer,
+                        timeout_seconds=_CHECKER_WALL_CLOCK_TIMEOUT_SECONDS,
+                        timeout_error=CheckerTimeoutError("checker llm request timed out"),
+                        question=working_question,
+                        answer=current_answer,
+                        all_retrieved_chunks=state.retrieved_chunks,
+                        client=verification_llm_client,
+                    )
+                except (CheckerTimeoutError, TimeoutError) as exc:
+                    check_elapsed = time.time() - check_started_at
+                    step5_check_total += check_elapsed
+                    state.check_passed = False
+                    state.check_issues = []
+                    state.check_loops = loop_i + 1
+                    state.timings[f"step5_check_loop_{loop_i + 1}"] = check_elapsed
+                    logger.warning(
+                        "%sStep 5 - 第 %s 轮检查超时，保留当前答案并结束检查: %s",
+                        _trace_prefix(trace_id),
+                        loop_i + 1,
+                        exc,
+                    )
+                    _emit_progress(
+                        "step5_check",
+                        "error",
+                        f"第 {loop_i + 1} 轮引用检查超时，保留当前答案并结束检查",
+                        check_loop=loop_i + 1,
+                        issues=0,
+                        elapsed_seconds=round(float(check_elapsed), 3),
+                        error=str(exc),
+                    )
+                    break
                 check_elapsed = time.time() - check_started_at
                 step5_check_total += check_elapsed
                 state.check_passed = passed
@@ -680,12 +729,36 @@ def run_agent(
                 )
 
                 revise_started_at = time.time()
-                current_answer = revise_answer(
-                    question=working_question,
-                    answer=current_answer,
-                    issues=issues,
-                    client=pipeline_llm_client,
-                )
+                try:
+                    current_answer = _call_with_wall_clock_timeout(
+                        func=revise_answer,
+                        timeout_seconds=_REVISER_WALL_CLOCK_TIMEOUT_SECONDS,
+                        timeout_error=ReviserTimeoutError("reviser llm request timed out"),
+                        question=working_question,
+                        answer=current_answer,
+                        issues=issues,
+                        client=verification_llm_client,
+                    )
+                except (ReviserTimeoutError, TimeoutError) as exc:
+                    revise_elapsed = time.time() - revise_started_at
+                    step5_revise_total += revise_elapsed
+                    state.timings[f"step5_revise_loop_{loop_i + 1}"] = revise_elapsed
+                    logger.warning(
+                        "%sStep 5 - 第 %s 轮修订超时，保留当前答案并结束检查: %s",
+                        _trace_prefix(trace_id),
+                        loop_i + 1,
+                        exc,
+                    )
+                    _emit_progress(
+                        "step5_revise",
+                        "error",
+                        f"第 {loop_i + 1} 轮问题修订超时，保留当前答案并结束检查",
+                        check_loop=loop_i + 1,
+                        issues=len(issues),
+                        elapsed_seconds=round(float(revise_elapsed), 3),
+                        error=str(exc),
+                    )
+                    break
                 revise_elapsed = time.time() - revise_started_at
                 step5_revise_total += revise_elapsed
                 step5_revise_rounds += 1
