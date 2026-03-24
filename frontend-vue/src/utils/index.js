@@ -121,15 +121,7 @@ export function formatTime(date) {
   return formatBeijingDate(d)
 }
 
-// 格式化答案 - Markdown 渲染
-export function formatAnswer(text, referenceSnippets = []) {
-  if (!text) return ''
-  void referenceSnippets
-
-  let normalizedText = normalizeMarkdownForRender(text)
-  normalizedText = fixTableFormat(normalizedText)
-  normalizedText = cleanLaTeX(normalizedText)
-  
+function renderMarkdownToHtml(text) {
   marked.setOptions({
     breaks: true,
     gfm: true,
@@ -137,30 +129,16 @@ export function formatAnswer(text, referenceSnippets = []) {
     mangle: false,
     headerIds: false
   })
-  
-  let html = ''
-  try {
-    html = marked.parse(normalizedText)
-    if (looksLikeUnrenderedMarkdown(normalizedText, html)) {
-      html = formatStreamingAnswer(normalizedText)
-    }
-  } catch (e) {
-    console.error('Markdown解析失败:', e)
-    html = formatStreamingAnswer(normalizedText)
-  }
-  
-  return applyDoiLinksToHtml(html)
+  return marked.parse(text)
 }
 
-export function formatStreamingAnswer(text) {
-  if (!text) return ''
-
+function formatStreamingFallback(text) {
   const escaped = escapeHtml(String(text))
   const normalized = escaped
     .replace(/\r\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
 
-  const html = normalized
+  return normalized
     .replace(/^###\s+(.+)$/gm, '<h3>$1</h3>')
     .replace(/^##\s+(.+)$/gm, '<h2>$1</h2>')
     .replace(/^[-*+]\s+(.+)$/gm, '<div class="stream-bullet">• $1</div>')
@@ -168,6 +146,56 @@ export function formatStreamingAnswer(text) {
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\n/g, '<br>')
+}
+
+function normalizeAnswerMarkdown(text) {
+  let normalizedText = normalizeMarkdownForRender(text)
+  normalizedText = fixTableFormat(normalizedText)
+  normalizedText = cleanLaTeX(normalizedText)
+  return normalizedText
+}
+
+// 格式化答案 - Markdown 渲染
+export function formatAnswer(text, referenceSnippets = []) {
+  if (!text) return ''
+  void referenceSnippets
+
+  const normalizedText = normalizeAnswerMarkdown(text)
+
+  let html = ''
+  try {
+    html = renderMarkdownToHtml(normalizedText)
+    if (looksLikeUnrenderedMarkdown(normalizedText, html)) {
+      html = formatStreamingFallback(normalizedText)
+    }
+  } catch (e) {
+    console.error('Markdown解析失败:', e)
+    html = formatStreamingFallback(normalizedText)
+  }
+
+  return applyDoiLinksToHtml(html)
+}
+
+export function formatStreamingAnswer(text) {
+  if (!text) return ''
+
+  const normalizedText = normalizeAnswerMarkdown(text)
+  let html = ''
+
+  if (!containsStructuredMarkdown(normalizedText)) {
+    html = formatStreamingFallback(normalizedText)
+    return applyDoiLinksToHtml(html)
+  }
+
+  try {
+    html = renderMarkdownToHtml(normalizedText)
+    if (looksLikeUnrenderedMarkdown(normalizedText, html)) {
+      html = formatStreamingFallback(normalizedText)
+    }
+  } catch (e) {
+    console.error('流式Markdown解析失败:', e)
+    html = formatStreamingFallback(normalizedText)
+  }
 
   return applyDoiLinksToHtml(html)
 }
