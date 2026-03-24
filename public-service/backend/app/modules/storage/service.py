@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 import threading
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from app.integrations.storage.factory import get_storage_backend
 from app.integrations.storage.minio import MinIOStorageBackend
@@ -15,6 +17,34 @@ _PAPER_DOWNLOAD_LOCKS_GUARD = threading.Lock()
 
 
 class StorageService:
+    @staticmethod
+    def normalize_doi(value: str) -> str:
+        text = str(value or "").strip()
+        previous = None
+        while previous != text:
+            previous = text
+            text = unquote(text).strip()
+        text = text.replace("\\", "/")
+        text = re.sub(r"^doi:\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"^[(/\\s]+|[)\],;:.\\s]+$", "", text)
+        if "papers/" in text:
+            text = text.split("papers/", 1)[-1]
+        elif (
+            text.lower().endswith(".pdf")
+            and (
+                os.path.isabs(text)
+                or text.startswith("./")
+                or text.startswith("../")
+                or bool(re.match(r"^[A-Za-z]:[\\/]", text))
+            )
+        ):
+            text = Path(text).name or text
+        if text.lower().endswith(".pdf"):
+            text = text[:-4]
+        if "_" in text and "/" not in text and text.startswith("10."):
+            text = text.replace("_", "/", 1)
+        return text.strip()
+
     @staticmethod
     def _paper_lock_key(local_path: Path) -> str:
         return str(local_path.resolve())
@@ -29,9 +59,10 @@ class StorageService:
                 _PAPER_DOWNLOAD_LOCKS[key] = lock
             return lock
 
-    @staticmethod
-    def build_paper_filename(doi: str) -> str:
-        return str(doi or "").replace("/", "_") + ".pdf"
+    @classmethod
+    def build_paper_filename(cls, doi: str) -> str:
+        normalized = cls.normalize_doi(doi)
+        return normalized.replace("/", "_").replace("\\", "_") + ".pdf" if normalized else ""
 
     @classmethod
     def build_paper_object_name(cls, doi: str) -> str:
@@ -74,11 +105,12 @@ class StorageService:
 
     def paper_exists(self, *, doi: str, papers_dir: str | Path, project_root: str, logger: Any | None = None) -> bool:
         papers_path = Path(papers_dir)
-        local_path = papers_path / self.build_paper_filename(doi)
+        normalized = self.normalize_doi(doi)
+        local_path = papers_path / self.build_paper_filename(normalized)
         backend = get_storage_backend(project_root=project_root)
         if isinstance(backend, MinIOStorageBackend):
             try:
-                if backend.object_exists(object_name=self.build_paper_object_name(doi)):
+                if backend.object_exists(object_name=self.build_paper_object_name(normalized)):
                     return True
             except Exception as exc:
                 if logger is not None:
@@ -95,13 +127,14 @@ class StorageService:
     ) -> Path | None:
         papers_path = Path(papers_dir)
         papers_path.mkdir(parents=True, exist_ok=True)
-        local_path = papers_path / self.build_paper_filename(doi)
+        normalized = self.normalize_doi(doi)
+        local_path = papers_path / self.build_paper_filename(normalized)
         lock = self._get_paper_download_lock(local_path)
 
         with lock:
             backend = get_storage_backend(project_root=project_root)
             if isinstance(backend, MinIOStorageBackend):
-                object_name = self.build_paper_object_name(doi)
+                object_name = self.build_paper_object_name(normalized)
                 if local_path.exists() and local_path.is_file():
                     null_logger = logger or type("_NullLogger", (), {"warning": lambda *args, **kwargs: None})()
                     if not backend.object_exists(object_name=object_name):

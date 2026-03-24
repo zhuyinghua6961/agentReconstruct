@@ -28,11 +28,12 @@ def test_direct_answer_uses_stage_model(monkeypatch):
 
     monkeypatch.setattr(direct_answerer, "load_prompt_template", lambda _: "{question}")
 
-    def fake_chat_completion(**kwargs):
+    def fake_chat_completion_stream(**kwargs):
         captured.update(kwargs)
-        return "answer"
+        yield "ans"
+        yield "wer"
 
-    monkeypatch.setattr(direct_answerer, "chat_completion", fake_chat_completion)
+    monkeypatch.setattr(direct_answerer, "chat_completion_stream", fake_chat_completion_stream)
     monkeypatch.setattr(direct_answerer.config, "DIRECT_ANSWER_MODEL", "direct-test-model")
 
     result = direct_answerer.direct_answer("demo")

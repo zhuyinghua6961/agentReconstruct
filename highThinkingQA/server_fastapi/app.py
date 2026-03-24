@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 
 import config
 from server.runtime.request_context import clear_trace_id, generate_trace_id, get_trace_id, set_trace_id
+from server.services.redis_client import bootstrap_redis_state
 from server_fastapi.errors import register_exception_handlers
 from server_fastapi.routers import register_routers
 
@@ -50,7 +51,7 @@ def _configure_application_logging(settings: config.HttpServiceSettings) -> logg
     file_handler.setLevel(log_level)
     file_handler.setFormatter(logging.Formatter(_APP_LOG_FORMAT))
 
-    for logger_name in ("server", "server_fastapi", "agent_core"):
+    for logger_name in ("server", "server_fastapi", "agent_core", "retriever"):
         package_logger = logging.getLogger(logger_name)
         current_level = package_logger.level if package_logger.level != logging.NOTSET else log_level
         package_logger.setLevel(min(current_level, log_level))
@@ -79,9 +80,14 @@ def create_app() -> FastAPI:
         "ENABLE_CORS": settings.enable_cors,
         "CORS_ORIGINS": settings.cors_origins,
     }
+    app.state.component_status = {}
+    app.state.redis_bindings = None
+    app.state.redis_service = None
     app.state.ask_slots = threading.BoundedSemaphore(
         value=int(app.state.config["ASK_STREAM_MAX_CONCURRENT"])
     )
+
+    bootstrap_redis_state(app.state)
 
     if app.state.config["ENABLE_CORS"]:
         origins = app.state.config["CORS_ORIGINS"]

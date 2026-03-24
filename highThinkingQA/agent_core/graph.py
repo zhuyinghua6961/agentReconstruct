@@ -30,6 +30,7 @@ from agent_core.reviser import ReviserTimeoutError, revise_answer
 from retriever.vector_retriever import batch_retrieve, RetrievedChunk
 from ingest.embedder import get_embedding_client
 from ingest.vector_store import get_or_create_collection
+from server.services.stage_cache import get_or_compute_decompose, get_or_compute_direct_answer
 
 logger = logging.getLogger(__name__)
 _PARTIAL_RETRIEVAL_FLUSH_WAIT_SECONDS = 0.8
@@ -422,10 +423,15 @@ def run_agent(
         def _timed_direct_answer() -> tuple[str, float]:
             started_at = time.time()
             logger.info("%sstep1 direct_answer start", _trace_prefix(trace_id))
-            answer = direct_answer(
-                working_question,
-                client=direct_llm_client,
+            answer = get_or_compute_direct_answer(
+                question=working_question,
+                model=config.DIRECT_ANSWER_MODEL,
                 enable_thinking=resolved_direct_answer_enable_thinking,
+                compute_fn=lambda: direct_answer(
+                    working_question,
+                    client=direct_llm_client,
+                    enable_thinking=resolved_direct_answer_enable_thinking,
+                ),
             )
             elapsed = time.time() - started_at
             logger.info(
@@ -439,11 +445,17 @@ def run_agent(
         def _timed_decompose_question() -> tuple[list[str], float]:
             started_at = time.time()
             logger.info("%sstep1 decompose start", _trace_prefix(trace_id))
-            questions = decompose_question(
-                working_question,
-                client=pipeline_llm_client,
-                num_sub_questions=resolved_num_sub_questions,
+            questions = get_or_compute_decompose(
+                question=working_question,
+                model=config.DECOMPOSE_MODEL,
                 enable_thinking=resolved_decompose_enable_thinking,
+                num_sub_questions=resolved_num_sub_questions,
+                compute_fn=lambda: decompose_question(
+                    working_question,
+                    client=pipeline_llm_client,
+                    num_sub_questions=resolved_num_sub_questions,
+                    enable_thinking=resolved_decompose_enable_thinking,
+                ),
             )
             elapsed = time.time() - started_at
             logger.info(

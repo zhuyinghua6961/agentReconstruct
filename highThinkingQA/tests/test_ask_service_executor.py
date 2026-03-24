@@ -1,6 +1,8 @@
 import concurrent.futures
 
 from server.services.ask_service import (
+    _build_reference_links,
+    _extract_references,
     execute_ask,
     stream_ask_events,
     _progress_to_step_event,
@@ -181,6 +183,23 @@ def test_stream_ask_events_forwards_content_before_done(monkeypatch):
 
 def test_adapt_answer_for_frontend_converts_bracket_citations():
     assert _adapt_answer_for_frontend("A [10.1000/demo, Preamble] B") == "A [DOI: 10.1000/demo] B"
+
+
+def test_extract_references_normalizes_polluted_doi_tokens():
+    refs = _extract_references(
+        "A [10.1007_s11581-021-04073-2, Results] and doi:10.1007/s11581-021-04073-2)."
+    )
+
+    assert refs == ["10.1007/s11581-021-04073-2"]
+
+
+def test_build_reference_links_uses_normalized_doi():
+    assert _build_reference_links(["10.1007_s11581-021-04073-2)."]) == [
+        {
+            "doi": "10.1007/s11581-021-04073-2",
+            "pdf_url": "/api/v1/view_pdf/10.1007/s11581-021-04073-2",
+        }
+    ]
 
 
 def test_stream_ask_events_adapts_doi_links_before_done(monkeypatch):

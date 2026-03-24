@@ -16,6 +16,16 @@ from app.modules.qa_cache.stage2_cache import (
     cache_stage2_result,
     get_cached_stage2_result,
 )
+from app.modules.qa_cache.stage25_cache import (
+    build_stage25_lock_key,
+    cache_stage25_result,
+    get_cached_stage25_result,
+)
+from app.modules.qa_cache.stage3_cache import (
+    build_stage3_lock_key,
+    cache_stage3_result,
+    get_cached_stage3_result,
+)
 from app.modules.qa_kb.models import GenerationRuntime, QaKbExecutionMetadata, QaKbExecutionResult
 from app.modules.qa_kb.stages.pdf_loading import Stage3PdfLoader
 from app.modules.qa_kb.stages.planning import Stage1Planner
@@ -194,6 +204,110 @@ class GenerationPipelineOrchestrator:
             compute_fn=_compute,
         )
 
+    def _run_stage25(
+        self,
+        *,
+        question: str,
+        runtime: GenerationRuntime,
+        retrieval_results: dict[str, Any],
+        dois: list[str],
+        redis_service: RedisService | None,
+    ) -> dict[str, Any]:
+        cached = get_cached_stage25_result(
+            redis_service=redis_service,
+            runtime=runtime,
+            question=question,
+            retrieval_results=retrieval_results,
+            dois=dois,
+        )
+        if cached is not None:
+            increment_cache_metric("stage25", "cache_hit")
+            return cached
+        increment_cache_metric("stage25", "cache_miss")
+
+        def _compute() -> dict[str, Any]:
+            result = self.stage25.run(runtime=runtime, retrieval_results=retrieval_results, user_question=question, dois=dois)
+            cache_stage25_result(
+                redis_service=redis_service,
+                runtime=runtime,
+                question=question,
+                retrieval_results=retrieval_results,
+                dois=dois,
+                stage25_result=result,
+            )
+            return result
+
+        if redis_service is None or not redis_service.available:
+            return _compute()
+
+        return run_singleflight(
+            redis_service=redis_service,
+            lock_key=build_stage25_lock_key(
+                redis_service=redis_service,
+                runtime=runtime,
+                question=question,
+                retrieval_results=retrieval_results,
+                dois=dois,
+            ),
+            namespace="stage25",
+            read_cached_fn=lambda: get_cached_stage25_result(
+                redis_service=redis_service,
+                runtime=runtime,
+                question=question,
+                retrieval_results=retrieval_results,
+                dois=dois,
+            ),
+            compute_fn=_compute,
+        )
+
+    def _run_stage3(
+        self,
+        *,
+        runtime: GenerationRuntime,
+        dois: list[str],
+        redis_service: RedisService | None,
+        max_chunks_per_doi: int,
+        should_cancel: Callable[[], bool] | None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        cached = get_cached_stage3_result(
+            redis_service=redis_service,
+            dois=dois,
+            max_chunks_per_doi=max_chunks_per_doi,
+        )
+        if cached is not None:
+            increment_cache_metric("stage3", "cache_hit")
+            return cached
+        increment_cache_metric("stage3", "cache_miss")
+
+        def _compute() -> dict[str, list[dict[str, Any]]]:
+            result = self.stage3.run(runtime=runtime, dois=dois, max_chunks_per_doi=max_chunks_per_doi, should_cancel=should_cancel)
+            cache_stage3_result(
+                redis_service=redis_service,
+                dois=dois,
+                max_chunks_per_doi=max_chunks_per_doi,
+                stage3_result=result,
+            )
+            return result
+
+        if redis_service is None or not redis_service.available:
+            return _compute()
+
+        return run_singleflight(
+            redis_service=redis_service,
+            lock_key=build_stage3_lock_key(
+                redis_service=redis_service,
+                dois=dois,
+                max_chunks_per_doi=max_chunks_per_doi,
+            ),
+            namespace="stage3",
+            read_cached_fn=lambda: get_cached_stage3_result(
+                redis_service=redis_service,
+                dois=dois,
+                max_chunks_per_doi=max_chunks_per_doi,
+            ),
+            compute_fn=_compute,
+        )
+
     def _prepare(
         self,
         *,
@@ -301,7 +415,13 @@ class GenerationPipelineOrchestrator:
             md_expansion_result = self._timed(
                 timings,
                 "stage25",
-                lambda: self.stage25.run(runtime=runtime, retrieval_results=stage2_result, user_question=question, dois=dois),
+                lambda: self._run_stage25(
+                    question=question,
+                    runtime=runtime,
+                    retrieval_results=stage2_result,
+                    dois=dois,
+                    redis_service=redis_service,
+                ),
             )
         except Exception as exc:
             logger.warning("stage25 md expansion failed, falling back to PDF path: %s", exc)
@@ -317,7 +437,13 @@ class GenerationPipelineOrchestrator:
             pdf_chunks = self._timed(
                 timings,
                 "stage3",
-                lambda: self.stage3.run(runtime=runtime, dois=dois, max_chunks_per_doi=3, should_cancel=should_cancel),
+                lambda: self._run_stage3(
+                    runtime=runtime,
+                    dois=dois,
+                    redis_service=redis_service,
+                    max_chunks_per_doi=3,
+                    should_cancel=should_cancel,
+                ),
             )
             if md_expansion_result.get("applied") and self.merge_pdf_chunks_with_md_fn is not None and md_expansion_result.get("md_chunks_by_doi"):
                 pdf_chunks = self.merge_pdf_chunks_with_md_fn(
@@ -542,7 +668,13 @@ class GenerationPipelineOrchestrator:
             md_expansion_result = self._timed(
                 timings,
                 "stage25",
-                lambda: self.stage25.run(runtime=runtime, retrieval_results=stage2_result, user_question=question, dois=dois),
+                lambda: self._run_stage25(
+                    question=question,
+                    runtime=runtime,
+                    retrieval_results=stage2_result,
+                    dois=dois,
+                    redis_service=redis_service,
+                ),
             )
             logger.info(
                 "fastqa stream stage25 completed applied=%s stats=%s",
@@ -590,7 +722,13 @@ class GenerationPipelineOrchestrator:
             pdf_chunks = self._timed(
                 timings,
                 "stage3",
-                lambda: self.stage3.run(runtime=runtime, dois=dois, max_chunks_per_doi=3, should_cancel=should_cancel),
+                lambda: self._run_stage3(
+                    runtime=runtime,
+                    dois=dois,
+                    redis_service=redis_service,
+                    max_chunks_per_doi=3,
+                    should_cancel=should_cancel,
+                ),
             )
             if md_expansion_result.get("applied") and self.merge_pdf_chunks_with_md_fn is not None and md_expansion_result.get("md_chunks_by_doi"):
                 pdf_chunks = self.merge_pdf_chunks_with_md_fn(

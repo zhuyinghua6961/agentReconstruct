@@ -18,6 +18,7 @@ from server.schemas.request_models import AskRequest
 from server.services.conversation_context_service import ConversationContext, build_conversation_context
 from server.services.mode_profiles import RuntimeProfile, get_runtime_profile
 from server.services.query_rewrite_service import QuestionRewriteResult, rewrite_question
+from server.storage.paper_storage import normalize_doi
 
 _DOI_PATTERN = re.compile(r"10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
 _BRACKET_CITATION_PATTERN = re.compile(r"\[(10\.\d{4,9}/[-._;()/:A-Z0-9]+)(?:,\s*[^\]]+)?\]", re.IGNORECASE)
@@ -347,7 +348,7 @@ def _extract_references(text: str) -> list[str]:
     seen: set[str] = set()
     refs: list[str] = []
     for match in _DOI_PATTERN.findall(str(text or "")):
-        doi = match.rstrip(".,;)").strip()
+        doi = normalize_doi(match.rstrip(".,;)").strip())
         if not doi:
             continue
         key = doi.lower()
@@ -359,7 +360,18 @@ def _extract_references(text: str) -> list[str]:
 
 
 def _build_reference_links(references: list[str]) -> list[dict[str, str]]:
-    return [{"doi": doi, "pdf_url": f"/api/v1/view_pdf/{doi}"} for doi in references]
+    links: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw in references:
+        doi = normalize_doi(raw)
+        if not doi:
+            continue
+        key = doi.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        links.append({"doi": doi, "pdf_url": f"/api/v1/view_pdf/{doi}"})
+    return links
 
 
 def _build_done_metadata(
@@ -393,7 +405,7 @@ def _adapt_answer_for_frontend(text: str) -> str:
         return ""
 
     def _replace(match: re.Match[str]) -> str:
-        doi = str(match.group(1) or "").strip()
+        doi = normalize_doi(str(match.group(1) or "").strip())
         if not doi:
             return match.group(0)
         return f"[DOI: {doi}]"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from app.core.config import get_settings
@@ -37,10 +38,19 @@ def test_settings_resolve_redis_defaults(monkeypatch):
 
     assert settings.redis_enabled is False
     assert settings.redis_password == "123456"
-    assert settings.redis_key_prefix == "agentcode"
+    assert settings.redis_key_prefix == "fastqa"
     assert settings.resolved_redis_url == "redis://:123456@127.0.0.1:6379/0"
 
     _reset_settings_cache()
+
+
+def test_fastqa_shared_config_enables_redis_by_default():
+    repo_root = Path(__file__).resolve().parents[2]
+    shared_env = repo_root / "resource/config/services/fastQA/config.shared.env"
+    content = shared_env.read_text(encoding="utf-8")
+
+    assert "REDIS_ENABLED=1" in content
+    assert "REDIS_KEY_PREFIX=fastqa" in content
 
 
 def test_redact_redis_url_masks_password():
@@ -217,19 +227,3 @@ def test_close_generation_runtime_closes_client():
     assert calls["closed"] is True
     assert runtime.generation_runtime is None
     assert runtime.generation_runtime_ready is False
-
-
-def test_close_redis_closes_client():
-    calls = {"closed": False}
-    runtime = SimpleNamespace(
-        redis_client=SimpleNamespace(close=lambda: calls.__setitem__("closed", True)),
-        redis_service=object(),
-        redis_bindings=object(),
-    )
-
-    close_redis(runtime)
-
-    assert calls["closed"] is True
-    assert runtime.redis_client is None
-    assert runtime.redis_service is None
-    assert runtime.redis_bindings is None

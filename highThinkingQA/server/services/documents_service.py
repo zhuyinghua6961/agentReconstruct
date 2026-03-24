@@ -11,7 +11,7 @@ from typing import Any
 import config
 from ingest.vector_store import get_collection_count
 from server.services.pdf_extractor import extract_pdf_text as extract_pdf_text_impl
-from server.storage.paper_storage import build_paper_filename, ensure_local_paper_pdf, paper_pdf_exists
+from server.storage.paper_storage import build_paper_filename, ensure_local_paper_pdf, normalize_doi, paper_pdf_exists
 
 try:
     from openai import OpenAI
@@ -82,7 +82,7 @@ class DocumentsService:
         )
 
     def view_pdf_path(self, doi: str, logger: Any) -> tuple[dict[str, Any], int, Path | None]:
-        normalized = str(doi or "").strip()
+        normalized = normalize_doi(doi)
         if not normalized:
             return {"success": False, "error": "pdf_not_found", "code": "NOT_FOUND", "doi": normalized}, 404, None
         pdf_path = ensure_local_paper_pdf(doi=normalized, papers_dir=self._papers_dir, logger=logger)
@@ -181,7 +181,7 @@ class DocumentsService:
         if client is None:
             return {"success": False, "error": "summary_disabled", "code": "SUMMARY_DISABLED"}, 503
 
-        normalized = str(doi or "").strip()
+        normalized = normalize_doi(doi)
         pdf_path = ensure_local_paper_pdf(doi=normalized, papers_dir=self._papers_dir, logger=logger)
         if pdf_path is None:
             return {"success": False, "error": "pdf_not_found", "code": "NOT_FOUND", "doi": normalized}, 404
@@ -232,7 +232,7 @@ class DocumentsService:
         }, 200
 
     def extract_pdf_text(self, doi: str, logger: Any) -> tuple[dict[str, Any], int]:
-        normalized = str(doi or "").strip()
+        normalized = normalize_doi(doi)
         pdf_path = ensure_local_paper_pdf(doi=normalized, papers_dir=self._papers_dir, logger=logger)
         if pdf_path is None:
             return {"success": False, "error": "pdf_not_found", "code": "NOT_FOUND", "doi": normalized}, 404
@@ -254,7 +254,7 @@ class DocumentsService:
         }, 200
 
     def check_pdf(self, doi: str, logger: Any) -> tuple[dict[str, Any], int]:
-        normalized = str(doi or "").strip()
+        normalized = normalize_doi(doi)
         exists = paper_pdf_exists(doi=normalized, papers_dir=self._papers_dir, logger=logger)
         filename = build_paper_filename(normalized)
         return {"success": True, "exists": exists, "doi": normalized, "filename": filename if exists else None}, 200

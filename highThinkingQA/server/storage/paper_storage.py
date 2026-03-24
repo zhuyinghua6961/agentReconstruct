@@ -3,16 +3,52 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 _DOWNLOAD_LOCKS: dict[str, threading.Lock] = {}
 _DOWNLOAD_LOCKS_GUARD = threading.Lock()
 
 
+def normalize_doi(value: str) -> str:
+    text = str(value or "").strip()
+    filename_like_source = False
+    previous = None
+    while previous != text:
+        previous = text
+        text = unquote(text).strip()
+    text = text.replace("\\", "/")
+    text = re.sub(r"^doi:\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^[(/\\s]+|[)\],;:.\\s]+$", "", text)
+    if "papers/" in text:
+        text = text.split("papers/", 1)[-1]
+        filename_like_source = text.lower().endswith(".pdf")
+    elif (
+        text.lower().endswith(".pdf")
+        and (
+            os.path.isabs(text)
+            or text.startswith("./")
+            or text.startswith("../")
+            or bool(re.match(r"^[A-Za-z]:[\\/]", text))
+        )
+    ):
+        text = Path(text).name or text
+        filename_like_source = True
+    if text.lower().endswith(".pdf"):
+        text = text[:-4]
+    if "_" in text and "/" not in text and text.startswith("10.") and not filename_like_source:
+        text = text.replace("_", "/", 1)
+    return text.strip()
+
+
 def build_paper_filename(doi: str) -> str:
-    return str(doi or "").replace("/", "_") + ".pdf"
+    normalized = normalize_doi(doi)
+    if not normalized:
+        return ""
+    return normalized.replace("/", "_").replace("\\", "_") + ".pdf"
 
 
 def build_paper_object_name(doi: str) -> str:
@@ -54,13 +90,14 @@ def _get_local_path_lock(local_path: Path) -> threading.Lock:
 
 
 def paper_pdf_exists(*, doi: str, papers_dir: Path, logger: Any | None = None) -> bool:
-    local_path = papers_dir / build_paper_filename(doi)
+    normalized = normalize_doi(doi)
+    local_path = papers_dir / build_paper_filename(normalized)
     minio_ctx = _build_minio_client_from_env()
     if minio_ctx is None:
         return local_path.exists()
 
     client, bucket, s3_error_cls = minio_ctx
-    object_name = build_paper_object_name(doi)
+    object_name = build_paper_object_name(normalized)
     try:
         client.stat_object(bucket, object_name)
         return True
@@ -86,7 +123,8 @@ def ensure_local_paper_pdf(*, doi: str, papers_dir: Path, logger: Any | None = N
     3. Fall back to local file only.
     """
     papers_dir.mkdir(parents=True, exist_ok=True)
-    local_path = papers_dir / build_paper_filename(doi)
+    normalized = normalize_doi(doi)
+    local_path = papers_dir / build_paper_filename(normalized)
     lock = _get_local_path_lock(local_path)
 
     with lock:
@@ -96,7 +134,7 @@ def ensure_local_paper_pdf(*, doi: str, papers_dir: Path, logger: Any | None = N
         minio_ctx = _build_minio_client_from_env()
         if minio_ctx is not None:
             client, bucket, s3_error_cls = minio_ctx
-            object_name = build_paper_object_name(doi)
+            object_name = build_paper_object_name(normalized)
             try:
                 client.stat_object(bucket, object_name)
                 client.fget_object(bucket, object_name, str(local_path))

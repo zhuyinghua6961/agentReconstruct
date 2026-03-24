@@ -15,3 +15,5 @@ pymysql>=1.1.1
 minio>=7.2.7
 # 可选: paddleocr 客户端（如使用 paddleocr_client 解析方式才需要）
 # paddleocr>=2.9.0
+
+redis>=5.0.0

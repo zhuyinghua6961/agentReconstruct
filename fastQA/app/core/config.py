@@ -246,7 +246,7 @@ def get_settings() -> Settings:
         redis_username=(str(os.getenv("REDIS_USERNAME", "") or "").strip() or None),
         redis_password=str(os.getenv("REDIS_PASSWORD", "123456") or "123456"),
         redis_db=_get_int("REDIS_DB", 0, minimum=0, maximum=63),
-        redis_key_prefix=str(os.getenv("REDIS_KEY_PREFIX", "agentcode") or "agentcode").strip() or "agentcode",
+        redis_key_prefix=str(os.getenv("REDIS_KEY_PREFIX", "fastqa") or "fastqa").strip() or "fastqa",
         redis_socket_connect_timeout_sec=_get_int("REDIS_SOCKET_CONNECT_TIMEOUT_SEC", 2, minimum=1, maximum=60),
         redis_socket_timeout_sec=_get_int("REDIS_SOCKET_TIMEOUT_SEC", 2, minimum=1, maximum=60),
         generation_runtime_enabled=_get_bool("FASTQA_GENERATION_RUNTIME_ENABLED", False),

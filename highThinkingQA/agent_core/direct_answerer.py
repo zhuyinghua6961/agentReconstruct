@@ -9,7 +9,7 @@ from typing import Optional
 from openai import OpenAI
 
 import config
-from agent_core.llm_client import chat_completion, load_prompt_template
+from agent_core.llm_client import chat_completion_stream, load_prompt_template
 
 logger = logging.getLogger(__name__)
 
@@ -32,14 +32,17 @@ def direct_answer(
     template = load_prompt_template("direct_answer.txt")
     prompt = template.format(question=question)
 
-    answer = chat_completion(
-        prompt=prompt,
-        client=client,
-        model=config.DIRECT_ANSWER_MODEL,
-        temperature=0.7,
-        max_tokens=4096,
-        enable_thinking=enable_thinking,
+    chunks = list(
+        chat_completion_stream(
+            prompt=prompt,
+            client=client,
+            model=config.DIRECT_ANSWER_MODEL,
+            temperature=0.7,
+            max_tokens=4096,
+            enable_thinking=enable_thinking,
+        )
     )
+    answer = "".join(chunks)
 
     logger.info(f"直接回答完成: {len(answer)} chars")
     return answer

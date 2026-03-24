@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from app.integrations.redis import RedisService
+from app.modules.qa_cache import reset_cache_metrics, snapshot_cache_metrics
 from app.modules.qa_kb.orchestrators.generation import GenerationPipelineOrchestrator
 
 
@@ -38,6 +40,54 @@ class _Runtime:
     def stage4_synthesis_with_pdf_chunks(self, user_question, deep_answer, pdf_chunks, retrieval_results=None, should_cancel=None):
         for item in self.stage4_payload:
             yield item
+
+
+class _FakeRedis:
+    def __init__(self) -> None:
+        self.values: dict[str, object] = {}
+
+    def get(self, key: str):
+        return self.values.get(key)
+
+    def set(self, key: str, value, ex=None, nx=False):
+        _ = ex
+        if nx and key in self.values:
+            return False
+        self.values[key] = value
+        return True
+
+    def delete(self, key: str):
+        return 1 if self.values.pop(key, None) is not None else 0
+
+
+class _CountingStage25:
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+        self.calls = 0
+
+    def run(self, *, runtime, retrieval_results, user_question, dois):
+        _ = (runtime, retrieval_results, user_question, dois)
+        self.calls += 1
+        return {
+            "enabled": bool(self.payload.get("enabled")),
+            "applied": bool(self.payload.get("applied")),
+            "md_chunks_by_doi": {
+                str(doi): [dict(chunk) for chunk in chunks]
+                for doi, chunks in dict(self.payload.get("md_chunks_by_doi") or {}).items()
+            },
+            "stats": dict(self.payload.get("stats") or {}),
+        }
+
+
+class _CountingStage3:
+    def __init__(self, payload: dict[str, list[dict]]) -> None:
+        self.payload = payload
+        self.calls = 0
+
+    def run(self, *, runtime, dois, max_chunks_per_doi=3, should_cancel=None):
+        _ = (runtime, dois, max_chunks_per_doi, should_cancel)
+        self.calls += 1
+        return {str(doi): [dict(chunk) for chunk in chunks] for doi, chunks in self.payload.items()}
 
 
 def _logger():
@@ -227,3 +277,111 @@ def test_orchestrator_stream_emits_md_hit_and_pdf_skip_copy():
     thinking_events = [event["content"] for event in events if event.get("type") == "thinking"]
     assert "🧩 阶段二点五命中：1 个DOI，1 个MD片段" in thinking_events
     assert "📄 阶段三：MD证据命中阈值，跳过PDF溯源...（hit_doi=1, md_chunks=1）" in thinking_events
+
+
+def test_orchestrator_run_reuses_cached_stage25_and_stage3_results():
+    reset_cache_metrics()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    runtime = _Runtime(
+        stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]},
+        stage2_payload={"success": True, "documents": ["doc"], "metadatas": [{"doi": "10.1"}], "distances": [0.1]},
+        doi_payload=["10.1"],
+        stage25_payload={},
+        stage3_payload={},
+        stage4_payload=[{"success": True, "final_answer": "final", "query_mode": "生成驱动检索（PDF溯源）", "references": [{"doi": "10.1"}]}],
+    )
+    stage25 = _CountingStage25(
+        {
+            "enabled": True,
+            "applied": True,
+            "md_chunks_by_doi": {"10.1": [{"text": "md evidence"}]},
+            "stats": {"hit_doi_count": 1, "total_md_chunks": 1, "fallback_reason": ""},
+        }
+    )
+    stage3 = _CountingStage3({"10.1": [{"text": "pdf evidence"}]})
+    orchestrator = GenerationPipelineOrchestrator(stage25=stage25, stage3=stage3)
+
+    first = orchestrator.run(
+        question="hello",
+        runtime=runtime,
+        redis_service=redis_service,
+        n_results_per_claim=5,
+        should_cancel=None,
+        active_stream_count=None,
+        logger=_logger(),
+    )
+    second = orchestrator.run(
+        question="hello",
+        runtime=runtime,
+        redis_service=redis_service,
+        n_results_per_claim=5,
+        should_cancel=None,
+        active_stream_count=None,
+        logger=_logger(),
+    )
+
+    metrics = snapshot_cache_metrics()
+    assert first.success is True
+    assert second.success is True
+    assert stage25.calls == 1
+    assert stage3.calls == 1
+    assert metrics["stage25"]["lock_acquired"] == 1
+    assert metrics["stage25"]["cache_hit"] == 1
+    assert metrics["stage3"]["lock_acquired"] == 1
+    assert metrics["stage3"]["cache_hit"] == 1
+
+
+def test_orchestrator_stream_reuses_cached_stage25_and_stage3_results():
+    reset_cache_metrics()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    runtime = _Runtime(
+        stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]},
+        stage2_payload={"success": True, "documents": ["doc"], "metadatas": [{"doi": "10.1"}], "distances": [0.1]},
+        doi_payload=["10.1"],
+        stage25_payload={},
+        stage3_payload={},
+        stage4_payload=[{"success": True, "final_answer": "final", "query_mode": "生成驱动检索（PDF溯源）", "references": [{"doi": "10.1"}]}],
+    )
+    stage25 = _CountingStage25(
+        {
+            "enabled": True,
+            "applied": False,
+            "md_chunks_by_doi": {},
+            "stats": {"hit_doi_count": 0, "total_md_chunks": 0, "fallback_reason": ""},
+        }
+    )
+    stage3 = _CountingStage3({"10.1": [{"text": "pdf evidence"}]})
+    orchestrator = GenerationPipelineOrchestrator(stage25=stage25, stage3=stage3)
+
+    first = list(
+        orchestrator.stream(
+            question="hello",
+            runtime=runtime,
+            redis_service=redis_service,
+            n_results_per_claim=5,
+            should_cancel=None,
+            active_stream_count=None,
+            logger=_logger(),
+            sse_event=lambda payload: payload,
+        )
+    )
+    second = list(
+        orchestrator.stream(
+            question="hello",
+            runtime=runtime,
+            redis_service=redis_service,
+            n_results_per_claim=5,
+            should_cancel=None,
+            active_stream_count=None,
+            logger=_logger(),
+            sse_event=lambda payload: payload,
+        )
+    )
+
+    metrics = snapshot_cache_metrics()
+    assert first[-1]["type"] == "done"
+    assert second[-1]["type"] == "done"
+    assert stage25.calls == 1
+    assert stage3.calls == 1
+    assert metrics["stage25"]["cache_hit"] >= 1
+    assert metrics["stage3"]["cache_hit"] >= 1

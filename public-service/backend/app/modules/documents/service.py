@@ -106,8 +106,9 @@ class DocumentsService:
             return fallback
 
     def _ensure_local_pdf(self, *, doi: str, logger: Any) -> Path | None:
+        normalized = storage_service.normalize_doi(doi)
         return storage_service.ensure_local_paper_pdf(
-            doi=doi,
+            doi=normalized,
             papers_dir=self._papers_dir,
             project_root=str(get_settings().local_storage_root),
             logger=logger,
@@ -177,21 +178,23 @@ class DocumentsService:
 
     def view_pdf_path(self, doi: str, logger: Any) -> tuple[dict[str, Any], int, Path | None]:
         try:
-            pdf_path = self._ensure_local_pdf(doi=doi, logger=logger)
+            normalized = storage_service.normalize_doi(doi)
+            pdf_path = self._ensure_local_pdf(doi=normalized, logger=logger)
             if not pdf_path:
-                return {"error": f"PDF文件不存在: {doi}"}, 404, None
-            return {}, 200, pdf_path
+                return {"error": f"PDF文件不存在: {normalized or doi}"}, 404, None
+            return {"doi": normalized}, 200, pdf_path
         except Exception as exc:
             return {"error": f"查看PDF失败: {exc}"}, 500, None
 
     def summarize_pdf(self, doi: str, logger: Any) -> tuple[dict[str, Any], int]:
         try:
-            logger.info("🧾 请求PDF总结: %s", doi)
+            normalized = storage_service.normalize_doi(doi)
+            logger.info("🧾 请求PDF总结: %s", normalized or doi)
             if OpenAI is None:
                 return {"error": "OpenAI SDK 不可用"}, 503
-            pdf_path = self._ensure_local_pdf(doi=doi, logger=logger)
+            pdf_path = self._ensure_local_pdf(doi=normalized, logger=logger)
             if not pdf_path:
-                return {"error": f"PDF文件不存在: {doi}"}, 404
+                return {"error": f"PDF文件不存在: {normalized or doi}"}, 404
 
             full_text = self._extract_pdf_body(
                 pdf_path=pdf_path,
@@ -222,17 +225,18 @@ class DocumentsService:
             )
             summary = str(resp.choices[0].message.content or "").strip()
             logger.info("✅ PDF总结生成完成")
-            return {"doi": doi, "summary": summary}, 200
+            return {"doi": normalized, "summary": summary}, 200
         except Exception as exc:
             logger.error("❌ PDF总结失败: %s", exc)
             return {"error": f"总结失败: {str(exc)}"}, 500
 
     def extract_pdf_text(self, doi: str, logger: Any) -> tuple[dict[str, Any], int]:
         try:
-            logger.info("📖 提取PDF文本: %s", doi)
-            pdf_path = self._ensure_local_pdf(doi=doi, logger=logger)
+            normalized = storage_service.normalize_doi(doi)
+            logger.info("📖 提取PDF文本: %s", normalized or doi)
+            pdf_path = self._ensure_local_pdf(doi=normalized, logger=logger)
             if not pdf_path:
-                return {"error": f"PDF文件不存在: {doi}"}, 404
+                return {"error": f"PDF文件不存在: {normalized or doi}"}, 404
 
             full_text = self._extract_pdf_body(
                 pdf_path=pdf_path,
@@ -245,7 +249,7 @@ class DocumentsService:
 
             paragraphs = self._segment_paragraphs(str(full_text or ""))
             logger.info("✅ 提取完成，共 %s 段", len(paragraphs))
-            return {"doi": doi, "paragraphs": paragraphs, "total": len(paragraphs)}, 200
+            return {"doi": normalized, "paragraphs": paragraphs, "total": len(paragraphs)}, 200
         except Exception as exc:
             logger.error("❌ 提取PDF文本失败: %s", exc)
             return {"error": f"提取失败: {str(exc)}"}, 500
@@ -254,13 +258,14 @@ class DocumentsService:
         return documents_translation_service.translate_batch(texts=texts, logger=logger)
 
     def check_pdf(self, doi: str) -> tuple[dict[str, Any], int]:
+        normalized = storage_service.normalize_doi(doi)
         exists = storage_service.paper_exists(
-            doi=doi,
+            doi=normalized,
             papers_dir=self._papers_dir,
             project_root=str(get_settings().local_storage_root),
         )
-        filename = storage_service.build_paper_filename(doi)
-        return {"exists": exists, "doi": doi, "filename": filename if exists else None}, 200
+        filename = storage_service.build_paper_filename(normalized)
+        return {"exists": exists, "doi": normalized, "filename": filename if exists else None}, 200
 
     def literature_content(
         self,
