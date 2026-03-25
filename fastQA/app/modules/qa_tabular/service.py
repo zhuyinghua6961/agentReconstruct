@@ -6,7 +6,12 @@ from typing import Any, Iterator
 from app.modules.qa_tabular.executor import execute_compare_plan, execute_tabular_plan
 from app.modules.qa_tabular.planner import plan_tabular_query
 from app.modules.qa_pdf.common import IncrementalCleanState, incremental_clean_events_for_piece
-from app.modules.qa_tabular.renderer import build_tabular_answer, build_tabular_result_context, iter_tabular_answer
+from app.modules.qa_tabular.renderer import (
+    build_tabular_answer,
+    build_tabular_result_context,
+    infer_tabular_summary_focus_columns,
+    iter_tabular_answer,
+)
 from app.modules.qa_tabular.schema_profiler import profile_workbook
 from app.modules.qa_tabular.workbook_loader import load_workbook_cached
 
@@ -458,6 +463,22 @@ class QaTabularService:
             sse_event,
         )
 
+        summary_stats = execution_result.get("summary_stats") if isinstance(execution_result.get("summary_stats"), dict) else {}
+        summary_focus_columns = infer_tabular_summary_focus_columns(question=question, plan=plan, result=execution_result)
+        if str(execution_result.get("operation") or "") == "summary":
+            yield _emit(
+                {
+                    "type": "step",
+                    "step": "tabular_summary_context",
+                    "status": "success",
+                    "message": (
+                        f"📌 概览聚焦列: {', '.join(summary_focus_columns) or '未识别到明确焦点列'}；"
+                        f"代表性样例 {len(execution_result.get('result_rows') or [])} 条"
+                    ),
+                },
+                sse_event,
+            )
+
         hybrid_evidence_rows: list[dict[str, Any]] = []
         pdf_evidence_context = ""
         if hybrid_mode:
@@ -573,6 +594,10 @@ class QaTabularService:
                     "kb_enabled": kb_enabled,
                     "kb_reference_count": len(kb_references),
                     "kb_evidence_chars": len(kb_evidence_context),
+                    "summary_column_count": int(summary_stats.get("column_count") or 0) if str(execution_result.get("operation") or "") == "summary" else 0,
+                    "summary_focus_columns": summary_focus_columns,
+                    "summary_sample_count": len(execution_result.get("result_rows") or []) if str(execution_result.get("operation") or "") == "summary" else 0,
+                    "summary_sample_strategy": str(summary_stats.get("sample_strategy") or "") if str(execution_result.get("operation") or "") == "summary" else "",
                     "streaming": True,
                 },
             )

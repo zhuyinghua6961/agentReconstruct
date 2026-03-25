@@ -27,6 +27,23 @@ _SINGULAR_FILE_REFS = (
     "this paper",
     "this file",
 )
+_SINGULAR_TABLE_REFS = (
+    "这个表格",
+    "这张表",
+    "这份表格",
+    "该表格",
+    "该表",
+    "这个excel",
+    "这个 excel",
+    "这个csv",
+    "这个 csv",
+    "这个工作表",
+    "该工作表",
+    "this table",
+    "this sheet",
+    "this excel",
+    "this csv",
+)
 _PLURAL_FILE_REFS = (
     "这些文献",
     "这些文件",
@@ -129,13 +146,22 @@ class FileContextResolver:
         ordinal_selection = self._extract_ordinal_selection(text=text, candidates=all_available_ids)
         deictic_count_selection = self._extract_deictic_count_selection(text=text, candidates=candidate_ids)
         singular_ref = self._contains_any(lower, _SINGULAR_FILE_REFS)
+        table_singular_ref = self._contains_any(lower, _SINGULAR_TABLE_REFS)
         plural_ref = self._contains_any(lower, _PLURAL_FILE_REFS)
         latest_ref = self._contains_any(lower, _LATEST_FILE_REFS)
         mixed_intent = self._detect_mixed_intent(lower)
         table_focus = self._question_has_table_focus(lower=lower, active_rows=active_rows, candidate_ids=candidate_ids)
         file_name_focus = self._question_has_file_name_focus(lower=lower, file_map=file_map, candidate_ids=candidate_ids)
 
-        strong_file_intent = bool(explicit_refs or ordinal_selection or deictic_count_selection or singular_ref or plural_ref or latest_ref)
+        strong_file_intent = bool(
+            explicit_refs
+            or ordinal_selection
+            or deictic_count_selection
+            or singular_ref
+            or table_singular_ref
+            or plural_ref
+            or latest_ref
+        )
         upload_file_intent = self._contains_any(lower, _UPLOAD_CONTEXT_WORDS) and bool(candidate_ids or newly_uploaded_ids)
         generic_file_topic = self._contains_any(lower, _GENERIC_FILE_WORDS)
         file_intent = strong_file_intent or upload_file_intent or table_focus or file_name_focus
@@ -194,6 +220,58 @@ class FileContextResolver:
                 allow_kb_verification=mixed_intent,
                 file_map=file_map,
             )
+
+        if table_singular_ref:
+            table_selected_ids = self._filter_ids_by_type(ids=selected_ids, file_map=file_map, table_only=True)
+            table_last_focus_ids = self._filter_ids_by_type(ids=last_focus_ids, file_map=file_map, table_only=True)
+            table_newly_uploaded_ids = self._filter_ids_by_type(ids=newly_uploaded_ids, file_map=file_map, table_only=True)
+            table_candidate_ids = self._filter_ids_by_type(
+                ids=(selected_ids or all_available_ids),
+                file_map=file_map,
+                table_only=True,
+            )
+
+            if len(table_selected_ids) == 1:
+                return self._file_turn(
+                    route=self._route_for_selection(selected_ids=table_selected_ids, file_map=file_map, table_focus=True),
+                    selected_file_ids=table_selected_ids,
+                    strategy="selected_single",
+                    allow_kb_verification=mixed_intent,
+                    file_map=file_map,
+                )
+            if len(table_last_focus_ids) == 1 and last_turn_route in _FILE_ROUTE_HINTS:
+                return self._file_turn(
+                    route=self._route_from_last_focus(
+                        last_turn_route=last_turn_route,
+                        file_map=file_map,
+                        selected_ids=table_last_focus_ids,
+                        table_focus=True,
+                    ),
+                    selected_file_ids=table_last_focus_ids,
+                    strategy="last_focus",
+                    allow_kb_verification=mixed_intent,
+                    file_map=file_map,
+                )
+            if table_newly_uploaded_ids:
+                selected = [table_newly_uploaded_ids[-1]]
+                return self._file_turn(
+                    route=self._route_for_selection(selected_ids=selected, file_map=file_map, table_focus=True),
+                    selected_file_ids=selected,
+                    strategy="latest_new_upload",
+                    allow_kb_verification=mixed_intent,
+                    file_map=file_map,
+                )
+            if len(table_candidate_ids) == 1:
+                selected = [table_candidate_ids[0]]
+                return self._file_turn(
+                    route=self._route_for_selection(selected_ids=selected, file_map=file_map, table_focus=True),
+                    selected_file_ids=selected,
+                    strategy="single_candidate",
+                    allow_kb_verification=mixed_intent,
+                    file_map=file_map,
+                )
+            if len(table_candidate_ids) > 1:
+                return self._clarify(selected_ids=table_candidate_ids, message="当前对话中有多个候选表格，请明确指定文件")
 
         if singular_ref:
             if len(selected_ids) == 1:
@@ -365,6 +443,27 @@ class FileContextResolver:
         if not ids or not file_map:
             return []
         return [file_id for file_id in ids if file_id in file_map]
+
+    def _filter_ids_by_type(
+        self,
+        *,
+        ids: list[int],
+        file_map: dict[int, ConversationFileRow],
+        table_only: bool,
+    ) -> list[int]:
+        if not ids or not file_map:
+            return []
+        filtered: list[int] = []
+        for file_id in ids:
+            row = file_map.get(file_id)
+            if row is None:
+                continue
+            if table_only and not row.is_table:
+                continue
+            if not table_only and not row.is_pdf:
+                continue
+            filtered.append(file_id)
+        return filtered
 
     def _extract_explicit_refs(self, text: str) -> list[int]:
         seen: set[int] = set()

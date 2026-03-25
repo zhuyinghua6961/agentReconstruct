@@ -41,6 +41,35 @@ def _coerce_steps(steps: Any) -> list[dict[str, Any]]:
     return normalized
 
 
+def _normalize_positive_int_list(values: Any) -> list[int]:
+    if not isinstance(values, list):
+        return []
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for item in values:
+        try:
+            value = int(item)
+        except Exception:
+            continue
+        if value <= 0 or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return normalized
+
+
+def _coerce_context_hints(context_hints: Any) -> dict[str, Any]:
+    if not isinstance(context_hints, dict):
+        return {
+            "selected_file_ids": [],
+            "last_turn_route_hint": None,
+        }
+    return {
+        "selected_file_ids": _normalize_positive_int_list(context_hints.get("selected_file_ids")),
+        "last_turn_route_hint": str(context_hints.get("last_turn_route_hint") or "").strip() or None,
+    }
+
+
 @dataclass
 class StreamSummary:
     assistant_content: str = ""
@@ -83,7 +112,14 @@ class ConversationPersistenceService:
     def set_transport(self, transport: httpx.AsyncBaseTransport | None) -> None:
         self._transport = transport
 
-    async def persist_user_message(self, *, request: Request, conversation_id: int | str | None, content: str) -> None:
+    async def persist_user_message(
+        self,
+        *,
+        request: Request,
+        conversation_id: int | str | None,
+        content: str,
+        context_hints: dict[str, Any] | None = None,
+    ) -> None:
         cid = _conversation_id_int(conversation_id)
         if cid is None:
             return
@@ -94,7 +130,7 @@ class ConversationPersistenceService:
             conversation_id=cid,
             role="user",
             content=str(content).strip(),
-            metadata={"source": "gateway_ask_stream"},
+            metadata={"source": "gateway_ask_stream", "context_hints": _coerce_context_hints(context_hints)},
         )
 
     async def persist_assistant_summary(

@@ -3,6 +3,22 @@ from __future__ import annotations
 from typing import Any
 
 
+def _to_plain_value(value: Any) -> Any:
+    if hasattr(value, "item"):
+        try:
+            value = value.item()
+        except Exception:
+            pass
+    return value
+
+
+def _round_number(value: Any, *, digits: int = 4) -> Any:
+    value = _to_plain_value(value)
+    if isinstance(value, float):
+        return round(value, digits)
+    return value
+
+
 def _to_records(frame, *, limit: int = 10) -> list[dict[str, Any]]:
     if frame is None:
         return []
@@ -11,12 +27,7 @@ def _to_records(frame, *, limit: int = 10) -> list[dict[str, Any]]:
     for record in head.to_dict(orient="records"):
         cleaned: dict[str, Any] = {}
         for key, value in record.items():
-            if hasattr(value, "item"):
-                try:
-                    value = value.item()
-                except Exception:
-                    pass
-            cleaned[str(key)] = value
+            cleaned[str(key)] = _to_plain_value(value)
         rows.append(cleaned)
     return rows
 
@@ -91,6 +102,153 @@ def _apply_filters(frame, filters: list[dict[str, Any]]):
     return result, warnings
 
 
+def _build_column_profiles(frame) -> list[dict[str, Any]]:
+    profiles: list[dict[str, Any]] = []
+    row_count = max(1, int(len(frame.index)))
+    for column in list(frame.columns):
+        series = frame[column]
+        non_null = series.dropna()
+        normalized = _coerce_series(series)
+        numeric_non_null = normalized.dropna()
+        is_numeric = int(len(numeric_non_null.index)) > 0 and (int(len(numeric_non_null.index)) / row_count) >= 0.6
+        profiles.append(
+            {
+                "name": str(column),
+                "kind": "numeric" if is_numeric else "categorical",
+                "missing_ratio": round(float(series.isna().sum()) / float(row_count), 4),
+                "unique_count": int(non_null.nunique(dropna=True)),
+            }
+        )
+    return profiles
+
+
+def _build_numeric_summaries(frame) -> dict[str, dict[str, Any]]:
+    summaries: dict[str, dict[str, Any]] = {}
+    row_count = max(1, int(len(frame.index)))
+    for column in list(frame.columns):
+        series = frame[column]
+        numeric = _coerce_series(series).dropna()
+        if int(len(numeric.index)) <= 0:
+            continue
+        if (int(len(numeric.index)) / row_count) < 0.6:
+            continue
+        summaries[str(column)] = {
+            "min": _round_number(float(numeric.min())),
+            "max": _round_number(float(numeric.max())),
+            "mean": _round_number(float(numeric.mean())),
+            "median": _round_number(float(numeric.median())),
+        }
+    return summaries
+
+
+def _build_categorical_summaries(frame, *, top_n: int = 5) -> dict[str, dict[str, Any]]:
+    summaries: dict[str, dict[str, Any]] = {}
+    row_count = max(1, int(len(frame.index)))
+    numeric_columns = set(_build_numeric_summaries(frame).keys())
+    for column in list(frame.columns):
+        if str(column) in numeric_columns:
+            continue
+        series = frame[column].dropna().astype(str).str.strip()
+        series = series[series != ""]
+        if int(len(series.index)) <= 0:
+            continue
+        counts = series.value_counts(dropna=True).head(top_n)
+        top_values: list[dict[str, Any]] = []
+        for value, count in counts.items():
+            top_values.append(
+                {
+                    "value": str(value),
+                    "count": int(count),
+                    "ratio": round(float(count) / float(row_count), 4),
+                }
+            )
+        summaries[str(column)] = {"top_values": top_values}
+    return summaries
+
+
+def _records_for_positions(frame, *, positions: list[int]) -> list[dict[str, Any]]:
+    if frame is None or not positions:
+        return []
+    rows: list[dict[str, Any]] = []
+    subset = frame.iloc[positions]
+    for record in subset.to_dict(orient="records"):
+        cleaned: dict[str, Any] = {}
+        for key, value in record.items():
+            cleaned[str(key)] = _to_plain_value(value)
+        rows.append(cleaned)
+    return rows
+
+
+def _evenly_spaced_positions(*, row_count: int, limit: int) -> list[int]:
+    if row_count <= 0 or limit <= 0:
+        return []
+    if row_count <= limit:
+        return list(range(row_count))
+    positions: list[int] = []
+    for index in range(limit):
+        scaled = round(index * (row_count - 1) / max(1, limit - 1))
+        positions.append(int(scaled))
+    return positions
+
+
+def _build_representative_summary_rows(frame, *, limit: int = 5) -> list[dict[str, Any]]:
+    row_count = int(len(frame.index)) if frame is not None else 0
+    if row_count <= 0:
+        return []
+    if row_count <= limit:
+        return _to_records(frame, limit=limit)
+
+    candidate_positions: list[int] = []
+    numeric_columns = list(_build_numeric_summaries(frame).keys())[:2]
+    for column in numeric_columns:
+        numeric = _coerce_series(frame[column]).dropna()
+        if int(len(numeric.index)) <= 0:
+            continue
+        try:
+            min_position = int(frame.index.get_loc(numeric.idxmin()))
+            max_position = int(frame.index.get_loc(numeric.idxmax()))
+        except Exception:
+            continue
+        candidate_positions.extend([min_position, max_position])
+
+    numeric_column_set = set(numeric_columns)
+    for column in list(frame.columns):
+        column_name = str(column)
+        if column_name in numeric_column_set:
+            continue
+        series = frame[column].dropna().astype(str).str.strip()
+        series = series[series != ""]
+        if int(len(series.index)) <= 0:
+            continue
+        counts = series.value_counts(dropna=True)
+        if int(len(counts.index)) <= 0:
+            continue
+        for value in [str(counts.index[-1]), str(counts.index[0])]:
+            matched = series[series == value]
+            if int(len(matched.index)) <= 0:
+                continue
+            try:
+                candidate_positions.append(int(frame.index.get_loc(matched.index[0])))
+            except Exception:
+                continue
+        if len(candidate_positions) >= limit * 2:
+            break
+
+    candidate_positions.extend(_evenly_spaced_positions(row_count=row_count, limit=limit))
+    deduped_positions: list[int] = []
+    seen: set[int] = set()
+    for position in candidate_positions:
+        normalized = int(position)
+        if normalized < 0 or normalized >= row_count or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped_positions.append(normalized)
+        if len(deduped_positions) >= limit:
+            break
+
+    return _records_for_positions(frame, positions=deduped_positions)
+
+
 def execute_tabular_plan(*, workbook: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
     if str(plan.get("operation") or "") == "compound":
         subplans = [item for item in (plan.get("subplans") or []) if isinstance(item, dict)]
@@ -153,12 +311,19 @@ def execute_tabular_plan(*, workbook: dict[str, Any], plan: dict[str, Any]) -> d
     }
 
     if operation == "summary":
+        focus_columns = [str(item) for item in (plan.get("focus_columns") or []) if str(item)]
         result["summary_stats"] = {
             "row_count": row_count_before,
             "column_count": int(len(filtered_frame.columns)),
             "columns": [str(col) for col in list(filtered_frame.columns)],
+            "column_profiles": _build_column_profiles(filtered_frame),
+            "numeric_summaries": _build_numeric_summaries(filtered_frame),
+            "categorical_summaries": _build_categorical_summaries(filtered_frame),
+            "sample_strategy": "representative_rows",
         }
-        result["result_rows"] = _to_records(filtered_frame, limit=5)
+        if focus_columns:
+            result["summary_stats"]["focus_columns"] = focus_columns
+        result["result_rows"] = _build_representative_summary_rows(filtered_frame, limit=5)
         return result
 
     if operation == "count_rows":

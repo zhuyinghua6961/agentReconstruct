@@ -170,3 +170,70 @@ def test_hybrid_service_can_use_pdf_preview_when_file_not_ready(monkeypatch):
     assert hybrid_events[-1]["status"] == "success"
     assert events[-1]["type"] == "done"
     assert "10.1/demo" in events[-1]["references"]
+
+
+def test_tabular_service_logs_summary_diagnostics(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        qa_tabular_service,
+        "load_workbook",
+        lambda _file_item: {
+            "file_name": "demo.xlsx",
+            "sheets": [{"sheet_name": "Sheet1", "sheet_index": 0, "dataframe": object()}],
+        },
+    )
+    monkeypatch.setattr(
+        qa_tabular_service,
+        "plan",
+        lambda **_kwargs: {"operation": "summary", "sheet_name": "Sheet1", "filters": [], "focus_columns": ["供应商", "实际容量_Ah"]},
+    )
+    monkeypatch.setattr(
+        qa_tabular_service,
+        "execute",
+        lambda **_kwargs: {
+            "operation": "summary",
+            "sheet_name": "Sheet1",
+            "row_count_before": 10,
+            "row_count_after": 10,
+            "summary_stats": {
+                "row_count": 10,
+                "column_count": 4,
+                "columns": ["供应商", "实际容量_Ah", "异常标记", "生产备注"],
+                "focus_columns": ["供应商", "实际容量_Ah"],
+            },
+            "result_rows": [
+                {"供应商": "宁德时代", "实际容量_Ah": 147.56},
+                {"供应商": "亿纬锂能", "实际容量_Ah": 69.77},
+            ],
+        },
+    )
+    monkeypatch.setattr(qa_tabular_service, "iter_synthesize_answer", lambda **_kwargs: iter(["结论"]))
+
+    events = list(
+        qa_tabular_service.iter_answer_events(
+            question="总结这个表格里各供应商的容量差异",
+            used_files=[
+                {
+                    "file_id": 1,
+                    "file_type": "excel",
+                    "file_name": "demo.xlsx",
+                    "local_path": "/tmp/demo.xlsx",
+                    "parse_status": "ready",
+                    "index_status": "ready",
+                    "processing_stage": "ready",
+                }
+            ],
+            route_hint="tabular_qa",
+            agent=SimpleNamespace(llm=object()),
+            sse_event=lambda event: event,
+            clean_answer_for_frontend=lambda text, **_kwargs: text,
+            log_qa_interaction=lambda **kwargs: captured.update(kwargs),
+            extract_pdf_text_fn=lambda _path: "",
+        )
+    )
+
+    assert events[-1]["type"] == "done"
+    assert captured["extra"]["summary_column_count"] == 4
+    assert captured["extra"]["summary_focus_columns"] == ["供应商", "实际容量_Ah"]
+    assert captured["extra"]["summary_sample_count"] == 2

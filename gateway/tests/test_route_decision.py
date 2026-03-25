@@ -165,6 +165,46 @@ def test_column_name_focus_routes_selected_table_to_tabular():
     assert decision.strategy == "metadata_focus_scope"
 
 
+def test_table_singular_reference_ignores_stale_selected_pdfs():
+    decision = resolver.resolve(
+        question="请总结这个表格",
+        pdf_context={
+            "selected_ids": [11, 22, 33],
+            "newly_uploaded_ids": [11, 22, 33],
+            "all_available_ids": [11, 22, 33],
+        },
+        available_files=[PDF, PDF_2, TABLE],
+    )
+    routed = router.decide(requested_mode="thinking", file_context=decision)
+
+    assert decision.route == "tabular_qa"
+    assert decision.selected_file_ids == [33]
+    assert decision.strategy == "selected_single"
+    assert routed.source_scope == "table"
+    assert routed.kb_enabled is False
+
+
+def test_table_singular_reference_with_kb_stays_table_kb_not_pdf_table_kb():
+    decision = resolver.resolve(
+        question="请结合知识库分析这个表格",
+        pdf_context={
+            "selected_ids": [11, 22, 33],
+            "newly_uploaded_ids": [11, 22, 33],
+            "all_available_ids": [11, 22, 33],
+        },
+        available_files=[PDF, PDF_2, TABLE],
+    )
+    routed = router.decide(requested_mode="thinking", file_context=decision)
+
+    assert decision.route == "tabular_qa"
+    assert decision.selected_file_ids == [33]
+    assert decision.strategy == "selected_single"
+    assert decision.turn_mode == "mixed"
+    assert routed.route == "hybrid_qa"
+    assert routed.source_scope == "table+kb"
+    assert routed.kb_enabled is True
+
+
 def test_filename_focus_routes_selected_pdf_to_pdf_qa():
     decision = resolver.resolve(
         question="solid-state-review 这篇文章的结论是什么？",
@@ -318,4 +358,3 @@ def test_last_focus_file_ids_alias_reuses_previous_file_route():
     assert decision.selected_file_ids == [22]
     assert decision.strategy == "last_focus"
     assert decision.route == "pdf_qa"
-

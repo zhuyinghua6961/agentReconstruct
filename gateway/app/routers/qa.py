@@ -192,6 +192,10 @@ async def _proxy_ask(request: Request, payload: AskRequest, mode: str) -> JSONRe
                 request=request,
                 conversation_id=payload.conversation_id,
                 content=payload.question,
+                context_hints={
+                    "selected_file_ids": list(route_decision.selected_file_ids),
+                    "last_turn_route_hint": route_decision.route,
+                },
             )
         except Exception as exc:
             logger.warning("gateway user persistence skipped: %s", exc)
@@ -255,6 +259,10 @@ async def _proxy_ask_stream(request: Request, payload: AskRequest, mode: str):
                 request=request,
                 conversation_id=payload.conversation_id,
                 content=payload.question,
+                context_hints={
+                    "selected_file_ids": list(route_decision.selected_file_ids),
+                    "last_turn_route_hint": route_decision.route,
+                },
             )
         except Exception as exc:
             logger.warning("gateway user persistence skipped: %s", exc)

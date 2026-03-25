@@ -173,6 +173,7 @@ def test_mode_ask_routes_file_question_to_fast_backend():
     assert captured["body"]["selected_file_ids"] == [11]
     assert fake_persistence.user_calls[0]["conversation_id"] == 42
     assert fake_persistence.user_calls[0]["content"] == "请总结这篇文献"
+    assert fake_persistence.user_calls[0]["context_hints"] == {"selected_file_ids": [11], "last_turn_route_hint": "pdf_qa"}
     assert fake_persistence.assistant_calls[0]["conversation_id"] == 42
     assert fake_persistence.assistant_calls[0]["summary"].assistant_content == "ok"
     assert response.headers["x-gateway-backend"] == "fast"
@@ -221,6 +222,7 @@ def test_mode_ask_routes_mixed_question_to_fast_backend():
     assert captured["body"]["source_scope"] == "pdf+kb"
     assert fake_persistence.user_calls[0]["conversation_id"] == 101
     assert fake_persistence.user_calls[0]["content"] == "请结合知识库总结这篇文献"
+    assert fake_persistence.user_calls[0]["context_hints"] == {"selected_file_ids": [11], "last_turn_route_hint": "hybrid_qa"}
     assert fake_persistence.assistant_calls[0]["conversation_id"] == 101
     assert fake_persistence.assistant_calls[0]["summary"].assistant_content == "ok"
     assert response.headers["x-gateway-backend"] == "fast"
@@ -366,9 +368,48 @@ def test_mode_ask_stream_persists_user_and_assistant_messages():
     assert b'"type":"done"' in body
     assert fake_persistence.user_calls[0]["conversation_id"] == 42
     assert fake_persistence.user_calls[0]["content"] == "plain qa"
+    assert fake_persistence.user_calls[0]["context_hints"] == {"selected_file_ids": [], "last_turn_route_hint": "kb_qa"}
     assert fake_persistence.assistant_calls[0]["conversation_id"] == 42
     assert fake_persistence.assistant_calls[0]["summary"].done_seen is True
     assert fake_persistence.assistant_calls[0]["summary"].reference_links[0]["doi"] == "10.1/demo"
+
+
+def test_mode_ask_stream_persists_file_context_hints_for_file_turn():
+    original = app.state.conversation_persistence_service
+    fake_persistence = _FakeConversationPersistenceService()
+    app.state.conversation_persistence_service = fake_persistence
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url).endswith("/api/fast/ask_stream")
+        return httpx.Response(
+            200,
+            content=(
+                b'data: {"type":"metadata","query_mode":"fast","route":"pdf_qa"}\n\n'
+                b'data: {"type":"content","content":"hello"}\n\n'
+                b'data: {"type":"done","final_answer":"hello","route":"pdf_qa"}\n\n'
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            with client.stream(
+                "POST",
+                "/api/thinking/ask_stream",
+                json={
+                    "question": "请总结这篇文献",
+                    "requested_mode": "thinking",
+                    "conversation_id": 42,
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            ) as response:
+                _ = b"".join(response.iter_bytes())
+    finally:
+        app.state.conversation_persistence_service = original
+
+    assert response.status_code == 200
+    assert fake_persistence.user_calls[0]["context_hints"] == {"selected_file_ids": [11], "last_turn_route_hint": "pdf_qa"}
 
 
 def test_mode_ask_thinking_skips_public_message_persistence():
