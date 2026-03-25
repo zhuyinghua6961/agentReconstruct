@@ -1,5 +1,9 @@
 """FastAPI ingest routes."""
 
+# Deprecated: this router is no longer registered in the current architecture.
+# Ingest HTTP entrypoints are no longer served by highThinkingQA.
+
+
 from __future__ import annotations
 
 from typing import Any

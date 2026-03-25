@@ -45,6 +45,8 @@ def normalize_doi(value: str) -> str:
 
 
 def build_paper_filename(doi: str) -> str:
+    # Compatibility note: retained for the retired document/PDF HTTP flow.
+    # thinking ask still uses normalize_doi(), but does not depend on local PDF materialization.
     normalized = normalize_doi(doi)
     if not normalized:
         return ""
@@ -52,6 +54,7 @@ def build_paper_filename(doi: str) -> str:
 
 
 def build_paper_object_name(doi: str) -> str:
+    # Compatibility note: retained for legacy paper file lookup/materialization paths.
     return f"papers/{build_paper_filename(doi)}"
 
 
@@ -90,6 +93,8 @@ def _get_local_path_lock(local_path: Path) -> threading.Lock:
 
 
 def paper_pdf_exists(*, doi: str, papers_dir: Path, logger: Any | None = None) -> bool:
+    # Compatibility note: retained for the retired document/PDF HTTP flow and
+    # should not be treated as part of the active thinking ask path.
     normalized = normalize_doi(doi)
     local_path = papers_dir / build_paper_filename(normalized)
     minio_ctx = _build_minio_client_from_env()
@@ -114,6 +119,8 @@ def paper_pdf_exists(*, doi: str, papers_dir: Path, logger: Any | None = None) -
 
 
 def ensure_local_paper_pdf(*, doi: str, papers_dir: Path, logger: Any | None = None) -> Path | None:
+    # Compatibility note: retained for legacy paper local-materialization flows and
+    # should not be treated as part of the active thinking ask path.
     """
     Resolve a readable local paper path.
 

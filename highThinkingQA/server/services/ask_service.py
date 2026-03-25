@@ -18,7 +18,7 @@ from server.schemas.request_models import AskRequest
 from server.services.conversation_context_service import ConversationContext, build_conversation_context, sanitize_conversation_context
 from server.services.mode_profiles import RuntimeProfile, get_runtime_profile
 from server.services.query_rewrite_service import QuestionRewriteResult, rewrite_question
-from server.storage.paper_storage import normalize_doi
+from server.utils.doi import normalize_doi
 
 _DOI_PATTERN = re.compile(r"10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
 _BRACKET_CITATION_PATTERN = re.compile(r"\[(10\.\d{4,9}/[-._;()/:A-Z0-9]+)(?:,\s*[^\]]+)?\]", re.IGNORECASE)

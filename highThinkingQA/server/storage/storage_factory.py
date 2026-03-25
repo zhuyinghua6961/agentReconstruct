@@ -1,5 +1,10 @@
 """Storage backend factory with local fallback."""
 
+# Compatibility note: retained for legacy conversation-json/object-storage support
+# and older file-flow helpers. Current highThinkingQA runtime uses public-service
+# for conversation persistence, and file HTTP surfaces are no longer served here.
+
+
 from __future__ import annotations
 
 from pathlib import Path

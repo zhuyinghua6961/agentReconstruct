@@ -1,5 +1,10 @@
 """File download response helpers for conversation uploads."""
 
+# Deprecated: retained only for the retired highThinkingQA conversation file
+# download HTTP flow. File download APIs are now owned by public-service behind
+# gateway public proxy.
+
+
 from __future__ import annotations
 
 from dataclasses import dataclass

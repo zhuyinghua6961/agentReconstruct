@@ -1,5 +1,9 @@
 """FastAPI quota routes."""
 
+# Deprecated: this router is no longer registered in the current architecture.
+# Quota HTTP APIs are owned by public-service behind gateway public proxy.
+
+
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends

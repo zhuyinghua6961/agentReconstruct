@@ -1,5 +1,9 @@
 """Upload helper to mirror local files to object storage."""
 
+# Deprecated: retained only for the retired highThinkingQA upload/file HTTP flow.
+# Upload HTTP APIs are now owned by public-service behind gateway public proxy.
+
+
 from __future__ import annotations
 
 from pathlib import Path

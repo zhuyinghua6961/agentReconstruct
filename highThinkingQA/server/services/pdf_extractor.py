@@ -1,5 +1,8 @@
 """PDF text extraction helpers."""
 
+# Deprecated: retained only to support the retired highThinkingQA document service.
+
+
 from __future__ import annotations
 
 import re

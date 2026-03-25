@@ -1,5 +1,8 @@
 """Pydantic schemas for admin user routes."""
 
+# Deprecated: retained only for the retired highThinkingQA admin router.
+
+
 from __future__ import annotations
 
 from typing import Literal

@@ -1,5 +1,8 @@
 """Quota service for frontend-aligned quota pages."""
 
+# Deprecated: retained only for the retired highThinkingQA quota HTTP surface.
+
+
 from __future__ import annotations
 
 import re

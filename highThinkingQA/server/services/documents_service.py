@@ -1,5 +1,8 @@
 """Document APIs for PDF access, translation, and summarization."""
 
+# Deprecated: retained only for the retired highThinkingQA document HTTP surface.
+
+
 from __future__ import annotations
 
 import os

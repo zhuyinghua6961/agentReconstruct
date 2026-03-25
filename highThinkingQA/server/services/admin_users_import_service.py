@@ -1,5 +1,8 @@
 """Admin batch import helpers."""
 
+# Deprecated: retained only for the retired highThinkingQA admin HTTP surface.
+
+
 from __future__ import annotations
 
 import csv

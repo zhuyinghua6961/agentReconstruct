@@ -240,6 +240,8 @@ def _merge_pending_assistant_overlay(
 
 
 def _load_legacy_context(*, user_id: int, conversation_id: int) -> dict[str, Any] | None:
+    # Deprecated: legacy local conversation fallback kept only as a compatibility path
+    # during the public-service persistence migration.
     result = conversation_service.get_conversation_context_snapshot(user_id=user_id, conversation_id=conversation_id)
     if not isinstance(result, dict) or not result.get("success"):
         return None
@@ -265,6 +267,8 @@ def _load_legacy_context(*, user_id: int, conversation_id: int) -> dict[str, Any
 
 
 def _persist_user_message_legacy(*, user_id: int, conversation_id: int, question: str) -> dict[str, Any]:
+    # Deprecated: legacy local conversation write path kept only as a compatibility path
+    # during the public-service persistence migration.
     return conversation_service.add_message(
         user_id=user_id,
         conversation_id=conversation_id,
@@ -275,6 +279,8 @@ def _persist_user_message_legacy(*, user_id: int, conversation_id: int, question
 
 
 def _persist_assistant_summary_legacy(*, user_id: int, conversation_id: int, assistant_content: str, summary: dict[str, Any]) -> None:
+    # Deprecated: legacy local assistant summary write path kept only as a compatibility
+    # path during the public-service persistence migration.
     meta = {
         "source": "ask_stream",
         "query_mode": str(summary.get("query_mode") or ""),

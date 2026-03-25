@@ -1,5 +1,8 @@
 """Pydantic request models for auth routes."""
 
+# Deprecated: retained only for the retired highThinkingQA auth router.
+
+
 from __future__ import annotations
 
 from typing import Any

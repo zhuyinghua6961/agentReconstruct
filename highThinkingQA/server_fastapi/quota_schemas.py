@@ -1,5 +1,8 @@
 """Pydantic schemas for quota APIs."""
 
+# Deprecated: retained only for the retired highThinkingQA quota router.
+
+
 from __future__ import annotations
 
 from pydantic import BaseModel, Field

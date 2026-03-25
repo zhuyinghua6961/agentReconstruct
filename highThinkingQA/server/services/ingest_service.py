@@ -1,5 +1,8 @@
 """Ingest job service for HTTP APIs."""
 
+# Deprecated: retained only for the retired highThinkingQA ingest HTTP surface.
+
+
 from __future__ import annotations
 
 import threading

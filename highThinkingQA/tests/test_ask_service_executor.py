@@ -13,6 +13,12 @@ from server.services.conversation_context_service import ConversationContext, bu
 from server.services.query_rewrite_service import rewrite_question
 
 
+def test_ask_service_normalize_doi_dependency_is_pure_utility():
+    from server.services import ask_service as ask_service_module
+
+    assert ask_service_module.normalize_doi.__module__ == "server.utils.doi"
+
+
 class ImmediateFuture:
     def __init__(self, *, result=None, exc=None):
         self._result = result

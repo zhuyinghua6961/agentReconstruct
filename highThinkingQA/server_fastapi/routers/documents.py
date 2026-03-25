@@ -1,5 +1,9 @@
 """FastAPI document routes."""
 
+# Deprecated: this router is no longer registered in the current architecture.
+# Document/PDF HTTP APIs are owned by public-service behind gateway public proxy.
+
+
 from __future__ import annotations
 
 from pathlib import Path

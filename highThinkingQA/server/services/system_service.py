@@ -1,5 +1,8 @@
 """System/info APIs used by the frontend."""
 
+# Deprecated: retained only for the retired highThinkingQA system/info HTTP surface.
+
+
 from __future__ import annotations
 
 from typing import Any

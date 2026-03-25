@@ -1,5 +1,8 @@
 """Admin user management service."""
 
+# Deprecated: retained only for the retired highThinkingQA admin HTTP surface.
+
+
 from __future__ import annotations
 
 import secrets

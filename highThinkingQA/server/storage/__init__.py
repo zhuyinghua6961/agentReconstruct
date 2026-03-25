@@ -1,5 +1,10 @@
 """Storage abstraction for local/MinIO backends."""
 
+# Compatibility note: retained for legacy conversation-json/object-storage support
+# and older file-flow helpers. Current highThinkingQA runtime uses public-service
+# for conversation persistence, and file HTTP surfaces are no longer served here.
+
+
 from server.storage.file_delivery_service import (
     FileDeliveryPlan,
     build_uploaded_file_response,

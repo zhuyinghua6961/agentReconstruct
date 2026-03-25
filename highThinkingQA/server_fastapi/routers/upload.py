@@ -1,5 +1,9 @@
 """FastAPI upload routes for PDF and Excel files."""
 
+# Deprecated: this router is no longer registered in the current architecture.
+# Upload HTTP APIs are owned by public-service behind gateway public proxy.
+
+
 from __future__ import annotations
 
 import os
