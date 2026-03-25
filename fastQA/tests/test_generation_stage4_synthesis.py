@@ -45,13 +45,25 @@ def _format_pdf_chunks_evidence(pdf_chunks: dict[str, list[dict]], user_question
     return "\n\n".join(parts).strip()
 
 
+class _CaptureLogger:
+    def __init__(self):
+        self.records = []
+
+    def info(self, msg, *args, **kwargs):
+        self.records.append(("info", msg % args if args else msg))
+
+    def warning(self, msg, *args, **kwargs):
+        self.records.append(("warning", msg % args if args else msg))
+
+    def error(self, msg, *args, **kwargs):
+        self.records.append(("error", msg % args if args else msg))
+
+    def debug(self, msg, *args, **kwargs):
+        self.records.append(("debug", msg % args if args else msg))
+
+
 def _logger():
-    return SimpleNamespace(
-        info=lambda *args, **kwargs: None,
-        warning=lambda *args, **kwargs: None,
-        error=lambda *args, **kwargs: None,
-        debug=lambda *args, **kwargs: None,
-    )
+    return _CaptureLogger()
 
 
 def test_stage4_synthesis_streams_content_and_final_result(monkeypatch):
@@ -295,6 +307,55 @@ def test_align_dois_with_pdf_chunks_preserves_markdown_block_boundaries():
     assert "(doi=10.1/a)\n\n## 机理分析" in result
     assert "## 机理分析\n- 液相极化增强。 (doi=10.1/a)" in result
 
+
+
+def test_stage4_synthesis_logs_context_summary_without_leaking_contents(monkeypatch):
+    monkeypatch.setenv("QA_STAGE4_MIN_CITATIONS", "1")
+    client = _FakeClient([_chunk("结论 (doi=10.1/a)")])
+    logger = _logger()
+
+    outputs = list(
+        iter_stage4_synthesis_with_pdf_chunks(
+            user_question="那它的缺点呢?",
+            deep_answer="draft",
+            pdf_chunks={"10.1/a": [{"text": "evidence", "page": 1}]},
+            retrieval_results={"claim_to_results": {}},
+            stage2_prompt="prompt {user_question} {deep_answer} {evidence_documents} {top5_references}",
+            client=client,
+            model="m",
+            safe_dict_cls=_SafeDict,
+            escape_braces_fn=_escape_braces,
+            format_pdf_chunks_evidence_fn=_format_pdf_chunks_evidence,
+            build_top5_reference_context_fn=build_top5_reference_context,
+            extract_cited_dois_fn=extract_cited_dois,
+            log_top5_coverage_fn=log_top5_coverage,
+            build_references_from_pdf_chunks_fn=build_references_from_pdf_chunks,
+            conversation_context={
+                "recent_turns_for_llm": [
+                    {"role": "user", "content": "介绍磷酸铁锂的优点", "trace_id": "trace-u1"},
+                    {"role": "assistant", "content": "它的优点包括安全性和寿命", "trace_id": "trace-a1"},
+                ],
+                "summary_for_llm": {
+                    "short_summary": "之前在讨论LFP优缺点",
+                    "open_threads": ["继续分析缺点"],
+                    "memory_facts": ["上轮已确认其安全性较高"],
+                },
+            },
+            logger=logger,
+        )
+    )
+
+    assert outputs[-1]["success"] is True
+    info_messages = [message for level, message in logger.records if level == "info"]
+    target = next(message for message in info_messages if message.startswith("stage4 conversation context attached"))
+    assert "turns=2" in target
+    assert "summary_present=True" in target
+    assert "short_summary_present=True" in target
+    assert "open_threads=1" in target
+    assert "memory_facts=1" in target
+    assert "介绍磷酸铁锂的优点" not in target
+    assert "它的优点包括安全性和寿命" not in target
+    assert "之前在讨论LFP优缺点" not in target
 
 
 def test_stage4_synthesis_includes_conversation_context_but_excludes_trace_fields(monkeypatch):

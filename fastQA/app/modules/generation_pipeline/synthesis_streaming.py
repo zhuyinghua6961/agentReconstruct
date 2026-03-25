@@ -200,6 +200,34 @@ def _format_facts_for_prompt(facts: List[Dict[str, str]]) -> str:
     return "\n".join(f"{idx}. {item['fact']} (doi={item['doi']})" for idx, item in enumerate(facts[:120], 1))
 
 
+def _summarize_conversation_context_for_log(conversation_context: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(conversation_context, dict):
+        return {
+            "present": False,
+            "turns": 0,
+            "summary_present": False,
+            "short_summary_present": False,
+            "open_threads": 0,
+            "memory_facts": 0,
+        }
+
+    turns = conversation_context.get("recent_turns_for_llm")
+    summary = conversation_context.get("summary_for_llm")
+    normalized_turns = [item for item in turns if isinstance(item, dict)] if isinstance(turns, list) else []
+    normalized_summary = summary if isinstance(summary, dict) else {}
+    open_threads = normalized_summary.get("open_threads") if isinstance(normalized_summary.get("open_threads"), list) else []
+    memory_facts = normalized_summary.get("memory_facts") if isinstance(normalized_summary.get("memory_facts"), list) else []
+    short_summary = " ".join(str(normalized_summary.get("short_summary") or "").split()).strip()
+    return {
+        "present": True,
+        "turns": len(normalized_turns),
+        "summary_present": bool(normalized_summary),
+        "short_summary_present": bool(short_summary),
+        "open_threads": len([item for item in open_threads if str(item).strip()]),
+        "memory_facts": len([item for item in memory_facts if str(item).strip()]),
+    }
+
+
 def _format_conversation_context_for_stage4(conversation_context: dict[str, Any] | None) -> str:
     if not isinstance(conversation_context, dict):
         return ""
@@ -406,6 +434,15 @@ def iter_stage4_synthesis_with_pdf_chunks(
 
         conversation_context_block = _format_conversation_context_for_stage4(conversation_context)
         if conversation_context_block:
+            context_log = _summarize_conversation_context_for_log(conversation_context)
+            logger.info(
+                "stage4 conversation context attached turns=%s summary_present=%s short_summary_present=%s open_threads=%s memory_facts=%s",
+                context_log["turns"],
+                context_log["summary_present"],
+                context_log["short_summary_present"],
+                context_log["open_threads"],
+                context_log["memory_facts"],
+            )
             prompt = (
                 "以下是当前会话上下文，仅用于承接当前问题与上文指代，不能覆盖文献证据：\n"
                 f"{conversation_context_block}\n\n"

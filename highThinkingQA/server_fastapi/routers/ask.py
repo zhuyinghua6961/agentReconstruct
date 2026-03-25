@@ -13,7 +13,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from server.errors import codes
 from server.errors.core import APIError, raise_invalid_request
-from server.runtime.ordered_task_dispatcher import get_default_dispatcher
 from server.runtime.request_context import get_trace_id
 from server.schemas.request_models import (
     ModeMismatchRequestError,
@@ -29,7 +28,6 @@ from server.services.ask_service import (
     stream_ask_events,
 )
 from server.services import chat_persistence
-from server.services.conversation.conversation_service import conversation_service
 from server_fastapi.auth.deps import AuthContext, require_auth_context
 from server_fastapi.http import read_json_payload
 
@@ -160,25 +158,6 @@ def _conversation_id_int(value) -> int | None:
 def _persistence_key(*, user_id: int, conversation_id: int) -> str:
     return f"conversation:{int(user_id)}:{int(conversation_id)}"
 
-
-def _persist_message_task(
-    *,
-    logger,
-    user_id: int,
-    conversation_id: int,
-    role: str,
-    content: str,
-    metadata: dict,
-) -> None:
-    result = conversation_service.add_message(
-        user_id=user_id,
-        conversation_id=conversation_id,
-        role=role,
-        content=content,
-        metadata=metadata,
-    )
-    if not result.get("success"):
-        logger.warning("conversation %s message persist skipped: %s", role, result)
 
 
 def _persist_user_message_if_needed(*, request: Request, ask_request) -> None:

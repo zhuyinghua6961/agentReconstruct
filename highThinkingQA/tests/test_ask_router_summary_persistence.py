@@ -2,13 +2,17 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import server_fastapi.routers.ask as ask_router
 from server_fastapi.routers.ask import _persist_assistant_message_if_needed, _persist_user_message_if_needed
+
+
+def test_ask_router_no_longer_exposes_local_conversation_authority():
+    assert not hasattr(ask_router, "conversation_service")
+    assert not hasattr(ask_router, "_persist_message_task")
 
 
 def test_persist_assistant_message_routes_through_chat_persistence(monkeypatch):
     calls: list[dict] = []
-    local_calls: list[tuple[str, dict]] = []
-
     monkeypatch.setattr("server_fastapi.routers.ask._chat_persist_async_enabled", lambda request: True)
     monkeypatch.setattr(
         "server_fastapi.routers.ask.chat_persistence",
@@ -20,14 +24,6 @@ def test_persist_assistant_message_routes_through_chat_persistence(monkeypatch):
             },
         )(),
         raising=False,
-    )
-    monkeypatch.setattr(
-        "server_fastapi.routers.ask.conversation_service.add_message",
-        lambda **kwargs: local_calls.append(("add_message", dict(kwargs))) or {"success": True, "data": {"message_id": 1}},
-    )
-    monkeypatch.setattr(
-        "server_fastapi.routers.ask.conversation_service.refresh_conversation_summary",
-        lambda **kwargs: local_calls.append(("refresh_conversation_summary", dict(kwargs))) or {"success": True, "data": {"summary": {}}},
     )
 
     request = SimpleNamespace(
@@ -91,14 +87,11 @@ def test_persist_assistant_message_routes_through_chat_persistence(monkeypatch):
             "async_enabled": True,
         }
     ]
-    assert local_calls == []
 
 
 
 def test_persist_assistant_message_delegates_to_chat_persistence(monkeypatch):
     calls: list[dict] = []
-    local_calls: list[tuple[str, dict]] = []
-
     monkeypatch.setattr("server_fastapi.routers.ask._chat_persist_async_enabled", lambda request: True)
     monkeypatch.setattr(
         "server_fastapi.routers.ask.chat_persistence",
@@ -110,14 +103,6 @@ def test_persist_assistant_message_delegates_to_chat_persistence(monkeypatch):
             },
         )(),
         raising=False,
-    )
-    monkeypatch.setattr(
-        "server_fastapi.routers.ask.conversation_service.add_message",
-        lambda **kwargs: local_calls.append(("add_message", dict(kwargs))) or {"success": True, "data": {"message_id": 1}},
-    )
-    monkeypatch.setattr(
-        "server_fastapi.routers.ask.conversation_service.refresh_conversation_summary",
-        lambda **kwargs: local_calls.append(("refresh_conversation_summary", dict(kwargs))) or {"success": True, "data": {"summary": {}}},
     )
 
     request = SimpleNamespace(
@@ -182,7 +167,6 @@ def test_persist_assistant_message_delegates_to_chat_persistence(monkeypatch):
             "async_enabled": True,
         }
     ]
-    assert local_calls == []
 
 
 
