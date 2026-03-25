@@ -18,5 +18,9 @@ def test_healthz_contains_backend_registry_and_upstreams():
     assert set(payload["backends"].keys()) == {"public", "fast", "thinking", "patent"}
     assert "backend_config_warnings" in payload
     assert payload["upstreams"]["public"]["ok"] is True
+    assert payload["upstreams"]["public"]["payload"]["path"] == "/health"
+    assert payload["upstreams"]["fast"]["payload"]["path"] == "/api/health"
     assert payload["upstreams"]["thinking"]["payload"]["status"] == "ok"
+    assert payload["upstreams"]["thinking"]["payload"]["path"] == "/api/health"
+    assert payload["upstreams"]["patent"]["payload"]["path"] == "/api/health"
     app.state.proxy_service.set_transport(None)

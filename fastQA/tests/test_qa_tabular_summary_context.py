@@ -43,6 +43,30 @@ def test_summary_execution_exposes_whole_table_statistics():
     assert len(result["result_rows"]) == 5
 
 
+
+
+def test_summary_execution_uses_filtered_row_count_in_summary_stats():
+    frame = pd.DataFrame(
+        {
+            "供应商": ["宁德时代", "宁德时代", "亿纬锂能", "国轩高科"],
+            "实际容量_Ah": [147.56, 152.10, 69.77, 128.36],
+            "异常标记": ["正常", "正常", "容量衰减异常", "容量衰减异常"],
+        }
+    )
+    result = execute_tabular_plan(
+        workbook=_workbook(frame),
+        plan={
+            "operation": "summary",
+            "sheet_name": "Sheet1",
+            "filters": [{"column": "异常标记", "op": "==", "value": "容量衰减异常"}],
+        },
+    )
+
+    assert result["row_count_before"] == 4
+    assert result["row_count_after"] == 2
+    assert result["summary_stats"]["row_count"] == 2
+    assert result["summary_stats"]["categorical_summaries"]["供应商"]["top_values"][0]["value"] in {"亿纬锂能", "国轩高科"}
+
 def test_summary_context_mentions_whole_table_stats_and_marks_samples():
     result = {
         "operation": "summary",

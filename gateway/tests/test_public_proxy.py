@@ -45,6 +45,29 @@ def test_public_proxy_forwards_json_to_public_backend():
     assert response.headers["x-gateway-backend"] == "public"
 
 
+def test_public_proxy_accepts_x_request_id_and_forwards_canonical_trace_header():
+    def handler(request: httpx.Request) -> httpx.Response:
+        header_names = [name.lower() for name, _ in request.headers.raw]
+        trace_values = [value for name, value in request.headers.raw if name.lower() == b"x-trace-id"]
+        assert trace_values == [b"trace-from-request-id"]
+        assert b"x-request-id" not in header_names
+        return httpx.Response(200, json={"success": True, "trace_id": trace_values[0].decode("utf-8")})
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        response = client.get(
+            "/api/conversations?page=2",
+            headers={
+                "Authorization": "Bearer demo",
+                "X-Request-ID": "trace-from-request-id",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["trace_id"] == "trace-from-request-id"
+    assert response.headers["x-trace-id"] == "trace-from-request-id"
+
+
 @pytest.mark.parametrize(
     ("method", "path", "expected_path", "json_body", "expected_query"),
     [
@@ -127,6 +150,29 @@ def test_public_proxy_preserves_inline_pdf_headers():
     assert response.headers["content-type"].startswith("application/pdf")
 
 
+def test_public_proxy_preserves_query_token_for_v1_view_pdf():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/api/v1/view_pdf/10.1000/test"
+        assert request.url.query == b"token=token-1"
+        return httpx.Response(
+            200,
+            stream=_ChunkedStream(),
+            headers={
+                "content-type": "application/pdf",
+                "content-disposition": 'inline; filename="paper.pdf"',
+            },
+        )
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        response = client.get("/api/v1/view_pdf/10.1000/test?token=token-1")
+
+    assert response.status_code == 200
+    assert response.content == b"chunk-1chunk-2"
+    assert response.headers["content-disposition"].startswith("inline;")
+
+
 def test_public_proxy_streams_conversation_file_download():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
@@ -154,10 +200,33 @@ def test_public_proxy_streams_conversation_file_download():
     assert response.headers["x-gateway-backend"] == "public"
 
 
+def test_public_proxy_preserves_query_token_for_v1_file_download():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/api/v1/conversations/12/files/34/download"
+        assert request.url.query == b"token=token-1"
+        return httpx.Response(
+            200,
+            stream=_ChunkedStream(),
+            headers={
+                "content-type": "application/octet-stream",
+                "content-disposition": 'attachment; filename="paper.pdf"',
+            },
+        )
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        response = client.get("/api/v1/conversations/12/files/34/download?token=token-1")
+
+    assert response.status_code == 200
+    assert response.content == b"chunk-1chunk-2"
+    assert response.headers["content-disposition"].startswith("attachment;")
+
+
 def test_public_proxy_streams_upload_multipart_body():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
-        assert request.url.path == "/api/upload_pdf"
+        assert request.url.path == "/upload_pdf"
         assert request.headers["authorization"] == "Bearer demo"
         assert request.headers["content-type"].startswith("multipart/form-data; boundary=")
         body = request.read()
@@ -195,3 +264,23 @@ def test_public_proxy_forwards_post_body_and_content_type():
 
     assert response.status_code == 200
     assert response.json()["translated"] == "你好"
+
+
+@pytest.mark.parametrize(
+    ("path", "expected_upstream_path"),
+    [
+        ("/api/health", "/health"),
+        ("/api/clear_pdf", "/clear_pdf"),
+    ],
+)
+def test_public_proxy_rewrites_legacy_only_public_paths(path, expected_upstream_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == expected_upstream_path
+        return httpx.Response(200, json={"path": request.url.path})
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        response = client.request("POST" if path.endswith("clear_pdf") else "GET", path)
+
+    assert response.status_code == 200
+    assert response.json()["path"] == expected_upstream_path

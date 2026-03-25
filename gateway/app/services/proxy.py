@@ -10,7 +10,7 @@ import httpx
 from fastapi import Request, Response
 
 from app.core.config import GatewaySettings
-from app.core.trace import TRACE_ID_HEADER, get_trace_id
+from app.core.trace import TRACE_COMPAT_HEADER_NAMES_LOWER, TRACE_ID_HEADER, get_trace_id
 from app.services.backend_registry import BackendTarget
 
 
@@ -37,6 +37,13 @@ _HOP_BY_HOP_RESPONSE_HEADERS = {
     "trailers",
     "transfer-encoding",
     "upgrade",
+}
+
+_PUBLIC_PATH_REWRITES = {
+    "/api/upload_pdf": "/upload_pdf",
+    "/api/upload_excel": "/upload_excel",
+    "/api/clear_pdf": "/clear_pdf",
+    "/api/health": "/health",
 }
 
 
@@ -79,7 +86,7 @@ class ProxyService:
         self._transport = transport
 
     def build_plan(self, *, target: BackendTarget, path: str, query: str = "", streaming: bool = False) -> ProxyPlan:
-        normalized_path = path if path.startswith("/") else f"/{path}"
+        normalized_path = self._resolve_upstream_path(target=target, path=path)
         upstream_url = f"{target.base_url}{normalized_path}"
         if query:
             upstream_url = f"{upstream_url}?{query}"
@@ -224,8 +231,13 @@ class ProxyService:
     def _prepare_upstream_headers(self, request: Request) -> dict[str, str]:
         headers = self._filter_request_headers(dict(request.headers))
         trace_id = get_trace_id(request)
-        if trace_id and TRACE_ID_HEADER.lower() not in {key.lower() for key in headers}:
-            headers.setdefault(TRACE_ID_HEADER, trace_id)
+        headers = {
+            key: value
+            for key, value in headers.items()
+            if key.lower() not in TRACE_COMPAT_HEADER_NAMES_LOWER
+        }
+        if trace_id:
+            headers[TRACE_ID_HEADER] = trace_id
         return headers
 
     def _build_downstream_response(self, *, plan: ProxyPlan, upstream: httpx.Response) -> Response:
@@ -249,7 +261,16 @@ class ProxyService:
     def _filter_response_headers(self, headers: dict[str, str]) -> dict[str, str]:
         result: dict[str, str] = {}
         for key, value in headers.items():
-            if key.lower() in _HOP_BY_HOP_RESPONSE_HEADERS:
+            lowered = key.lower()
+            if lowered in _HOP_BY_HOP_RESPONSE_HEADERS:
+                continue
+            if lowered in TRACE_COMPAT_HEADER_NAMES_LOWER:
                 continue
             result[key] = value
         return result
+
+    def _resolve_upstream_path(self, *, target: BackendTarget, path: str) -> str:
+        normalized_path = path if path.startswith("/") else f"/{path}"
+        if target.name == "public":
+            return _PUBLIC_PATH_REWRITES.get(normalized_path, normalized_path)
+        return normalized_path

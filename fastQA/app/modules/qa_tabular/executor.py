@@ -313,7 +313,7 @@ def execute_tabular_plan(*, workbook: dict[str, Any], plan: dict[str, Any]) -> d
     if operation == "summary":
         focus_columns = [str(item) for item in (plan.get("focus_columns") or []) if str(item)]
         result["summary_stats"] = {
-            "row_count": row_count_before,
+            "row_count": row_count_after,
             "column_count": int(len(filtered_frame.columns)),
             "columns": [str(col) for col in list(filtered_frame.columns)],
             "column_profiles": _build_column_profiles(filtered_frame),
