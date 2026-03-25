@@ -6,14 +6,14 @@ import glob
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from app.modules.storage.paper_storage import ensure_local_paper_pdf
+from app.modules.storage.service import storage_service
 
 
 def find_pdf_path(*, doi: str, papers_dir: str | Path, logger: Any) -> Optional[str]:
     """Find paper PDF path by DOI using exact and glob patterns."""
     base_dir = Path(papers_dir).resolve()
 
-    resolved = ensure_local_paper_pdf(doi=doi, papers_dir=base_dir, logger=logger)
+    resolved = storage_service.ensure_local_paper_pdf(doi=doi, papers_dir=base_dir, logger=logger)
     if resolved:
         logger.debug(f"   📄 找到PDF（MinIO/本地）: {resolved.name}")
         return str(resolved)

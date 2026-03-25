@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+import app.modules.generation_pipeline.pdf_pipeline as pdf_pipeline_module
 from app.modules.generation_pipeline.pdf_pipeline import find_pdf_path, stage3_load_pdf_chunks
 
 
@@ -10,9 +11,11 @@ def test_find_pdf_path_prefers_storage_resolution(monkeypatch, tmp_path):
     resolved.write_text("pdf", encoding="utf-8")
 
     monkeypatch.setattr(
-        "app.modules.generation_pipeline.pdf_pipeline.ensure_local_paper_pdf",
-        lambda *, doi, papers_dir, logger: resolved,
+        "app.modules.generation_pipeline.pdf_pipeline.storage_service.ensure_local_paper_pdf",
+        lambda **kwargs: resolved,
     )
+
+    assert not hasattr(pdf_pipeline_module, "ensure_local_paper_pdf")
 
     found = find_pdf_path(doi="10.1/x", papers_dir=tmp_path, logger=logging.getLogger("test.pdf"))
 

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import get_settings
-from app.modules.storage.paper_storage import ensure_local_paper_pdf
+from app.modules.storage.service import storage_service
 
 
 def load_vector_db_topics(*, topic_index_path: str | Path | None = None, logger: Any) -> dict[str, Any] | None:
@@ -63,7 +63,7 @@ def _split_pdf_sentences(text: str, *, limit: int = 200) -> list[str]:
 def _load_pdf_sentences_cached(doi: str, max_pages: int, max_chars: int, papers_dir: str) -> tuple[str, ...] | None:
     import fitz  # type: ignore
 
-    pdf_path = ensure_local_paper_pdf(doi=doi, papers_dir=papers_dir, logger=None)
+    pdf_path = storage_service.ensure_local_paper_pdf(doi=doi, papers_dir=papers_dir, logger=None)
     if not pdf_path:
         return None
 
