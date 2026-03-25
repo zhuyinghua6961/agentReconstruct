@@ -16,9 +16,11 @@ from app.modules.generation_pipeline.synthesis_streaming import iter_stage4_synt
 class _FakeClient:
     def __init__(self, chunks):
         self._chunks = chunks
+        self.calls = []
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
-    def _create(self, **_kwargs):
+    def _create(self, **kwargs):
+        self.calls.append(kwargs)
         return iter(self._chunks)
 
 
@@ -293,3 +295,54 @@ def test_align_dois_with_pdf_chunks_preserves_markdown_block_boundaries():
     assert "(doi=10.1/a)\n\n## 机理分析" in result
     assert "## 机理分析\n- 液相极化增强。 (doi=10.1/a)" in result
 
+
+
+def test_stage4_synthesis_includes_conversation_context_but_excludes_trace_fields(monkeypatch):
+    monkeypatch.setenv("QA_STAGE4_MIN_CITATIONS", "1")
+    client = _FakeClient([_chunk("结论 (doi=10.1/a)")])
+
+    outputs = list(
+        iter_stage4_synthesis_with_pdf_chunks(
+            user_question="那它的缺点呢?",
+            deep_answer="draft",
+            pdf_chunks={"10.1/a": [{"text": "evidence", "page": 1}]},
+            retrieval_results={"claim_to_results": {}},
+            stage2_prompt="prompt {user_question} {deep_answer} {evidence_documents} {top5_references}",
+            client=client,
+            model="m",
+            safe_dict_cls=_SafeDict,
+            escape_braces_fn=_escape_braces,
+            format_pdf_chunks_evidence_fn=_format_pdf_chunks_evidence,
+            build_top5_reference_context_fn=build_top5_reference_context,
+            extract_cited_dois_fn=extract_cited_dois,
+            log_top5_coverage_fn=log_top5_coverage,
+            build_references_from_pdf_chunks_fn=build_references_from_pdf_chunks,
+            conversation_context={
+                "recent_turns_for_llm": [
+                    {"role": "user", "content": "介绍磷酸铁锂的优点", "trace_id": "trace-u1"},
+                    {"role": "assistant", "content": "它的优点包括安全性和寿命", "trace_id": "trace-a1"},
+                ],
+                "summary_for_llm": {
+                    "short_summary": "之前在讨论LFP优缺点",
+                    "open_threads": ["继续分析缺点"],
+                    "memory_facts": ["上轮已确认其安全性较高"],
+                    "trace_id": "trace-summary",
+                    "steps": [{"name": "should-not-leak"}],
+                    "timings": {"stage1": 12},
+                },
+            },
+            logger=_logger(),
+        )
+    )
+
+    assert outputs[-1]["success"] is True
+    prompt = client.calls[0]["messages"][1]["content"]
+    assert "介绍磷酸铁锂的优点" in prompt
+    assert "它的优点包括安全性和寿命" in prompt
+    assert "之前在讨论LFP优缺点" in prompt
+    assert "继续分析缺点" in prompt
+    assert "上轮已确认其安全性较高" in prompt
+    assert "trace-u1" not in prompt
+    assert "trace-summary" not in prompt
+    assert "should-not-leak" not in prompt
+    assert '"stage1": 12' not in prompt

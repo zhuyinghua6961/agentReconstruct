@@ -543,6 +543,7 @@ class GenerationPipelineOrchestrator:
                 pdf_chunks=prepared["pdf_chunks"],
                 retrieval_results=prepared["retrieval_results"],
                 should_cancel=should_cancel,
+                conversation_context=conversation_context,
             ),
         )
         synthesis_result = _consume_stage4_result(stage4_output, logger)
@@ -822,6 +823,7 @@ class GenerationPipelineOrchestrator:
             pdf_chunks=pdf_chunks,
             retrieval_results=stage2_result,
             should_cancel=should_cancel,
+            conversation_context=conversation_context,
         )
 
         final_chunks: list[str] = []

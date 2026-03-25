@@ -35,7 +35,7 @@ class _Runtime:
     def stage3_load_pdf_chunks(self, dois, max_chunks_per_doi=3, should_cancel=None):
         return {key: list(value) for key, value in self.stage3_payload.items()}
 
-    def stage4_synthesis_with_pdf_chunks(self, user_question, deep_answer, pdf_chunks, retrieval_results=None, should_cancel=None):
+    def stage4_synthesis_with_pdf_chunks(self, user_question, deep_answer, pdf_chunks, retrieval_results=None, should_cancel=None, conversation_context=None):
         for item in self.stage4_payload:
             yield item
 

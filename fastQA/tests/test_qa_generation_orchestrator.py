@@ -37,7 +37,7 @@ class _Runtime:
     def stage3_load_pdf_chunks(self, dois, max_chunks_per_doi=3, should_cancel=None):
         return {key: list(value) for key, value in self.stage3_payload.items()}
 
-    def stage4_synthesis_with_pdf_chunks(self, user_question, deep_answer, pdf_chunks, retrieval_results=None, should_cancel=None):
+    def stage4_synthesis_with_pdf_chunks(self, user_question, deep_answer, pdf_chunks, retrieval_results=None, should_cancel=None, conversation_context=None):
         for item in self.stage4_payload:
             yield item
 
@@ -185,6 +185,64 @@ def test_orchestrator_passes_conversation_context_to_stage1():
 
     assert result.success is True
     assert captured["user_question"] == "hello"
+    assert captured["conversation_context"] == {
+        "recent_turns_for_llm": [{"role": "assistant", "content": "prev"}],
+        "summary_for_llm": {"short_summary": "sum"},
+    }
+
+
+def test_orchestrator_stream_passes_conversation_context_to_stage4():
+    runtime = _Runtime(
+        stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]},
+        stage2_payload={"success": True, "documents": ["doc"], "metadatas": [{"doi": "10.1"}], "distances": [0.1]},
+        doi_payload=["10.1"],
+        stage25_payload={"enabled": False, "applied": False, "md_chunks_by_doi": {}, "stats": {}},
+        stage3_payload={"10.1": [{"text": "evidence"}]},
+        stage4_payload=[],
+    )
+    captured: dict[str, object] = {}
+
+    class _Stage4:
+        def stream(
+            self,
+            *,
+            runtime,
+            user_question,
+            deep_answer,
+            pdf_chunks,
+            retrieval_results=None,
+            should_cancel=None,
+            conversation_context=None,
+        ):
+            captured["runtime"] = runtime
+            captured["user_question"] = user_question
+            captured["deep_answer"] = deep_answer
+            captured["pdf_chunks"] = pdf_chunks
+            captured["retrieval_results"] = retrieval_results
+            captured["should_cancel"] = should_cancel
+            captured["conversation_context"] = conversation_context
+            yield {"success": True, "final_answer": "final", "query_mode": "kb_qa", "references": []}
+
+    orchestrator = GenerationPipelineOrchestrator(stage4=_Stage4())
+
+    events = list(
+        orchestrator.stream(
+            question="hello",
+            runtime=runtime,
+            redis_service=None,
+            n_results_per_claim=5,
+            should_cancel=None,
+            active_stream_count=None,
+            logger=_logger(),
+            sse_event=lambda payload: payload,
+            conversation_context={
+                "recent_turns_for_llm": [{"role": "assistant", "content": "prev"}],
+                "summary_for_llm": {"short_summary": "sum"},
+            },
+        )
+    )
+
+    assert events[-1]["type"] == "done"
     assert captured["conversation_context"] == {
         "recent_turns_for_llm": [{"role": "assistant", "content": "prev"}],
         "summary_for_llm": {"short_summary": "sum"},

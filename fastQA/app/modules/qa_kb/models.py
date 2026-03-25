@@ -49,6 +49,7 @@ class GenerationRuntime(Protocol):
         pdf_chunks: dict[str, list[dict[str, Any]]],
         retrieval_results: dict[str, Any] | None = None,
         should_cancel: Any | None = None,
+        conversation_context: dict[str, Any] | None = None,
     ) -> Any:
         ...
 

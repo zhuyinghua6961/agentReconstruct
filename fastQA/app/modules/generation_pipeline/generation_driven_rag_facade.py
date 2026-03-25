@@ -285,6 +285,7 @@ class GenerationDrivenRAG:
         pdf_chunks: dict[str, list[dict[str, Any]]],
         retrieval_results: dict[str, Any] | None = None,
         should_cancel=None,
+        conversation_context: dict[str, Any] | None = None,
     ):
         yield from iter_stage4_synthesis_with_pdf_chunks_impl(
             user_question=user_question,
@@ -304,5 +305,6 @@ class GenerationDrivenRAG:
             programmatic_insert_dois_fn=self._programmatic_insert_dois,
             align_dois_with_pdf_chunks_fn=self._align_dois_with_pdf_chunks,
             should_cancel=should_cancel,
+            conversation_context=conversation_context,
             logger=logger,
         )

@@ -15,6 +15,7 @@ class Stage4Synthesizer:
         pdf_chunks: dict[str, list[dict[str, Any]]],
         retrieval_results: dict[str, Any] | None = None,
         should_cancel: Any | None = None,
+        conversation_context: dict[str, Any] | None = None,
     ) -> Any:
         return runtime.stage4_synthesis_with_pdf_chunks(
             user_question=user_question,
@@ -22,4 +23,5 @@ class Stage4Synthesizer:
             pdf_chunks=pdf_chunks,
             retrieval_results=retrieval_results,
             should_cancel=should_cancel,
+            conversation_context=conversation_context,
         )

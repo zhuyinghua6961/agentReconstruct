@@ -200,6 +200,43 @@ def _format_facts_for_prompt(facts: List[Dict[str, str]]) -> str:
     return "\n".join(f"{idx}. {item['fact']} (doi={item['doi']})" for idx, item in enumerate(facts[:120], 1))
 
 
+def _format_conversation_context_for_stage4(conversation_context: dict[str, Any] | None) -> str:
+    if not isinstance(conversation_context, dict):
+        return ""
+
+    parts: list[str] = []
+    summary = conversation_context.get("summary_for_llm")
+    if isinstance(summary, dict):
+        short_summary = " ".join(str(summary.get("short_summary") or "").split()).strip()
+        if short_summary:
+            parts.append(f"会话摘要：{short_summary}")
+        open_threads = [str(item).strip() for item in list(summary.get("open_threads") or []) if str(item).strip()]
+        if open_threads:
+            parts.append(f"待继续话题：{'；'.join(open_threads)}")
+        memory_facts = [str(item).strip() for item in list(summary.get("memory_facts") or []) if str(item).strip()]
+        if memory_facts:
+            parts.append(f"已知事实：{'；'.join(memory_facts)}")
+
+    turns = conversation_context.get("recent_turns_for_llm")
+    if isinstance(turns, list):
+        rendered_turns: list[str] = []
+        for item in turns:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "").strip().lower()
+            if role not in {"user", "assistant"}:
+                continue
+            content = " ".join(str(item.get("content") or "").split()).strip()
+            if not content:
+                continue
+            role_label = "用户" if role == "user" else "助手"
+            rendered_turns.append(f"{role_label}: {content}")
+        if rendered_turns:
+            parts.append("最近对话：\n" + "\n".join(rendered_turns))
+
+    return "\n\n".join(parts).strip()
+
+
 def _extract_structure_from_deep_answer(deep_answer: str) -> Tuple[str, str]:
     text = str(deep_answer or "").strip()
     if not text:
@@ -248,6 +285,7 @@ def iter_stage4_synthesis_with_pdf_chunks(
     programmatic_insert_dois_fn: Callable[..., str] | None = None,
     align_dois_with_pdf_chunks_fn: Callable[..., str] | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    conversation_context: dict[str, Any] | None = None,
     logger: Any,
 ) -> Any:
     def _cancelled() -> bool:
@@ -365,6 +403,14 @@ def iter_stage4_synthesis_with_pdf_chunks(
                 )
         if not prompt:
             prompt = stage2_prompt.format_map(safe_kwargs)
+
+        conversation_context_block = _format_conversation_context_for_stage4(conversation_context)
+        if conversation_context_block:
+            prompt = (
+                "以下是当前会话上下文，仅用于承接当前问题与上文指代，不能覆盖文献证据：\n"
+                f"{conversation_context_block}\n\n"
+                f"{prompt}"
+            )
 
         logger.info(
             "stage4 prompt prepared mode=%s prompt_chars=%s top_reference_list_chars=%s",
