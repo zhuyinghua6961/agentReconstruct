@@ -4,7 +4,6 @@ import os
 import re
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote
 
 from app.core.config import get_settings
 from app.modules.documents.reference_preview import (
@@ -16,33 +15,6 @@ from app.modules.documents.reference_preview import (
 from app.modules.qa_pdf.pdf_extractor import extract_pdf_text as extract_pdf_text_impl
 from app.modules.storage.service import storage_service
 
-
-def normalize_doi(value: str) -> str:
-    text = str(value or "").strip()
-    previous = None
-    while previous != text:
-        previous = text
-        text = unquote(text).strip()
-    text = text.replace("\\", "/")
-    text = re.sub(r"^doi:\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^[(/\\s]+|[)\\s]+$", "", text)
-    if "papers/" in text:
-        text = text.split("papers/", 1)[-1]
-    elif (
-        text.lower().endswith(".pdf")
-        and (
-            os.path.isabs(text)
-            or text.startswith("./")
-            or text.startswith("../")
-            or bool(re.match(r"^[A-Za-z]:[\\/]", text))
-        )
-    ):
-        text = Path(text).name or text
-    if text.lower().endswith(".pdf"):
-        text = text[:-4]
-    if "_" in text and "/" not in text and text.startswith("10."):
-        text = text.replace("_", "/", 1)
-    return text.strip()
 
 
 class DocumentsService:
@@ -56,9 +28,8 @@ class DocumentsService:
         return Path(papers_dir)
 
     def _ensure_local_pdf(self, *, doi: str, logger: Any, papers_dir: str | Path | None = None) -> Path | None:
-        normalized = normalize_doi(doi)
         return storage_service.ensure_local_paper_pdf(
-            doi=normalized,
+            doi=doi,
             papers_dir=self._resolve_papers_dir(papers_dir),
             project_root=str(self._resolve_papers_dir(papers_dir).parent),
             logger=logger,
@@ -86,7 +57,7 @@ class DocumentsService:
 
     def view_pdf_path(self, doi: str, logger: Any, papers_dir: str | Path | None = None) -> tuple[dict[str, Any], int, Path | None]:
         try:
-            normalized = normalize_doi(doi)
+            normalized = storage_service.normalize_doi(doi)
             pdf_path = self._ensure_local_pdf(doi=normalized, logger=logger, papers_dir=papers_dir)
             if not pdf_path:
                 return {"error": f"PDF文件不存在: {normalized or doi}"}, 404, None
@@ -95,7 +66,7 @@ class DocumentsService:
             return {"error": f"查看PDF失败: {exc}"}, 500, None
 
     def check_pdf(self, doi: str, logger: Any | None = None, papers_dir: str | Path | None = None) -> tuple[dict[str, Any], int]:
-        normalized = normalize_doi(doi)
+        normalized = storage_service.normalize_doi(doi)
         resolved_papers_dir = self._resolve_papers_dir(papers_dir)
         exists = storage_service.paper_exists(
             doi=normalized,
@@ -112,7 +83,7 @@ class DocumentsService:
         papers_dir: str | Path | None = None,
     ) -> tuple[dict[str, Any], int]:
         try:
-            normalized = normalize_doi(doi)
+            normalized = storage_service.normalize_doi(doi)
             pdf_path = self._ensure_local_pdf(doi=normalized, logger=logger, papers_dir=papers_dir)
             if not pdf_path:
                 return {"error": f"PDF文件不存在: {normalized or doi}"}, 404

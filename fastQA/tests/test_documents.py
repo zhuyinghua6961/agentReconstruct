@@ -53,6 +53,30 @@ def test_view_pdf_handles_encoded_pdf_suffix_and_parentheses(tmp_path):
     assert response.headers["content-disposition"].startswith("inline;")
 
 
+def test_documents_service_view_pdf_path_uses_storage_service_normalize_doi(monkeypatch, tmp_path):
+    calls = []
+    pdf_path = tmp_path / "demo.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%test\n")
+
+    def fake_normalize(value):
+        calls.append(value)
+        return "10.2/demo"
+
+    def fake_ensure_local_paper_pdf(**kwargs):
+        assert kwargs["doi"] == "10.2/demo"
+        return pdf_path
+
+    monkeypatch.setattr("app.modules.documents.service.storage_service.normalize_doi", fake_normalize)
+    monkeypatch.setattr("app.modules.documents.service.storage_service.ensure_local_paper_pdf", fake_ensure_local_paper_pdf)
+
+    payload, status_code, resolved = documents_service.view_pdf_path("(10.2%2Fdemo.pdf)", logger=None, papers_dir=tmp_path)
+
+    assert calls == ["(10.2%2Fdemo.pdf)"]
+    assert payload == {}
+    assert status_code == 200
+    assert resolved == pdf_path
+
+
 def test_reference_preview_reports_requested_count_and_truncation(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "app.modules.documents.service.build_reference_preview_batch",

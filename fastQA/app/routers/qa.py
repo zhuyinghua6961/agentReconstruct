@@ -15,7 +15,8 @@ from app.core.runtime import generation_runtime_is_ready
 from app.core.sse import sse_response
 from app.modules.qa_kb.models import QaKbRequest
 from app.modules.qa_kb.service import qa_kb_service
-from app.modules.qa_kb.streaming import build_reference_links, normalize_reference_objects, normalize_references
+from app.modules.qa_kb.streaming import normalize_reference_objects, normalize_references
+from app.modules.storage.service import storage_service
 from app.services.file_routes import iter_pdf_route_events, iter_tabular_route_events, resolve_gateway_file_context
 from app.services.conversation_context_builder import build_conversation_context
 from app.services.request_adapter import GatewayAskRequest, RequestAdapterError, adapt_gateway_ask_payload
@@ -352,7 +353,7 @@ def _done_event(
 ) -> dict[str, Any]:
     normalized_reference_objects = normalize_reference_objects(list(references or []))
     normalized_references = normalize_references(normalized_reference_objects)
-    links = build_reference_links(normalized_references)
+    links = storage_service.build_pdf_links(normalized_references)
     resolved_query_mode = str(query_mode or route)
     resolved_source_scope = str(source_scope or (file_selection or {}).get("source_scope") or "")
     resolved_source_usage = dict(source_usage or _source_usage_from_scope(resolved_source_scope))
@@ -776,11 +777,11 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
                     raw_reference_objects if isinstance(raw_reference_objects, list) else done_event.get("references")
                 )
                 normalized_references = normalize_references(normalized_reference_objects)
-                links = build_reference_links(normalized_references)
+                links = storage_service.build_pdf_links(normalized_references)
                 done_event["references"] = normalized_references
                 done_event["reference_objects"] = normalized_reference_objects
-                done_event.setdefault("reference_links", links)
-                done_event.setdefault("pdf_links", links)
+                done_event["reference_links"] = links
+                done_event["pdf_links"] = links
                 done_event.setdefault("doi_locations", [])
                 done_event.setdefault("timings", {})
                 done_event.setdefault("trace_id", trace_id)
@@ -971,7 +972,7 @@ def _collect_sync_result(events: list[dict[str, Any]], *, trace_id: str, request
             source_usage = dict(event.get("source_usage") or metadata.get("source_usage") or _source_usage_from_scope(source_scope))
         elif event_type == "error" and error_payload is None:
             error_payload = dict(event)
-    links = build_reference_links(references)
+    links = storage_service.build_pdf_links(references)
     payload = {
         "success": error_payload is None,
         "final_answer": "".join(contents),

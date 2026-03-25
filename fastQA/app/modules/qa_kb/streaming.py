@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Callable, Iterator
 
 from app.modules.qa_kb.models import QaKbExecutionResult
+from app.modules.storage.service import storage_service
 
 
 def iter_text_chunks(text: str, *, chunk_size: int = 120) -> Iterator[str]:
@@ -41,10 +42,6 @@ def normalize_references(values: Any) -> list[str]:
     return [str(item.get("doi") or "").strip() for item in normalize_reference_objects(values)]
 
 
-def build_reference_links(references: list[str]) -> list[dict[str, str]]:
-    return [{"doi": doi, "pdf_url": f"/api/v1/view_pdf/{doi}"} for doi in references]
-
-
 def iter_result_events(
     *,
     result: QaKbExecutionResult,
@@ -56,7 +53,7 @@ def iter_result_events(
         synthesis_result.get("references") if isinstance(synthesis_result, dict) else [],
     )
     references = normalize_references(reference_objects)
-    links = build_reference_links(references)
+    links = storage_service.build_pdf_links(references)
     metadata = {
         "type": "metadata",
         "query_mode": result.metadata.query_mode,

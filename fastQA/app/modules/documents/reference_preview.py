@@ -6,8 +6,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
-from urllib.parse import quote
-
 from app.modules.storage.service import storage_service
 
 DEFAULT_PREVIEW_MAX_ITEMS = 30
@@ -60,8 +58,7 @@ def build_pdf_filename(doi: str) -> str:
 
 
 def build_pdf_url(doi: str) -> str:
-    encoded_path = "/".join(quote(part, safe="") for part in doi.split("/"))
-    return f"/api/v1/view_pdf/{encoded_path}"
+    return storage_service.build_pdf_url(doi)
 
 
 def query_graph_reference_metadata(agent: Any, doi: str, logger: Any) -> Dict[str, Any]:

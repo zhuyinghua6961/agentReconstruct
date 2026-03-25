@@ -1,16 +1,39 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import quote
 from typing import Any
 
 from app.modules.storage.paper_storage import (
     build_paper_filename,
     ensure_local_paper_pdf as ensure_local_paper_pdf_impl,
     find_local_paper_pdf,
+    normalize_doi as normalize_doi_impl,
 )
 
 
 class StorageService:
+    @staticmethod
+    def normalize_doi(value: str) -> str:
+        return normalize_doi_impl(value)
+
+    @staticmethod
+    def build_pdf_url(doi: str) -> str:
+        normalized = normalize_doi_impl(doi)
+        if not normalized:
+            return "/api/v1/view_pdf/"
+        encoded_path = "/".join(quote(part, safe="") for part in normalized.split("/"))
+        return f"/api/v1/view_pdf/{encoded_path}"
+
+    def build_pdf_links(self, references: list[str] | tuple[str, ...]) -> list[dict[str, str]]:
+        links: list[dict[str, str]] = []
+        for item in references:
+            doi = self.normalize_doi(str(item or '').strip())
+            if not doi:
+                continue
+            links.append({"doi": doi, "pdf_url": self.build_pdf_url(doi)})
+        return links
+
     @staticmethod
     def build_paper_filename(doi: str) -> str:
         return build_paper_filename(doi)

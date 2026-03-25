@@ -5,6 +5,8 @@ from pathlib import Path
 import re
 from typing import Callable, Iterable, List, Optional
 
+from app.modules.storage.service import storage_service
+
 
 class StreamCancelledError(RuntimeError):
     pass
@@ -71,10 +73,6 @@ def extract_doi_from_pdf_filename(pdf_path: Optional[str]) -> Optional[str]:
     return doi_match.group(0).replace("_", "/")
 
 
-def build_pdf_links(references: Iterable[str]) -> List[dict]:
-    return [{"doi": doi, "pdf_url": f"/api/v1/view_pdf/{doi}"} for doi in references]
-
-
 def _normalize_used_files(used_files: Iterable[dict] | None) -> List[dict]:
     if not isinstance(used_files, (list, tuple)):
         return []
@@ -127,7 +125,7 @@ def build_done_event_payload(
     return {
         "type": "done",
         "references": unique_refs,
-        "pdf_links": build_pdf_links(unique_refs),
+        "pdf_links": storage_service.build_pdf_links(unique_refs),
         "route": str(route or "").strip(),
         "used_files": _normalize_used_files(used_files),
         "timings": timings if isinstance(timings, dict) else {},
