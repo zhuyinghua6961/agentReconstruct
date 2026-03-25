@@ -532,7 +532,6 @@ def test_fast_mode_sync_ask_applies_authority_context_before_execution(monkeypat
     assert response.status_code == 200
     assert payload["final_answer"] == "hello"
     assert captured["chat_history"] == [{"role": "assistant", "content": "previous answer", "trace_id": "trace-prev"}]
-    assert captured["options"]["authority_context_snapshot"] == {"conversation_id": 12}
     assert captured["options"]["authority_conversation_state"] == {"last_turn_route": "kb_qa"}
     assert captured["options"]["authority_summary"] == {"short_summary": "summary"}
     assert captured["options"]["authority_snapshot_version"] == 3

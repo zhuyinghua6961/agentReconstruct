@@ -26,8 +26,6 @@ _MAX_RECENT_MESSAGES = _env_int("MULTITURN_RECENT_MESSAGES", 8, minimum=1, maxim
 _MAX_MESSAGE_CHARS = _env_int("MULTITURN_MESSAGE_MAX_CHARS", 800, minimum=50, maximum=4000)
 _MAX_TOTAL_CHARS = _env_int("MULTITURN_TOTAL_MAX_CHARS", 4000, minimum=200, maximum=20000)
 
-_SUMMARY_EXCLUDED_KEYS = {"steps", "timings", "file_selection", "source_usage", "trace_id"}
-
 
 @dataclass(frozen=True)
 class ConversationContext:
@@ -112,15 +110,16 @@ def _sanitize_summary(summary: dict[str, Any] | Any) -> dict[str, Any]:
     if not isinstance(summary, dict):
         return {}
     sanitized: dict[str, Any] = {}
-    for key, value in summary.items():
-        key_text = str(key or "").strip()
-        if not key_text or key_text in _SUMMARY_EXCLUDED_KEYS:
-            continue
-        sanitized[key_text] = value
-    short_summary = _normalize_text(sanitized.get("short_summary"), max_chars=1200)
+    short_summary = _normalize_text(summary.get("short_summary"), max_chars=1200)
     if short_summary:
         sanitized["short_summary"] = short_summary
-        sanitized.setdefault("recent_focus", short_summary)
+        sanitized["recent_focus"] = short_summary
+    open_threads = [str(item).strip() for item in list(summary.get("open_threads") or []) if str(item).strip()]
+    if open_threads:
+        sanitized["open_threads"] = open_threads
+    memory_facts = [str(item).strip() for item in list(summary.get("memory_facts") or []) if str(item).strip()]
+    if memory_facts:
+        sanitized["memory_facts"] = memory_facts
     return sanitized
 
 

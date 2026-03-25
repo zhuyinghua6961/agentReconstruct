@@ -50,6 +50,9 @@ def test_prepare_execution_filters_prompt_context_before_rewrite(monkeypatch):
                 "file_selection": {"picked": ["paper-a"]},
                 "source_usage": [{"doi": "10.1000/demo"}],
                 "trace_id": "trace-1",
+                "short_summary": "最近在讨论低温性能",
+                "open_threads": ["冬天衰减原因"],
+                "memory_facts": ["体系是LFP"],
             },
             conversation_id=11,
             user_id=7,
@@ -85,12 +88,12 @@ def test_prepare_execution_filters_prompt_context_before_rewrite(monkeypatch):
         {"role": "user", "content": "介绍磷酸铁锂"},
         {"role": "assistant", "content": "它低温性能一般"},
     ]
-    assert captured["summary"]["topic"] == "磷酸铁锂"
-    assert "steps" not in captured["summary"]
-    assert "timings" not in captured["summary"]
-    assert "file_selection" not in captured["summary"]
-    assert "source_usage" not in captured["summary"]
-    assert "trace_id" not in captured["summary"]
+    assert captured["summary"] == {
+        "short_summary": "最近在讨论低温性能",
+        "recent_focus": "最近在讨论低温性能",
+        "open_threads": ["冬天衰减原因"],
+        "memory_facts": ["体系是LFP"],
+    }
 
 
 
@@ -130,6 +133,9 @@ def test_execute_ask_passes_sanitized_prompt_context_to_agent(monkeypatch):
                 "file_selection": {"picked": ["paper-a"]},
                 "source_usage": [{"doi": "10.1000/demo"}],
                 "trace_id": "trace-1",
+                "short_summary": "最近在讨论低温性能",
+                "open_threads": ["冬天衰减原因"],
+                "memory_facts": ["体系是LFP"],
             },
             conversation_id=11,
             user_id=7,
@@ -166,12 +172,13 @@ def test_execute_ask_passes_sanitized_prompt_context_to_agent(monkeypatch):
         {"role": "user", "content": "介绍磷酸铁锂"},
         {"role": "assistant", "content": "它低温性能一般"},
     ]
-    assert captured["conversation_context"]["summary"]["topic"] == "磷酸铁锂"
-    assert "steps" not in captured["conversation_context"]["summary"]
-    assert "timings" not in captured["conversation_context"]["summary"]
-    assert "file_selection" not in captured["conversation_context"]["summary"]
-    assert "source_usage" not in captured["conversation_context"]["summary"]
-    assert "trace_id" not in captured["conversation_context"]["summary"]
+    assert captured["conversation_context"]["summary"] == {
+        "short_summary": "最近在讨论低温性能",
+        "recent_focus": "最近在讨论低温性能",
+        "open_threads": ["冬天衰减原因"],
+        "memory_facts": ["体系是LFP"],
+    }
+
 
 
 def test_prepare_execution_maps_public_service_short_summary_for_rewrite(monkeypatch):

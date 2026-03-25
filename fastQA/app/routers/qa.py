@@ -207,9 +207,6 @@ def _apply_authority_context(
     chat_history = authority_context.get("chat_history")
     normalized_chat_history = [dict(item) for item in chat_history if isinstance(item, dict)] if isinstance(chat_history, list) else list(adapted_request.authority_chat_history)
     merged_options = dict(adapted_request.options or {})
-    snapshot = authority_context.get("snapshot")
-    if isinstance(snapshot, dict):
-        merged_options["authority_context_snapshot"] = snapshot
     conversation_state = authority_context.get("conversation_state")
     if isinstance(conversation_state, dict):
         merged_options["authority_conversation_state"] = conversation_state

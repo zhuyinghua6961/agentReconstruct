@@ -30,7 +30,8 @@ def test_builder_merges_authority_and_request_history_with_overlap_and_budget():
     ]
 
 
-def test_builder_passes_summary_state_and_source_selection_through_standard_contract():
+
+def test_builder_filters_prompt_and_runtime_context_to_stable_contract():
     context = build_conversation_context(
         current_question="结合文件回答",
         request_chat_history=[],
@@ -44,11 +45,38 @@ def test_builder_passes_summary_state_and_source_selection_through_standard_cont
             "steps": [{"name": "should not leak"}],
             "timings": {"stage1": 12},
         },
-        authority_conversation_state={"last_turn_route": "hybrid_qa", "last_focus_file_ids": [11]},
+        authority_conversation_state={
+            "last_turn_route": "hybrid_qa",
+            "last_focus_file_ids": [11, "12", 11, "bad"],
+            "last_assistant_trace_id": "trace-prev",
+            "timings": {"route": 12},
+        },
         source_scope="pdf+kb",
-        selected_file_ids=[11, 12],
-        used_files=[{"file_id": 11, "file_type": "pdf"}],
-        execution_files=[{"file_id": 11, "file_type": "pdf", "local_path": "/tmp/a.pdf"}],
+        selected_file_ids=[11, "12", 11, "bad"],
+        used_files=[
+            {
+                "file_id": 11,
+                "file_type": "pdf",
+                "file_name": "paper-a.pdf",
+                "selected_reason": "selected_single",
+                "source": "gateway_file_context",
+                "storage_ref": "minio://bucket/a.pdf",
+                "local_path": "/tmp/a.pdf",
+                "file_meta": {"title": "ignored"},
+            }
+        ],
+        execution_files=[
+            {
+                "file_id": 12,
+                "file_type": "pdf",
+                "file_name": "paper-b.pdf",
+                "selected_reason": "last_focus",
+                "source": "gateway_file_context",
+                "storage_ref": "minio://bucket/b.pdf",
+                "local_path": "/tmp/b.pdf",
+                "file_status": "ready",
+            }
+        ],
         primary_file_id=11,
     )
 
@@ -57,14 +85,31 @@ def test_builder_passes_summary_state_and_source_selection_through_standard_cont
         "open_threads": ["倍率性能"],
         "memory_facts": ["材料是LFP"],
     }
-    assert context["conversation_state"] == {"last_turn_route": "hybrid_qa", "last_focus_file_ids": [11]}
+    assert context["conversation_state"] == {"last_turn_route": "hybrid_qa", "last_focus_file_ids": [11, 12]}
     assert context["source_selection"] == {
         "source_scope": "pdf+kb",
         "selected_file_ids": [11, 12],
-        "used_files": [{"file_id": 11, "file_type": "pdf"}],
-        "execution_files": [{"file_id": 11, "file_type": "pdf", "local_path": "/tmp/a.pdf"}],
+        "used_files": [
+            {
+                "file_id": 11,
+                "file_type": "pdf",
+                "file_name": "paper-a.pdf",
+                "selected_reason": "selected_single",
+                "source": "gateway_file_context",
+            }
+        ],
+        "execution_files": [
+            {
+                "file_id": 12,
+                "file_type": "pdf",
+                "file_name": "paper-b.pdf",
+                "selected_reason": "last_focus",
+                "source": "gateway_file_context",
+            }
+        ],
         "primary_file_id": 11,
     }
+
 
 
 def test_builder_clips_history_by_recent_turn_limit_before_returning_llm_context():

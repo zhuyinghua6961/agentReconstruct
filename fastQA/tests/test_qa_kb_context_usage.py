@@ -54,7 +54,8 @@ class _Runtime:
         yield {"success": True, "final_answer": deep_answer, "query_mode": "kb_qa", "references": []}
 
 
-def test_kb_service_threads_recent_turns_and_summary_into_stage1_runtime():
+
+def test_kb_service_threads_sanitized_context_into_stage1_runtime():
     runtime = _Runtime()
     request = QaKbRequest(
         question="那它的缺点呢",
@@ -65,8 +66,26 @@ def test_kb_service_threads_recent_turns_and_summary_into_stage1_runtime():
             {"role": "assistant", "content": "它的优点包括安全性和寿命", "trace_id": "trace-a1"},
         ],
         summary_for_llm={"short_summary": "之前在讨论LFP优缺点", "steps": [{"name": "ignore"}]},
-        conversation_state={"last_turn_route": "kb_qa"},
-        source_selection={"source_scope": "kb", "selected_file_ids": []},
+        conversation_state={
+            "last_turn_route": "kb_qa",
+            "last_focus_file_ids": [5, "6"],
+            "last_assistant_trace_id": "trace-prev",
+        },
+        source_selection={
+            "source_scope": "pdf+kb",
+            "selected_file_ids": [5, "6", "bad"],
+            "used_files": [
+                {
+                    "file_id": 5,
+                    "file_type": "pdf",
+                    "file_name": "paper-a.pdf",
+                    "selected_reason": "selected_single",
+                    "source": "gateway_file_context",
+                    "local_path": "/tmp/a.pdf",
+                    "storage_ref": "minio://bucket/a.pdf",
+                }
+            ],
+        },
     )
 
     events = list(
@@ -87,10 +106,23 @@ def test_kb_service_threads_recent_turns_and_summary_into_stage1_runtime():
                 {"role": "assistant", "content": "它的优点包括安全性和寿命"},
             ],
             "summary_for_llm": {"short_summary": "之前在讨论LFP优缺点"},
-            "conversation_state": {"last_turn_route": "kb_qa"},
-            "source_selection": {"source_scope": "kb", "selected_file_ids": []},
+            "conversation_state": {"last_turn_route": "kb_qa", "last_focus_file_ids": [5, 6]},
+            "source_selection": {
+                "source_scope": "pdf+kb",
+                "selected_file_ids": [5, 6],
+                "used_files": [
+                    {
+                        "file_id": 5,
+                        "file_type": "pdf",
+                        "file_name": "paper-a.pdf",
+                        "selected_reason": "selected_single",
+                        "source": "gateway_file_context",
+                    }
+                ],
+            },
         },
     }
+
 
 
 def test_stage1_planning_includes_conversation_context_but_excludes_trace_fields():

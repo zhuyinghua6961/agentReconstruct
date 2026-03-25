@@ -19,7 +19,6 @@ def _env_int(name: str, default: int, *, minimum: int = 1, maximum: int | None =
 _DEFAULT_MAX_RECENT_TURNS = _env_int("FASTQA_CONTEXT_RECENT_TURNS", 8, minimum=1, maximum=20)
 _DEFAULT_MAX_MESSAGE_CHARS = _env_int("FASTQA_CONTEXT_MESSAGE_MAX_CHARS", 800, minimum=50, maximum=4000)
 _DEFAULT_MAX_TOTAL_CHARS = _env_int("FASTQA_CONTEXT_TOTAL_MAX_CHARS", 4000, minimum=200, maximum=20000)
-_SUMMARY_KEYS = ("short_summary", "open_threads", "memory_facts")
 
 
 def _normalize_text(value: Any, *, max_chars: int) -> str:
@@ -27,6 +26,14 @@ def _normalize_text(value: Any, *, max_chars: int) -> str:
     if not text:
         return ""
     return text[:max_chars]
+
+
+def _safe_positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except Exception:
+        return None
+    return parsed if parsed > 0 else None
 
 
 def normalize_turns(turns: list[dict[str, Any]] | list[Any], *, max_message_chars: int = _DEFAULT_MAX_MESSAGE_CHARS) -> list[dict[str, str]]:
@@ -63,7 +70,39 @@ def normalize_summary(summary: dict[str, Any] | None) -> dict[str, Any]:
 def normalize_conversation_state(state: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(state, dict):
         return {}
-    return dict(state)
+    normalized: dict[str, Any] = {}
+    route = _normalize_text(state.get("last_turn_route"), max_chars=64)
+    if route:
+        normalized["last_turn_route"] = route
+    focus_ids: list[int] = []
+    seen_focus_ids: set[int] = set()
+    for item in list(state.get("last_focus_file_ids") or []):
+        parsed = _safe_positive_int(item)
+        if parsed is None or parsed in seen_focus_ids:
+            continue
+        seen_focus_ids.add(parsed)
+        focus_ids.append(parsed)
+    if focus_ids:
+        normalized["last_focus_file_ids"] = focus_ids
+    return normalized
+
+
+def _normalize_file_context_items(items: list[dict[str, Any]] | list[Any] | None) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for item in list(items or []):
+        if not isinstance(item, dict):
+            continue
+        payload: dict[str, Any] = {}
+        file_id = _safe_positive_int(item.get("file_id"))
+        if file_id is not None:
+            payload["file_id"] = file_id
+        for key in ("file_type", "file_name", "selected_reason", "source"):
+            value = _normalize_text(item.get(key), max_chars=256)
+            if value:
+                payload[key] = value
+        if payload:
+            normalized.append(payload)
+    return normalized
 
 
 def normalize_source_selection(
@@ -74,18 +113,28 @@ def normalize_source_selection(
     execution_files: list[dict[str, Any]] | list[Any] | None,
     primary_file_id: int | None = None,
 ) -> dict[str, Any]:
-    normalized = {
-        "source_scope": str(source_scope or "").strip(),
-        "selected_file_ids": [int(item) for item in list(selected_file_ids or []) if str(item).strip()],
-    }
-    normalized_used_files = [dict(item) for item in list(used_files or []) if isinstance(item, dict)]
-    normalized_execution_files = [dict(item) for item in list(execution_files or []) if isinstance(item, dict)]
+    normalized: dict[str, Any] = {}
+    normalized_source_scope = _normalize_text(source_scope, max_chars=32)
+    if normalized_source_scope:
+        normalized["source_scope"] = normalized_source_scope
+    normalized_selected_ids: list[int] = []
+    seen_selected_ids: set[int] = set()
+    for item in list(selected_file_ids or []):
+        parsed = _safe_positive_int(item)
+        if parsed is None or parsed in seen_selected_ids:
+            continue
+        seen_selected_ids.add(parsed)
+        normalized_selected_ids.append(parsed)
+    normalized["selected_file_ids"] = normalized_selected_ids
+    normalized_used_files = _normalize_file_context_items(used_files)
+    normalized_execution_files = _normalize_file_context_items(execution_files)
     if normalized_used_files:
         normalized["used_files"] = normalized_used_files
     if normalized_execution_files:
         normalized["execution_files"] = normalized_execution_files
-    if primary_file_id is not None:
-        normalized["primary_file_id"] = int(primary_file_id)
+    normalized_primary_file_id = _safe_positive_int(primary_file_id)
+    if normalized_primary_file_id is not None:
+        normalized["primary_file_id"] = normalized_primary_file_id
     return normalized
 
 

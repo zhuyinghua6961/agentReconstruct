@@ -56,7 +56,7 @@ def test_build_conversation_context_recent_turns_keep_only_role_and_content(monk
 
 
 
-def test_build_conversation_context_filters_summary_for_prompt_facing_use(monkeypatch):
+def test_build_conversation_context_whitelists_public_service_summary_fields(monkeypatch):
     monkeypatch.setattr(
         "server.services.conversation_context_service._load_server_context_snapshot",
         lambda **kwargs: (
@@ -72,6 +72,9 @@ def test_build_conversation_context_filters_summary_for_prompt_facing_use(monkey
                 "file_selection": {"picked": ["paper-a"]},
                 "source_usage": [{"doi": "10.1000/demo"}],
                 "trace_id": "trace-1",
+                "short_summary": "最近在讨论低温性能",
+                "open_threads": ["冬天衰减原因"],
+                "memory_facts": ["体系是LFP"],
             },
         ),
     )
@@ -87,16 +90,13 @@ def test_build_conversation_context_filters_summary_for_prompt_facing_use(monkey
         )
     )
 
-    assert context.summary["topic"] == "磷酸铁锂"
-    assert context.summary["recent_focus"] == "低温性能"
-    assert context.summary["user_goal"] == "分析冬季衰减原因"
-    assert context.summary["open_questions"] == ["那它冬天呢"]
-    assert context.summary["updated_at"] == "2026-03-17T10:00:00+08:00"
-    assert "steps" not in context.summary
-    assert "timings" not in context.summary
-    assert "file_selection" not in context.summary
-    assert "source_usage" not in context.summary
-    assert "trace_id" not in context.summary
+    assert context.summary == {
+        "short_summary": "最近在讨论低温性能",
+        "recent_focus": "最近在讨论低温性能",
+        "open_threads": ["冬天衰减原因"],
+        "memory_facts": ["体系是LFP"],
+    }
+
 
 
 def test_build_conversation_context_maps_public_service_short_summary_to_recent_focus(monkeypatch):
