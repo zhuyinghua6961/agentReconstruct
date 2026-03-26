@@ -44,7 +44,6 @@ def build_pdf_text_cache_key(
     if not signature:
         return None
     return redis_service.key_factory.cache(
-        "qa",
         "pdftext",
         _pdf_cache_epoch(),
         _pdf_text_cache_version(),
@@ -65,7 +64,6 @@ def build_pdf_text_lock_key(
     if not signature:
         return None
     return redis_service.key_factory.lock(
-        "qa",
         "pdftext",
         _pdf_cache_epoch(),
         _pdf_text_cache_version(),

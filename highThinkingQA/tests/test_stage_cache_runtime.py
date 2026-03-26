@@ -121,5 +121,5 @@ def test_bootstrap_redis_state_updates_app_state(monkeypatch):
 def test_build_key_factory_namespaces_segments():
     factory = build_key_factory("highthinking")
 
-    assert factory.cache("qa", "direct_answer", "abc") == "highthinking:cache:qa:direct_answer:abc"
-    assert factory.lock("qa", "retrieve", "abc") == "highthinking:lock:qa:retrieve:abc"
+    assert factory.cache("direct_answer", "abc") == "highthinking:cache:direct_answer:abc"
+    assert factory.lock("retrieve", "abc") == "highthinking:lock:retrieve:abc"

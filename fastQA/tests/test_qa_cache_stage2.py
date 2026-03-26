@@ -48,8 +48,8 @@ def test_stage2_cache_roundtrip_normalizes_claims(monkeypatch):
         n_results_per_claim=8,
     )
 
-    assert cache_key.startswith("agentcode:cache:qa:stage2:")
-    assert lock_key.startswith("agentcode:lock:qa:stage2:")
+    assert cache_key.startswith("agentcode:cache:stage2:")
+    assert lock_key.startswith("agentcode:lock:stage2:")
 
     cached = cache_stage2_result(
         redis_service=service,

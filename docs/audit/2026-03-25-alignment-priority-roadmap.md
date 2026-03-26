@@ -20,7 +20,7 @@
 
 ## 结论先行
 
-当前剩余未对齐项，按优先级建议分成 4 档：
+当前剩余未对齐项，按优先级建议分成 5 档：
 
 ### P0：必须先做
 1. 表格 `summary` 上下文增强
@@ -37,6 +37,11 @@
 ### P3：后续优化
 7. `public-service` summary/memory 从空壳进化为真正可用的长期摘要
 8. 网关兼容字段、旧路由、历史兼容层的进一步清理
+
+### P4：产品能力探索
+9. `fastQA` / `highThinkingQA` 答案内强制生成总结的可行性与副作用评估
+10. 引用文献点击后直接落到参考段落/句子的能力探索
+11. 翻译模块的“划选即翻译 / 一键粘贴原文段落”交互探索
 
 如果只看“最直接影响用户感知”的顺序：
 1. 表格 summary
@@ -341,7 +346,15 @@ storage 这组已经开始收口，但还没达到“全系统单一权威出口
 ## P3-3 `fastQA` 问答阶段缓存 TTL 与 `highThinkingQA` 对齐
 
 ### 当前状态
-`fastQA` 和 `highThinkingQA` 都已经开始有问答阶段缓存，但两边的 TTL 策略还没有明确对齐。
+已完成本轮默认 TTL 收口：
+- `fastQA stage1=3600, stage2=1800, stage2.5=1800, stage3=1800`
+- `highThinkingQA direct_answer=3600, decompose=3600, retrieve=1800`
+
+保留例外：
+- `fastQA pdf_text=86400` 继续视为文件提取缓存，不纳入本轮问答阶段 TTL 对齐范围。
+
+详见：
+- [2026-03-26 P3 runtime boundary notes](/home/cqy/worktrees/highThinking/docs/audit/2026-03-26-p3-runtime-boundary-notes.md)
 
 这会导致：
 - 同样是问答缓存，不同模式下命中/失效体感不一致
@@ -389,7 +402,18 @@ storage 这组已经开始收口，但还没达到“全系统单一权威出口
 ## P3-5 Redis key 简化，不再套过多层级
 
 ### 当前状态
-当前 Redis key 命名已经能区分服务和能力，但有些 key 层级偏深，阅读和排障成本较高。
+已完成本轮 key 命名收口。
+
+当前活链路已统一到更平的形式：
+- `fastqa:cache:<capability>:...`
+- `fastqa:lock:<capability>:...`
+- `highthinkingqa:cache:<capability>:...`
+- `highthinkingqa:lock:<capability>:...`
+
+不再保留 `prefix` 后继续重复 `qa` / `highthinkingqa` 这种冗余层级。
+
+详见：
+- [2026-03-26 P3 runtime boundary notes](/home/cqy/worktrees/highThinking/docs/audit/2026-03-26-p3-runtime-boundary-notes.md)
 
 用户关注的方向是：
 - 保留服务前缀
@@ -415,7 +439,18 @@ storage 这组已经开始收口，但还没达到“全系统单一权威出口
 ## P3-6 移除 `gateway` 聊天持久化兼容代理，收敛到 `fastQA` / `highThinkingQA` 直连 `public-service authority`
 
 ### 当前状态
-当前系统里的聊天持久化并不是完全单一路径。
+已完成 QA ask 主链的 gateway 代理持久化移除。
+
+当前 `gateway/app/routers/qa.py` 在 `ask/ask_stream` 路径上只保留：
+- route decision
+- upstream forwarding
+- SSE passthrough
+- error conversion
+
+不再代写 user/assistant 聊天记录。
+
+详见：
+- [2026-03-26 P3 runtime boundary notes](/home/cqy/worktrees/highThinking/docs/audit/2026-03-26-p3-runtime-boundary-notes.md)
 
 实际是两层同时存在：
 - `gateway` 仍保留一层兼容持久化代理，会调用浏览器侧消息接口
@@ -440,7 +475,140 @@ storage 这组已经开始收口，但还没达到“全系统单一权威出口
 
 ---
 
-## 六、推荐执行顺序
+## 六、P4：产品能力探索
+
+## P4-1 `fastQA` / `highThinkingQA` 在答案中强制生成总结
+
+### 当前诉求
+希望两条问答链路在给出主体答案后，都稳定带出一段明确总结，而不是完全依赖模型自由发挥。
+
+这里要先区分两件事：
+- 一种是“prompt 约束”，要求模型在答案末尾固定输出总结段
+- 另一种是“后处理拼接”，由系统把总结块结构化插到最终答案里
+
+这两种实现，对稳定性、流式体验、前端渲染和引用一致性的影响完全不同。
+
+### 为什么放到 P4
+它不是当前链路 correctness 的缺口，更像产品体验增强项。
+
+当前更高优先级的问题仍然是：
+- 主链是否正确
+- 引用是否稳定
+- 上下文是否对齐
+- 文件/混合 QA 是否按预期路由
+
+在这些问题稳定前，过早强推“统一总结块”，容易把展示层增强和主链正确性搅在一起。
+
+### 探索重点
+- `fastQA` 和 `highThinkingQA` 是否应该统一总结结构，还是允许各自保留风格差异
+- 总结应放在答案末尾、答案开头，还是折叠块里
+- 流式输出阶段是否先输出主体，再输出总结，避免首 token 体验变差
+- 总结是否要求引用，还是允许做成“无引用压缩摘要”
+- 如果答案已经很短，是否还需要强制再生成总结
+
+### 风险
+- 强制总结可能导致答案冗余
+- 如果做成后处理拼接，可能破坏当前 markdown / citation / SSE 渲染
+- 如果直接写死 prompt，可能挤压主体答案 token budget
+- 两条链路统一过度，可能损失 `fastQA` 和 `highThinkingQA` 各自的回答风格
+
+### 建议动作
+- 先盘清两条链路当前答案模板和 done 阶段输出契约
+- 做 3 种方案对比：
+  - prompt 内强制总结
+  - 流式末尾附加总结块
+  - done 后结构化补摘要
+- 明确每种方案对流式体验、引用对齐、前端 markdown 渲染的影响
+- 最后再决定是否进入实现
+
+### 相关文档
+- [P4-1 详细 spec](/home/cqy/worktrees/highThinking/docs/audit/2026-03-25-p4-answer-summary-spec.md)
+- [P4-1 implementation plan](/home/cqy/worktrees/highThinking/docs/superpowers/plans/2026-03-25-answer-summary-rollout.md)
+
+## P4-2 探索“点击引用直接查看参考段落/句子”
+
+### 当前诉求
+希望用户在答案里点击引用文献后，不只是打开原文，而是尽量直接看到被参考的段落、句子或更细粒度的证据位置。
+
+这件事的核心不在前端跳转本身，而在后端现有向量库和引用对象里，是否已经保存足够精细的定位信息。
+
+### 为什么放到 P4
+它是高价值能力，但本质是“证据可视化增强”，不是当前问答主链能不能用的阻塞项。
+
+如果现有 chunk 元数据本来就没有：
+- 页码
+- chunk 偏移
+- 章节
+- 原文切片文本
+- sentence span
+
+那这件事就不是前端加个按钮能解决，而是整个 retrieval / indexing / reference object 要补元数据。
+
+### 探索重点
+- `fastQA` 与 `highThinkingQA` 当前正在使用的向量数据库分别是什么
+- 每条 chunk 现在真实存了哪些字段
+- `reference_objects` 里是否已经能把答案引用回溯到具体 chunk
+- chunk 到“句子级/段落级”证据之间是否还差一层对齐
+- 点击后是高亮原 PDF 页片段，还是展示抽取出来的证据段落文本
+
+### 风险
+- 向量库当前只有 chunk 级元数据，无法直接定位到句子
+- 同一 DOI / 文献可能在不同索引流程中元数据不一致
+- 原文查看链路如果仍依赖 PDF viewer，不一定天然支持细粒度锚点
+- 如果句子级对齐要实时做，可能拖慢问答收尾阶段
+
+### 建议动作
+- 先实查当前向量库 collection schema 与 chunk metadata 实际内容
+- 盘清 `reference_objects -> chunk -> pdf_url / local materialization` 的映射闭环
+- 判断是否能先做“段落级 evidence preview”，再评估是否需要句子级锚点
+- 如果元数据不足，单独出一份 retrieval/index metadata 增强 spec，而不要直接进前端实现
+
+### 相关文档
+- [P4-2 详细 spec](/home/cqy/worktrees/highThinking/docs/audit/2026-03-25-p4-citation-evidence-positioning-spec.md)
+- [P4-2 implementation plan](/home/cqy/worktrees/highThinking/docs/superpowers/plans/2026-03-25-citation-evidence-positioning.md)
+
+## P4-3 翻译模块的“划选即翻译 / 一键粘贴原文段落”交互探索
+
+### 当前诉求
+这块有两类交互目标：
+- 阅读文献时，用户划选某段文字，直接触发翻译
+- 在“粘贴文本翻译”区域，支持一键把刚复制的文献段落粘进去，而不是手动再粘一次
+
+它们都属于“翻译链路的人机交互增强”，但对浏览器能力、剪贴板权限、PDF 阅读器集成方式的依赖比较强。
+
+### 为什么放到 P4
+这不是问答主链 correctness 问题，而是翻译体验增强。
+
+而且这类功能非常容易出现“看起来简单，实际被浏览器权限和 viewer 集成卡住”的情况，所以先探索、再实现更稳。
+
+### 探索重点
+- 当前翻译模块入口、粘贴文本翻译入口、文献阅读器之间的实际关系
+- PDF/原文查看器是否能拿到稳定的 selection text
+- 浏览器 Clipboard API 是否允许无手工粘贴地读取用户最近复制内容
+- 是否要做“选中后浮动翻译按钮”，还是“复制后在翻译框显示一键导入”
+- 是否需要区分 PDF 原文、HTML 正文、表格文本的不同来源
+
+### 风险
+- 不同查看器的选区 API 不一致
+- 浏览器对剪贴板读取权限限制较强
+- 自动读取剪贴板可能引发用户预期和隐私问题
+- 如果翻译入口过多，前端交互会变乱
+
+### 建议动作
+- 先盘清当前翻译模块和原文阅读器的真实技术边界
+- 分开评估两条能力：
+  - selection-to-translate
+  - copy-buffer-to-translate
+- 优先选择用户感知强、工程复杂度低的一条先做 PoC
+- 明确哪些方案必须依赖前端 viewer 改造，哪些可以先在现有 UI 上落地
+
+### 相关文档
+- [P4-3 详细 spec](/home/cqy/worktrees/highThinking/docs/audit/2026-03-25-p4-translation-selection-paste-spec.md)
+- [P4-3 implementation plan](/home/cqy/worktrees/highThinking/docs/superpowers/plans/2026-03-25-translation-selection-paste.md)
+
+---
+
+## 七、推荐执行顺序
 
 ### 推荐顺序 A：用户体验优先
 1. 表格 `summary` 上下文增强
@@ -455,6 +623,9 @@ storage 这组已经开始收口，但还没达到“全系统单一权威出口
 10. 排查 `highThinkingQA` 引用检查阶段慢点
 11. Redis key 命名简化
 12. 移除 `gateway` 聊天持久化兼容代理
+13. 强制总结能力探索
+14. 引用点击定位段落/句子能力探索
+15. 翻译模块交互增强探索
 
 ### 推荐顺序 B：架构边界优先
 1. `gateway + public-service` 公共协议兼容层收口
@@ -469,6 +640,9 @@ storage 这组已经开始收口，但还没达到“全系统单一权威出口
 10. 排查 `highThinkingQA` 引用检查阶段慢点
 11. Redis key 命名简化
 12. 移除 `gateway` 聊天持久化兼容代理
+13. 强制总结能力探索
+14. 引用点击定位段落/句子能力探索
+15. 翻译模块交互增强探索
 
 ### 当前建议
 结合你现在的诉求，更推荐 **顺序 A**。
@@ -480,7 +654,7 @@ storage 这组已经开始收口，但还没达到“全系统单一权威出口
 
 ---
 
-## 七、当前建议的下一步
+## 八、当前建议的下一步
 
 如果按这份优先级继续推进，建议下一步直接进入：
 

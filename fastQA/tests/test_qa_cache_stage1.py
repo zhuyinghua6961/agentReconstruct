@@ -41,8 +41,8 @@ def test_stage1_cache_roundtrip_uses_runtime_signature():
     cache_key = build_stage1_cache_key(redis_service=service, runtime=runtime, question=" What is LFP? ")
     lock_key = build_stage1_lock_key(redis_service=service, runtime=runtime, question=" What is LFP? ")
 
-    assert cache_key.startswith("agentcode:cache:qa:stage1:")
-    assert lock_key.startswith("agentcode:lock:qa:stage1:")
+    assert cache_key.startswith("agentcode:cache:stage1:")
+    assert lock_key.startswith("agentcode:lock:stage1:")
 
     cached = cache_stage1_result(
         redis_service=service,

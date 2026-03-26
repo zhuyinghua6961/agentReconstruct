@@ -60,7 +60,6 @@ def build_stage3_cache_key(
     route_hint: str = "kb_qa",
 ) -> str:
     return redis_service.key_factory.cache(
-        "qa",
         "stage3",
         _qa_cache_epoch(),
         _papers_epoch(),
@@ -78,7 +77,6 @@ def build_stage3_lock_key(
     route_hint: str = "kb_qa",
 ) -> str:
     return redis_service.key_factory.lock(
-        "qa",
         "stage3",
         _qa_cache_epoch(),
         _papers_epoch(),

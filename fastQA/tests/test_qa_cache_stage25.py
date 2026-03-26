@@ -61,8 +61,8 @@ def test_stage25_cache_roundtrip_uses_retrieval_signature(monkeypatch):
         dois=dois,
     )
 
-    assert cache_key.startswith("agentcode:cache:qa:stage25:5:9:")
-    assert lock_key.startswith("agentcode:lock:qa:stage25:5:9:")
+    assert cache_key.startswith("agentcode:cache:stage25:5:9:")
+    assert lock_key.startswith("agentcode:lock:stage25:5:9:")
 
     cached = cache_stage25_result(
         redis_service=service,

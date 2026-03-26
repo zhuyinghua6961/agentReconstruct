@@ -121,7 +121,6 @@ def build_stage1_cache_key(
     route_hint: str = "kb_qa",
 ) -> str:
     return redis_service.key_factory.cache(
-        "qa",
         "stage1",
         _qa_cache_epoch(),
         route_hint,
@@ -141,7 +140,6 @@ def build_stage1_lock_key(
     route_hint: str = "kb_qa",
 ) -> str:
     return redis_service.key_factory.lock(
-        "qa",
         "stage1",
         _qa_cache_epoch(),
         route_hint,

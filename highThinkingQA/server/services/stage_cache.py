@@ -114,7 +114,7 @@ def _direct_answer_ttl() -> int:
 
 
 def _decompose_ttl() -> int:
-    return _env_int("HT_QA_DECOMPOSE_CACHE_TTL_SECONDS", 21600, minimum=60, maximum=86400)
+    return _env_int("HT_QA_DECOMPOSE_CACHE_TTL_SECONDS", 3600, minimum=60, maximum=86400)
 
 
 def _retrieve_ttl() -> int:
@@ -171,7 +171,6 @@ def run_singleflight(
 
 def _direct_answer_key(*, redis_service: RedisService, question: str, model: str, enable_thinking: bool | None) -> str:
     return redis_service.key_factory.cache(
-        "highthinkingqa",
         "direct_answer",
         _cache_epoch(),
         str(model or ""),
@@ -183,7 +182,6 @@ def _direct_answer_key(*, redis_service: RedisService, question: str, model: str
 
 def _decompose_key(*, redis_service: RedisService, question: str, model: str, enable_thinking: bool | None, num_sub_questions: int) -> str:
     return redis_service.key_factory.cache(
-        "highthinkingqa",
         "decompose",
         _cache_epoch(),
         str(model or ""),
@@ -196,7 +194,6 @@ def _decompose_key(*, redis_service: RedisService, question: str, model: str, en
 
 def _retrieve_query_key(*, redis_service: RedisService, query: str, top_k: int | None) -> str:
     return redis_service.key_factory.cache(
-        "highthinkingqa",
         "retrieve",
         _cache_epoch(),
         str(config.CHROMA_PERSIST_DIR or ""),
@@ -208,7 +205,6 @@ def _retrieve_query_key(*, redis_service: RedisService, query: str, top_k: int |
 
 def _retrieve_query_lock_key(*, redis_service: RedisService, query: str, top_k: int | None) -> str:
     return redis_service.key_factory.lock(
-        "highthinkingqa",
         "retrieve",
         _cache_epoch(),
         str(config.CHROMA_PERSIST_DIR or ""),
@@ -320,7 +316,7 @@ def get_or_compute_direct_answer(*, question: str, model: str, enable_thinking: 
 
     return run_singleflight(
         redis_service=redis_service,
-        lock_key=redis_service.key_factory.lock("highthinkingqa", "direct_answer", _cache_epoch(), str(model or ""), _hash_payload(_normalized_text(question))) if redis_service and redis_service.available else "",
+        lock_key=redis_service.key_factory.lock("direct_answer", _cache_epoch(), str(model or ""), _hash_payload(_normalized_text(question))) if redis_service and redis_service.available else "",
         namespace="direct_answer",
         read_cached_fn=lambda: get_cached_direct_answer(redis_service=redis_service, question=question, model=model, enable_thinking=enable_thinking),
         compute_fn=_compute,
@@ -355,7 +351,7 @@ def get_or_compute_decompose(*, question: str, model: str, enable_thinking: bool
 
     return run_singleflight(
         redis_service=redis_service,
-        lock_key=redis_service.key_factory.lock("highthinkingqa", "decompose", _cache_epoch(), str(model or ""), int(num_sub_questions), _hash_payload(_normalized_text(question))) if redis_service and redis_service.available else "",
+        lock_key=redis_service.key_factory.lock("decompose", _cache_epoch(), str(model or ""), int(num_sub_questions), _hash_payload(_normalized_text(question))) if redis_service and redis_service.available else "",
         namespace="decompose",
         read_cached_fn=lambda: get_cached_decompose(
             redis_service=redis_service,

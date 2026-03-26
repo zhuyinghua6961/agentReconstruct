@@ -2,25 +2,17 @@
 
 from __future__ import annotations
 
-import logging
-import json
 import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.models.ask import AskRequest
 from app.providers.conversation_files.base import ConversationFileProviderError
-from app.services.conversation_persistence import StreamSummary
 from app.services.proxy import ProxyService, StreamingProxyHandle
 
 router = APIRouter(tags=["qa"])
-logger = logging.getLogger(__name__)
 
 _ALLOWED_MODES = {"fast", "thinking", "patent"}
-
-
-def _should_gateway_persist(*, actual_mode: str) -> bool:
-    return actual_mode != "thinking"
 
 
 def _legacy_mode(payload: AskRequest) -> str:
@@ -185,54 +177,13 @@ async def _proxy_ask(request: Request, payload: AskRequest, mode: str) -> JSONRe
         file_context=file_context,
         trace_id=trace_id,
     )
-    persistence_service = request.app.state.conversation_persistence_service
-    if _should_gateway_persist(actual_mode=route_decision.actual_mode):
-        try:
-            await persistence_service.persist_user_message(
-                request=request,
-                conversation_id=payload.conversation_id,
-                content=payload.question,
-                context_hints={
-                    "selected_file_ids": list(route_decision.selected_file_ids),
-                    "last_turn_route_hint": route_decision.route,
-                },
-            )
-        except Exception as exc:
-            logger.warning("gateway user persistence skipped: %s", exc)
     path = f"/api/{route_decision.actual_mode}/ask"
-    response = await proxy_service.forward_json(
+    return await proxy_service.forward_json(
         request=request,
         target=registry.get(route_decision.actual_mode),
         path=path,
         payload=upstream_payload,
     )
-    if response.status_code < 400 and _should_gateway_persist(actual_mode=route_decision.actual_mode):
-        try:
-            payload_json = json.loads(response.body.decode("utf-8"))
-            data = payload_json.get("data") if isinstance(payload_json, dict) else payload_json
-            if isinstance(data, dict):
-                summary = persistence_service.new_stream_summary()
-                summary.assistant_content = str(data.get("final_answer") or "")
-                summary.query_mode = str(data.get("query_mode") or (data.get("metadata") or {}).get("query_mode") or "")
-                summary.references = data.get("references") if isinstance(data.get("references"), list) else []
-                summary.reference_links = data.get("reference_links") if isinstance(data.get("reference_links"), list) else []
-                summary.pdf_links = data.get("pdf_links") if isinstance(data.get("pdf_links"), list) else []
-                summary.doi_locations = data.get("doi_locations") if isinstance(data.get("doi_locations"), dict) else {}
-                summary.route = str(data.get("route") or "")
-                summary.used_files = data.get("used_files") if isinstance(data.get("used_files"), list) else []
-                summary.timings = data.get("timings") if isinstance(data.get("timings"), dict) else {}
-                summary.trace_id = str(data.get("trace_id") or trace_id)
-                summary.file_selection = data.get("file_selection") if isinstance(data.get("file_selection"), dict) else {}
-                summary.steps = data.get("steps") if isinstance(data.get("steps"), list) else []
-                summary.done_seen = True
-                await persistence_service.persist_assistant_summary(
-                    request=request,
-                    conversation_id=payload.conversation_id,
-                    summary=summary,
-                )
-        except Exception as exc:
-            logger.warning("gateway sync ask assistant persistence skipped: %s", exc)
-    return response
 
 
 async def _proxy_ask_stream(request: Request, payload: AskRequest, mode: str):
@@ -252,20 +203,6 @@ async def _proxy_ask_stream(request: Request, payload: AskRequest, mode: str):
         file_context=file_context,
         trace_id=trace_id,
     )
-    persistence_service = request.app.state.conversation_persistence_service
-    if _should_gateway_persist(actual_mode=route_decision.actual_mode):
-        try:
-            await persistence_service.persist_user_message(
-                request=request,
-                conversation_id=payload.conversation_id,
-                content=payload.question,
-                context_hints={
-                    "selected_file_ids": list(route_decision.selected_file_ids),
-                    "last_turn_route_hint": route_decision.route,
-                },
-            )
-        except Exception as exc:
-            logger.warning("gateway user persistence skipped: %s", exc)
     path = f"/api/{route_decision.actual_mode}/ask_stream"
     try:
         handle: StreamingProxyHandle = await proxy_service.open_json_stream(
@@ -288,32 +225,8 @@ async def _proxy_ask_stream(request: Request, payload: AskRequest, mode: str):
             message=body.decode("utf-8", errors="ignore") or "upstream_error",
         )
 
-    summary: StreamSummary = persistence_service.new_stream_summary()
-
-    async def _persisting_body_iter():
-        try:
-            if _should_gateway_persist(actual_mode=route_decision.actual_mode):
-                async for chunk in persistence_service.extract_stream(
-                    body_iter=handle.body_iter(),
-                    summary=summary,
-                ):
-                    yield chunk
-            else:
-                async for chunk in handle.body_iter():
-                    yield chunk
-        finally:
-            if _should_gateway_persist(actual_mode=route_decision.actual_mode):
-                try:
-                    await persistence_service.persist_assistant_summary(
-                        request=request,
-                        conversation_id=payload.conversation_id,
-                        summary=summary,
-                    )
-                except Exception as exc:
-                    logger.warning("gateway assistant persistence skipped: %s", exc)
-
     return StreamingResponse(
-        _persisting_body_iter(),
+        handle.body_iter(),
         status_code=handle.status_code,
         media_type=str(handle.headers.get("content-type") or "text/event-stream"),
         headers=handle.headers,

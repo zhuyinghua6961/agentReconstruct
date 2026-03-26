@@ -43,8 +43,8 @@ def test_stage3_cache_roundtrip_uses_doi_set_signature(monkeypatch):
         max_chunks_per_doi=3,
     )
 
-    assert cache_key.startswith("agentcode:cache:qa:stage3:3:11:")
-    assert lock_key.startswith("agentcode:lock:qa:stage3:3:11:")
+    assert cache_key.startswith("agentcode:cache:stage3:3:11:")
+    assert lock_key.startswith("agentcode:lock:stage3:3:11:")
 
     cached = cache_stage3_result(
         redis_service=service,
