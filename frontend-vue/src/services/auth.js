@@ -1,7 +1,7 @@
 /**
  * 认证API服务
  */
-const API_BASE = '/api/v1/auth'
+const API_BASE = '/api/auth'
 
 function readStoredToken() {
   return localStorage.getItem('token')

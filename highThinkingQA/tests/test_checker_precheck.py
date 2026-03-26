@@ -338,3 +338,66 @@ def test_checker_disables_thinking_for_llm_audit(monkeypatch):
     assert passed is True
     assert issues == []
     assert captured["enable_thinking"] is False
+
+
+def test_checker_limits_chunk_count_per_slice(monkeypatch):
+    captured = {}
+
+    def fake_chat_completion(**kwargs):
+        captured["prompt"] = kwargs["prompt"]
+        return '{"passed": true, "issues": []}'
+
+    monkeypatch.setattr("agent_core.checker.chat_completion", fake_chat_completion)
+
+    answer = "结论成立 [10.1000/known-doi, Results]"
+    chunks = [[
+        RetrievedChunk(
+            text=f"evidence chunk {idx} " + ("x" * 400),
+            doi="10.1000/known-doi",
+            title="Known",
+            section_name="Results",
+            chunk_index=idx,
+            distance=0.01 * idx,
+        )
+        for idx in range(12)
+    ]]
+
+    passed, issues = check_answer("demo", answer, chunks, client=object())
+
+    assert passed is True
+    assert issues == []
+    assert "evidence chunk 0" in captured["prompt"]
+    assert "evidence chunk 7" in captured["prompt"]
+    assert "evidence chunk 8" not in captured["prompt"]
+    assert "evidence chunk 11" not in captured["prompt"]
+
+
+
+def test_checker_truncates_long_chunk_text_before_prompt(monkeypatch):
+    captured = {}
+
+    def fake_chat_completion(**kwargs):
+        captured["prompt"] = kwargs["prompt"]
+        return '{"passed": true, "issues": []}'
+
+    monkeypatch.setattr("agent_core.checker.chat_completion", fake_chat_completion)
+
+    long_text = "prefix-" + ("A" * 1400) + "-tail-marker"
+    answer = "结论成立 [10.1000/known-doi, Results]"
+    chunks = [[
+        RetrievedChunk(
+            text=long_text,
+            doi="10.1000/known-doi",
+            title="Known",
+            section_name="Results",
+            chunk_index=0,
+            distance=0.1,
+        )
+    ]]
+
+    passed, issues = check_answer("demo", answer, chunks, client=object())
+
+    assert passed is True
+    assert issues == []
+    assert "prefix-" in captured["prompt"]
+    assert "-tail-marker" not in captured["prompt"]

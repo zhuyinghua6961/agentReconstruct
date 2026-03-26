@@ -31,8 +31,8 @@ class _SnapshotSummary(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     short_summary: str = ""
-    memory_facts: list[dict[str, Any]] = Field(default_factory=list)
-    open_threads: list[dict[str, Any]] = Field(default_factory=list)
+    memory_facts: list[Any] = Field(default_factory=list)
+    open_threads: list[Any] = Field(default_factory=list)
 
 
 class _RecentTurn(BaseModel):

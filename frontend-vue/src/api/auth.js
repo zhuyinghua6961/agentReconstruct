@@ -1,6 +1,6 @@
 import { getJson, postJson, putJson } from './http';
 
-const API_PREFIX = '/api/v1/auth';
+const API_PREFIX = '/api/auth';
 
 export async function loginAuth(username, password) {
   return await postJson(

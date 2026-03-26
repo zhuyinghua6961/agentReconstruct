@@ -271,7 +271,7 @@ function encodeDoiPath(doi) {
 function buildPdfUrl(doi, page = null) {
   const token = getAuthToken()
   const encodedDoi = encodeDoiPath(doi)
-  let url = `/api/v1/view_pdf/${encodedDoi}`
+  let url = `/api/view_pdf/${encodedDoi}`
   if (token) {
     url += `?token=${encodeURIComponent(token)}`
   }

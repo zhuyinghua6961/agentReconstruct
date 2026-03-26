@@ -10,6 +10,13 @@ def _paths(path: str, *, include_v1: bool = True) -> tuple[str, ...]:
     return tuple(paths)
 
 
+def _mode_paths(suffix: str, *, include_v1: bool = True) -> tuple[str, ...]:
+    paths = [f"/api/{mode}/{suffix}" for mode in ("fast", "thinking", "patent")]
+    if include_v1:
+        paths.extend(f"/api/v1/{mode}/{suffix}" for mode in ("fast", "thinking", "patent"))
+    return tuple(paths)
+
+
 _PUBLIC_ROUTE_GROUPS = (
     _paths("/api/auth/login"),
     _paths("/api/auth/register"),
@@ -57,10 +64,8 @@ _PUBLIC_ROUTE_GROUPS = (
 PUBLIC_ROUTE_PATTERNS = tuple(path for group in _PUBLIC_ROUTE_GROUPS for path in group)
 
 _QA_ROUTE_GROUPS = (
-    _paths("/api/ask"),
-    _paths("/api/ask_stream"),
-    _paths("/api/{mode}/ask"),
-    _paths("/api/{mode}/ask_stream"),
+    _mode_paths("ask"),
+    _mode_paths("ask_stream"),
 )
 
 QA_ROUTE_PATTERNS = tuple(path for group in _QA_ROUTE_GROUPS for path in group)

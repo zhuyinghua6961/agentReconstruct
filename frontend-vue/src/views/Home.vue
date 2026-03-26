@@ -1381,7 +1381,7 @@ function downloadUploadedFile(file) {
     return
   }
   const token = localStorage.getItem('token') || ''
-  let url = `/api/v1/conversations/${conversationId}/files/${file.file_id}/download`
+  let url = `/api/conversations/${conversationId}/files/${file.file_id}/download`
   if (token) {
     url += `?token=${encodeURIComponent(token)}`
   }

@@ -312,10 +312,12 @@ def test_internal_context_snapshot_generates_minimal_summary(monkeypatch):
     payload = response.json()
     assert payload["summary"] == {
         "short_summary": (
-            "user: Summarize the last finding. "
-            "assistant: The last finding is that the catalyst stayed stable for 48 hours."
+            "主题：Summarize the last finding.；最新结论："
+            "The last finding is that the catalyst stayed stable for 48 hours."
         ),
-        "memory_facts": [],
+        "memory_facts": [
+            "The last finding is that the catalyst stayed stable for 48 hours.",
+        ],
         "open_threads": [],
     }
 

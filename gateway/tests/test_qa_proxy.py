@@ -219,13 +219,15 @@ def test_mode_ask_routes_mixed_question_to_fast_backend():
     assert fake_persistence.assistant_calls == []
     assert response.headers["x-gateway-backend"] == "fast"
 
-def test_v1_ask_stream_alias_routes_to_requested_backend():
+def test_v1_ask_stream_alias_is_removed():
+    called = {"upstream": False}
+
     def handler(request: httpx.Request) -> httpx.Response:
-        assert str(request.url).endswith("/api/thinking/ask_stream")
+        called["upstream"] = True
         return httpx.Response(
             200,
             content=(
-                b'data: {"type":"metadata","query_mode":"fast"}\n\n'
+                b'data: {"type":"metadata","query_mode":"thinking"}\n\n'
                 b'data: {"type":"content","content":"hello"}\n\n'
                 b'data: {"type":"done","final_answer":"hello"}\n\n'
             ),
@@ -241,9 +243,9 @@ def test_v1_ask_stream_alias_routes_to_requested_backend():
         ) as response:
             body = b"".join(response.iter_bytes())
 
-    assert response.status_code == 200
-    assert b'"type":"content"' in body
-    assert response.headers["x-gateway-backend"] == "thinking"
+    assert response.status_code == 404
+    assert body == b'{"detail":"Not Found"}'
+    assert called["upstream"] is False
 
 
 def test_mode_ask_stream_routes_file_question_to_fast_backend():
@@ -681,50 +683,43 @@ def test_mode_ask_with_public_http_provider_forwards_auth_and_trace():
     assert captured["body"]["route"] == "tabular_qa"
 
 
-def test_v1_ask_alias_accepts_legacy_mode_field_routes_backend():
-    captured = {}
+def test_v1_ask_alias_is_removed():
+    called = {"upstream": False}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        captured["url"] = str(request.url)
-        captured["body"] = json.loads(request.content.decode("utf-8"))
+        called["upstream"] = True
         return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
 
     with _TransportGuard(handler):
         client = TestClient(app)
         response = client.post(
             "/api/v1/ask",
-            json={"question": "plain qa", "mode": "thinking"},
+            json={"question": "plain qa", "requested_mode": "thinking"},
         )
 
-    assert response.status_code == 200
-    assert captured["url"].endswith("/api/thinking/ask")
-    assert captured["body"]["requested_mode"] == "thinking"
-    assert response.headers["x-gateway-backend"] == "thinking"
+    assert response.status_code == 404
+    assert called["upstream"] is False
 
 
-def test_v1_ask_alias_accepts_legacy_mode_field_sets_actual_mode():
-    captured = {}
+def test_ask_alias_is_removed():
+    called = {"upstream": False}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        captured["url"] = str(request.url)
-        captured["body"] = json.loads(request.content.decode("utf-8"))
+        called["upstream"] = True
         return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
 
     with _TransportGuard(handler):
         client = TestClient(app)
         response = client.post(
-            "/api/v1/ask",
+            "/api/ask",
             json={
                 "question": "plain qa",
-                "mode": "thinking",
+                "requested_mode": "thinking",
             },
         )
 
-    assert response.status_code == 200
-    assert captured["url"].endswith("/api/thinking/ask")
-    assert captured["body"]["requested_mode"] == "thinking"
-    assert captured["body"]["actual_mode"] == "thinking"
-    assert response.headers["x-gateway-backend"] == "thinking"
+    assert response.status_code == 404
+    assert called["upstream"] is False
 
 
 def test_mode_ask_returns_503_when_conversation_file_provider_fails():

@@ -15,19 +15,6 @@ router = APIRouter(tags=["qa"])
 _ALLOWED_MODES = {"fast", "thinking", "patent"}
 
 
-def _legacy_mode(payload: AskRequest) -> str:
-    requested_mode = str(getattr(payload, "requested_mode", "fast") or "fast").strip().lower()
-    body_mode = str(getattr(payload, "mode", "") or "").strip().lower()
-
-    if requested_mode in _ALLOWED_MODES and requested_mode != "fast":
-        return requested_mode
-    if body_mode in _ALLOWED_MODES:
-        return body_mode
-    if requested_mode in _ALLOWED_MODES:
-        return requested_mode
-    return "fast"
-
-
 async def _resolve(request: Request, payload: AskRequest, mode: str):
     resolver = request.app.state.file_context_resolver
     decision_service = request.app.state.route_decision_service
@@ -233,29 +220,37 @@ async def _proxy_ask_stream(request: Request, payload: AskRequest, mode: str):
     )
 
 
-@router.post("/api/ask")
-@router.post("/api/v1/ask")
-async def ask_legacy(payload: AskRequest, request: Request):
-    return await _proxy_ask(request, payload, _legacy_mode(payload))
+@router.post("/api/fast/ask")
+@router.post("/api/v1/fast/ask")
+async def ask_fast(payload: AskRequest, request: Request):
+    return await _proxy_ask(request, payload, "fast")
 
 
-@router.post("/api/ask_stream")
-@router.post("/api/v1/ask_stream")
-async def ask_stream_legacy(payload: AskRequest, request: Request):
-    return await _proxy_ask_stream(request, payload, _legacy_mode(payload))
+@router.post("/api/thinking/ask")
+@router.post("/api/v1/thinking/ask")
+async def ask_thinking(payload: AskRequest, request: Request):
+    return await _proxy_ask(request, payload, "thinking")
 
 
-@router.post("/api/{mode}/ask")
-@router.post("/api/v1/{mode}/ask")
-async def ask_mode(mode: str, payload: AskRequest, request: Request):
-    if mode not in _ALLOWED_MODES:
-        return JSONResponse(status_code=400, content={"success": False, "error": "mode_not_supported"})
-    return await _proxy_ask(request, payload, mode)
+@router.post("/api/patent/ask")
+@router.post("/api/v1/patent/ask")
+async def ask_patent(payload: AskRequest, request: Request):
+    return await _proxy_ask(request, payload, "patent")
 
 
-@router.post("/api/{mode}/ask_stream")
-@router.post("/api/v1/{mode}/ask_stream")
-async def ask_stream_mode(mode: str, payload: AskRequest, request: Request):
-    if mode not in _ALLOWED_MODES:
-        return JSONResponse(status_code=400, content={"success": False, "error": "mode_not_supported"})
-    return await _proxy_ask_stream(request, payload, mode)
+@router.post("/api/fast/ask_stream")
+@router.post("/api/v1/fast/ask_stream")
+async def ask_stream_fast(payload: AskRequest, request: Request):
+    return await _proxy_ask_stream(request, payload, "fast")
+
+
+@router.post("/api/thinking/ask_stream")
+@router.post("/api/v1/thinking/ask_stream")
+async def ask_stream_thinking(payload: AskRequest, request: Request):
+    return await _proxy_ask_stream(request, payload, "thinking")
+
+
+@router.post("/api/patent/ask_stream")
+@router.post("/api/v1/patent/ask_stream")
+async def ask_stream_patent(payload: AskRequest, request: Request):
+    return await _proxy_ask_stream(request, payload, "patent")

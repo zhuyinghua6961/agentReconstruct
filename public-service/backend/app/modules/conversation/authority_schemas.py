@@ -34,8 +34,8 @@ class AuthorityUserWriteRequest(AuthorityRequestBase):
 
 class AuthorityConversationSummary(BaseModel):
     short_summary: str = Field(default="", description="Minimal authority-generated summary from final user/assistant turns only.")
-    memory_facts: list[dict[str, Any]] = Field(default_factory=list, description="Stable placeholder for future authority memory extraction.")
-    open_threads: list[dict[str, Any]] = Field(default_factory=list, description="Stable placeholder for unresolved conversation threads.")
+    memory_facts: list[str] = Field(default_factory=list, description="Stable facts distilled from recent assistant turns for downstream context reuse.")
+    open_threads: list[str] = Field(default_factory=list, description="Latest unresolved user threads that remain open for the next turn.")
 
 
 class AuthorityRecentTurn(BaseModel):

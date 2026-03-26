@@ -1,6 +1,6 @@
 import { getJson, postJson, putJson } from './http';
 
-const API_PREFIX = '/api/v1/quota';
+const API_PREFIX = '/api/quota';
 
 export async function getMyQuotas() {
   return await getJson(`${API_PREFIX}/my`);

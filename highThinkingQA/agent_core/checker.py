@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 _CHECKER_REQUEST_TIMEOUT_SECONDS = 60.0
 _CHECKER_MAX_PARALLEL_SLICES = 4
+_CHECKER_MAX_CHUNKS_PER_SLICE = 8
+_CHECKER_MAX_PASSAGE_CHARS_PER_SLICE = 6000
+_CHECKER_MAX_CHUNK_TEXT_CHARS = 900
 
 
 class CheckerTimeoutError(RuntimeError):
@@ -200,6 +203,63 @@ def _extract_citation_slices(answer: str) -> list[dict[str, object]]:
     return slices
 
 
+def _truncate_chunk_text(text: str) -> str:
+    normalized = str(text or "").strip()
+    if len(normalized) <= _CHECKER_MAX_CHUNK_TEXT_CHARS:
+        return normalized
+    suffix = " ...[truncated for checker]"
+    budget = max(1, _CHECKER_MAX_CHUNK_TEXT_CHARS - len(suffix))
+    return f"{normalized[:budget].rstrip()}{suffix}"
+
+
+def _limit_checker_chunks(filtered_chunks: list[list[RetrievedChunk]]) -> tuple[list[list[RetrievedChunk]], dict[str, int]]:
+    original_chunk_count = sum(len(chunks) for chunks in filtered_chunks)
+    original_text_chars = sum(len(str(getattr(chunk, "text", "") or "")) for chunks in filtered_chunks for chunk in chunks)
+
+    limited: list[list[RetrievedChunk]] = []
+    kept_chunk_count = 0
+    kept_text_chars = 0
+
+    for chunks in filtered_chunks:
+        if kept_chunk_count >= _CHECKER_MAX_CHUNKS_PER_SLICE or kept_text_chars >= _CHECKER_MAX_PASSAGE_CHARS_PER_SLICE:
+            break
+        limited_group: list[RetrievedChunk] = []
+        for chunk in chunks:
+            if kept_chunk_count >= _CHECKER_MAX_CHUNKS_PER_SLICE or kept_text_chars >= _CHECKER_MAX_PASSAGE_CHARS_PER_SLICE:
+                break
+            text_value = _truncate_chunk_text(getattr(chunk, "text", "") or "")
+            if not text_value:
+                continue
+            remaining_chars = _CHECKER_MAX_PASSAGE_CHARS_PER_SLICE - kept_text_chars
+            if remaining_chars <= 0:
+                break
+            if len(text_value) > remaining_chars:
+                if kept_chunk_count > 0:
+                    break
+                text_value = _truncate_chunk_text(text_value[:remaining_chars])
+            limited_group.append(
+                RetrievedChunk(
+                    text=text_value,
+                    doi=str(getattr(chunk, "doi", "") or ""),
+                    title=str(getattr(chunk, "title", "") or ""),
+                    section_name=str(getattr(chunk, "section_name", "") or ""),
+                    chunk_index=int(getattr(chunk, "chunk_index", 0) or 0),
+                    distance=float(getattr(chunk, "distance", 0.0) or 0.0),
+                )
+            )
+            kept_chunk_count += 1
+            kept_text_chars += len(text_value)
+        if limited_group:
+            limited.append(limited_group)
+
+    return limited, {
+        "original_chunk_count": original_chunk_count,
+        "kept_chunk_count": kept_chunk_count,
+        "original_text_chars": original_text_chars,
+        "kept_text_chars": kept_text_chars,
+    }
+
+
 def _programmatic_precheck(answer: str, evidence_index: dict[str, dict[str, object]]) -> list[dict]:
     issues: list[dict] = []
     seen: set[tuple[str, str]] = set()
@@ -314,7 +374,8 @@ def check_answer(
             all_retrieved_chunks,
             list(item["references"]),
         )
-        filtered_chunk_count = sum(len(chunks) for chunks in filtered_chunks)
+        limited_chunks, limit_meta = _limit_checker_chunks(filtered_chunks)
+        filtered_chunk_count = int(limit_meta["kept_chunk_count"])
         total_doi_scoped_chunks += doi_scoped_chunks
         total_section_scoped_chunks += section_scoped_chunks
         total_filtered_chunks += filtered_chunk_count
@@ -322,18 +383,23 @@ def check_answer(
             {
                 "answer_block": item["answer_block"],
                 "references": list(item["references"]),
-                "filtered_chunks": filtered_chunks,
+                "filtered_chunks": limited_chunks,
+                "limit_meta": limit_meta,
             }
         )
 
+    original_text_chars = sum(len(str(getattr(chunk, "text", "") or "")) for chunks in all_retrieved_chunks for chunk in chunks)
+    limited_text_chars = sum(int((job.get("limit_meta") or {}).get("kept_text_chars") or 0) for job in slice_jobs)
     logger.info(
-        "Checker parallel slices=%s cited_refs=%s original_chunks=%s doi_scoped_chunks=%s section_scoped_chunks=%s filtered_chunks=%s",
+        "Checker parallel slices=%s cited_refs=%s original_chunks=%s doi_scoped_chunks=%s section_scoped_chunks=%s filtered_chunks=%s original_text_chars=%s limited_text_chars=%s",
         len(slice_jobs),
         len(cited_references),
         original_chunk_count,
         total_doi_scoped_chunks,
         total_section_scoped_chunks,
         total_filtered_chunks,
+        original_text_chars,
+        limited_text_chars,
     )
 
     llm_started_at = time.time()
@@ -352,7 +418,7 @@ def check_answer(
                 )
                 for job in slice_jobs
             ]
-            for future in concurrent.futures.as_completed(futures):
+            for future in futures:
                 try:
                     passed, issues, meta = future.result()
                 except Exception as exc:

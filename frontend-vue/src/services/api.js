@@ -10,7 +10,7 @@ function resolveBackendBase() {
 }
 
 const API_BASE = resolveBackendBase();
-const V1 = '/api/v1';
+const V1 = '/api';
 
 function readStoredToken() {
   return localStorage.getItem('token')
@@ -478,14 +478,15 @@ export const api = {
   },
 
   async *askStream(question, chatHistory = [], conversationId = null, pdfContext = null, signal = undefined, mode = 'thinking') {
+    const normalizedMode = String(mode || 'thinking').trim().toLowerCase();
     const body = {
       question,
       chat_history: chatHistory.slice(-10),
+      requested_mode: ['fast', 'thinking', 'patent'].includes(normalizedMode) ? normalizedMode : 'fast',
     };
     if (conversationId) body.conversation_id = conversationId;
     if (pdfContext) body.pdf_context = pdfContext;
 
-    const normalizedMode = String(mode || 'thinking').trim().toLowerCase();
     const askPath = ['fast', 'thinking', 'patent'].includes(normalizedMode)
       ? `${V1}/${normalizedMode}/ask_stream`
       : `${V1}/ask_stream`;

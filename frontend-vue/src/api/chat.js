@@ -1,7 +1,7 @@
 import { buildUrl, getJson, postForm, postJson } from './http';
 import { streamSseJson } from '../utils/sse';
 
-const API_PREFIX = '/api/v1';
+const API_PREFIX = '/api';
 
 function normalizeChatHistory(chatHistory = []) {
   return (Array.isArray(chatHistory) ? chatHistory : [])

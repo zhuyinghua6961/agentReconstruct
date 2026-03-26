@@ -10,6 +10,7 @@ from app.core.config import get_settings
 from app.core.errors import DatabaseUnavailableError
 from app.core.timezone import BEIJING_TIMEZONE, ensure_beijing_datetime, now_beijing, now_beijing_iso
 from app.integrations.redis import RedisService, build_redis_bindings
+from app.modules.conversation.authority_summary import build_authority_summary
 from app.modules.conversation.cache import (
     cache_conversation_detail,
     cache_conversation_list,
@@ -1100,18 +1101,7 @@ class ConversationService:
         return recent_turns
 
     def _build_authority_summary(self, *, recent_turns: list[dict[str, Any]]) -> dict[str, Any]:
-        short_summary_parts: list[str] = []
-        for item in recent_turns[-4:]:
-            role = str(item.get("role") or "").strip().lower()
-            content = " ".join(str(item.get("content") or "").split())
-            if role not in {"user", "assistant"} or not content:
-                continue
-            short_summary_parts.append(f"{role}: {content}")
-        return {
-            "short_summary": " ".join(short_summary_parts),
-            "memory_facts": [],
-            "open_threads": [],
-        }
+        return build_authority_summary(recent_turns=recent_turns)
 
     def _build_authority_conversation_state(self, *, messages: list[dict[str, Any]]) -> dict[str, Any]:
         last_turn_route = ""

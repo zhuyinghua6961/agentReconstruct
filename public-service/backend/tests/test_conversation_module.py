@@ -902,9 +902,9 @@ def test_authority_user_write_is_immediately_visible_to_context_snapshot():
         assert snapshot["data"]["user_id"] == 7
         assert snapshot["data"]["snapshot_version"] >= 2
         assert snapshot["data"]["summary"] == {
-            "short_summary": "user: hello authority",
+            "short_summary": "主题：hello authority",
             "memory_facts": [],
-            "open_threads": [],
+            "open_threads": ["hello authority"],
         }
         assert snapshot["data"]["recent_turns"] == [
             {
@@ -1186,13 +1186,86 @@ def test_authority_context_snapshot_builds_minimal_summary_from_recent_turns():
         assert snapshot["success"] is True
         assert snapshot["data"]["summary"] == {
             "short_summary": (
-                "user: Summarize the conversation. "
-                "assistant: The conversation is about catalyst stability over 48 hours."
+                "主题：Summarize the conversation.；最新结论："
+                "The conversation is about catalyst stability over 48 hours."
             ),
-            "memory_facts": [],
+            "memory_facts": [
+                "The conversation is about catalyst stability over 48 hours.",
+            ],
             "open_threads": [],
         }
 
+
+
+def test_authority_context_snapshot_tracks_latest_open_thread_and_recent_facts():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Authority Open Thread")
+        conversation_id = int(created["data"]["conversation_id"])
+
+        user_added = service.add_authority_user_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-thread-user-1",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key=f"{conversation_id}:trace-thread-user-1:user",
+            content="请总结厚电极在高倍率下的问题。",
+            context_hints={},
+        )
+        assert user_added["success"] is True
+
+        assistant_added = service.add_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            role="assistant",
+            content="厚电极在高倍率下更容易出现液相浓差极化。",
+            metadata={"trace_id": "trace-thread-assistant", "route": "kb_qa"},
+        )
+        assert assistant_added["success"] is True
+
+        followup_added = service.add_authority_user_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-thread-user-2",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key=f"{conversation_id}:trace-thread-user-2:user",
+            content="那对倍率性能的直接影响是什么？",
+            context_hints={},
+        )
+        assert followup_added["success"] is True
+
+        snapshot = service.get_conversation_context_snapshot(user_id=7, conversation_id=conversation_id)
+
+        assert snapshot["success"] is True
+        assert snapshot["data"]["summary"] == {
+            "short_summary": (
+                "主题：请总结厚电极在高倍率下的问题。；当前问题：那对倍率性能的直接影响是什么？"
+            ),
+            "memory_facts": ["厚电极在高倍率下更容易出现液相浓差极化。"],
+            "open_threads": ["那对倍率性能的直接影响是什么？"],
+        }
 
 
 def test_authority_context_snapshot_rejects_wrong_owner():

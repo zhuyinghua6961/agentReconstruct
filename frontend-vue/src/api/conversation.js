@@ -1,6 +1,6 @@
 import { buildUrl, deleteJson, getJson, postJson } from './http';
 
-const API_PREFIX = '/api/v1/conversations';
+const API_PREFIX = '/api/conversations';
 
 export async function createConversation(title = '新会话') {
   return await postJson(`${API_PREFIX}`, { title });

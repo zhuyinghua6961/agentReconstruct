@@ -1,6 +1,6 @@
 import { buildUrl, getJson, postJson } from './http';
 
-const API_PREFIX = '/api/v1';
+const API_PREFIX = '/api';
 
 function readPdfAuthToken() {
   if (typeof window === 'undefined') {
