@@ -1,0 +1,26 @@
+[project]
+name = "patent"
+version = "0.1.0"
+description = "Phase 1 scaffold for the patent FastAPI service"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.115,<1.0",
+  "gunicorn>=23,<24",
+  "httpx>=0.28,<1.0",
+  "itsdangerous>=2.2,<3.0",
+  "pydantic>=2.9,<3.0",
+  "pytest>=8,<9",
+  "redis>=5,<6",
+  "uvicorn>=0.34,<1.0",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["config"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["server*", "server_fastapi*"]
