@@ -226,3 +226,38 @@ def test_prepare_execution_maps_public_service_short_summary_for_rewrite(monkeyp
 
     assert captured["summary"]["short_summary"] == "最近在讨论厚电极的液相浓差极化。"
     assert captured["summary"]["recent_focus"] == "最近在讨论厚电极的液相浓差极化。"
+
+from agent_core.answer_summary import (
+    apply_answer_summary_experiment as apply_thinking_answer_summary_experiment,
+    build_summary_instruction as build_thinking_summary_instruction,
+)
+from agent_core.synthesizer import _build_synthesis_prompt
+
+
+def test_highthinking_answer_summary_experiment_appends_summary_block_when_enabled():
+    answer, meta = apply_thinking_answer_summary_experiment(
+        "## 分析\n\n厚电极在高倍率下首先暴露的是液相传输受限问题，因为离子需要跨越更长的孔道并维持更陡的浓度梯度 [10.1/demo, Results]。\n\n当孔隙率、润湿性和曲折度没有同步优化时，电解液中的盐浓度会在极片厚度方向形成明显梯度，导致浓差极化快速累积 [10.1/demo, Discussion]。\n\n这类极化会进一步压缩可用反应区域，并使末端电压更早触底，因此表现为容量释放不足与倍率性能下滑。",
+        enabled=True,
+    )
+
+    assert "\n\n## 总结\n\n- " in answer
+    assert meta["generated"] is True
+    assert meta["format"] == "bullet_fallback"
+
+
+def test_highthinking_synthesis_prompt_includes_summary_instruction_when_enabled(monkeypatch):
+    monkeypatch.setattr(
+        "agent_core.synthesizer.load_prompt_template",
+        lambda _name: "Question: {question}\nDirect: {direct_answer}\nPassages: {retrieved_passages}",
+    )
+
+    prompt = _build_synthesis_prompt(
+        question="为什么厚电极在高倍率下极化严重？",
+        direct_answer="因为传质受限。",
+        all_retrieved_chunks=[],
+        sub_questions=[],
+        summary_enabled=True,
+    )
+
+    assert "## 总结" in prompt
+    assert build_thinking_summary_instruction(enabled=True).strip() in prompt

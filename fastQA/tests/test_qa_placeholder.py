@@ -646,3 +646,25 @@ def test_fast_mode_sync_ask_ignores_pending_overlay_redis_failure(monkeypatch):
             "message_id": "msg-1",
         }
     ]
+
+from app.modules.generation_pipeline.answer_summary import apply_answer_summary_experiment as apply_fast_answer_summary_experiment
+
+
+def test_fast_answer_summary_experiment_appends_summary_block_when_enabled():
+    answer, meta = apply_fast_answer_summary_experiment(
+        "## 主结论\n\n厚电极在高电流密度下容易形成更大的液相锂盐浓度梯度，因此极化上升更快 (doi=10.1/demo)。\n\n电解液传输路径变长、孔隙传质受限以及有效反应面积下降，会共同放大浓差极化并拖低倍率性能 (doi=10.1/demo)。\n\n如果继续提高面载量而不同步优化孔结构和润湿条件，极化会进一步累积，最终表现为容量利用率下降与末端电压提前触底。",
+        enabled=True,
+    )
+
+    assert answer.startswith("## 主结论")
+    assert "\n\n## 总结\n\n- " in answer
+    assert meta["generated"] is True
+    assert meta["format"] == "bullet_fallback"
+
+
+def test_fast_answer_summary_experiment_skips_short_answer():
+    answer, meta = apply_fast_answer_summary_experiment("结论很短。", enabled=True)
+
+    assert answer == "结论很短。"
+    assert meta["generated"] is False
+    assert meta["skipped_reason"] == "short_answer"

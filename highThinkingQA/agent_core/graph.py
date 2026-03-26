@@ -22,6 +22,7 @@ from typing import Optional, Callable, Any
 import config
 from agent_core.direct_answerer import direct_answer
 from agent_core.decomposer import decompose_question
+from agent_core.answer_summary import apply_answer_summary_experiment, summary_experiment_enabled
 from agent_core.llm_client import get_async_llm_client, get_llm_client
 from agent_core.sub_answerer import iter_pre_answers_async, pre_answer_all
 from agent_core.synthesizer import synthesize_answer, synthesize_answer_stream
@@ -371,6 +372,7 @@ def run_agent(
     resolved_retrieval_top_k = int(retrieval_top_k) if retrieval_top_k is not None else int(config.RETRIEVAL_TOP_K)
     resolved_max_check_loops = int(max_check_loops) if max_check_loops is not None else int(config.MAX_CHECK_LOOPS)
     resolved_retrieval_pipeline_batch_size = int(config.RETRIEVAL_PIPELINE_BATCH_SIZE)
+    resolved_summary_experiment = summary_experiment_enabled()
     if resolved_num_sub_questions <= 0:
         resolved_num_sub_questions = 1
     if resolved_retrieval_top_k <= 0:
@@ -587,6 +589,7 @@ def run_agent(
                 sub_questions=state.sub_questions,
                 client=pipeline_llm_client,
                 enable_thinking=resolved_stream_synthesis_enable_thinking,
+                summary_enabled=resolved_summary_experiment,
             ):
                 _raise_if_cancelled()
                 if chunk:
@@ -611,6 +614,7 @@ def run_agent(
                 sub_questions=state.sub_questions,
                 client=pipeline_llm_client,
                 enable_thinking=resolved_enable_thinking,
+                summary_enabled=resolved_summary_experiment,
             )
             logger.info(
                 "%sstep4 synthesis blocking done total_chars=%s",
@@ -791,6 +795,20 @@ def run_agent(
                 )
 
         state.final_answer = current_answer
+        state.final_answer, summary_meta = apply_answer_summary_experiment(
+            state.final_answer,
+            enabled=resolved_summary_experiment,
+        )
+        logger.info(
+            "%sanswer summary experiment enabled=%s generated=%s format=%s length=%s has_citation=%s skipped_reason=%s",
+            _trace_prefix(trace_id),
+            summary_meta.get("enabled"),
+            summary_meta.get("generated"),
+            summary_meta.get("format"),
+            summary_meta.get("length"),
+            summary_meta.get("has_citation"),
+            summary_meta.get("skipped_reason"),
+        )
 
         state.timings["step5_check_total"] = step5_check_total
         state.timings["step5_revise_total"] = step5_revise_total

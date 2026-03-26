@@ -397,6 +397,15 @@ storage 这组已经开始收口，但还没达到“全系统单一权威出口
 - 分别确认：草稿完成、检查开始、检查结束、超时退出、最终 done 的时间点
 - 先定位到底是 checker 慢、证据对齐慢，还是超时/中断策略未按预期生效，再决定优化动作
 
+### 当前补充结论（2026-03-26）
+- 已完成只读诊断，结论见 [highThinkingQA 慢点诊断与优化优先级](/home/cqy/worktrees/highThinking/docs/audit/2026-03-26-highthinkingqa-latency-diagnosis.md)
+- 当前主慢点不是检索，而是 `direct_answer`
+- 当前最大系统性风险不是“用户看到的 60s 超时”，而是 `checker` 超时后后台请求仍继续运行数分钟
+
+
+
+
+
 ---
 
 ## P3-5 Redis key 简化，不再套过多层级
@@ -524,6 +533,7 @@ storage 这组已经开始收口，但还没达到“全系统单一权威出口
 ### 相关文档
 - [P4-1 详细 spec](/home/cqy/worktrees/highThinking/docs/audit/2026-03-25-p4-answer-summary-spec.md)
 - [P4-1 implementation plan](/home/cqy/worktrees/highThinking/docs/superpowers/plans/2026-03-25-answer-summary-rollout.md)
+- [P4-1 当前输出契约审计](/home/cqy/worktrees/highThinking/docs/audit/2026-03-25-answer-summary-current-contract.md)
 
 ## P4-2 探索“点击引用直接查看参考段落/句子”
 

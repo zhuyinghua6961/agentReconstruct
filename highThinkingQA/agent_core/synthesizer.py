@@ -10,6 +10,7 @@ from typing import Optional, Generator
 
 from openai import OpenAI
 
+from agent_core.answer_summary import build_summary_instruction
 from agent_core.llm_client import (
     chat_completion,
     chat_completion_stream,
@@ -45,12 +46,10 @@ def format_retrieved_passages(
             parts.append(f"\n=== Passages for Sub-question {i+1}: {sub_questions[i]} ===\n")
 
         for chunk in chunks:
-            # 去重：避免同一段落被重复引用
             text_hash = hash(chunk.text[:200])
             if text_hash in seen_texts:
                 continue
             seen_texts.add(text_hash)
-
             parts.append(chunk.format_for_prompt())
 
     return "\n\n".join(parts)
@@ -61,17 +60,23 @@ def _build_synthesis_prompt(
     direct_answer: str,
     all_retrieved_chunks: list[list[RetrievedChunk]],
     sub_questions: list[str] = None,
+    *,
+    summary_enabled: bool | None = None,
 ) -> str:
     """构建综合 prompt（普通和流式共用）"""
     retrieved_passages = format_retrieved_passages(
         all_retrieved_chunks, sub_questions
     )
     template = load_prompt_template("synthesize.txt")
-    return template.format(
+    prompt = template.format(
         question=question,
         direct_answer=direct_answer,
         retrieved_passages=retrieved_passages,
     )
+    summary_instruction = build_summary_instruction(enabled=summary_enabled)
+    if summary_instruction:
+        prompt = f"{prompt}{summary_instruction}"
+    return prompt
 
 
 def synthesize_answer(
@@ -81,25 +86,19 @@ def synthesize_answer(
     sub_questions: list[str] = None,
     client: Optional[OpenAI] = None,
     enable_thinking: Optional[bool] = None,
+    summary_enabled: bool | None = None,
 ) -> str:
     """
     综合生成最终答案（非流式）。
-
-    Args:
-        question: 用户原始问题
-        direct_answer: 路径 A 的 LLM 直接回答
-        all_retrieved_chunks: 路径 B 每个子问题检索到的文段
-        sub_questions: 子问题列表
-        client: OpenAI 客户端
-
-    Returns:
-        带引用溯源的最终答案
     """
     prompt = _build_synthesis_prompt(
-        question, direct_answer, all_retrieved_chunks, sub_questions
+        question,
+        direct_answer,
+        all_retrieved_chunks,
+        sub_questions,
+        summary_enabled=summary_enabled,
     )
 
-    # 综合回答需要更大的输出空间
     answer = chat_completion(
         prompt=prompt,
         client=client,
@@ -119,23 +118,18 @@ def synthesize_answer_stream(
     sub_questions: list[str] = None,
     client: Optional[OpenAI] = None,
     enable_thinking: Optional[bool] = None,
+    summary_enabled: bool | None = None,
 ) -> Generator[str, None, None]:
     """
     流式综合生成最终答案。
     逐块 yield 回答文本，思考过程不输出。
-
-    Args:
-        question: 用户原始问题
-        direct_answer: 路径 A 的 LLM 直接回答
-        all_retrieved_chunks: 路径 B 每个子问题检索到的文段
-        sub_questions: 子问题列表
-        client: OpenAI 客户端
-
-    Yields:
-        回答文本片段
     """
     prompt = _build_synthesis_prompt(
-        question, direct_answer, all_retrieved_chunks, sub_questions
+        question,
+        direct_answer,
+        all_retrieved_chunks,
+        sub_questions,
+        summary_enabled=summary_enabled,
     )
 
     logger.info("开始流式生成综合回答...")

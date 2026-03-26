@@ -5,6 +5,11 @@ import re
 from typing import Any, Callable, Dict, List, Set, Tuple
 
 from app.modules.generation_pipeline.feature_flags import env_bool, env_int
+from app.modules.generation_pipeline.answer_summary import (
+    apply_answer_summary_experiment,
+    build_summary_instruction,
+    summary_experiment_enabled,
+)
 from app.modules.generation_pipeline.reference_alignment import (
     format_pdf_chunks_evidence as format_pdf_chunks_evidence_impl,
 )
@@ -456,6 +461,9 @@ def iter_stage4_synthesis_with_pdf_chunks(
             len(top5_reference_list),
         )
 
+        summary_enabled = summary_experiment_enabled()
+        summary_instruction = build_summary_instruction(enabled=summary_enabled)
+
         system_prompt = f"""你是一位严谨的材料科学文献分析专家，擅长将专业知识与文献证据有机结合。
 
 ## 任务要求：
@@ -471,6 +479,8 @@ def iter_stage4_synthesis_with_pdf_chunks(
 - 错误：在答案最后统一列出所有DOI
 - 错误：一句话引用多个DOI
 """
+        if summary_instruction:
+            system_prompt = f"{system_prompt}{summary_instruction}"
 
         stream = client.chat.completions.create(
             model=model,
@@ -583,6 +593,21 @@ def iter_stage4_synthesis_with_pdf_chunks(
                 )
             except Exception as exc:
                 logger.warning("Stage4 DOI fallback alignment failed: %s", exc)
+
+        final_answer, summary_meta = apply_answer_summary_experiment(
+            final_answer,
+            enabled=summary_enabled,
+        )
+        cited_dois, cited_dois_set = _refresh_cited_dois(final_answer)
+        logger.info(
+            "stage4 answer summary experiment enabled=%s generated=%s format=%s length=%s has_citation=%s skipped_reason=%s",
+            summary_meta.get("enabled"),
+            summary_meta.get("generated"),
+            summary_meta.get("format"),
+            summary_meta.get("length"),
+            summary_meta.get("has_citation"),
+            summary_meta.get("skipped_reason"),
+        )
 
         try:
             log_top5_coverage_fn(cited_dois_set=cited_dois_set, top5_with_scores=top5_with_scores, logger=logger)
