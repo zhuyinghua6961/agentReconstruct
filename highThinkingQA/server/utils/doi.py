@@ -8,6 +8,17 @@ from pathlib import Path
 from urllib.parse import unquote
 
 
+_DOI_START_WITHOUT_SEPARATOR_RE = re.compile(r"(10\.\d{1,9})(?=[A-Za-z])", re.IGNORECASE)
+_DOI_EXTRACT_RE = re.compile(
+    r"10\.\d{1,9}/[-._;()/:A-Z0-9]+?(?=(?:10\.\d{1,9}/)|$)",
+    re.IGNORECASE,
+)
+
+
+def _repair_missing_separator(text: str) -> str:
+    return _DOI_START_WITHOUT_SEPARATOR_RE.sub(r"\1/", str(text or ""))
+
+
 def normalize_doi(value: str) -> str:
     text = str(value or "").strip()
     filename_like_source = False
@@ -16,6 +27,7 @@ def normalize_doi(value: str) -> str:
         previous = text
         text = unquote(text).strip()
     text = text.replace("\\", "/")
+    text = _repair_missing_separator(text)
     text = re.sub(r"^doi:\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"^[(/\\s]+|[)\],;:.\\s]+$", "", text)
     if "papers/" in text:
@@ -37,3 +49,23 @@ def normalize_doi(value: str) -> str:
     if "_" in text and "/" not in text and text.startswith("10.") and not filename_like_source:
         text = text.replace("_", "/", 1)
     return text.strip()
+
+
+def extract_dois(value: str) -> list[str]:
+    text = normalize_doi(value)
+    if not text:
+        return []
+    results: list[str] = []
+    seen: set[str] = set()
+    matches = [match.group(0) for match in _DOI_EXTRACT_RE.finditer(text)]
+    candidates = matches or [text]
+    for candidate in candidates:
+        normalized = normalize_doi(candidate)
+        if not normalized.startswith("10.") or "/" not in normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append(normalized)
+    return results

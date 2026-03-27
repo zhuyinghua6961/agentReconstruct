@@ -18,10 +18,11 @@ from server.schemas.request_models import AskRequest
 from server.services.conversation_context_service import ConversationContext, build_conversation_context, sanitize_conversation_context
 from server.services.mode_profiles import RuntimeProfile, get_runtime_profile
 from server.services.query_rewrite_service import QuestionRewriteResult, rewrite_question
-from server.utils.doi import normalize_doi
+from server.utils.doi import extract_dois, normalize_doi
 
-_DOI_PATTERN = re.compile(r"10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
-_BRACKET_CITATION_PATTERN = re.compile(r"\[(10\.\d{4,9}/[-._;()/:A-Z0-9]+)(?:,\s*[^\]]+)?\]", re.IGNORECASE)
+_DOI_PATTERN = re.compile(r"10\.\d{1,9}[-._;()/:A-Z0-9]+", re.IGNORECASE)
+_BRACKET_CITATION_PATTERN = re.compile(r"\[(10\.\d{1,9}[-._;()/:A-Z0-9]+)(?:,\s*[^\]]+)?\]", re.IGNORECASE)
+_DOI_TAG_PATTERN = re.compile(r"\[DOI:\s*([^\]]+)\]", re.IGNORECASE)
 logger = logging.getLogger(__name__)
 
 
@@ -347,8 +348,7 @@ def _progress_to_step_event(payload: dict[str, Any]) -> dict[str, Any]:
 def _extract_references(text: str) -> list[str]:
     seen: set[str] = set()
     refs: list[str] = []
-    for match in _DOI_PATTERN.findall(str(text or "")):
-        doi = normalize_doi(match.rstrip(".,;)").strip())
+    for doi in extract_dois(str(text or "")):
         if not doi:
             continue
         key = doi.lower()
@@ -363,14 +363,12 @@ def _build_reference_links(references: list[str]) -> list[dict[str, str]]:
     links: list[dict[str, str]] = []
     seen: set[str] = set()
     for raw in references:
-        doi = normalize_doi(raw)
-        if not doi:
-            continue
-        key = doi.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        links.append({"doi": doi, "pdf_url": f"/api/v1/view_pdf/{doi}"})
+        for doi in extract_dois(raw):
+            key = doi.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            links.append({"doi": doi, "pdf_url": f"/api/v1/view_pdf/{doi}"})
     return links
 
 
@@ -464,9 +462,9 @@ def _build_doi_locations(reference_objects: list[dict[str, Any]]) -> dict[str, l
         page_range = _normalize_page_range(item.get("page_range"))
         if page is None and page_range:
             page = page_range[0]
-        if page is None:
-            continue
-        location: dict[str, Any] = {"page": page}
+        location: dict[str, Any] = {}
+        if page is not None:
+            location["page"] = page
         section_name = str(item.get("section_name") or "").strip()
         if section_name:
             location["section"] = section_name
@@ -480,7 +478,10 @@ def _build_doi_locations(reference_objects: list[dict[str, Any]]) -> dict[str, l
         if evidence_text:
             location["source_text"] = evidence_text
             location["source_preview"] = evidence_text
-        confidence = str(item.get("locator_confidence") or ("page" if page else "section" if section_name else "none")).strip()
+        if not location:
+            continue
+        default_confidence = "page" if page else "section" if section_name else "chunk" if "chunk_index" in location else "evidence"
+        confidence = str(item.get("locator_confidence") or default_confidence).strip()
         if confidence:
             location["confidence"] = confidence
         locations.setdefault(doi, []).append(location)
@@ -518,12 +519,13 @@ def _adapt_answer_for_frontend(text: str) -> str:
         return ""
 
     def _replace(match: re.Match[str]) -> str:
-        doi = normalize_doi(str(match.group(1) or "").strip())
-        if not doi:
+        dois = extract_dois(str(match.group(1) or "").strip())
+        if not dois:
             return match.group(0)
-        return f"[DOI: {doi}]"
+        return " ".join(f"[DOI: {doi}]" for doi in dois)
 
-    return _BRACKET_CITATION_PATTERN.sub(_replace, content)
+    adapted = _DOI_TAG_PATTERN.sub(_replace, content)
+    return _BRACKET_CITATION_PATTERN.sub(_replace, adapted)
 
 
 def _safe_stream_adapt_prefix_length(text: str) -> int:

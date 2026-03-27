@@ -9,7 +9,7 @@ from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Set, Tuple
 
 from app.modules.generation_pipeline.feature_flags import env_bool, env_int
-from app.modules.generation_pipeline.doi_validation import build_doi_variants, canonicalize_doi
+from app.modules.generation_pipeline.doi_validation import build_doi_variants, canonicalize_doi, extract_valid_dois
 
 
 ELEMENT_SYNONYM_GROUPS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
@@ -207,15 +207,10 @@ def build_top5_reference_context(
 
 def extract_cited_dois(final_answer: str, logger: Any) -> Tuple[List[str], Set[str]]:
     """Extract DOI values from model answer with multiple regex patterns."""
-    def _normalize_doi_token(raw: str) -> str:
-        value = str(raw or "").strip()
-        return re.sub(r"[.,;:]+$", "", value)
-
     cited_dois_set: Set[str] = set()
     for pattern in [DOI_BRACKET_PATTERN, DOI_INLINE_PATTERN]:
         for match in pattern.finditer(str(final_answer or "")):
-            normalized = _normalize_doi_token(match.group(1))
-            if normalized:
+            for normalized in extract_valid_dois(match.group(1)):
                 cited_dois_set.add(normalized)
 
     cited_dois = list(cited_dois_set)

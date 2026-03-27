@@ -1,6 +1,8 @@
 import concurrent.futures
+from types import SimpleNamespace
 
 from server.services.ask_service import (
+    _build_doi_locations,
     _build_reference_links,
     _extract_references,
     execute_ask,
@@ -121,6 +123,51 @@ def test_build_conversation_context_uses_chat_persistence_snapshot(monkeypatch):
     ]
 
 
+def test_execute_ask_returns_reference_objects_with_evidence_payload(monkeypatch):
+    state = type(
+        "State",
+        (),
+        {
+            "final_answer": "alpha [10.1000/demo, Preamble]",
+            "timings": {"total": 0.1},
+            "error": "",
+            "retrieved_chunks": [
+                [
+                    SimpleNamespace(
+                        text="Li+ transport becomes the limiting factor in thick electrodes.",
+                        doi="10.1000/demo",
+                        title="Demo Paper",
+                        section_name="Preamble",
+                        chunk_index=2,
+                    )
+                ]
+            ],
+        },
+    )()
+    executor = DummyExecutor(ImmediateFuture(result=state))
+
+    monkeypatch.setattr("server.services.ask_service._get_agent_executor", lambda: executor)
+
+    result = execute_ask(
+        request=AskRequest(question="demo", mode="thinking", user_id=None, conversation_id=None, chat_history=[], options={}),
+        timeout_seconds=10,
+        trace_id="req_test",
+    )
+
+    assert result["reference_objects"] == [
+        {
+            "doi": "10.1000/demo",
+            "title": "Demo Paper",
+            "section_name": "Preamble",
+            "chunk_index": 2,
+            "evidence_text": "Li+ transport becomes the limiting factor in thick electrodes.",
+            "page": None,
+            "page_range": None,
+            "locator_confidence": "section",
+        }
+    ]
+
+
 def test_execute_ask_uses_shared_executor(monkeypatch):
     state = type("State", (), {"final_answer": "alpha [10.1000/demo, Preamble]", "timings": {"total": 0.1}, "error": ""})()
     executor = DummyExecutor(ImmediateFuture(result=state))
@@ -136,6 +183,54 @@ def test_execute_ask_uses_shared_executor(monkeypatch):
     assert executor.calls
     assert result["final_answer"] == "alpha [DOI: 10.1000/demo]"
     assert result["metadata"]["query_mode"] == "thinking"
+
+
+def test_stream_ask_events_done_frame_contains_reference_objects(monkeypatch):
+    state = type(
+        "State",
+        (),
+        {
+            "final_answer": "alpha [10.1000/demo, Preamble]",
+            "timings": {"total": 0.1},
+            "error": "",
+            "retrieved_chunks": [
+                [
+                    SimpleNamespace(
+                        text="Li+ transport becomes the limiting factor in thick electrodes.",
+                        doi="10.1000/demo",
+                        title="Demo Paper",
+                        section_name="Preamble",
+                        chunk_index=2,
+                    )
+                ]
+            ],
+        },
+    )()
+    executor = DummyExecutor(ImmediateFuture(result=state))
+
+    monkeypatch.setattr("server.services.ask_service._get_agent_executor", lambda: executor)
+
+    frames = list(
+        stream_ask_events(
+            request=AskRequest(question="demo", mode="thinking", user_id=None, conversation_id=None, chat_history=[], options={}),
+            timeout_seconds=10,
+            heartbeat_seconds=1,
+            trace_id="req_test",
+        )
+    )
+
+    assert frames[-1]["reference_objects"] == [
+        {
+            "doi": "10.1000/demo",
+            "title": "Demo Paper",
+            "section_name": "Preamble",
+            "chunk_index": 2,
+            "evidence_text": "Li+ transport becomes the limiting factor in thick electrodes.",
+            "page": None,
+            "page_range": None,
+            "locator_confidence": "section",
+        }
+    ]
 
 
 def test_stream_ask_events_uses_shared_executor(monkeypatch):
@@ -276,6 +371,10 @@ def test_adapt_answer_for_frontend_converts_bracket_citations():
     assert _adapt_answer_for_frontend("A [10.1000/demo, Preamble] B") == "A [DOI: 10.1000/demo] B"
 
 
+def test_adapt_answer_for_frontend_repairs_polluted_bracket_citations():
+    assert _adapt_answer_for_frontend("A [10.1016j.est.2024.113859, Results] B") == "A [DOI: 10.1016/j.est.2024.113859] B"
+
+
 def test_extract_references_normalizes_polluted_doi_tokens():
     refs = _extract_references(
         "A [10.1007_s11581-021-04073-2, Results] and doi:10.1007/s11581-021-04073-2)."
@@ -318,7 +417,31 @@ def test_stream_ask_events_adapts_doi_links_before_done(monkeypatch):
     content = "".join(frame["content"] for frame in frames if frame["type"] == "content")
     assert content == "A [DOI: 10.1000/demo] B"
     assert frames[-1]["metadata"]["route"] == "kb_qa"
-    assert frames[-1]["doi_locations"] == []
+    assert frames[-1]["doi_locations"] == {}
+
+
+def test_build_doi_locations_keeps_section_when_page_missing():
+    assert _build_doi_locations(
+        [
+            {
+                "doi": "10.1000/demo",
+                "section_name": "Results",
+                "chunk_index": 2,
+                "evidence_text": "倍率提高后极化增大。",
+                "locator_confidence": "section",
+            }
+        ]
+    ) == {
+        "10.1000/demo": [
+            {
+                "section": "Results",
+                "chunk_index": 2,
+                "source_text": "倍率提高后极化增大。",
+                "source_preview": "倍率提高后极化增大。",
+                "confidence": "section",
+            }
+        ]
+    }
 
 
 def test_stream_ask_events_forwards_progress_events(monkeypatch):

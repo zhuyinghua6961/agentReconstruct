@@ -43,6 +43,31 @@ test('formatStreamingAnswer renders markdown tables during streaming', () => {
   assert.match(html, /data-doi="10\.1000\/demo"/i)
 })
 
+test('formatAnswer repairs polluted DOI links and splits concatenated DOI tokens', () => {
+  installMinimalDom()
+  const input = [
+    '[DOI: 10.1016j.est.2024.113859]',
+    '[DOI: 10.1016j.jpowsour.2005.03.09910.1016j.jpowsour.2013.06.070]',
+  ].join(' ')
+
+  const html = formatAnswer(input)
+
+  assert.match(html, /data-doi="10\.1016\/j\.est\.2024\.113859"/i)
+  assert.match(html, /data-doi="10\.1016\/j\.jpowsour\.2005\.03\.099"/i)
+  assert.match(html, /data-doi="10\.1016\/j\.jpowsour\.2013\.06\.070"/i)
+  assert.doesNotMatch(html, /data-doi="10\.1016j/i)
+})
+
+test('formatAnswer renders DOI links with parenthesized suffix intact', () => {
+  installMinimalDom()
+  const input = '参考文献 (doi=10.1016/S0378-7753(03)00297-0)'
+
+  const html = formatAnswer(input)
+
+  assert.match(html, /data-doi="10\.1016\/S0378-7753\(03\)00297-0"/i)
+  assert.match(html, />10\.1016\/S0378-7753\(03\)00297-0<\/a>/i)
+})
+
 test('formatAnswer renders inline formulas with superscript and subscript', () => {
   installMinimalDom()
   const input = '容量衰减可写作 $Q_{loss} = k x^2$，材料可表示为 Li_{1-x}CoO_2。'

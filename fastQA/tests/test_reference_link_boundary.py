@@ -216,3 +216,90 @@ def test_stream_done_overrides_upstream_reference_links_with_router_boundary(mon
 
     assert stream_done["reference_links"] == [{"doi": "stub-doi", "pdf_url": "/stub/pdf"}]
     assert stream_done["pdf_links"] == [{"doi": "stub-doi", "pdf_url": "/stub/pdf"}]
+
+
+def test_router_done_event_builds_doi_locations_from_reference_objects(monkeypatch):
+    stub = _StubStorageService()
+    monkeypatch.setattr(qa_router, "storage_service", stub, raising=False)
+
+    payload = qa_router._done_event(
+        route="kb_qa",
+        used_files=[],
+        trace_id="trace-1",
+        references=[
+            {
+                "doi": "10.1/a",
+                "title": "Demo",
+                "section_name": "Intro",
+                "chunk_index": 7,
+                "page": 3,
+                "evidence_text": "厚电极在高倍率下会出现显著浓差极化。",
+            }
+        ],
+    )
+
+    assert payload["reference_objects"][0]["evidence_text"] == "厚电极在高倍率下会出现显著浓差极化。"
+    assert payload["doi_locations"] == {
+        "10.1/a": [
+            {
+                "page": 3,
+                "section": "Intro",
+                "chunk_index": 7,
+                "source_text": "厚电极在高倍率下会出现显著浓差极化。",
+                "source_preview": "厚电极在高倍率下会出现显著浓差极化。",
+                "confidence": "page",
+            }
+        ]
+    }
+
+
+def test_router_done_event_keeps_chunk_evidence_when_page_missing(monkeypatch):
+    stub = _StubStorageService()
+    monkeypatch.setattr(qa_router, "storage_service", stub, raising=False)
+
+    payload = qa_router._done_event(
+        route="kb_qa",
+        used_files=[],
+        trace_id="trace-2",
+        references=[
+            {
+                "doi": "10.1/a",
+                "title": "Demo",
+                "chunk_index": 7,
+                "evidence_text": "厚电极在高倍率下会出现显著浓差极化。",
+            }
+        ],
+    )
+
+    assert payload["doi_locations"] == {
+        "10.1/a": [
+            {
+                "chunk_index": 7,
+                "source_text": "厚电极在高倍率下会出现显著浓差极化。",
+                "source_preview": "厚电极在高倍率下会出现显著浓差极化。",
+                "confidence": "chunk",
+            }
+        ]
+    }
+
+
+def test_router_done_event_splits_and_repairs_polluted_reference_dois(monkeypatch):
+    stub = _StubStorageService()
+    monkeypatch.setattr(qa_router, "storage_service", stub, raising=False)
+
+    payload = qa_router._done_event(
+        route="kb_qa",
+        used_files=[],
+        trace_id="trace-3",
+        references=[
+            {
+                "doi": "10.1016j.jpowsour.2005.03.09910.1016j.jpowsour.2013.06.070",
+                "sample_text": "evidence",
+            }
+        ],
+    )
+
+    assert payload["references"] == [
+        "10.1016/j.jpowsour.2005.03.099",
+        "10.1016/j.jpowsour.2013.06.070",
+    ]

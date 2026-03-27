@@ -2,35 +2,53 @@
 
 import { marked } from 'marked'
 
+const DOI_INLINE_LINK_PATTERN = /\((?:doi\s*=|DOI:\s*)(10\.(?:[^\s,()]+|\([^\s,()]+\))+)(?:\s*·\s*查看原文[^)]*)?\)/gi
+
 function normalizeDoiForLink(raw) {
+  return extractDoiLinks(raw)[0] || ''
+}
+
+function extractDoiLinks(raw) {
   let doi = String(raw || '').replace(/<[^>]*>/g, '').trim()
-  if (!doi) return ''
+  if (!doi) return []
 
   doi = doi.replace(/^doi\s*=\s*/i, '')
   doi = doi.replace(/·\s*查看原文.*/i, '')
   doi = doi.replace(/[)\],;:]+$/g, '')
+  doi = doi.replace(/(10\.\d{1,9})(?=[A-Za-z])/gi, '$1/')
 
-  const m = doi.match(/10\.[^\s;)\]·]+/i)
-  if (m) doi = m[0]
+  const matches = doi.match(/10\.\d{1,9}[/_][A-Za-z0-9._;()/:-]+?(?=(?:10\.\d{1,9}[/_])|$)/gi)
+  const candidates = matches && matches.length > 0 ? matches : [doi]
+  const results = []
+  const seen = new Set()
 
-  if (doi.includes('_') && !doi.includes('/')) {
-    doi = doi.replace('_', '/')
+  for (const candidate of candidates) {
+    let normalized = String(candidate || '').trim()
+    if (normalized.includes('_') && !normalized.includes('/')) {
+      normalized = normalized.replace('_', '/')
+    }
+    normalized = normalized.replace(/[)\],;:]+$/g, '')
+    if (!/^10\.\d{1,9}\//i.test(normalized)) continue
+    const key = normalized.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    results.push(normalized)
   }
-  return doi
+  return results
 }
 
 function applyDoiLinksToHtml(html) {
   let nextHtml = String(html || '')
   nextHtml = nextHtml.replace(/\[DOI:\s*([^\]]+)\]/gi, (match, doi) => {
-    const cleanDoi = normalizeDoiForLink(doi)
-    if (!cleanDoi) return match
-    return `<a href="#" class="doi-link" data-doi="${cleanDoi}">[DOI: ${cleanDoi}]</a>`
+    const cleanDois = extractDoiLinks(doi)
+    if (cleanDois.length === 0) return match
+    return cleanDois.map((cleanDoi) => `<a href="#" class="doi-link" data-doi="${cleanDoi}">[DOI: ${cleanDoi}]</a>`).join(' ')
   })
 
-  nextHtml = nextHtml.replace(/\(doi\s*=\s*([^)\s]+(?:\s*·\s*查看原文[^)]*)?)\)/gi, (match, doi) => {
-    const cleanDoi = normalizeDoiForLink(doi)
-    if (!cleanDoi) return match
-    return `(<a href="#" class="doi-link" data-doi="${cleanDoi}">${cleanDoi}</a>)`
+  nextHtml = nextHtml.replace(DOI_INLINE_LINK_PATTERN, (match, doi) => {
+    const cleanDois = extractDoiLinks(doi)
+    if (cleanDois.length === 0) return match
+    return cleanDois.map((cleanDoi) => `(<a href="#" class="doi-link" data-doi="${cleanDoi}">${cleanDoi}</a>)`).join(' ')
   })
 
   return nextHtml
