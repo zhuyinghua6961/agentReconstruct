@@ -24,6 +24,20 @@ def test_plain_question_keeps_requested_mode():
     assert routed.route == "kb_qa"
 
 
+def test_selected_pdf_file_forces_fast_mode_even_when_question_text_is_plain():
+    decision = resolver.resolve(
+        question="磷酸铁锂电压范围是多少？",
+        pdf_context={"selected_ids": [11]},
+        available_files=[PDF],
+    )
+    routed = router.decide(requested_mode="thinking", file_context=decision)
+    assert decision.selected_file_ids == [11]
+    assert decision.strategy == "selected_scope"
+    assert routed.actual_mode == "fast"
+    assert routed.route == "pdf_qa"
+    assert routed.source_scope == "pdf"
+
+
 def test_generic_literature_topic_does_not_force_file_route():
     decision = resolver.resolve(question="文献综述一般怎么写？", pdf_context={"selected_ids": [11]})
     routed = router.decide(requested_mode="thinking", file_context=decision)

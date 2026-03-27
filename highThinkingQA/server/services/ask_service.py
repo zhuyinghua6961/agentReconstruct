@@ -11,7 +11,7 @@ import re
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Generator
+from typing import Any, Callable, Generator
 
 import config
 from server.schemas.request_models import AskRequest
@@ -374,6 +374,119 @@ def _build_reference_links(references: list[str]) -> list[dict[str, str]]:
     return links
 
 
+def _coerce_positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _normalize_page_range(value: Any) -> list[int] | None:
+    if not isinstance(value, (list, tuple)):
+        return None
+    normalized: list[int] = []
+    for item in value:
+        parsed = _coerce_positive_int(item)
+        if parsed is not None:
+            normalized.append(parsed)
+    return normalized or None
+
+
+def _build_reference_objects(state: Any, references: list[str]) -> list[dict[str, Any]]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for raw in references:
+        doi = normalize_doi(raw)
+        if not doi:
+            continue
+        key = doi.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(doi)
+
+    resolved: dict[str, dict[str, Any]] = {}
+    for chunk_group in list(getattr(state, "retrieved_chunks", []) or []):
+        for chunk in list(chunk_group or []):
+            doi = normalize_doi(getattr(chunk, "doi", ""))
+            if not doi or doi.lower() not in {item.lower() for item in ordered}:
+                continue
+            if doi in resolved:
+                continue
+            section_name = str(getattr(chunk, "section_name", "") or "").strip()
+            chunk_index = getattr(chunk, "chunk_index", None)
+            try:
+                chunk_index = int(chunk_index) if chunk_index is not None else None
+            except (TypeError, ValueError):
+                chunk_index = None
+            page = _coerce_positive_int(getattr(chunk, "page", None))
+            page_range = _normalize_page_range(getattr(chunk, "page_range", None))
+            locator_confidence = "page" if page is not None or page_range else ("section" if section_name else "none")
+            resolved[doi] = {
+                "doi": doi,
+                "title": str(getattr(chunk, "title", "") or "").strip(),
+                "section_name": section_name,
+                "chunk_index": chunk_index,
+                "evidence_text": str(getattr(chunk, "text", "") or "").strip(),
+                "page": page,
+                "page_range": page_range,
+                "locator_confidence": locator_confidence,
+            }
+
+    result: list[dict[str, Any]] = []
+    for doi in ordered:
+        result.append(
+            resolved.get(
+                doi,
+                {
+                    "doi": doi,
+                    "title": "",
+                    "section_name": "",
+                    "chunk_index": None,
+                    "evidence_text": "",
+                    "page": None,
+                    "page_range": None,
+                    "locator_confidence": "none",
+                },
+            )
+        )
+    return result
+
+
+def _build_doi_locations(reference_objects: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    locations: dict[str, list[dict[str, Any]]] = {}
+    for item in reference_objects:
+        doi = normalize_doi(item.get("doi"))
+        if not doi:
+            continue
+        page = _coerce_positive_int(item.get("page"))
+        page_range = _normalize_page_range(item.get("page_range"))
+        if page is None and page_range:
+            page = page_range[0]
+        if page is None:
+            continue
+        location: dict[str, Any] = {"page": page}
+        section_name = str(item.get("section_name") or "").strip()
+        if section_name:
+            location["section"] = section_name
+        chunk_index = item.get("chunk_index")
+        try:
+            if chunk_index is not None:
+                location["chunk_index"] = int(chunk_index)
+        except (TypeError, ValueError):
+            pass
+        evidence_text = str(item.get("evidence_text") or "").strip()
+        if evidence_text:
+            location["source_text"] = evidence_text
+            location["source_preview"] = evidence_text
+        confidence = str(item.get("locator_confidence") or ("page" if page else "section" if section_name else "none")).strip()
+        if confidence:
+            location["confidence"] = confidence
+        locations.setdefault(doi, []).append(location)
+    return locations
+
+
 def _build_done_metadata(
     *,
     profile: RuntimeProfile,
@@ -556,6 +669,8 @@ def execute_ask(
     frontend_answer = _adapt_answer_for_frontend(state.final_answer)
     references = _extract_references(state.final_answer)
     links = _build_reference_links(references)
+    reference_objects = _build_reference_objects(state, references)
+    doi_locations = _build_doi_locations(reference_objects)
     logger.info(
         "[trace_id=%s] execute_ask done answer_chars=%s references=%s timings=%s",
         trace_id,
@@ -568,10 +683,47 @@ def execute_ask(
         "timings": state.timings,
         "metadata": _build_done_metadata(profile=profile, request=request, context=context, rewrite=rewrite),
         "references": references,
+        "reference_objects": reference_objects,
         "pdf_links": links,
         "reference_links": links,
+        "doi_locations": doi_locations,
         "trace_id": trace_id,
         "used_files": list(request.used_files or []),
+    }
+
+
+def _build_done_event(
+    *,
+    state: Any,
+    profile: RuntimeProfile,
+    request: AskRequest,
+    context: ConversationContext,
+    rewrite: QuestionRewriteResult,
+    trace_id: str,
+) -> dict[str, Any]:
+    frontend_answer = _adapt_answer_for_frontend(state.final_answer)
+    references = _extract_references(state.final_answer)
+    links = _build_reference_links(references)
+    reference_objects = _build_reference_objects(state, references)
+    doi_locations = _build_doi_locations(reference_objects)
+    return {
+        "type": "done",
+        "mode": profile.mode,
+        "requested_mode": request.requested_mode,
+        "actual_mode": request.actual_mode,
+        "route": request.route,
+        "turn_mode": request.turn_mode,
+        "final_answer": frontend_answer,
+        "timings": state.timings,
+        "references": references,
+        "reference_objects": reference_objects,
+        "pdf_links": links,
+        "reference_links": links,
+        "doi_locations": doi_locations,
+        "trace_id": trace_id,
+        "used_files": list(request.used_files or []),
+        "metadata": _build_done_metadata(profile=profile, request=request, context=context, rewrite=rewrite),
+        "file_selection": {},
     }
 
 
@@ -581,6 +733,7 @@ def stream_ask_events(
     timeout_seconds: int,
     heartbeat_seconds: int,
     trace_id: str,
+    completion_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> Generator[dict[str, Any], None, None]:
     """Yield structured ask-stream events (not encoded as SSE yet)."""
     profile = resolve_profile(request.mode)
@@ -598,6 +751,7 @@ def stream_ask_events(
     event_queue: queue.Queue[Any] = queue.Queue()
     stop_token = object()
     result_holder: dict[str, Any] = {}
+    completion_lock = threading.Lock()
     step_idx = 0
     cancel_event = threading.Event()
     streamed_raw_content = ""
@@ -685,6 +839,35 @@ def stream_ask_events(
             cancel_event=cancel_event,
             trace_id=trace_id,
         )
+        def _on_future_done(done_future) -> None:
+            if completion_callback is None:
+                return
+            try:
+                state = done_future.result()
+            except Exception:
+                return
+            if state is None or getattr(state, "error", ""):
+                return
+            try:
+                done_event = _build_done_event(
+                    state=state,
+                    profile=profile,
+                    request=request,
+                    context=context,
+                    rewrite=rewrite,
+                    trace_id=trace_id,
+                )
+                with completion_lock:
+                    result_holder["done_event"] = done_event
+                completion_callback(dict(done_event))
+            except Exception:
+                logger.warning("[trace_id=%s] completion callback failed", trace_id, exc_info=True)
+
+        add_done_callback = getattr(future, "add_done_callback", None)
+        if callable(add_done_callback):
+            add_done_callback(_on_future_done)
+        elif completion_callback is not None and bool(getattr(future, "done", lambda: False)()):
+            _on_future_done(future)
         result_holder["future"] = future
 
     yield {
@@ -809,30 +992,21 @@ def stream_ask_events(
         }
         return
 
-    frontend_answer = _adapt_answer_for_frontend(state.final_answer)
-    references = _extract_references(state.final_answer)
-    links = _build_reference_links(references)
+    with completion_lock:
+        done_event = dict(result_holder.get("done_event") or {})
+    if not done_event:
+        done_event = _build_done_event(
+            state=state,
+            profile=profile,
+            request=request,
+            context=context,
+            rewrite=rewrite,
+            trace_id=trace_id,
+        )
     logger.info(
         "[trace_id=%s] stream done total_chars=%s references=%s",
         trace_id,
-        len(frontend_answer),
-        len(references),
+        len(str(done_event.get("final_answer") or "")),
+        len(list(done_event.get("references") or [])),
     )
-    yield {
-        "type": "done",
-        "mode": profile.mode,
-        "requested_mode": request.requested_mode,
-        "actual_mode": request.actual_mode,
-        "route": request.route,
-        "turn_mode": request.turn_mode,
-        "final_answer": frontend_answer,
-        "timings": state.timings,
-        "references": references,
-        "pdf_links": links,
-        "reference_links": links,
-        "doi_locations": [],
-        "trace_id": trace_id,
-        "used_files": list(request.used_files or []),
-        "metadata": _build_done_metadata(profile=profile, request=request, context=context, rewrite=rewrite),
-        "file_selection": {},
-    }
+    yield done_event

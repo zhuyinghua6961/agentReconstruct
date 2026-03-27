@@ -173,6 +173,54 @@ def test_mode_ask_routes_file_question_to_fast_backend():
     assert fake_persistence.assistant_calls == []
     assert response.headers["x-gateway-backend"] == "fast"
 
+
+def test_mode_ask_routes_selected_file_scope_to_fast_backend_even_for_plain_question():
+    original = app.state.conversation_file_service
+    original_persistence = app.state.conversation_persistence_service
+    app.state.conversation_file_service = _ConversationFilesStub(
+        [
+            ConversationFileRow(
+                file_id=11,
+                file_type="pdf",
+                file_name="battery-paper.pdf",
+            )
+        ]
+    )
+    fake_persistence = _FakeConversationPersistenceService()
+    app.state.conversation_persistence_service = fake_persistence
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            response = client.post(
+                "/api/thinking/ask",
+                json={
+                    "question": "磷酸铁锂电压范围是多少？",
+                    "requested_mode": "thinking",
+                    "conversation_id": 42,
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            )
+    finally:
+        app.state.conversation_file_service = original
+        app.state.conversation_persistence_service = original_persistence
+
+    assert response.status_code == 200
+    assert captured["url"].endswith("/api/fast/ask")
+    assert captured["body"]["actual_mode"] == "fast"
+    assert captured["body"]["route"] == "pdf_qa"
+    assert captured["body"]["source_scope"] == "pdf"
+    assert captured["body"]["selected_file_ids"] == [11]
+    assert fake_persistence.user_calls == []
+    assert fake_persistence.assistant_calls == []
+    assert response.headers["x-gateway-backend"] == "fast"
+
 def test_mode_ask_routes_mixed_question_to_fast_backend():
     original = app.state.conversation_file_service
     original_persistence = app.state.conversation_persistence_service
@@ -937,3 +985,75 @@ def test_mode_ask_stream_short_circuits_clarification_in_gateway():
     assert b'FILE_SELECTION_CLARIFICATION_REQUIRED' in body
     assert response.headers["content-type"].startswith("text/event-stream")
 
+
+def test_mode_ask_stream_forwards_user_id_to_fast_backend():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=b'data: {"type":"done","final_answer":"ok"}\n\n',
+        )
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        response = client.post(
+            "/api/fast/ask_stream",
+            json={
+                "question": "plain qa",
+                "requested_mode": "fast",
+                "conversation_id": 42,
+                "user_id": 7,
+            },
+        )
+
+    assert response.status_code == 200
+    assert captured["url"].endswith("/api/fast/ask_stream")
+    assert captured["body"]["user_id"] == 7
+
+
+import asyncio
+
+
+def test_gateway_stream_summary_keeps_reference_objects_from_done_event():
+    from app.core.config import GatewaySettings
+    from app.services.conversation_persistence import ConversationPersistenceService
+
+    service = ConversationPersistenceService(GatewaySettings.from_env())
+    summary = service.new_stream_summary()
+
+    async def body_iter():
+        yield b'data: {"type":"content","content":"hello"}\n\n'
+        yield (
+            b'data: {"type":"done","final_answer":"hello","query_mode":"thinking",'
+            b'"references":[{"doi":"10.1/a"}],'
+            b'"reference_objects":[{"doi":"10.1/a","section_name":"Discussion","chunk_index":2,"evidence_text":"evidence","locator_confidence":"section"}],'
+            b'"reference_links":[{"doi":"10.1/a","pdf_url":"/api/v1/view_pdf/10.1/a"}],'
+            b'"doi_locations":{}}\n\n'
+        )
+
+    async def _collect():
+        chunks = []
+        async for chunk in service.extract_stream(body_iter=body_iter(), summary=summary):
+            chunks.append(chunk)
+        return chunks
+
+    chunks = asyncio.run(_collect())
+
+    assert len(chunks) == 2
+    assert summary.done_seen is True
+    assert summary.references == [{"doi": "10.1/a"}]
+    assert summary.reference_objects == [
+        {
+            "doi": "10.1/a",
+            "section_name": "Discussion",
+            "chunk_index": 2,
+            "evidence_text": "evidence",
+            "locator_confidence": "section",
+        }
+    ]
+    metadata = summary.to_metadata()
+    assert metadata["reference_objects"] == summary.reference_objects

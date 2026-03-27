@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -208,10 +209,13 @@ def _persist_assistant_message_if_needed(*, request: Request, ask_request, summa
 def _build_stream_response(*, request: Request, ask_request, trace_id: str, slot) -> StreamingResponse:
     def _generate():
         seq = 0
+        summary_lock = threading.Lock()
+        assistant_persisted = False
         summary = {
             "assistant_content": "",
             "query_mode": "",
             "references": [],
+            "reference_objects": [],
             "reference_links": [],
             "pdf_links": [],
             "doi_locations": {},
@@ -223,54 +227,94 @@ def _build_stream_response(*, request: Request, ask_request, trace_id: str, slot
             "file_selection": {},
             "done_seen": False,
         }
+
+        def _ingest_done_payload(payload: dict) -> None:
+            refs = payload.get("references")
+            if isinstance(refs, list):
+                summary["references"] = refs
+            reference_objects = payload.get("reference_objects")
+            if isinstance(reference_objects, list):
+                summary["reference_objects"] = reference_objects
+            ref_links = payload.get("reference_links")
+            if isinstance(ref_links, list):
+                summary["reference_links"] = ref_links
+            pdf_links = payload.get("pdf_links")
+            if isinstance(pdf_links, list):
+                summary["pdf_links"] = pdf_links
+            doi_locations = payload.get("doi_locations")
+            if isinstance(doi_locations, dict):
+                summary["doi_locations"] = doi_locations
+            final_answer = str(payload.get("final_answer") or "").strip()
+            if final_answer:
+                summary["assistant_content"] = final_answer
+            summary["route"] = str(payload.get("route") or summary["route"])
+            used_files = payload.get("used_files")
+            if isinstance(used_files, list):
+                summary["used_files"] = used_files
+            timings = payload.get("timings")
+            if isinstance(timings, dict):
+                summary["timings"] = timings
+            summary["trace_id"] = str(payload.get("trace_id") or summary["trace_id"])
+            metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+            query_mode = str(
+                payload.get("query_mode")
+                or metadata.get("query_mode")
+                or summary["query_mode"]
+            ).strip()
+            if query_mode:
+                summary["query_mode"] = query_mode
+            file_selection = payload.get("file_selection")
+            if isinstance(file_selection, dict):
+                summary["file_selection"] = file_selection
+            summary["done_seen"] = True
+
+        def _persist_summary_once() -> None:
+            nonlocal assistant_persisted
+            if assistant_persisted:
+                return
+            if not bool(summary.get("done_seen")):
+                return
+            content = str(summary.get("assistant_content") or "").strip()
+            if not content:
+                return
+            _persist_assistant_message_if_needed(request=request, ask_request=ask_request, summary=dict(summary))
+            assistant_persisted = True
+
+        def _completion_callback(payload: dict) -> None:
+            with summary_lock:
+                _ingest_done_payload(payload)
+                _persist_summary_once()
+
         try:
             for payload in stream_ask_events(
                 request=ask_request,
                 timeout_seconds=int(request.app.state.config["ASK_TIMEOUT_SECONDS"]),
                 heartbeat_seconds=int(request.app.state.config["SSE_HEARTBEAT_SECONDS"]),
                 trace_id=trace_id,
+                completion_callback=_completion_callback,
             ):
                 event_type = str(payload.get("type") or "")
                 if event_type == "content":
-                    summary["assistant_content"] += str(payload.get("content") or "")
+                    with summary_lock:
+                        summary["assistant_content"] += str(payload.get("content") or "")
                 elif event_type == "metadata":
-                    summary["query_mode"] = str(payload.get("query_mode") or summary["query_mode"])
+                    with summary_lock:
+                        summary["query_mode"] = str(payload.get("query_mode") or summary["query_mode"])
                 elif event_type == "step":
-                    summary_steps = summary.get("steps")
-                    if isinstance(summary_steps, list):
-                        summary_steps.append(
-                            {
-                                "step": payload.get("step"),
-                                "message": payload.get("message"),
-                                "status": payload.get("status"),
-                                "data": payload.get("data"),
-                            }
-                        )
+                    with summary_lock:
+                        summary_steps = summary.get("steps")
+                        if isinstance(summary_steps, list):
+                            summary_steps.append(
+                                {
+                                    "step": payload.get("step"),
+                                    "message": payload.get("message"),
+                                    "status": payload.get("status"),
+                                    "data": payload.get("data"),
+                                }
+                            )
                 elif event_type == "done":
-                    summary["done_seen"] = True
-                    refs = payload.get("references")
-                    if isinstance(refs, list):
-                        summary["references"] = refs
-                    ref_links = payload.get("reference_links")
-                    if isinstance(ref_links, list):
-                        summary["reference_links"] = ref_links
-                    pdf_links = payload.get("pdf_links")
-                    if isinstance(pdf_links, list):
-                        summary["pdf_links"] = pdf_links
-                    doi_locations = payload.get("doi_locations")
-                    if isinstance(doi_locations, dict):
-                        summary["doi_locations"] = doi_locations
-                    summary["route"] = str(payload.get("route") or summary["route"])
-                    used_files = payload.get("used_files")
-                    if isinstance(used_files, list):
-                        summary["used_files"] = used_files
-                    timings = payload.get("timings")
-                    if isinstance(timings, dict):
-                        summary["timings"] = timings
-                    summary["trace_id"] = str(payload.get("trace_id") or summary["trace_id"])
-                    file_selection = payload.get("file_selection")
-                    if isinstance(file_selection, dict):
-                        summary["file_selection"] = file_selection
+                    with summary_lock:
+                        _ingest_done_payload(payload)
                 seq += 1
                 yield _to_sse_line(payload, seq=seq)
         except Exception as exc:  # pragma: no cover - defensive
@@ -288,7 +332,8 @@ def _build_stream_response(*, request: Request, ask_request, trace_id: str, slot
             )
         finally:
             try:
-                _persist_assistant_message_if_needed(request=request, ask_request=ask_request, summary=summary)
+                with summary_lock:
+                    _persist_summary_once()
             except Exception as exc:  # pragma: no cover
                 request.app.logger.warning("assistant persistence hook failed: %s", exc)
             slot.release()

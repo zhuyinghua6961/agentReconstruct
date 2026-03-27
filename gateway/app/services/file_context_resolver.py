@@ -131,7 +131,8 @@ class FileContextResolver:
         raw_last_focus_source = ctx.get("last_focus_ids") if "last_focus_ids" in ctx else ctx.get("last_focus_file_ids")
         raw_last_focus_ids = self._normalize_int_list(raw_last_focus_source)
 
-        selected_ids = self._filter_known_ids(raw_selected_ids, file_map) or raw_selected_ids
+        known_selected_ids = self._filter_known_ids(raw_selected_ids, file_map)
+        selected_ids = known_selected_ids or raw_selected_ids
         newly_uploaded_ids = self._filter_known_ids(raw_newly_uploaded_ids, file_map) or raw_newly_uploaded_ids
         all_available_ids = self._filter_known_ids(raw_all_available_ids, file_map) or raw_all_available_ids or [row.file_id for row in active_rows]
         last_focus_ids = self._filter_known_ids(raw_last_focus_ids, file_map)
@@ -197,6 +198,14 @@ class FileContextResolver:
             )
 
         if not file_intent:
+            if known_selected_ids:
+                return self._file_turn(
+                    route=self._route_for_selection(selected_ids=known_selected_ids, file_map=file_map, table_focus=table_focus),
+                    selected_file_ids=known_selected_ids,
+                    strategy="selected_scope",
+                    allow_kb_verification=mixed_intent,
+                    file_map=file_map,
+                )
             return self._kb_only(selected_ids=selected_ids)
 
         if generic_file_topic and not strong_file_intent and not upload_file_intent and not table_focus and not file_name_focus:
