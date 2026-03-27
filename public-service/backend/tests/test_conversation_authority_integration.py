@@ -110,6 +110,10 @@ def test_fastqa_authority_client_closed_loop_materializes_assistant_turn(monkeyp
                 answer_text="because",
                 steps=[{"step": "stage1"}],
                 references=[{"doi": "10.1/a"}],
+                reference_objects=[{"doi": "10.1/a", "section_name": "Results", "chunk_index": 3}],
+                reference_links=[{"doi": "10.1/a", "pdf_url": "/api/v1/view_pdf/10.1%2Fa"}],
+                pdf_links=[{"doi": "10.1/a", "pdf_url": "/api/v1/view_pdf/10.1%2Fa"}],
+                doi_locations={"10.1/a": [{"section": "Results", "chunk_index": 3}]},
                 used_files=[{"file_id": 9}],
                 timings={"latency_ms": 123},
             )
@@ -142,6 +146,112 @@ def test_fastqa_authority_client_closed_loop_materializes_assistant_turn(monkeyp
                 "last_turn_route": "kb_qa",
                 "last_focus_file_ids": [9],
                 "last_assistant_trace_id": "trace-it-assistant",
+            }
+            detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+            assert detail["success"] is True
+            assistant_message = detail["data"]["messages"][-1]
+            assert assistant_message["metadata"]["reference_objects"] == [{"doi": "10.1/a", "section_name": "Results", "chunk_index": 3}]
+            assert assistant_message["metadata"]["reference_links"] == [{"doi": "10.1/a", "pdf_url": "/api/v1/view_pdf/10.1%2Fa"}]
+            assert assistant_message["metadata"]["pdf_links"] == [{"doi": "10.1/a", "pdf_url": "/api/v1/view_pdf/10.1%2Fa"}]
+            assert assistant_message["metadata"]["doi_locations"] == {"10.1/a": [{"section": "Results", "chunk_index": 3}]}
+        finally:
+            set_conversation_service(original_service)
+            client.app.dependency_overrides.clear()
+
+
+def test_fastqa_authority_client_allows_rerouted_thinking_request_mode(monkeypatch):
+    monkeypatch.setenv(_INTERNAL_TOKEN_ENV, "authority-test-token")
+
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir, TestClient(app) as client:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(project_root=tempdir, storage_backend=storage_backend)
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+        original_service = conversation_service
+        set_conversation_service(service)
+        client.app.state.runtime.conversation_service = service
+        client.app.state.runtime.conversation_repository = repo
+        client.app.state.runtime.redis_service = redis_service
+        client.app.dependency_overrides[require_auth_context] = lambda: AuthContext(user_id=7, role="user", username="user7")
+
+        try:
+            created = service.create_conversation(user_id=7, title="authority integration rerouted thinking")
+            conversation_id = int(created["data"]["conversation_id"])
+
+            authority_client = ConversationAuthorityClient(
+                base_url="http://public-service",
+                service_token="authority-test-token",
+                transport=_transport_via_test_client(client),
+            )
+
+            user_written = authority_client.write_user_turn(
+                user_id=7,
+                conversation_id=conversation_id,
+                trace_id="trace-it-user-rerouted",
+                route="pdf_qa",
+                requested_mode="thinking",
+                actual_mode="fast",
+                content="summarize this paper",
+                selected_file_ids=[9],
+                last_turn_route_hint="pdf_qa",
+            )
+            assert user_written["conversation_id"] == conversation_id
+
+            snapshot_after_user = authority_client.read_context_snapshot(
+                user_id=7,
+                conversation_id=conversation_id,
+                trace_id="trace-it-user-rerouted",
+                route="pdf_qa",
+                requested_mode="thinking",
+                actual_mode="fast",
+            )
+            assert [item["role"] for item in snapshot_after_user["recent_turns"]] == ["user"]
+
+            accepted = authority_client.accept_assistant_turn_async(
+                user_id=7,
+                conversation_id=conversation_id,
+                trace_id="trace-it-assistant-rerouted",
+                route="pdf_qa",
+                requested_mode="thinking",
+                actual_mode="fast",
+                answer_text="paper summary",
+                steps=[{"step": "pdf"}],
+                references=[],
+                reference_objects=[],
+                reference_links=[],
+                pdf_links=[],
+                doi_locations={},
+                used_files=[{"file_id": 9}],
+                timings={"latency_ms": 123},
+            )
+            assert accepted["accepted"] is True
+
+            worker = AuthorityAssistantInboxWorker(repository=repo, conversation_service=service)
+            summary = worker.run_once(limit=10)
+            assert summary["done"] == 1
+
+            snapshot_after_worker = authority_client.read_context_snapshot(
+                user_id=7,
+                conversation_id=conversation_id,
+                trace_id="trace-it-assistant-rerouted",
+                route="pdf_qa",
+                requested_mode="thinking",
+                actual_mode="fast",
+            )
+            assert [item["role"] for item in snapshot_after_worker["recent_turns"]] == ["user", "assistant"]
+            assert snapshot_after_worker["conversation_state"] == {
+                "last_turn_route": "pdf_qa",
+                "last_focus_file_ids": [9],
+                "last_assistant_trace_id": "trace-it-assistant-rerouted",
             }
         finally:
             set_conversation_service(original_service)
@@ -213,6 +323,10 @@ def test_highthinking_authority_client_closed_loop_materializes_assistant_turn(m
                 answer_text="because",
                 steps=[{"step": "stage1"}],
                 references=[{"doi": "10.1/a"}],
+                reference_objects=[{"doi": "10.1/a", "section_name": "Discussion", "chunk_index": 2}],
+                reference_links=[{"doi": "10.1/a", "pdf_url": "/api/v1/view_pdf/10.1%2Fa"}],
+                pdf_links=[{"doi": "10.1/a", "pdf_url": "/api/v1/view_pdf/10.1%2Fa"}],
+                doi_locations={"10.1/a": [{"section": "Discussion", "chunk_index": 2}]},
                 used_files=[{"file_id": 9}],
                 timings={"latency_ms": 123},
             )
@@ -246,6 +360,13 @@ def test_highthinking_authority_client_closed_loop_materializes_assistant_turn(m
                 "last_focus_file_ids": [9],
                 "last_assistant_trace_id": "trace-it-assistant-thinking",
             }
+            detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+            assert detail["success"] is True
+            assistant_message = detail["data"]["messages"][-1]
+            assert assistant_message["metadata"]["reference_objects"] == [{"doi": "10.1/a", "section_name": "Discussion", "chunk_index": 2}]
+            assert assistant_message["metadata"]["reference_links"] == [{"doi": "10.1/a", "pdf_url": "/api/v1/view_pdf/10.1%2Fa"}]
+            assert assistant_message["metadata"]["pdf_links"] == [{"doi": "10.1/a", "pdf_url": "/api/v1/view_pdf/10.1%2Fa"}]
+            assert assistant_message["metadata"]["doi_locations"] == {"10.1/a": [{"section": "Discussion", "chunk_index": 2}]}
         finally:
             set_conversation_service(original_service)
             client.app.dependency_overrides.clear()

@@ -83,6 +83,10 @@ function containsStructuredMarkdown(text) {
   return /(^|\n)\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|\|.+\|)/m.test(String(text || ''))
 }
 
+function containsInlineRenderMarkup(text) {
+  return /<(?:sub|sup|span)\b/i.test(String(text || ''))
+}
+
 function looksLikeUnrenderedMarkdown(text, html) {
   if (!containsStructuredMarkdown(text)) return false
   if (/<(?:h[1-6]|ul|ol|li|table|blockquote)\b/i.test(String(html || ''))) return false
@@ -151,7 +155,7 @@ function formatStreamingFallback(text) {
 function normalizeAnswerMarkdown(text) {
   let normalizedText = normalizeMarkdownForRender(text)
   normalizedText = fixTableFormat(normalizedText)
-  normalizedText = cleanLaTeX(normalizedText)
+  normalizedText = renderMathMarkup(normalizedText)
   return normalizedText
 }
 
@@ -182,7 +186,7 @@ export function formatStreamingAnswer(text) {
   const normalizedText = normalizeAnswerMarkdown(text)
   let html = ''
 
-  if (!containsStructuredMarkdown(normalizedText)) {
+  if (!containsStructuredMarkdown(normalizedText) && !containsInlineRenderMarkup(normalizedText)) {
     html = formatStreamingFallback(normalizedText)
     return applyDoiLinksToHtml(html)
   }
@@ -239,27 +243,72 @@ function fixTableFormat(text) {
   return result.join('\n')
 }
 
-// 清理 LaTeX 公式
-function cleanLaTeX(text) {
-  text = text.replace(/\\\[[\s\S]*?\\\]/g, m => cleanLaTeXCommands(m.replace(/\\\[|\]/g, '')))
-  text = text.replace(/\$\$[\s\S]*?\$\$/g, m => cleanLaTeXCommands(m.replace(/\$\$/g, '')))
-  text = text.replace(/\\\([\s\S]*?\\\)/g, m => cleanLaTeXCommands(m.replace(/\\\(|\\\)/g, '')))
-  text = text.replace(/\$[^$]+\$/g, m => cleanLaTeXCommands(m.replace(/\$/g, '')))
-  return text
+function renderMathMarkup(text) {
+  let next = String(text || '')
+
+  next = next.replace(/\\\[((?:.|\n)*?)\\\]/g, (_match, expr) => renderMathExpression(expr))
+  next = next.replace(/\$\$([\s\S]*?)\$\$/g, (_match, expr) => renderMathExpression(expr))
+  next = next.replace(/\\\(((?:.|\n)*?)\\\)/g, (_match, expr) => renderMathExpression(expr))
+  next = next.replace(/\$([^$\n]+)\$/g, (_match, expr) => renderMathExpression(expr))
+
+  return renderSubSupMarkup(next)
 }
 
-// 清理 LaTeX 命令
-function cleanLaTeXCommands(text) {
-  const subs = {'0':'₀','1':'₁','2':'₂','3':'₃','4':'₄','5':'₅','6':'₆','7':'₇','8':'₈','9':'₉'}
-  const sups = {'0':'⁰','1':'¹','2':'²','3':'³','4':'⁴','5':'⁵','6':'⁶','7':'⁷','8':'⁸','9':'⁹'}
-  
-  text = text.replace(/_(\d+)/g, m => m.slice(1).split('').map(c => subs[c] || c).join(''))
-  text = text.replace(/\^(\d+)/g, m => m.slice(1).split('').map(c => sups[c] || c).join(''))
-  text = text.replace(/\\rightarrow/g, '→').replace(/\\leftarrow/g, '←')
-  text = text.replace(/\\Rightarrow/g, '⇐').replace(/\\Leftarrow/g, '⇒')
-  text = text.replace(/\\[a-zA-Z]+\{([^}]+)\}/g, '$1')
-  text = text.replace(/\\[a-zA-Z]+/g, '')
-  return text.trim()
+function renderMathExpression(text) {
+  let expr = normalizeMathCommands(String(text || '').trim())
+  expr = renderFractions(expr)
+  expr = renderSubSupMarkup(expr)
+  return expr
+}
+
+function normalizeMathCommands(text) {
+  const replacements = new Map([
+    ['\\rightarrow', '→'],
+    ['\\leftarrow', '←'],
+    ['\\Rightarrow', '⇒'],
+    ['\\Leftarrow', '⇐'],
+    ['\\geq', '≥'],
+    ['\\leq', '≤'],
+    ['\\times', '×'],
+    ['\\cdot', '·'],
+    ['\\pm', '±'],
+    ['\\alpha', 'α'],
+    ['\\beta', 'β'],
+    ['\\gamma', 'γ'],
+    ['\\delta', 'δ'],
+    ['\\lambda', 'λ'],
+    ['\\mu', 'μ'],
+    ['\\sigma', 'σ'],
+    ['\\Delta', 'Δ'],
+  ])
+
+  let next = String(text || '')
+  for (const [source, target] of replacements.entries()) {
+    next = next.replaceAll(source, target)
+  }
+  next = next.replace(/\\text\{([^{}]+)\}/g, '$1')
+  next = next.replace(/\\mathrm\{([^{}]+)\}/g, '$1')
+  next = next.replace(/\\operatorname\{([^{}]+)\}/g, '$1')
+  next = next.replace(/\\([{}])/g, '$1')
+  next = next.replace(/\\[a-zA-Z]+/g, '')
+  return next
+}
+
+function renderFractions(text) {
+  return String(text || '').replace(
+    /\\frac\{([^{}]+)\}\{([^{}]+)\}/g,
+    '<span class="math-frac"><span class="math-frac-num">$1</span><span class="math-frac-den">$2</span></span>'
+  )
+}
+
+function renderSubSupMarkup(text) {
+  return String(text || '')
+    .replace(/([A-Za-z0-9)\]])_\{([^{}\n]+)\}/g, '$1<sub>$2</sub>')
+    .replace(/([A-Za-z0-9)\]])_([A-Za-z0-9+\-]+)/g, '$1<sub>$2</sub>')
+    .replace(/([A-Za-z0-9)\]])\^\{([^{}\n]+)\}/g, '$1<sup>$2</sup>')
+    .replace(/([A-Za-z0-9)\]])\^([A-Za-z0-9+\-]+)/g, '$1<sup>$2</sup>')
+    .replace(/<\/sub><sub>/g, '')
+    .replace(/<\/sup><sup>/g, '')
 }
 
 // HTML 转义

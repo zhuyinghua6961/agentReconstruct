@@ -164,6 +164,70 @@ def test_internal_context_snapshot_rejects_invalid_source_service_policy(monkeyp
     assert response.json()["code"] == "INTERNAL_SOURCE_SERVICE_FORBIDDEN"
 
 
+def test_internal_context_snapshot_allows_fastqa_rerouted_thinking_request(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="authority rerouted snapshot")
+        conversation_id = int(created["data"]["conversation_id"])
+        response = client.get(
+            f"/internal/conversations/{conversation_id}/context-snapshot",
+            params=_snapshot_query(conversation_id=conversation_id, requested_mode="thinking", actual_mode="fast"),
+            headers=_internal_headers("fastQA"),
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["conversation_id"] == conversation_id
+    assert payload["user_id"] == 7
+
+
+def test_internal_user_write_allows_fastqa_rerouted_thinking_request(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="authority rerouted user write")
+        conversation_id = int(created["data"]["conversation_id"])
+        response = client.post(
+            f"/internal/conversations/{conversation_id}/messages/user",
+            json=_user_write_body(
+                conversation_id=conversation_id,
+                requested_mode="thinking",
+                actual_mode="fast",
+                idempotency_key=f"{conversation_id}:trc_fast_001:user",
+            ),
+            headers=_internal_headers("fastQA"),
+        )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["conversation_id"] == conversation_id
+
+
+def test_internal_assistant_async_allows_fastqa_rerouted_thinking_request(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="authority rerouted assistant write")
+        conversation_id = int(created["data"]["conversation_id"])
+        response = client.post(
+            f"/internal/conversations/{conversation_id}/messages/assistant-async",
+            json=_assistant_body(
+                conversation_id=conversation_id,
+                requested_mode="thinking",
+                actual_mode="fast",
+                idempotency_key=f"{conversation_id}:trc_fast_001:assistant",
+            ),
+            headers=_internal_headers("fastQA"),
+        )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["accepted"] is True
+    assert payload["trace_id"] == "trc_fast_001"
+
+
 def test_internal_context_snapshot_read_does_not_require_idempotency_key(monkeypatch):
     monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
 

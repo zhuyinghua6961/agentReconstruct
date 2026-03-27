@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 _ALLOWED_MODE = "fast"
+_ALLOWED_REQUESTED_MODES = {"fast", "thinking", "patent"}
 _ALLOWED_ROUTES = {"kb_qa", "pdf_qa", "tabular_qa", "hybrid_qa"}
 _TABLE_FILE_TYPES = {"excel", "csv", "table", "xls", "xlsx"}
 _SOURCE_SCOPE_ORDER = ("pdf", "table", "kb")
@@ -267,7 +268,7 @@ def adapt_gateway_ask_payload(payload: Mapping[str, Any]) -> GatewayAskRequest:
 
     requested_mode = str(source.get("requested_mode") or _ALLOWED_MODE).strip() or _ALLOWED_MODE
     actual_mode = str(source.get("actual_mode") or requested_mode or _ALLOWED_MODE).strip() or _ALLOWED_MODE
-    if requested_mode != _ALLOWED_MODE or actual_mode != _ALLOWED_MODE:
+    if requested_mode not in _ALLOWED_REQUESTED_MODES or actual_mode != _ALLOWED_MODE:
         raise RequestAdapterError(
             code="mode_not_supported",
             message="fastQA only supports fast mode",

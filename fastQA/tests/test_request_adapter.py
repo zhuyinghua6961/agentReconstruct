@@ -161,6 +161,23 @@ def test_adapter_rejects_non_fast_mode():
         raise AssertionError("expected RequestAdapterError")
 
 
+def test_adapter_accepts_gateway_rerouted_file_request_with_fast_actual_mode():
+    request = adapt_gateway_ask_payload(
+        {
+            "question": "总结这篇文献",
+            "requested_mode": "thinking",
+            "actual_mode": "fast",
+            "route": "pdf_qa",
+            "source_scope": "pdf",
+            "execution_files": [{"file_id": 1, "file_type": "pdf", "local_path": "/tmp/demo.pdf"}],
+        }
+    )
+
+    assert request.requested_mode == "thinking"
+    assert request.actual_mode == "fast"
+    assert request.route == "pdf_qa"
+
+
 def test_adapter_rejects_unknown_route():
     try:
         adapt_gateway_ask_payload({"question": "hello", "requested_mode": "fast", "route": "unknown"})

@@ -209,6 +209,33 @@ def test_legacy_v1_ask_returns_json_error_for_invalid_stream_request():
     assert payload["code"] == "MODE_NOT_SUPPORTED"
 
 
+def test_pdf_route_accepts_thinking_request_when_gateway_has_rerouted_to_fast(monkeypatch):
+    def _fake_pdf_iter(**_kwargs):
+        yield {"type": "metadata", "query_mode": "PDF文献查询"}
+        yield {"type": "content", "content": "pdf answer"}
+        yield {"type": "done", "route": "pdf_qa", "references": []}
+
+    monkeypatch.setattr(qa_router_module, "iter_pdf_route_events", _fake_pdf_iter)
+    response = client.post(
+        "/api/ask",
+        json={
+            "question": "总结这篇文献",
+            "requested_mode": "thinking",
+            "actual_mode": "fast",
+            "route": "pdf_qa",
+            "source_scope": "pdf",
+            "execution_files": [{"file_id": 1, "file_type": "pdf", "local_path": "/tmp/demo.pdf"}],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["route"] == "pdf_qa"
+    assert payload["metadata"]["requested_mode"] == "thinking"
+    assert payload["metadata"]["actual_mode"] == "fast"
+
+
 def test_hybrid_route_dispatch_matrix(monkeypatch):
     calls = {"pdf": 0, "tabular": 0}
 

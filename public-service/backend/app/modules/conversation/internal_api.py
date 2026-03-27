@@ -23,9 +23,15 @@ from app.modules.conversation.authority_schemas import (
 router = APIRouter(tags=["conversation-internal"])
 
 _INTERNAL_TOKEN_ENV = "PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN"
-_ALLOWED_SOURCE_SERVICE_MODES: dict[str, set[str]] = {
-    "fastQA": {"fast"},
-    "highThinkingQA": {"thinking"},
+_SOURCE_SERVICE_POLICY: dict[str, dict[str, set[str]]] = {
+    "fastQA": {
+        "requested_modes": {"fast", "thinking"},
+        "actual_modes": {"fast"},
+    },
+    "highThinkingQA": {
+        "requested_modes": {"thinking"},
+        "actual_modes": {"thinking"},
+    },
 }
 
 
@@ -90,12 +96,14 @@ def _enforce_source_service_policy(
     requested_mode: str,
     actual_mode: str,
 ) -> None:
-    allowed_modes = _ALLOWED_SOURCE_SERVICE_MODES.get(str(source_service))
+    policy = _SOURCE_SERVICE_POLICY.get(str(source_service))
+    allowed_requested_modes = set(policy.get("requested_modes") or ()) if isinstance(policy, dict) else set()
+    allowed_actual_modes = set(policy.get("actual_modes") or ()) if isinstance(policy, dict) else set()
     if (
         caller_service_name != source_service
-        or not allowed_modes
-        or requested_mode not in allowed_modes
-        or actual_mode not in allowed_modes
+        or not policy
+        or requested_mode not in allowed_requested_modes
+        or actual_mode not in allowed_actual_modes
     ):
         raise AppError(
             message="internal_source_service_forbidden",

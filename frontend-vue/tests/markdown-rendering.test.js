@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { formatStreamingAnswer } from '../src/utils/index.js'
+import { formatAnswer, formatStreamingAnswer } from '../src/utils/index.js'
 
 function installMinimalDom() {
   global.document = {
@@ -41,4 +41,26 @@ test('formatStreamingAnswer renders markdown tables during streaming', () => {
   assert.match(html, /<td>120 um<\/td>/i)
   assert.match(html, /class="doi-link"/i)
   assert.match(html, /data-doi="10\.1000\/demo"/i)
+})
+
+test('formatAnswer renders inline formulas with superscript and subscript', () => {
+  installMinimalDom()
+  const input = '容量衰减可写作 $Q_{loss} = k x^2$，材料可表示为 Li_{1-x}CoO_2。'
+
+  const html = formatAnswer(input)
+
+  assert.doesNotMatch(html, /\$Q_\{loss\} = k x\^2\$/)
+  assert.match(html, /<sub>loss<\/sub>/i)
+  assert.match(html, /<sup>2<\/sup>/i)
+  assert.match(html, /Li<sub>1-x<\/sub>CoO<sub>2<\/sub>/i)
+})
+
+test('formatStreamingAnswer preserves inline math markup during streaming', () => {
+  installMinimalDom()
+  const input = '容量衰减满足 $Q_{loss} = k x^2$。'
+
+  const html = formatStreamingAnswer(input)
+
+  assert.match(html, /<sub>loss<\/sub>/i)
+  assert.match(html, /<sup>2<\/sup>/i)
 })
