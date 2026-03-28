@@ -15,6 +15,7 @@ class ChatMessage(BaseModel):
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     conversation_id: int | str | None = None
+    user_id: int | str | None = None
     chat_history: list[ChatMessage] = Field(default_factory=list, max_length=20)
     requested_mode: Literal["fast", "thinking", "patent"]
     pdf_context: dict[str, Any] = Field(default_factory=dict)

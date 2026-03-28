@@ -18,6 +18,12 @@ function readStoredToken() {
     || '';
 }
 
+function readStoredUserId() {
+  const raw = localStorage.getItem('lfp_user_id') || '';
+  const value = Number(raw);
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
 function clearStoredAuth() {
   localStorage.removeItem('token');
   localStorage.removeItem('user');
@@ -170,20 +176,29 @@ function normalizeDoiLocations(rawLocations) {
 
 function normalizeMessage(item) {
   const metadata = item?.metadata && typeof item.metadata === 'object' ? { ...item.metadata } : {};
-  const refsRaw = Array.isArray(item?.references)
-    ? item.references
-    : (Array.isArray(metadata.references) ? metadata.references : []);
+  const refsRaw = Array.isArray(item?.reference_objects)
+    ? item.reference_objects
+    : Array.isArray(metadata.reference_objects)
+      ? metadata.reference_objects
+      : Array.isArray(item?.references)
+        ? item.references
+        : (Array.isArray(metadata.references) ? metadata.references : []);
   const references = refsRaw
     .map((ref) => {
       if (typeof ref === 'string') {
-        return { doi: ref.trim(), title: '' };
+        const doi = ref.trim();
+        return doi ? { doi, title: '' } : null;
       }
+      if (!ref || typeof ref !== 'object') return null;
+      const doi = String(ref?.doi || '').trim();
+      if (!doi) return null;
       return {
-        doi: String(ref?.doi || '').trim(),
+        ...ref,
+        doi,
         title: String(ref?.title || ''),
       };
     })
-    .filter((ref) => ref.doi);
+    .filter((ref) => ref?.doi);
 
   const rawMode = String(item?.queryMode || item?.query_mode || metadata.query_mode || metadata.queryMode || '').trim();
   const queryModeMap = {
@@ -214,18 +229,29 @@ function normalizeMessage(item) {
     item?.doiLocations || item?.doi_locations || metadata?.doiLocations || metadata?.doi_locations
   );
 
+  if (references.length > 0) {
+    metadata.references = references;
+    metadata.reference_objects = references;
+  }
+  if (referenceLinks.length > 0) {
+    metadata.reference_links = referenceLinks;
+    metadata.pdf_links = referenceLinks;
+  }
+  if (steps.length > 0) {
+    metadata.steps = steps;
+  }
+  if (rawMode) {
+    metadata.query_mode = rawMode;
+  }
+  if (Object.keys(doiLocations).length > 0) {
+    metadata.doi_locations = doiLocations;
+  }
+
   return {
     role: String(item?.role || 'assistant'),
     content: String(item?.content || ''),
     timestamp: item?.timestamp || item?.created_at || new Date().toISOString(),
-    metadata: {
-      ...metadata,
-      references,
-      ...(referenceLinks.length > 0 ? { reference_links: referenceLinks, pdf_links: referenceLinks } : {}),
-      ...(steps.length > 0 ? { steps } : {}),
-      ...(rawMode ? { query_mode: rawMode } : {}),
-      ...(Object.keys(doiLocations).length > 0 ? { doi_locations: doiLocations } : {}),
-    },
+    metadata,
     queryMode,
     references,
     referenceLinks,
@@ -485,6 +511,8 @@ export const api = {
       requested_mode: ['fast', 'thinking', 'patent'].includes(normalizedMode) ? normalizedMode : 'fast',
     };
     if (conversationId) body.conversation_id = conversationId;
+    const userId = readStoredUserId();
+    if (userId) body.user_id = userId;
     if (pdfContext) body.pdf_context = pdfContext;
 
     const askPath = ['fast', 'thinking', 'patent'].includes(normalizedMode)
@@ -553,6 +581,7 @@ export const api = {
         question,
         chat_history: chatHistory.slice(-10),
         requested_mode: ['fast', 'thinking', 'patent'].includes(normalizedMode) ? normalizedMode : 'fast',
+        ...(readStoredUserId() ? { user_id: readStoredUserId() } : {}),
       }),
     });
     return payload;

@@ -3,6 +3,13 @@ import { streamSseJson } from '../utils/sse';
 
 const API_PREFIX = '/api';
 
+function readStoredUserId() {
+  if (typeof window === 'undefined') return null;
+  const raw = window.localStorage.getItem('lfp_user_id') || '';
+  const value = Number(raw);
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
 function normalizeChatHistory(chatHistory = []) {
   return (Array.isArray(chatHistory) ? chatHistory : [])
     .map((item) => {
@@ -79,6 +86,10 @@ export async function streamAsk({
   };
   if (conversationId) {
     body.conversation_id = conversationId;
+  }
+  const userId = readStoredUserId();
+  if (userId) {
+    body.user_id = userId;
   }
   const options = {};
   if (typeof usePdf === 'boolean') options.use_pdf = usePdf;

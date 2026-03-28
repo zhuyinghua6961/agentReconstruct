@@ -66,55 +66,61 @@
         ></div>
 
         <!-- 右侧面板 - 位置提示/总结/翻译 -->
-        <div v-show="showSidePanel" class="right-panel" :style="{ width: sidebarWidth + 'px' }">
+        <div
+          v-show="showSidePanel"
+          class="right-panel"
+          :class="{ 'citations-only': isCitationsVisible }"
+          :style="{ width: sidebarWidth + 'px' }"
+        >
           <div class="side-mode-switch">
             <button
               class="mode-btn"
-              :class="{ active: panelMode === 'both' }"
-              @click="setPanelMode('both')"
+              :class="{ active: panelMode === 'citations' }"
+              @click="setPanelMode('citations')"
             >
-              总结 + 翻译
+              引用位置
             </button>
             <button
               class="mode-btn"
               :class="{ active: panelMode === 'summary' }"
               @click="setPanelMode('summary')"
             >
-              仅总结
+              总结
             </button>
             <button
               class="mode-btn"
               :class="{ active: panelMode === 'translation' }"
               @click="setPanelMode('translation')"
             >
-              仅翻译
+              翻译
             </button>
           </div>
 
-          <!-- 位置提示面板 -->
-          <div v-if="locationHints.length > 0" class="location-panel">
+          <!-- 引用位置面板 -->
+          <div v-show="isCitationsVisible" class="location-panel">
             <div class="location-panel-header">
               <h3>📍 引用位置</h3>
               <p>共 {{ locationHints.length }} 处引用</p>
             </div>
             <div class="location-panel-content">
+              <p v-if="locationHints.length === 0" class="summary-placeholder">当前引用暂无可展示的位置证据。</p>
               <div v-for="(hint, idx) in locationHints" :key="idx" 
                    class="location-item"
                    :class="hint.confidence">
                 <div class="location-header">
                   <span class="page-badge">
-                    {{ hint.section || '未知章节' }}
+                    {{ resolveLocationTitle(hint) }}
                   </span>
                   <span class="similarity-badge" :class="hint.confidence">
-                    {{ (hint.similarity * 100).toFixed(0) }}%
+                    {{ resolveLocationBadge(hint) }}
                   </span>
                 </div>
-                <div class="location-sentence">
-                  "{{ hint.answer_sentence || hint.sentence }}"
+                <div v-if="resolveLocationSentence(hint)" class="location-sentence">
+                  "{{ resolveLocationSentence(hint) }}"
                 </div>
                 <div class="location-source">
                   <strong>原文片段:</strong>
-                  <p>{{ hint.source_text || hint.source_preview }}</p>
+                  <p>{{ resolveLocationSource(hint) }}</p>
                 </div>
                 <div v-if="hint.has_number || hint.has_unit" class="location-tags">
                   <span v-if="hint.has_number" class="tag">📊 含数值</span>
@@ -124,13 +130,12 @@
             </div>
           </div>
 
-          <div class="assist-panels" ref="assistPanelsRef">
+          <div class="assist-panels">
             <!-- 全文总结面板 -->
             <div
               v-show="isSummaryVisible"
               class="summary-panel"
-              :style="panelMode === 'both' ? { height: summaryHeight + 'px' } : null"
-            >
+                          >
               <div class="summary-panel-header">
                 <h3>🧾 全文总结</h3>
                 <button
@@ -148,13 +153,6 @@
                 <p v-else class="summary-placeholder">点击“生成总结”可快速获取论文核心结论。</p>
               </div>
             </div>
-
-            <div
-              v-if="panelMode === 'both'"
-              class="assist-splitter"
-              @mousedown.prevent="startVerticalResize"
-              @touchstart.prevent="startVerticalResize"
-            ></div>
 
             <!-- 翻译面板 -->
             <div v-show="isTranslationVisible" class="translation-panel">
@@ -217,9 +215,11 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 import { checkPdfAvailability } from '../api/literature'
 import { api } from '../services/api'
+import { resolvePdfReaderInitialPanelMode, isPdfReaderPanelActive } from '../utils/pdfReaderPanelMode'
+import { resolveLocationBadge, resolveLocationSentence, resolveLocationSource, resolveLocationTitle } from '../utils/referenceLocation'
 
 // Props & Emits
 const emit = defineEmits(['close'])
@@ -239,21 +239,16 @@ const isPdfLoading = ref(false)
 const sidebarWidth = ref(360)
 const isResizing = ref(false)
 const layoutRef = ref(null)
-const panelMode = ref('both')
-const assistPanelsRef = ref(null)
-const summaryHeight = ref(230)
-const isVerticalResizing = ref(false)
+const panelMode = ref('summary')
 const summaryText = ref('')
 const summaryError = ref('')
 const isSummarizing = ref(false)
 
 const MIN_SIDEBAR_WIDTH = 260
 const MIN_LEFT_WIDTH = 420
-const MIN_SUMMARY_HEIGHT = 120
-const MIN_TRANSLATION_HEIGHT = 180
-
-const isSummaryVisible = computed(() => panelMode.value !== 'translation')
-const isTranslationVisible = computed(() => panelMode.value !== 'summary')
+const isCitationsVisible = computed(() => isPdfReaderPanelActive(panelMode.value, 'citations'))
+const isSummaryVisible = computed(() => isPdfReaderPanelActive(panelMode.value, 'summary'))
+const isTranslationVisible = computed(() => isPdfReaderPanelActive(panelMode.value, 'translation'))
 
 function getAuthToken() {
   return localStorage.getItem('token')
@@ -289,7 +284,8 @@ async function openReader(doi, locations = []) {
   summaryText.value = ''
   summaryError.value = ''
   isSummarizing.value = false
-  
+  panelMode.value = resolvePdfReaderInitialPanelMode(locations)
+
   let url = buildPdfUrl(doi)
   
   // 如果有位置信息，添加页码锚点
@@ -305,7 +301,6 @@ async function openReader(doi, locations = []) {
   isOpen.value = true
   translations.value = []
   manualText.value = ''
-  nextTick(() => normalizeSummaryHeight())
 
   try {
     const payload = await checkPdfAvailability(doi)
@@ -329,9 +324,6 @@ async function openReader(doi, locations = []) {
 
 function toggleSidePanel() {
   showSidePanel.value = !showSidePanel.value
-  if (showSidePanel.value) {
-    nextTick(() => normalizeSummaryHeight())
-  }
 }
 
 function getClientX(e) {
@@ -339,97 +331,38 @@ function getClientX(e) {
   return e.clientX
 }
 
-function getClientY(e) {
-  if (e.touches && e.touches.length) return e.touches[0].clientY
-  return e.clientY
-}
-
-function normalizeSummaryHeight() {
-  if (panelMode.value !== 'both' || !assistPanelsRef.value) return
-  const rect = assistPanelsRef.value.getBoundingClientRect()
-  const minHeight = MIN_SUMMARY_HEIGHT
-  const maxHeight = Math.max(minHeight, rect.height - MIN_TRANSLATION_HEIGHT)
-  if (summaryHeight.value < minHeight) summaryHeight.value = minHeight
-  if (summaryHeight.value > maxHeight) summaryHeight.value = maxHeight
-}
-
 function setPanelMode(mode) {
   panelMode.value = mode
-  if (mode === 'both') {
-    nextTick(() => normalizeSummaryHeight())
-  }
 }
 
 function startResize(e) {
-  if (!layoutRef.value) return
+  if (!showSidePanel.value) return
   isResizing.value = true
-  onResize(e)
-  window.addEventListener('mousemove', onResize)
+  window.addEventListener('mousemove', handleResize)
   window.addEventListener('mouseup', stopResize)
-  window.addEventListener('touchmove', onResize, { passive: false })
+  window.addEventListener('touchmove', handleResize, { passive: false })
   window.addEventListener('touchend', stopResize)
-  document.body.style.cursor = 'col-resize'
-  document.body.style.userSelect = 'none'
+  handleResize(e)
 }
 
-function onResize(e) {
-  if (!isResizing.value || !layoutRef.value) return
-  const rect = layoutRef.value.getBoundingClientRect()
+function handleResize(e) {
+  if (!isResizing.value) return
+  e.preventDefault?.()
+  const layoutWidth = layoutRef.value?.clientWidth || 0
+  if (layoutWidth <= 0) return
   const clientX = getClientX(e)
-  let newWidth = rect.right - clientX
-  const maxWidth = Math.max(MIN_SIDEBAR_WIDTH, rect.width - MIN_LEFT_WIDTH)
-  if (newWidth < MIN_SIDEBAR_WIDTH) newWidth = MIN_SIDEBAR_WIDTH
-  if (newWidth > maxWidth) newWidth = maxWidth
-  sidebarWidth.value = Math.round(newWidth)
+  const nextWidth = layoutWidth - clientX
+  const maxSidebarWidth = Math.max(MIN_SIDEBAR_WIDTH, layoutWidth - MIN_LEFT_WIDTH)
+  sidebarWidth.value = Math.min(Math.max(nextWidth, MIN_SIDEBAR_WIDTH), maxSidebarWidth)
 }
 
 function stopResize() {
+  if (!isResizing.value) return
   isResizing.value = false
-  window.removeEventListener('mousemove', onResize)
+  window.removeEventListener('mousemove', handleResize)
   window.removeEventListener('mouseup', stopResize)
-  window.removeEventListener('touchmove', onResize)
+  window.removeEventListener('touchmove', handleResize)
   window.removeEventListener('touchend', stopResize)
-  document.body.style.cursor = ''
-  document.body.style.userSelect = ''
-}
-
-function startVerticalResize(e) {
-  if (!assistPanelsRef.value || panelMode.value !== 'both') return
-  isVerticalResizing.value = true
-  onVerticalResize(e)
-  window.addEventListener('mousemove', onVerticalResize)
-  window.addEventListener('mouseup', stopVerticalResize)
-  window.addEventListener('touchmove', onVerticalResize, { passive: false })
-  window.addEventListener('touchend', stopVerticalResize)
-  document.body.style.cursor = 'row-resize'
-  document.body.style.userSelect = 'none'
-}
-
-function onVerticalResize(e) {
-  if (!isVerticalResizing.value || !assistPanelsRef.value) return
-  if (e.cancelable) e.preventDefault()
-  const rect = assistPanelsRef.value.getBoundingClientRect()
-  const clientY = getClientY(e)
-  let newHeight = clientY - rect.top
-  const maxHeight = Math.max(MIN_SUMMARY_HEIGHT, rect.height - MIN_TRANSLATION_HEIGHT)
-  if (newHeight < MIN_SUMMARY_HEIGHT) newHeight = MIN_SUMMARY_HEIGHT
-  if (newHeight > maxHeight) newHeight = maxHeight
-  summaryHeight.value = Math.round(newHeight)
-}
-
-function stopVerticalResize() {
-  isVerticalResizing.value = false
-  window.removeEventListener('mousemove', onVerticalResize)
-  window.removeEventListener('mouseup', stopVerticalResize)
-  window.removeEventListener('touchmove', onVerticalResize)
-  window.removeEventListener('touchend', stopVerticalResize)
-  document.body.style.cursor = ''
-  document.body.style.userSelect = ''
-}
-
-function jumpToPage(page) {
-  targetPage.value = page
-  pdfUrl.value = buildPdfUrl(currentDoi.value, page)
 }
 
 function closeReader() {
@@ -437,7 +370,7 @@ function closeReader() {
   currentDoi.value = ''
   pdfUrl.value = ''
   pdfError.value = null
-  stopVerticalResize()
+  stopResize()
   isPdfLoading.value = false
   summaryText.value = ''
   summaryError.value = ''
@@ -539,7 +472,7 @@ defineExpose({
 
 onBeforeUnmount(() => {
   stopResize()
-  stopVerticalResize()
+  stopResize()
 })
 </script>
 
@@ -732,6 +665,13 @@ onBeforeUnmount(() => {
   max-height: 38%;
 }
 
+.right-panel.citations-only .location-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  border-bottom: none;
+}
+
 .location-panel-header {
   padding: 20px;
   border-bottom: 1px solid #e5e7eb;
@@ -754,6 +694,10 @@ onBeforeUnmount(() => {
   flex: 0 1 auto;
   overflow-y: auto;
   padding: 16px;
+}
+
+.right-panel.citations-only .location-panel-content {
+  flex: 1 1 auto;
 }
 
 .location-item {
@@ -1019,12 +963,8 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
-.assist-splitter {
-  height: 8px;
-  cursor: row-resize;
-  background: linear-gradient(180deg, #e5e7eb, #cbd5e1, #e5e7eb);
-  border-top: 1px solid #e5e7eb;
-  border-bottom: 1px solid #e5e7eb;
+.right-panel.citations-only .assist-panels {
+  display: none;
 }
 
 .translation-panel-header {

@@ -5,6 +5,7 @@ import { api } from '../services/api'
 import { formatTime, formatAnswer, formatStreamingAnswer } from '../utils'
 import { mergeSelectedFileIdsAfterUpload, resolveUploadedFileDisplayNumber } from '../utils/fileSelection'
 import PdfReader from '../components/PdfReader.vue'
+import { buildCitationLocationsForDoi } from '../utils/citationEvidence'
 
 const PINNED_CHATS_COLLAPSED_KEY = 'lfp.sidebar.pinned-collapsed.v1'
 const RECENT_CHATS_COLLAPSED_KEY = 'lfp.sidebar.recent-collapsed.v1'
@@ -871,10 +872,14 @@ onMounted(async () => {
       const currentMsg = Number.isInteger(messageIndex) && messageIndex >= 0
         ? store.currentMessages[messageIndex]
         : null
-      const locations = currentMsg?.doiLocations?.[doi] || []
+      const locations = buildCitationLocationsForDoi({
+        doi,
+        doiLocations: currentMsg?.doiLocations || {},
+        references: currentMsg?.references || []
+      })
 
       if (doi && pdfReader.value) {
-        pdfReader.value.openReader(doi, locations)  // 传递位置信息
+        pdfReader.value.openReader(doi, locations)
       }
     }
   }
@@ -1127,6 +1132,9 @@ async function sendMessage() {
         const existingMeta = (targetMessage.metadata && typeof targetMessage.metadata === 'object') ? targetMessage.metadata : {}
         const doneMeta = (data.metadata && typeof data.metadata === 'object') ? data.metadata : {}
         const referenceLinks = data.reference_links || data.pdf_links || data.referenceLinks || data.pdfLinks || []
+        const references = Array.isArray(data.reference_objects)
+          ? data.reference_objects
+          : (Array.isArray(data.references) ? data.references : [])
         const finalizedSteps = updateStreamingSteps((steps) => {
           if (activeStepKey) {
             const activeIdx = steps.findIndex((step) => step.step === activeStepKey)
@@ -1141,6 +1149,7 @@ async function sendMessage() {
           })
         })
         const updates = {
+          references,
           referenceLinks,
           steps: finalizedSteps,
           isComplete: true

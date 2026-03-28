@@ -35,6 +35,7 @@ def _normalized_payload(*, payload: AskRequest, route_decision, file_context, tr
     return {
         "question": payload.question,
         "conversation_id": payload.conversation_id,
+        "user_id": payload.user_id,
         "chat_history": [item.model_dump() for item in payload.chat_history],
         "requested_mode": route_decision.requested_mode,
         "actual_mode": route_decision.actual_mode,
