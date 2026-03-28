@@ -36,3 +36,20 @@ archive/*legacy*/
 fastQA/logs/
 highThinkingQA/vectordb/
 resource/logs/
+
+# Deploy local env and release artifacts
+deploy/.env
+deploy/*.tar
+
+# Deploy generated seed content; keep docs and placeholders tracked
+deploy/seed-data/*
+!deploy/seed-data/README.md
+!deploy/seed-data/*/
+deploy/seed-data/*/*
+!deploy/seed-data/*/.gitkeep
+
+# Deploy generated MinIO seed content; keep docs tracked
+deploy/minio-seed/*
+!deploy/minio-seed/README.md
+!deploy/minio-seed/*/
+deploy/minio-seed/*/*

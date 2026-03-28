@@ -1,0 +1,5 @@
+FROM highthinking-python-base:latest
+
+WORKDIR /app
+EXPOSE 8008
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "app.main:app", "--chdir", "/app/fastQA", "--bind", "0.0.0.0:8008", "--workers", "8", "--timeout", "600"]

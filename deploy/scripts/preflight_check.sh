@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+DEPLOY_DIR="$ROOT_DIR/deploy"
+ENV_FILE="${1:-$DEPLOY_DIR/.env}"
+COMPOSE_FILE="$DEPLOY_DIR/docker-compose.yml"
+
+required_files=(
+  "$COMPOSE_FILE"
+  "$DEPLOY_DIR/mysql-init/001_schema.sql"
+  "$DEPLOY_DIR/minio-init/init.sh"
+)
+
+required_vars=(
+  COMPOSE_PROJECT_NAME
+  GATEWAY_IMAGE
+  PUBLIC_SERVICE_IMAGE
+  FASTQA_IMAGE
+  HIGHTHINKINGQA_IMAGE
+  MYSQL_ROOT_PASSWORD
+  MYSQL_DATABASE
+  MYSQL_APP_USER
+  MYSQL_APP_PASSWORD
+  REDIS_PASSWORD
+  MINIO_ROOT_USER
+  MINIO_ROOT_PASSWORD
+  MINIO_BUCKET
+  FASTQA_EMBEDDING_MODEL_TYPE
+  FASTQA_EMBEDDING_API_URL
+  FASTQA_EMBEDDING_API_MODEL
+  HIGHTHINKINGQA_LLM_BASE_URL
+  HIGHTHINKINGQA_LLM_MODEL
+  HIGHTHINKINGQA_EMBEDDING_BASE_URL
+  HIGHTHINKINGQA_EMBEDDING_MODEL
+)
+
+placeholder_patterns=(
+  'change_me_'
+  'ghcr.io/example/'
+)
+
+check_seed_dir() {
+  local dir="$1"
+  if find "$dir" -mindepth 1 ! -name '.gitkeep' -print -quit | grep -q .; then
+    echo "ok: seed-data present in $dir"
+  else
+    echo "warn: seed-data directory is empty: $dir"
+  fi
+}
+
+check_optional_seed_dir() {
+  local dir="$1"
+  if find "$dir" -mindepth 1 ! -name '.gitkeep' -print -quit | grep -q .; then
+    echo "ok: minio seed present in $dir"
+  else
+    echo "warn: minio seed directory is empty: $dir"
+  fi
+}
+
+for file in "${required_files[@]}"; do
+  if [[ ! -f "$file" ]]; then
+    echo "missing required file: $file" >&2
+    exit 1
+  fi
+done
+
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "env file not found: $ENV_FILE" >&2
+  echo "hint: cp deploy/.env.production.example deploy/.env" >&2
+  exit 1
+fi
+
+set -a
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+set +a
+
+for var_name in "${required_vars[@]}"; do
+  if [[ -z "${!var_name:-}" ]]; then
+    echo "missing required variable in $ENV_FILE: $var_name" >&2
+    exit 1
+  fi
+done
+
+if [[ "${FASTQA_EMBEDDING_MODEL_TYPE}" != "remote" ]]; then
+  echo "invalid FASTQA_EMBEDDING_MODEL_TYPE: expected remote, got ${FASTQA_EMBEDDING_MODEL_TYPE}" >&2
+  exit 1
+fi
+
+for pattern in "${placeholder_patterns[@]}"; do
+  if grep -q "$pattern" "$ENV_FILE"; then
+    echo "warn: placeholder values matching '$pattern' still exist in $ENV_FILE"
+  fi
+done
+
+check_seed_dir "$DEPLOY_DIR/seed-data/public-service"
+check_seed_dir "$DEPLOY_DIR/seed-data/fastQA"
+check_seed_dir "$DEPLOY_DIR/seed-data/highThinkingQA"
+check_optional_seed_dir "$DEPLOY_DIR/minio-seed/$MINIO_BUCKET"
+
+docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" config >/dev/null
+
+echo "preflight check passed"

@@ -1,0 +1,305 @@
+services:
+  mysql:
+    image: mysql:${MYSQL_IMAGE_TAG}
+    container_name: ${COMPOSE_PROJECT_NAME}-mysql
+    restart: unless-stopped
+    command:
+      - mysqld
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+    ports:
+      - "${MYSQL_PUBLISH_PORT}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$${MYSQL_ROOT_PASSWORD}\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  redis:
+    image: redis:${REDIS_IMAGE_TAG}
+    container_name: ${COMPOSE_PROJECT_NAME}-redis
+    restart: unless-stopped
+    command: ["sh", "-c", "redis-server --appendonly yes --requirepass \"$${REDIS_PASSWORD}\""]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    ports:
+      - "${REDIS_PUBLISH_PORT}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  minio:
+    image: minio/minio:${MINIO_IMAGE_TAG}
+    container_name: ${COMPOSE_PROJECT_NAME}-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "${MINIO_API_PUBLISH_PORT}:9000"
+      - "${MINIO_CONSOLE_PUBLISH_PORT}:9001"
+    volumes:
+      - minio_data:/data
+
+  minio-init:
+    image: minio/mc:${MINIO_MC_IMAGE_TAG}
+    container_name: ${COMPOSE_PROJECT_NAME}-minio-init
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint: ["/bin/sh", "/scripts/init.sh"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+    volumes:
+      - ./minio-init:/scripts:ro
+
+  minio-seed:
+    image: minio/mc:${MINIO_MC_IMAGE_TAG}
+    container_name: ${COMPOSE_PROJECT_NAME}-minio-seed
+    restart: "no"
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/sh", "/scripts/import.sh"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+    volumes:
+      - ./minio-init:/scripts:ro
+      - ./minio-seed:/seed:ro
+
+  init-data:
+    image: alpine:${ALPINE_IMAGE_TAG}
+    container_name: ${COMPOSE_PROJECT_NAME}-init-data
+    restart: "no"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        mkdir -p /targets/public-service /targets/fastqa-state /targets/highthinking-state
+        if [ -d /seed/public-service ]; then cp -a /seed/public-service/. /targets/public-service/; fi
+        if [ -d /seed/fastQA ]; then cp -a /seed/fastQA/. /targets/fastqa-state/; fi
+        if [ -d /seed/highThinkingQA ]; then cp -a /seed/highThinkingQA/. /targets/highthinking-state/; fi
+    volumes:
+      - ./seed-data:/seed:ro
+      - public_service_data:/targets/public-service
+      - fastqa_state:/targets/fastqa-state
+      - highthinking_state:/targets/highthinking-state
+
+  public-service:
+    image: ${PUBLIC_SERVICE_IMAGE}
+    container_name: ${COMPOSE_PROJECT_NAME}-public-service
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      minio-seed:
+        condition: service_completed_successfully
+      init-data:
+        condition: service_completed_successfully
+    environment:
+      APP_ENV: ${APP_ENV}
+      PUBLIC_SERVICE_HOST: 0.0.0.0
+      PUBLIC_SERVICE_PORT: 8102
+      PUBLIC_SERVICE_DATA_ROOT: /data/public-service
+      PUBLIC_SERVICE_CORS_ORIGINS: ${PUBLIC_SERVICE_CORS_ORIGINS}
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_USER: ${MYSQL_APP_USER}
+      MYSQL_PASSWORD: ${MYSQL_APP_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      REDIS_ENABLED: ${PUBLIC_SERVICE_REDIS_ENABLED}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      REDIS_DB: ${PUBLIC_SERVICE_REDIS_DB}
+      REDIS_KEY_PREFIX: ${PUBLIC_SERVICE_REDIS_KEY_PREFIX}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+      MINIO_SECURE: "0"
+      MINIO_REGION: ${MINIO_REGION}
+      MINIO_USE_PROXY: ${PUBLIC_SERVICE_MINIO_USE_PROXY}
+      MINIO_DOWNLOAD_EXPIRES: ${PUBLIC_SERVICE_MINIO_DOWNLOAD_EXPIRES}
+      OPENAI_API_KEY: ${PUBLIC_SERVICE_OPENAI_API_KEY}
+      OPENAI_BASE_URL: ${PUBLIC_SERVICE_OPENAI_BASE_URL}
+      DASHSCOPE_API_KEY: ${PUBLIC_SERVICE_DASHSCOPE_API_KEY}
+      NEO4J_URL: ${PUBLIC_SERVICE_NEO4J_URL}
+      NEO4J_USERNAME: ${PUBLIC_SERVICE_NEO4J_USERNAME}
+      NEO4J_PASSWORD: ${PUBLIC_SERVICE_NEO4J_PASSWORD}
+    ports:
+      - "${PUBLIC_SERVICE_PUBLISH_PORT}:8102"
+    volumes:
+      - public_service_data:/data/public-service
+
+  fastqa:
+    image: ${FASTQA_IMAGE}
+    container_name: ${COMPOSE_PROJECT_NAME}-fastqa
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      minio-seed:
+        condition: service_completed_successfully
+      init-data:
+        condition: service_completed_successfully
+      public-service:
+        condition: service_started
+    environment:
+      APP_ENV: ${APP_ENV}
+      FASTAPI_HOST: 0.0.0.0
+      FASTAPI_PORT: 8008
+      FASTQA_SERVICE_STATE_ROOT: /data/fastqa/state
+      FASTQA_SERVICE_RUNTIME_ROOT: /data/fastqa/runtime
+      FASTQA_SERVICE_ASSET_ROOT: /app/resource/assets
+      RESOURCE_ROOT: /app/resource
+      REDIS_ENABLED: ${FASTQA_REDIS_ENABLED}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      REDIS_DB: ${FASTQA_REDIS_DB}
+      REDIS_KEY_PREFIX: ${FASTQA_REDIS_KEY_PREFIX}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+      MINIO_SECURE: "0"
+      PUBLIC_SERVICE_INTERNAL_BASE_URL: http://public-service:8102
+      OPENAI_API_KEY: ${FASTQA_OPENAI_API_KEY}
+      OPENAI_BASE_URL: ${FASTQA_OPENAI_BASE_URL}
+      DASHSCOPE_API_KEY: ${FASTQA_DASHSCOPE_API_KEY}
+      DASHSCOPE_BASE_URL: ${FASTQA_DASHSCOPE_BASE_URL}
+      EMBEDDING_MODEL_TYPE: ${FASTQA_EMBEDDING_MODEL_TYPE}
+      EMBEDDING_API_URL: ${FASTQA_EMBEDDING_API_URL}
+      EMBEDDING_API_MODEL: ${FASTQA_EMBEDDING_API_MODEL}
+      PDFQA_SIDECAR_BASE_URL_INTERNAL: ${FASTQA_PDFQA_SIDECAR_BASE_URL_INTERNAL}
+    ports:
+      - "${FASTQA_PUBLISH_PORT}:8008"
+    volumes:
+      - fastqa_state:/data/fastqa/state
+      - fastqa_runtime:/data/fastqa/runtime
+
+  highthinkingqa:
+    image: ${HIGHTHINKINGQA_IMAGE}
+    container_name: ${COMPOSE_PROJECT_NAME}-highthinkingqa
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      minio-seed:
+        condition: service_completed_successfully
+      init-data:
+        condition: service_completed_successfully
+      public-service:
+        condition: service_started
+    environment:
+      APP_ENV: ${APP_ENV}
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8009
+      HIGHTHINKINGQA_SERVICE_STATE_ROOT: /data/highthinkingqa/state
+      HIGHTHINKINGQA_SERVICE_RUNTIME_ROOT: /data/highthinkingqa/runtime
+      HIGHTHINKINGQA_SERVICE_ASSET_ROOT: /app/resource/assets
+      RESOURCE_ROOT: /app/resource
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_USER: ${MYSQL_APP_USER}
+      MYSQL_PASSWORD: ${MYSQL_APP_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      REDIS_ENABLED: ${HIGHTHINKINGQA_REDIS_ENABLED}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      REDIS_DB: ${HIGHTHINKINGQA_REDIS_DB}
+      REDIS_KEY_PREFIX: ${HIGHTHINKINGQA_REDIS_KEY_PREFIX}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+      MINIO_SECURE: "0"
+      MINIO_REGION: ${MINIO_REGION}
+      LLM_API_KEY: ${HIGHTHINKINGQA_LLM_API_KEY}
+      LLM_BASE_URL: ${HIGHTHINKINGQA_LLM_BASE_URL}
+      LLM_MODEL: ${HIGHTHINKINGQA_LLM_MODEL}
+      EMBEDDING_API_KEY: ${HIGHTHINKINGQA_EMBEDDING_API_KEY}
+      EMBEDDING_BASE_URL: ${HIGHTHINKINGQA_EMBEDDING_BASE_URL}
+      EMBEDDING_MODEL: ${HIGHTHINKINGQA_EMBEDDING_MODEL}
+      OCR_API_KEY: ${HIGHTHINKINGQA_OCR_API_KEY}
+      OCR_BASE_URL: ${HIGHTHINKINGQA_OCR_BASE_URL}
+      OCR_MODEL: ${HIGHTHINKINGQA_OCR_MODEL}
+      PUBLIC_SERVICE_INTERNAL_BASE_URL: http://public-service:8102
+    ports:
+      - "${HIGHTHINKINGQA_PUBLISH_PORT}:8009"
+    volumes:
+      - highthinking_state:/data/highthinkingqa/state
+      - highthinking_runtime:/data/highthinkingqa/runtime
+
+  gateway:
+    image: ${GATEWAY_IMAGE}
+    container_name: ${COMPOSE_PROJECT_NAME}-gateway
+    restart: unless-stopped
+    depends_on:
+      public-service:
+        condition: service_started
+      fastqa:
+        condition: service_started
+      highthinkingqa:
+        condition: service_started
+    environment:
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: 8101
+      PUBLIC_BACKEND_BASE_URL: http://public-service:8102
+      FAST_BACKEND_BASE_URL: http://fastqa:8008
+      THINKING_BACKEND_BASE_URL: http://highthinkingqa:8009
+      GATEWAY_CONVERSATION_FILE_PROVIDER: ${GATEWAY_CONVERSATION_FILE_PROVIDER}
+      GATEWAY_REQUEST_TIMEOUT_SECONDS: ${GATEWAY_REQUEST_TIMEOUT_SECONDS}
+      GATEWAY_SSE_TIMEOUT_SECONDS: ${GATEWAY_SSE_TIMEOUT_SECONDS}
+    ports:
+      - "${GATEWAY_PUBLISH_PORT}:8101"
+
+volumes:
+  mysql_data:
+  redis_data:
+  minio_data:
+  public_service_data:
+  fastqa_state:
+  fastqa_runtime:
+  highthinking_state:
+  highthinking_runtime:
+
+networks:
+  default:
+    name: ${COMPOSE_PROJECT_NAME}-net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${DOCKER_BRIDGE_SUBNET}
+          gateway: ${DOCKER_BRIDGE_GATEWAY}
