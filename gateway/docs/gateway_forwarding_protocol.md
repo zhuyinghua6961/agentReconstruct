@@ -340,8 +340,9 @@ Frontend -> gateway transport:
 
 Gateway -> backend transport:
 - HTTP passthrough
-- no MQ in the browser-facing path
-- SSE passthrough must stay streaming, not buffered
+- no MQ replacement of the browser-facing HTTP or SSE protocol itself
+- queue-backed execution admission may still happen after gateway route resolution and before backend execution starts
+- for immediately admitted stream requests, SSE passthrough must stay streaming and not be buffered
 
 ## 6.2 Required request headers
 
