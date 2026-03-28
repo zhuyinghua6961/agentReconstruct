@@ -647,7 +647,10 @@ def test_fast_mode_sync_ask_ignores_pending_overlay_redis_failure(monkeypatch):
         }
     ]
 
-from app.modules.generation_pipeline.answer_summary import apply_answer_summary_experiment as apply_fast_answer_summary_experiment
+from app.modules.generation_pipeline.answer_summary import (
+    apply_answer_summary_experiment as apply_fast_answer_summary_experiment,
+    summary_experiment_enabled as fast_summary_experiment_enabled,
+)
 
 
 def test_fast_answer_summary_experiment_appends_summary_block_when_enabled():
@@ -668,3 +671,15 @@ def test_fast_answer_summary_experiment_skips_short_answer():
     assert answer == "结论很短。"
     assert meta["generated"] is False
     assert meta["skipped_reason"] == "short_answer"
+
+
+def test_fast_answer_summary_experiment_enabled_by_default(monkeypatch):
+    monkeypatch.delenv("ANSWER_SUMMARY_EXPERIMENT", raising=False)
+
+    assert fast_summary_experiment_enabled() is True
+
+
+def test_fast_answer_summary_experiment_can_be_disabled_explicitly(monkeypatch):
+    monkeypatch.setenv("ANSWER_SUMMARY_EXPERIMENT", "0")
+
+    assert fast_summary_experiment_enabled() is False

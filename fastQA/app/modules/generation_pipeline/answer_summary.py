@@ -13,7 +13,7 @@ _DOI_RE = re.compile(r'\(doi\s*=\s*[^)]+\)', re.IGNORECASE)
 def summary_experiment_enabled(*, enabled: bool | None = None) -> bool:
     if enabled is not None:
         return bool(enabled)
-    return env_bool('ANSWER_SUMMARY_EXPERIMENT', False)
+    return env_bool('ANSWER_SUMMARY_EXPERIMENT', True)
 
 
 def build_summary_instruction(*, enabled: bool | None = None) -> str:
