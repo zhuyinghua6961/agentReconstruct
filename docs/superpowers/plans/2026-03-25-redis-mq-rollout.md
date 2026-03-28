@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Introduce Redis Streams based MQ for the stack's durable background work while keeping user-turn writes, routing, and interactive ask/SSE behavior synchronous.
+**Goal:** Introduce Redis Streams based MQ for the stack's durable background work while keeping user-turn writes, routing, and interactive ask/SSE behavior synchronous. A later follow-on phase may use Redis-backed admission queues to smooth bursty interactive traffic before execution starts, but must still preserve direct streaming once a request is admitted.
 
-**Architecture:** `public-service` is the long-term authority for conversation, upload, file, and document truth. The rollout starts by standardizing Redis stream helpers and moving authority-owned async flows in `public-service` onto Streams, then migrates only `highThinkingQA` background ingest orchestration and `fastQA` best-effort prewarm. `gateway` remains a thin synchronous proxy and may only gain an optional audit stream after the business flows are stable. Web `gunicorn` processes stay producer-only by default; MQ consumers must run in explicit worker processes or worker deployments.
+**Architecture:** `public-service` is the long-term authority for conversation, upload, file, and document truth. The rollout starts by standardizing Redis stream helpers and moving authority-owned async flows in `public-service` onto Streams, then migrates only `highThinkingQA` background ingest orchestration and `fastQA` best-effort prewarm. Current code reality is already partially transitional: `highThinkingQA` now persists richer completion summaries for thinking-mode completion, `fastQA` plus `public-service` now partially support rerouted file-QA authority persistence where `requested_mode` may differ from `actual_mode=fast`, and a standalone `patent` phase1 scaffold now exists under `patent/` with app factory, ask contract, health contract, Redis/runtime helpers, chat persistence, and authority-client bindings. That patent scaffold is not yet rollout-ready for durable production traffic because gateway routing/persistence and `public-service` authority gates still need end-to-end enablement. `gateway` should therefore be treated as a thin synchronous proxy with some residual compatibility-era persistence code still present, not as the only remaining producer boundary for non-thinking flows. Web `gunicorn` processes stay producer-only by default; MQ consumers must run in explicit worker processes or worker deployments. If interactive admission queueing is added later, it must be implemented as a separate control-plane worker path, not as per-process web-worker limiter logic.
 
 **Tech Stack:** FastAPI, Redis Streams, Redis consumer groups, existing Redis key helpers, MySQL-backed authority state, pytest, service-to-service HTTP, existing worker/runtime startup hooks.
 
@@ -12,12 +12,13 @@
 
 ## Scope Split
 
-This spec spans multiple subsystems, so implementation should be executed as one rollout program with four workstreams:
+This spec spans multiple subsystems, so implementation should be executed as one rollout program with five workstreams:
 
 1. Shared Redis stream primitives and rollout flags
 2. `public-service` authority async streams
 3. `highThinkingQA` background ingest only, plus temporary legacy bridge handling where necessary
 4. `fastQA` prewarm and optional `gateway` audit
+5. Interactive execution admission queueing after the background worker topology is stable
 
 Do not merge these into one giant branch without checkpoints. Each completed task below should leave the repo in a buildable, testable state.
 
@@ -25,7 +26,8 @@ Do not merge these into one giant branch without checkpoints. Each completed tas
 
 - Do not move user-turn writes behind MQ.
 - Do not move `gateway` routing, clarification, file-context resolution, or SSE passthrough behind MQ.
-- Do not turn `fastQA` or `highThinkingQA` interactive `ask` / `ask_stream` into queue jobs.
+- Do not replace admitted `fastQA` or `highThinkingQA` interactive `ask` / `ask_stream` token delivery with queue polling.
+- Do not rely on per-process web-worker semaphores as the global execution limit in multi-instance or `gunicorn` deployments.
 - Do not introduce `highThinkingQA` as the long-term owner of file-QA, upload truth, file lifecycle truth, or document truth.
 - Do not introduce Redis Pub/Sub as the durability mechanism for these flows.
 
@@ -45,6 +47,7 @@ For every new stream producer or worker in this plan, `shadow mode` means:
 - Each MQ worker role needs its own explicit process role flag and startup path, or its own dedicated deployment.
 - `public-service` assistant/json-sync consumers, `highThinkingQA` ingest, and `fastQA` prewarm should all be operable independently from the web API processes.
 - `highThinkingQA` ingest additionally requires a single-active lease or leader guard; consumer-group membership alone is not enough because the service still preserves a single-running-job model.
+- Current `fastQA` and `highThinkingQA` ask limiters remain process-local safety rails only. Any future global interactive admission limit must be coordinated through Redis-backed shared state and a dedicated dispatcher role, not inferred from local `gunicorn` worker counts.
 
 ## File Structure Map
 
@@ -71,6 +74,7 @@ For every new stream producer or worker in this plan, `shadow mode` means:
 - `fastQA/app/core/config.py`
 - `fastQA/app/core/runtime.py`
 - `fastQA/app/services/chat_persistence.py`
+- `fastQA/app/services/limits.py`
 - `fastQA/app/services/stream_contract.py`
 - `fastQA/app/modules/storage/upload_materializer.py`
 - `fastQA/tests/test_stream_contract.py`
@@ -83,13 +87,23 @@ For every new stream producer or worker in this plan, `shadow mode` means:
 - `highThinkingQA/server/services/ingest_service.py`
 - `highThinkingQA/server/services/conversation/chat_json_outbox_worker.py`
 - `highThinkingQA/server_fastapi/app.py`
-- `highThinkingQA/server_fastapi/routers/ingest.py`
+- `highThinkingQA/server_fastapi/routers/ask.py`
+- `highThinkingQA/server_fastapi/routers/__init__.py`
 - `highThinkingQA/tests/test_chat_persistence.py`
 - `highThinkingQA/tests/test_conversation_authority_client.py`
 - `highThinkingQA/tests/test_background_persistence_dispatcher.py`
 - `highThinkingQA/tests/test_chat_json_store.py`
+- `highThinkingQA/tests/fastapi_migration/test_fastapi_route_surface_minimal.py`
+- `patent/README.md`
+- `patent/config.py`
+- `patent/server_fastapi/routers/ask.py`
+- `patent/server_fastapi/routers/health.py`
+- `patent/tests/fastapi_contract/test_ask_contract.py`
+- `patent/tests/fastapi_contract/test_health_contract.py`
+- `patent/tests/test_conversation_authority_client.py`
 - `gateway/app/core/config.py`
 - `gateway/app/main.py`
+- `gateway/app/services/proxy.py`
 - `gateway/app/services/route_decision.py`
 - `gateway/app/services/conversation_persistence.py`
 - `gateway/app/routers/qa.py`
@@ -112,6 +126,13 @@ For every new stream producer or worker in this plan, `shadow mode` means:
 - `highThinkingQA/tests/test_ingest_streams.py`
 - `gateway/app/services/route_audit_stream.py`
 - `gateway/tests/test_route_audit_stream.py`
+- `gateway/app/services/execution_admission.py`
+- `gateway/app/services/execution_event_relay.py`
+- `gateway/app/services/execution_queue_status.py`
+- `gateway/scripts/start_admission_worker.sh`
+- `gateway/tests/test_execution_admission.py`
+- `gateway/tests/test_execution_event_relay.py`
+- `gateway/tests/test_execution_queue_status.py`
 
 ### Existing files likely to modify
 
@@ -135,6 +156,9 @@ For every new stream producer or worker in this plan, `shadow mode` means:
 - Modify: `public-service/backend/app/integrations/redis/keys.py`
 - Modify: `public-service/backend/app/integrations/redis/service.py`
 - Modify: `public-service/backend/app/core/config.py`
+- Modify: `public-service/backend/app/core/runtime.py`
+- Modify: `public-service/backend/app/main.py`
+- Modify: `public-service/scripts/start_gunicorn.sh`
 - Modify: `fastQA/app/integrations/redis/keys.py`
 - Modify: `fastQA/app/integrations/redis/service.py`
 - Modify: `fastQA/app/core/config.py`
@@ -152,6 +176,7 @@ Test cases to add:
 - no new stream name duplicates the service prefix twice
 - rollout flags distinguish `shadow`, `enabled`, and `worker_enabled`
 - web API role and MQ worker role are explicitly separable under `gunicorn`
+- public-service startup no longer auto-starts MQ workers from lifespan in every web worker process
 - consumer-group bootstrap is idempotent and chooses `$` or `0` explicitly by rollout mode
 - `highThinkingQA` config surface does not expose any new upload/file-QA ownership flag
 
@@ -174,6 +199,7 @@ Implementation notes:
 Implementation notes:
 - Add flags for producer shadow mode, producer cutover, and worker enablement.
 - Add an explicit process-role split so web API startup does not automatically start MQ consumers in every `gunicorn` worker process.
+- Move public-service worker startup decisions out of unconditional lifespan startup and under explicit role selection.
 - Default all new workers to off unless the existing flow is already authority-owned.
 - Keep `highThinkingQA` limited to ingest-oriented and temporary bridge flags only.
 
@@ -188,7 +214,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add public-service/backend/app/integrations/redis/streams.py public-service/backend/app/integrations/redis/keys.py public-service/backend/app/integrations/redis/service.py public-service/backend/app/core/config.py fastQA/app/integrations/redis/keys.py fastQA/app/integrations/redis/service.py fastQA/app/core/config.py highThinkingQA/server/services/redis_client.py public-service/backend/tests/test_config_independence.py fastQA/tests/test_redis_helpers.py fastQA/tests/test_redis_runtime.py highThinkingQA/tests/test_env_loader.py
+git add public-service/backend/app/integrations/redis/streams.py public-service/backend/app/integrations/redis/keys.py public-service/backend/app/integrations/redis/service.py public-service/backend/app/core/config.py public-service/backend/app/core/runtime.py public-service/backend/app/main.py public-service/scripts/start_gunicorn.sh fastQA/app/integrations/redis/keys.py fastQA/app/integrations/redis/service.py fastQA/app/core/config.py highThinkingQA/server/services/redis_client.py public-service/backend/tests/test_config_independence.py fastQA/tests/test_redis_helpers.py fastQA/tests/test_redis_runtime.py highThinkingQA/tests/test_env_loader.py
 git commit -m "feat: add redis stream foundations and rollout flags"
 ```
 
@@ -213,6 +239,7 @@ git commit -m "feat: add redis stream foundations and rollout flags"
 
 Test cases to add:
 - `assistant_finalize` requires `final_event.done_seen`, `answer_text`, `steps`, `references`, `used_files`, `timings`
+- richer completion metadata from answer-summary or thinking-summary persistence still fits the existing `assistant_finalize` envelope and does not require a second summary-specific stream family
 - `chat_json_sync` requires `conversation_id`, `user_id`, `json_version`, `object_name`, `content_hash`
 - idempotency keys are stable and deterministic
 - malformed authority async payloads are rejected before publish
@@ -228,6 +255,8 @@ Expected: FAIL because canonical stream contract builders do not exist yet.
 Implementation notes:
 - Put stream envelope shaping in one module, not inside route handlers.
 - Reuse existing authority schema names where possible.
+- Preserve both `requested_mode` and `actual_mode` in the canonical async contract so rerouted `thinking -> fast` file-QA traffic keeps authority correctness without inventing a separate fallback schema.
+- Keep answer summaries and richer thinking completion summaries inside the existing `final_event` / `answer_text` contract; do not create a separate MQ family just for summary blocks.
 - Keep transport-only metadata optional.
 
 - [ ] **Step 3: Add producer publishing hooks in the authority service**
@@ -395,12 +424,13 @@ If those criteria become true, create a follow-up plan that migrates `stream:con
 **Files:**
 - Create: `highThinkingQA/server/services/ingest_streams.py`
 - Modify: `highThinkingQA/server/services/ingest_service.py`
-- Modify: `highThinkingQA/server_fastapi/routers/ingest.py`
 - Modify: `highThinkingQA/server_fastapi/app.py`
+- Modify: `highThinkingQA/server_fastapi/routers/__init__.py`
 - Modify: `highThinkingQA/scripts/start_fastapi_gunicorn.sh`
 - Modify: `highThinkingQA/server_fastapi/gunicorn.conf.py`
 - Test: `highThinkingQA/tests/test_ingest_streams.py`
 - Test: `highThinkingQA/tests/test_env_loader.py`
+- Test: `highThinkingQA/tests/fastapi_migration/test_fastapi_route_surface_minimal.py`
 
 - [ ] **Step 1: Write failing tests for durable ingest job submission and recovery**
 
@@ -411,18 +441,19 @@ Test cases to add:
 - retryable ingest failures remain claimable
 - terminal ingest failures mark the job failed and route the message to DLQ
 - generic web `gunicorn` startup does not start ingest consumers in every API worker process
+- the minimal thinking-service web route surface still does not re-expose `/api/v1/ingest`
 - a single-active lease with explicit token, TTL, heartbeat, and lease-loss behavior prevents concurrent ingest execution across replicas and worker processes
 
 Run:
 ```bash
-pytest highThinkingQA/tests/test_ingest_streams.py highThinkingQA/tests/test_env_loader.py -v
+pytest highThinkingQA/tests/test_ingest_streams.py highThinkingQA/tests/test_env_loader.py highThinkingQA/tests/fastapi_migration/test_fastapi_route_surface_minimal.py -v
 ```
 Expected: FAIL because Redis-stream orchestration for ingest does not exist yet.
 
 - [ ] **Step 2: Implement producer and consumer orchestration for ingest**
 
 Implementation notes:
-- Keep the ingest API synchronous only for job creation and status response.
+- Keep ingest job creation out of the current minimal public FastAPI route surface unless the route boundary is intentionally reopened later.
 - Move heavy corpus work behind Redis Streams.
 - Preserve current `PAPERS_DIR` based corpus semantics.
 - Terminal ingest failures must update persisted job state to `failed` before DLQ acknowledgement.
@@ -434,20 +465,21 @@ Implementation notes:
 Implementation notes:
 - Keep rollout flags off by default.
 - Do not touch upload routes, document routes, or ask execution.
+- Do not re-register legacy upload/ingest routes in the thinking web app as part of this task.
 - Keep web `gunicorn` startup producer-only unless an explicit ingest-worker role is selected.
 
 - [ ] **Step 4: Run the ingest tests**
 
 Run:
 ```bash
-pytest highThinkingQA/tests/test_ingest_streams.py highThinkingQA/tests/test_env_loader.py -v
+pytest highThinkingQA/tests/test_ingest_streams.py highThinkingQA/tests/test_env_loader.py highThinkingQA/tests/fastapi_migration/test_fastapi_route_surface_minimal.py -v
 ```
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add highThinkingQA/server/services/ingest_streams.py highThinkingQA/server/services/ingest_service.py highThinkingQA/server_fastapi/routers/ingest.py highThinkingQA/server_fastapi/app.py highThinkingQA/scripts/start_fastapi_gunicorn.sh highThinkingQA/server_fastapi/gunicorn.conf.py highThinkingQA/tests/test_ingest_streams.py highThinkingQA/tests/test_env_loader.py
+git add highThinkingQA/server/services/ingest_streams.py highThinkingQA/server/services/ingest_service.py highThinkingQA/server_fastapi/app.py highThinkingQA/server_fastapi/routers/__init__.py highThinkingQA/scripts/start_fastapi_gunicorn.sh highThinkingQA/server_fastapi/gunicorn.conf.py highThinkingQA/tests/test_ingest_streams.py highThinkingQA/tests/test_env_loader.py highThinkingQA/tests/fastapi_migration/test_fastapi_route_surface_minimal.py
 git commit -m "feat: add highThinkingQA ingest stream orchestration"
 ```
 
@@ -505,13 +537,18 @@ git commit -m "refactor: limit highThinkingQA chat json flow to bridge mode"
 
 **Files:**
 - Create: `fastQA/app/modules/storage/prewarm_streams.py`
+- Modify: `fastQA/app/modules/storage/service.py`
 - Modify: `fastQA/app/modules/storage/upload_materializer.py`
+- Modify: `fastQA/app/modules/generation_pipeline/context_loading.py`
+- Modify: `fastQA/app/modules/generation_pipeline/pdf_pipeline.py`
 - Modify: `fastQA/app/services/chat_persistence.py`
 - Modify: `fastQA/app/core/runtime.py`
 - Modify: `fastQA/app/main.py`
 - Modify: `fastQA/scripts/start_gunicorn.sh`
 - Test: `fastQA/tests/test_prewarm_streams.py`
 - Test: `fastQA/tests/test_upload_materializer.py`
+- Test: `fastQA/tests/test_context_loading.py`
+- Test: `fastQA/tests/test_generation_pdf_pipeline.py`
 - Test: `fastQA/tests/test_chat_persistence.py`
 
 - [ ] **Step 1: Write failing tests for best-effort prewarm behavior**
@@ -521,11 +558,12 @@ Test cases to add:
 - duplicate prewarm deliveries are safe no-ops
 - prewarm failure never breaks the request path
 - request path still materializes synchronously on cache miss
+- paper-PDF materialization still flows through `storage_service` entrypoints after the refactor
 - generic web `gunicorn` startup does not start prewarm consumers in every API worker process
 
 Run:
 ```bash
-pytest fastQA/tests/test_prewarm_streams.py fastQA/tests/test_upload_materializer.py fastQA/tests/test_chat_persistence.py -v
+pytest fastQA/tests/test_prewarm_streams.py fastQA/tests/test_upload_materializer.py fastQA/tests/test_context_loading.py fastQA/tests/test_generation_pdf_pipeline.py fastQA/tests/test_chat_persistence.py -v
 ```
 Expected: FAIL because the prewarm stream helper does not exist yet.
 
@@ -534,6 +572,7 @@ Expected: FAIL because the prewarm stream helper does not exist yet.
 Implementation notes:
 - Keep this flow best-effort only.
 - Limit work to asset materialization, workbook/profile warmup, and similar derived compute.
+- Treat `fastQA/app/modules/storage/service.py` as the current facade entrypoint for paper-PDF materialization, with `upload_materializer.py` remaining the uploaded-file/workbook side of the flow.
 - Do not move answer generation into MQ.
 - Run prewarm consumption in an explicit worker process or deployment, not under generic web app startup.
 
@@ -541,14 +580,14 @@ Implementation notes:
 
 Run:
 ```bash
-pytest fastQA/tests/test_prewarm_streams.py fastQA/tests/test_upload_materializer.py fastQA/tests/test_chat_persistence.py -v
+pytest fastQA/tests/test_prewarm_streams.py fastQA/tests/test_upload_materializer.py fastQA/tests/test_context_loading.py fastQA/tests/test_generation_pdf_pipeline.py fastQA/tests/test_chat_persistence.py -v
 ```
 Expected: PASS.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add fastQA/app/modules/storage/prewarm_streams.py fastQA/app/modules/storage/upload_materializer.py fastQA/app/services/chat_persistence.py fastQA/app/core/runtime.py fastQA/app/main.py fastQA/scripts/start_gunicorn.sh fastQA/tests/test_prewarm_streams.py fastQA/tests/test_upload_materializer.py fastQA/tests/test_chat_persistence.py
+git add fastQA/app/modules/storage/prewarm_streams.py fastQA/app/modules/storage/service.py fastQA/app/modules/storage/upload_materializer.py fastQA/app/modules/generation_pipeline/context_loading.py fastQA/app/modules/generation_pipeline/pdf_pipeline.py fastQA/app/services/chat_persistence.py fastQA/app/core/runtime.py fastQA/app/main.py fastQA/scripts/start_gunicorn.sh fastQA/tests/test_prewarm_streams.py fastQA/tests/test_upload_materializer.py fastQA/tests/test_context_loading.py fastQA/tests/test_generation_pdf_pipeline.py fastQA/tests/test_chat_persistence.py
 git commit -m "feat: add fastQA prewarm stream"
 ```
 
@@ -602,6 +641,202 @@ Expected: PASS.
 ```bash
 git add gateway/app/services/route_audit_stream.py gateway/app/services/route_decision.py gateway/app/routers/qa.py gateway/app/core/config.py gateway/app/main.py gateway/tests/test_route_audit_stream.py gateway/tests/test_route_decision.py gateway/tests/test_qa_proxy.py gateway/tests/test_config.py
 git commit -m "feat: add gateway route audit stream"
+```
+
+---
+
+## Phase 5: Queue-Backed Interactive Admission After Core MQ Stabilization
+
+This phase exists for the specific burst-control scenario where the deployment can safely execute only a fixed number of LLM tasks globally. The primary config knob is `interactive_execution_max_concurrent` with environment variable `INTERACTIVE_EXECUTION_MAX_CONCURRENT`. The recommended initial default is 10 concurrent executions, but this limit must be configurable. If upstream traffic spikes above that configured ceiling, for example 50 interactive requests against a current limit of 10, only the first 10 run immediately and the rest enter the queue directly.
+
+The contract for this phase is:
+
+- the first admitted requests should keep current direct JSON or SSE performance characteristics
+- overflow requests should enter Redis-backed admission queues immediately rather than all reaching the backend execution layer or waiting in-process for local limiter release
+- target state: `fast` and `patent` share the same higher-priority tier
+- current state: a standalone `patent` phase1 scaffold already exists in the repo, but if the deployed patent path is still placeholder, disabled, or not yet authority-compatible end-to-end, it must fail readiness before enqueue or admission and must not consume high-tier backlog or slot budget
+- tier selection must follow `actual_mode`, not merely `requested_mode`; rerouted file-QA requests that execute in `fast` remain high tier even if the original requested mode was `thinking`
+- `thinking` is lower priority, but it must not starve indefinitely
+- long waits must not be modeled as indefinitely hanging HTTP requests; queued requests need explicit status and later stream attachment semantics
+
+### Task 10: Admission Queue Contracts And Global Slot Arbiter
+
+**Files:**
+- Create: `gateway/app/services/execution_admission.py`
+- Modify: `gateway/app/core/config.py`
+- Modify: `gateway/app/main.py`
+- Modify: `gateway/app/services/__init__.py`
+- Modify: `gateway/app/services/backend_registry.py`
+- Modify: `fastQA/app/core/config.py`
+- Modify: `highThinkingQA/config.py`
+- Modify: `public-service/backend/app/modules/conversation/authority_schemas.py`
+- Modify: `public-service/backend/app/modules/conversation/internal_api.py`
+- Test: `gateway/tests/test_execution_admission.py`
+- Test: `gateway/tests/test_config.py`
+- Test: `fastQA/tests/test_health.py`
+- Test: `highThinkingQA/tests/fastapi_migration/test_fastapi_ask_contract.py`
+
+- [ ] **Step 1: Write failing tests for tiered admission and global slot semantics**
+
+Test cases to add:
+- admission queue uses two tiers: `fast == patent` high, `thinking` low
+- configured global execution capacity is enforced cluster-wide through `interactive_execution_max_concurrent`, defaults to 10, is operator-adjustable, and is not derived from per-process limiter counts
+- once the current admitted count reaches the configured ceiling, later requests are queued immediately instead of waiting in-process
+- admission also enforces backend-specific ceilings so `thinking` cannot be over-admitted beyond its configured downstream capacity
+- queued execution snapshots preserve both `requested_mode` and `actual_mode`, and scheduler tiering follows `actual_mode`
+- low tier receives starvation protection when both tiers are backlogged
+- queued requests keep stable `request_id` and `trace_id`
+- `gunicorn` web workers never self-elect into the scheduler role on normal API startup
+- patent shares the high tier only when backend readiness checks say the deployment can actually execute patent requests
+- backend-busy rejection after provisional admission releases the slot and requeues or fails deterministically
+
+Run:
+```bash
+pytest gateway/tests/test_execution_admission.py gateway/tests/test_config.py fastQA/tests/test_health.py highThinkingQA/tests/fastapi_migration/test_fastapi_ask_contract.py -v
+```
+Expected: FAIL because admission queue contracts and global slot arbitration do not exist yet.
+
+- [ ] **Step 2: Implement the admission dispatcher contract**
+
+Implementation notes:
+- Model interactive admission as Redis-backed control-plane work that happens after route decision and before backend execution.
+- Use explicit shared slot leases or an equivalent atomic token pool for the global execution ceiling.
+- Expose that ceiling as an operator-adjustable config value named `interactive_execution_max_concurrent` with env var `INTERACTIVE_EXECUTION_MAX_CONCURRENT` and initial default `10`.
+- Enforce backend-specific capacity gates in addition to the global total.
+- Preserve the routed `requested_mode` / `actual_mode` pair in queued snapshots and downstream authority callbacks; scheduler priority uses `actual_mode`, while authority auditing must retain both values.
+- Keep local backend semaphores as final safety rails only.
+- Make the admission scheduler a dedicated worker role or dedicated deployment, never a side effect of generic `gunicorn` API startup.
+- Prefer a high-tier queue for `fast` and `patent`, and a low-tier queue for `thinking`.
+- Implement fairness centrally with either one reserved low-tier slot out of 10 or an equivalent weighted-fair scheduler.
+- Fail fast before enqueue or admit when the selected backend is placeholder, disabled, or known-not-implemented for that mode.
+- This task does not magically make `patent` executable. If the rollout intends to admit real `patent` work instead of fail-fast placeholder handling, the corresponding backend and authority contract changes must land in the same rollout window or in an explicit prerequisite task.
+
+- [ ] **Step 3: Run the admission foundation tests**
+
+Run:
+```bash
+pytest gateway/tests/test_execution_admission.py gateway/tests/test_config.py fastQA/tests/test_health.py highThinkingQA/tests/fastapi_migration/test_fastapi_ask_contract.py -v
+```
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add gateway/app/services/execution_admission.py gateway/app/core/config.py gateway/app/main.py gateway/app/services/__init__.py gateway/app/services/backend_registry.py fastQA/app/core/config.py highThinkingQA/config.py public-service/backend/app/modules/conversation/authority_schemas.py public-service/backend/app/modules/conversation/internal_api.py gateway/tests/test_execution_admission.py gateway/tests/test_config.py fastQA/tests/test_health.py highThinkingQA/tests/fastapi_migration/test_fastapi_ask_contract.py
+git commit -m "feat: add queue-backed interactive admission scheduler"
+```
+
+### Task 11: Queued Request Status And Stream Attachment Contract
+
+**Files:**
+- Create: `gateway/app/services/execution_event_relay.py`
+- Create: `gateway/app/services/execution_queue_status.py`
+- Modify: `gateway/app/models/ask.py`
+- Modify: `gateway/app/routers/qa.py`
+- Modify: `gateway/app/services/proxy.py`
+- Modify: `gateway/docs/gateway_forwarding_protocol.md`
+- Test: `gateway/tests/test_execution_event_relay.py`
+- Test: `gateway/tests/test_execution_queue_status.py`
+- Test: `gateway/tests/test_qa_proxy.py`
+- Test: `gateway/tests/test_route_decision.py`
+
+- [ ] **Step 1: Write failing tests for queued-request lifecycle**
+
+Test cases to add:
+- immediate-admit requests still use the current direct response or SSE path
+- overflow requests receive explicit queued metadata instead of hanging the original request indefinitely
+- queued request status exposes `queued`, `admitted`, `executing`, `streaming`, `completed`, `failed`, `cancelled`, or `expired`
+- delayed-attachment requests use a shared relay or replay buffer keyed by `request_id`, not the original request-bound passthrough
+- reconnecting clients can resume from the last acknowledged relay sequence
+- once admitted, the client can attach to the relay-backed stream path without changing the backend generation contract
+- delayed `json` requests expose terminal-result retrieval by `request_id` instead of using the stream relay
+- disconnect or cancellation releases the global slot and updates queue state correctly
+
+Run:
+```bash
+pytest gateway/tests/test_execution_event_relay.py gateway/tests/test_execution_queue_status.py gateway/tests/test_qa_proxy.py gateway/tests/test_route_decision.py -v
+```
+Expected: FAIL because queued-request lifecycle and stream-attachment behavior do not exist yet.
+
+- [ ] **Step 2: Implement queued-request API semantics**
+
+Implementation notes:
+- Keep the current direct path only for requests admitted immediately while the configured ceiling still has capacity.
+- For every request that is not admitted immediately, return explicit queued metadata with `request_id`, queue tier, and follow-up status or stream-attach handles.
+- Add a shared relay or replay buffer for delayed-attachment requests so later-attaching clients do not depend on the original request-bound passthrough connection.
+- Retain relay frames through terminal completion plus a bounded TTL and sequence them so reconnects can resume safely across instances.
+- For delayed `json` requests, materialize a terminal result fetch path by `request_id` instead of forcing them through the stream relay contract.
+- Do not re-run route decision or file selection when the queued request is later admitted; execute from the persisted normalized snapshot.
+- Preserve existing backend `ask` and `ask_stream` contracts once execution actually starts.
+
+- [ ] **Step 3: Run the queued-request tests**
+
+Run:
+```bash
+pytest gateway/tests/test_execution_event_relay.py gateway/tests/test_execution_queue_status.py gateway/tests/test_qa_proxy.py gateway/tests/test_route_decision.py -v
+```
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add gateway/app/services/execution_event_relay.py gateway/app/services/execution_queue_status.py gateway/app/models/ask.py gateway/app/routers/qa.py gateway/app/services/proxy.py gateway/docs/gateway_forwarding_protocol.md gateway/tests/test_execution_event_relay.py gateway/tests/test_execution_queue_status.py gateway/tests/test_qa_proxy.py gateway/tests/test_route_decision.py
+git commit -m "feat: add queued interactive request lifecycle"
+```
+
+### Task 12: Multi-Instance Verification And Admission Runbook
+
+**Files:**
+- Modify: `docs/2026-03-25-redis-mq-architecture-spec.md`
+- Modify: `docs/superpowers/plans/2026-03-25-redis-mq-rollout.md`
+- Modify: `scripts/start_all.sh`
+- Modify: `scripts/status_all.sh`
+- Modify: `scripts/stop_all.sh`
+- Modify: `highThinkingQA/server_fastapi/routers/health.py`
+- Modify: `gateway/tests/test_health.py`
+- Test: `highThinkingQA/tests/test_env_loader.py`
+- Test: `gateway/tests/test_execution_admission.py`
+- Test: `gateway/tests/test_execution_queue_status.py`
+- Test: `gateway/tests/test_health.py`
+
+- [ ] **Step 1: Add failing checks for dispatcher visibility and multi-instance correctness**
+
+Checks to add:
+- ops status shows whether the admission dispatcher role is enabled
+- health or status output shows the configured `interactive_execution_max_concurrent` value, whether it is still on the default `10` or an overridden value, and queue-tier policy
+- health or status output shows backend-specific admission ceilings and current relay buffer retention policy
+- docs record how many `gunicorn` web workers may run without multiplying the global execution ceiling
+- rollback docs explain how to disable queued admission without breaking already-admitted streams
+- if operationally required, `highThinkingQA` health exposes its local ask-limit safety rail distinctly from the global admission ceiling
+
+Run:
+```bash
+pytest gateway/tests/test_execution_admission.py gateway/tests/test_execution_queue_status.py gateway/tests/test_health.py highThinkingQA/tests/test_env_loader.py -v
+```
+Expected: FAIL or remain incomplete until dispatcher visibility is wired.
+
+- [ ] **Step 2: Implement the admission runbook and verification**
+
+Implementation notes:
+- Surface queue backlog, admitted count, active slot leases, oldest queued age, and tier-level dispatch counts.
+- Surface backend-specific admitted counts and backend-capacity configuration separately from the global total.
+- Verify that the configured global ceiling still holds when multiple gateway instances or `gunicorn` workers are started.
+- Document the rollback order so queued admission can be disabled before touching live admitted executions.
+- Keep the current per-process backend limiters visible in health output as local safety rails distinct from the global admission limit.
+
+- [ ] **Step 3: Run the admission verification batch**
+
+Run:
+```bash
+pytest gateway/tests/test_execution_admission.py gateway/tests/test_execution_queue_status.py gateway/tests/test_qa_proxy.py gateway/tests/test_route_decision.py gateway/tests/test_config.py gateway/tests/test_health.py highThinkingQA/tests/test_env_loader.py -v
+```
+Expected: PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add docs/2026-03-25-redis-mq-architecture-spec.md docs/superpowers/plans/2026-03-25-redis-mq-rollout.md scripts/start_all.sh scripts/status_all.sh scripts/stop_all.sh highThinkingQA/server_fastapi/routers/health.py gateway/tests/test_health.py highThinkingQA/tests/test_env_loader.py gateway/tests/test_execution_admission.py gateway/tests/test_execution_queue_status.py
+git commit -m "docs: add interactive admission rollout runbook"
 ```
 
 ---
@@ -672,16 +907,21 @@ git commit -m "docs: finalize redis mq rollout runbook"
 4. Task 6 is allowed only as a transitional bridge and must not expand `highThinkingQA` into file/upload ownership.
 5. Task 7 is best-effort and must not block answer-path correctness.
 6. Task 8 is optional and should not start until all authority-owned workers are stable.
-7. Task 9 closes the rollout and documents rollback.
+7. Task 9 closes the background-stream rollout and documents rollback for those workstreams.
+8. Task 10 is the first valid interactive-admission task and must not begin until Tasks 1 through 9 are stable.
+9. Task 11 depends on Task 10 because queued-request lifecycle is meaningless without global admission ownership.
+10. Task 12 closes the interactive-admission rollout and documents multi-instance verification.
 
 ## Recommended Commit Boundaries
 
 - One commit per task.
 - Do not batch `public-service` worker cutovers with `highThinkingQA` or `fastQA`.
 - Keep gateway audit isolated in its own commit or branch.
+- Keep interactive admission scheduler and queued-request API work isolated from the background-stream rollout commits.
 
 ## Handoff Notes For Implementers
 
 - Read `docs/2026-03-25-redis-mq-architecture-spec.md` before starting any task.
 - Re-check `highThinkingQA` scope in `highThinkingQA/README.md` before touching any upload, document, or conversation-local code there.
 - If a task requires broadening `highThinkingQA` into file-QA ownership, stop and revise the spec instead of coding through it.
+- If a task tries to solve multi-instance execution control with only local semaphores or `gunicorn` worker counts, stop and revise the design before coding.

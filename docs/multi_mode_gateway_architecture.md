@@ -94,14 +94,15 @@ Light semantic routing means:
 
 ## MQ Scope
 
-MQ should handle asynchronous work only:
+MQ should primarily handle asynchronous work, and may additionally handle pre-execution admission control:
 - file parsing
 - OCR
 - embedding / indexing
 - long-running summary jobs
 - async persistence / audit / notification
+- optional pre-execution admission control when cluster-wide interactive concurrency must be capped
 
-MQ should not replace the HTTP entrypoint for browser requests or SSE streaming.
+MQ should not replace the browser-facing HTTP entrypoint or live SSE transport after execution has started. It may still be used as an admission layer before execution begins.
 
 ## Shared Infrastructure Requirements
 

@@ -1,7 +1,7 @@
 # Redis MQ Architecture Specification
 
 > **Status:** Draft in progress. This document is being written incrementally while code discovery continues.
-> **Scope:** `gateway`, `fastQA`, `highThinkingQA`, `public-service`
+> **Scope:** `gateway`, `fastQA`, `highThinkingQA`, `public-service`, `patent`
 > **Date:** 2026-03-25
 
 ## 1. Goal
@@ -9,6 +9,7 @@
 Define a detailed Redis-based MQ architecture for the current monorepo so that:
 
 - existing synchronous request paths remain correct
+- bursty interactive execution can be queue-admitted globally without degrading already-running streams
 - long-running and side-effect-heavy work can be decoupled safely
 - current in-process worker and outbox patterns can evolve into durable queue-backed workers
 - each service gets a clear producer/consumer contract, idempotency rule, retry policy, and rollout path
@@ -100,10 +101,36 @@ Phase-1 ordering mechanism is explicit:
 
 The migration should start by wrapping existing outbox/worker semantics, not by replacing all existing side effects at once.
 
+### 3.6 Separate Execution Admission From Live Streaming Transport
+
+When cluster-wide LLM capacity is lower than incoming request rate, Redis MQ may also be used for interactive execution admission before generation starts.
+
+Example target scenario:
+
+- default real execution capacity: 10 concurrent LLM tasks across the whole deployment
+- incoming burst: 50 interactive requests
+- first 10 admitted executions should keep the current direct JSON or SSE performance
+- remaining 40 requests must wait durably in queue instead of all reaching the backend execution layer at once
+
+Rules:
+
+- the system must enforce a configurable cluster-wide interactive execution ceiling named `interactive_execution_max_concurrent`; the corresponding environment variable should be `INTERACTIVE_EXECUTION_MAX_CONCURRENT`
+- the initial recommended default for `interactive_execution_max_concurrent` is `10`
+- if the number of currently admitted executions has reached that configured ceiling, new requests enter the admission queue immediately rather than waiting in-process for an execution slot
+- admission queueing happens before backend execution begins
+- once a request is admitted, the current backend `ask` or `ask_stream` execution path remains the live transport path
+- queue wait and execution are distinct states; a request must not occupy an execution slot while merely waiting
+- long queue waits must not be modeled as indefinitely hanging HTTP requests; they require explicit queued-request state and later status or stream attachment
+- multi-instance correctness must come from shared Redis coordination, not from per-process semaphores inside `gunicorn` workers
+
+This is a control-plane use of Redis MQ. It is not permission to replace token delivery with queue polling after execution has started.
+
 ## 4. Non-Goals
 
 - replacing current `ask_stream` SSE with queue polling
+- replacing already-admitted token streaming with Redis-mediated token transport by default
 - moving gateway forwarding itself behind MQ
+- treating per-process `gunicorn` semaphores as the source of truth for global execution concurrency
 - making auth or quota eventually consistent
 - introducing Kafka-class event governance before the repository needs it
 
@@ -129,6 +156,8 @@ These are the current top-level candidate streams and will be specified in detai
 - `stream:corpus:ingest_job:v1`
 - `stream:fast:prewarm_asset:v1`
 - `stream:gateway:route_decision_audit:v1`
+- `stream:qa:execution_admission_high:v1`
+- `stream:qa:execution_admission_low:v1`
 
 ## 7. Shared Message Envelope
 
@@ -396,13 +425,15 @@ Redis Streams should not be treated as a substitute for exclusive business locks
 
 ### 11.1 Boundary Summary
 
-`public-service` is the authoritative owner of conversation truth, auth, quota, and the long-term public conversation/file API surface. `gateway` is not the authority; it is a routing and proxy layer with compatibility-era persistence side effects still present on some paths.
+`public-service` is the authoritative owner of conversation truth, auth, quota, and the long-term public conversation/file API surface. `gateway` is not the authority; it is a routing and proxy layer with some compatibility-era persistence code still present in the repo.
 
 Current-state reality and target-state intent are different and must both be represented in this spec:
 
 - target state: authority writes are owned by `public-service`, and execution services publish authority-shaped events directly or through the authority acceptance API
-- current state: `gateway` still persists user and assistant messages for non-`thinking` execution paths through the compatibility public message API, while `highThinkingQA` already contains a closer-to-target producer shape for thinking execution side effects only
-- current state: `highThinkingQA` still contains residual local upload registration and local chat-json/outbox behavior from the copied migration closure; this is transitional compatibility debt, not long-term ownership of file/upload/document truth
+- current state: `highThinkingQA` already contains a closer-to-target producer shape for thinking execution side effects, and `fastQA` now partially supports rerouted file-QA authority persistence where `requested_mode` and `actual_mode` differ; `gateway` compatibility persistence code remains in the repo but should not be treated as the only current producer path
+- current state: `highThinkingQA` still contains residual local upload registration, ingest, and local chat-json/outbox code from the copied migration closure; this is transitional compatibility debt, not long-term ownership of file/upload/document truth
+- current state: a standalone `patent` phase1 service scaffold now exists in the repo with Redis/runtime, ask contract, health contract, chat-persistence helpers, and authority-client bindings, but external rollout gates still block durable patent traffic outside that directory
+- current mounted FastAPI route surface in `highThinkingQA` is now intentionally minimal and no longer exposes those residual upload/ingest routes as active public endpoints
 
 This means the Redis MQ design must preserve the following hard rule:
 
@@ -563,12 +594,12 @@ The following gateway path must remain synchronous and outside Redis MQ:
 - resolve file context
 - compute route decision
 - decide clarification versus execution
-- forward request to the selected backend
-- preserve SSE passthrough for `ask_stream`
+- forward admitted request to the selected backend
+- preserve SSE passthrough for admitted `ask_stream`
 
 **Reason**
 
-This path determines the current request's semantics and is explicitly constrained by the existing gateway protocol docs. Introducing queue indirection here would change correctness, latency, and stream semantics rather than merely decoupling side effects.
+This path determines the current request's semantics and is explicitly constrained by the existing gateway protocol docs. A later queue-backed admission layer may sit after route resolution but before execution forwarding. It must not move route resolution, clarification, or live admitted-stream passthrough out of the current synchronous boundary.
 
 **Current code evidence**
 
@@ -614,6 +645,125 @@ Emit non-authoritative route-decision audit events for observability.
 
 This stream must never become a source of truth for request execution. It is telemetry only.
 
+### 11.6 Stream Family: `stream:qa:execution_admission_high:v1` And `stream:qa:execution_admission_low:v1`
+
+This stream family is an optional later-stage admission layer for interactive execution bursts. It is justified when the deployment has a real cluster-wide LLM ceiling, for example 10 safe concurrent executions, but upstream traffic can spike materially above that level.
+
+**Purpose**
+
+- absorb burst traffic before execution starts
+- keep global execution concurrency within a shared limit across all instances and `gunicorn` workers
+- preserve current direct-stream performance for requests that have already acquired execution capacity
+- prevent overflow requests from all reaching backend execution code at once
+
+**Producer**
+
+- `gateway`, after file-context resolution and route decision are complete and only for requests that would otherwise start interactive execution
+
+**Admission readiness rule**
+
+- `gateway` must check that the selected backend is executable in the current deployment before enqueueing or admitting work
+- if `route_decision.actual_mode == "patent"` but the selected patent backend is configured as placeholder, disabled, or known-not-implemented, the request must fail fast or be rerouted before it consumes queue backlog or slot budget
+- readiness must be revalidated again at admission time if queue delay is long enough that deployment state may have changed
+
+**Queue tier mapping**
+
+- `stream:qa:execution_admission_high:v1`: `actual_mode in {"fast", "patent"}`
+- `stream:qa:execution_admission_low:v1`: `actual_mode == "thinking"`
+
+Priority is defined by the selected execution tier after route decision, not by whichever codebase currently implements that tier. In the target state, `patent` shares the same scheduler tier as `fast`. In the current placeholder state, `patent` must fail readiness before enqueue or admission and therefore must not consume high-tier backlog or slot budget.
+
+**Required payload fields**
+
+- `request_id`
+- `trace_id`
+- `conversation_id`
+- `user_id`
+- `requested_mode`
+- `actual_mode`
+- `route`
+- `target_backend`
+- `backend_capacity_key`
+- `transport_kind` with `json` or `sse`
+- `enqueued_at`
+- `execution_snapshot`
+
+`execution_snapshot` must contain the normalized backend request payload or a stable storage-backed reference to that payload. The scheduler must not recompute file selection or route decision later from potentially changed live state.
+
+**State model**
+
+- `queued`: accepted into Redis-backed admission queue but no execution slot yet
+- `admitted`: granted a global execution slot and assigned to an execution owner
+- `executing`: backend request has started
+- `streaming`: first response bytes or frames are being emitted
+- `completed`: execution and stream cleanup finished successfully
+- `failed`: terminal execution failure after admission
+- `cancelled`: client or operator cancelled before completion
+- `expired`: request aged out before admission or attachment
+
+**Global slot model**
+
+- global execution capacity is a single deployment-wide configurable integer named `interactive_execution_max_concurrent`; the recommended initial default is `10`
+- once the number of admitted executions reaches that configured ceiling, later requests must be queued immediately instead of trying to wait for local semaphore release in the request process
+- admission must satisfy both the global slot ceiling and the backend-specific slot ceiling for the selected executor
+- backend-specific ceilings must be configurable independently for at least `fast_or_patent` and `thinking`
+- slot ownership must be represented in Redis via renewable leases or an equivalent atomic token pool
+- the lease is acquired before backend execution begins and is released only after final stream cleanup, disconnect cleanup, or terminal failure handling
+- local `fastQA` limiters and `highThinkingQA` semaphores remain per-process safety rails only; they must not be treated as the global source of truth
+- if a worker dies mid-stream, the slot lease must expire or be reclaimed so queued work can resume safely
+
+Under current repository defaults, the initial `thinking` backend-specific ceiling should not be configured above the current downstream ask limit until that backend is intentionally raised and verified. The scheduler must not assume that the global total alone is safe for every backend.
+
+Configuration naming rule:
+
+- primary global knob: `interactive_execution_max_concurrent` / `INTERACTIVE_EXECUTION_MAX_CONCURRENT`
+- if backend-specific admission ceilings are exposed later, they should be derived names under the same family rather than unrelated limiter names
+
+**Scheduling rule**
+
+- within the same priority tier, dispatch FIFO by enqueue time
+- high tier is preferred whenever both tiers have backlog
+- low tier must still make progress; do not allow indefinite starvation
+- initial policy recommendation: allow high tier to consume all slots when low tier is empty, but when both tiers are backlogged reserve at least 1 of 10 slots for low tier or use an equivalent weighted-fair policy
+- fairness policy must be implemented centrally in the admission dispatcher, not independently in each web worker
+- if a request is admitted but the selected backend still rejects it immediately as busy or unavailable, the dispatcher must release the provisional slot lease, mark the attempt as `requeued_backend_busy` or terminal capability failure, and avoid silent slot leakage
+
+**Transport rule**
+
+There are two valid admission outcomes:
+
+- immediate admit: the current admitted count is still below the configured execution ceiling and any backend-specific ceiling, so the request continues through the current direct backend `ask` or `ask_stream` path; this keeps the first admitted requests operationally close to current behavior
+- queued admit: the configured execution ceiling or backend-specific ceiling has already been reached, so the system returns explicit queued-request metadata such as `request_id`, queue state, and a later status or stream-attach handle; the original HTTP request should not stay open for long waits
+
+Queued admit requires an explicit relay model because the current `gateway` SSE path is request-bound passthrough only.
+
+Recommended relay contract for queued requests:
+
+- when the client later attaches, the gateway resolves `request_id` to a shared relay record rather than reopening the original upstream passthrough request
+- after admission, the execution owner writes ordered stream frames into a short-lived Redis-backed relay buffer keyed by `request_id`
+- each relay frame must include a monotonically increasing sequence number so reconnecting clients can resume from the last acknowledged frame
+- the relay buffer must remain available through terminal `done` or `error` plus a bounded post-completion TTL
+- immediate-admit requests may bypass this relay and stay on the current direct passthrough path; the relay is mandatory only for delayed-attachment queued requests
+
+Queued `json` requests follow a different delayed-admit contract:
+
+- if `transport_kind == "json"` and the request cannot be admitted because the configured ceiling is already full, the gateway should return queued metadata rather than hold the original HTTP request open
+- once execution completes, the terminal JSON payload must be retrievable by `request_id` from the queued-request status or a dedicated result-fetch endpoint
+- delayed `json` requests do not use the frame relay; they use terminal-result materialization instead
+
+The recommended production shape for real peak shaving is explicit queued admission plus later stream attachment. Holding many idle HTTP requests open while they wait for a slot defeats the main operational benefit of the queue.
+
+**Current code evidence**
+
+- [gateway request resolution](/home/cqy/worktrees/highThinking/gateway/app/routers/qa.py)
+- [gateway proxy service](/home/cqy/worktrees/highThinking/gateway/app/services/proxy.py)
+- [gateway backend registry](/home/cqy/worktrees/highThinking/gateway/app/services/backend_registry.py)
+- [fastQA process-local ask limiter](/home/cqy/worktrees/highThinking/fastQA/app/services/limits.py)
+- [fastQA README open risk](/home/cqy/worktrees/highThinking/fastQA/README.md)
+- [highThinking FastAPI app slot semaphore](/home/cqy/worktrees/highThinking/highThinkingQA/server_fastapi/app.py)
+- [highThinking ask route slot acquisition](/home/cqy/worktrees/highThinking/highThinkingQA/server_fastapi/routers/ask.py)
+- [highThinking patent placeholder contract test](/home/cqy/worktrees/highThinking/highThinkingQA/tests/fastapi_migration/test_fastapi_ask_contract.py)
+
 ## 12. HighThinkingQA Specification
 
 ### 12.1 Boundary Summary
@@ -626,11 +776,15 @@ This stream must never become a source of truth for request execution. It is tel
 
 Its long-term role is still thinking-mode QA execution only. The copied upload/chat-json/conversation code in this repo slice is migration residue, not evidence that `highThinkingQA` should own file-QA, upload truth, or document truth.
 
+Current code also now makes the public boundary clearer: the mounted FastAPI route surface is intentionally minimal (`health`, `ask`, `ask_stream`), while residual upload/ingest/conversation code remains in the repo slice but is no longer exposed as the active public route surface.
+
 This service is therefore a strong Redis Streams candidate for backgroundization, but not for replacing the current interactive ask/streaming contract.
 
 Code evidence:
 
 - [highThinking ask router](/home/cqy/worktrees/highThinking/highThinkingQA/server_fastapi/routers/ask.py)
+- [highThinking route registration](/home/cqy/worktrees/highThinking/highThinkingQA/server_fastapi/routers/__init__.py)
+- [highThinking minimal route surface test](/home/cqy/worktrees/highThinking/highThinkingQA/tests/fastapi_migration/test_fastapi_route_surface_minimal.py)
 - [highThinking chat persistence](/home/cqy/worktrees/highThinking/highThinkingQA/server/services/chat_persistence.py)
 - [highThinking conversation outbox repository](/home/cqy/worktrees/highThinking/highThinkingQA/server/repositories/conversation_outbox_repository.py)
 - [highThinking ingest service](/home/cqy/worktrees/highThinking/highThinkingQA/server/services/ingest_service.py)
@@ -739,7 +893,7 @@ The current `IngestService` is a clear candidate for queue-backed job orchestrat
 
 **Producer**
 
-- ingest API path via `create_ingest_job()`
+- residual internal job-creation path via `create_ingest_job()`; current mounted FastAPI route surface no longer exposes `/api/v1/ingest` as an active public endpoint
 
 **Consumer**
 
@@ -786,7 +940,7 @@ The current `IngestService` is a clear candidate for queue-backed job orchestrat
 - [highThinking ingest service](/home/cqy/worktrees/highThinking/highThinkingQA/server/services/ingest_service.py)
 - [highThinking ingest pipeline](/home/cqy/worktrees/highThinking/highThinkingQA/ingest/pipeline.py)
 
-### 12.5 Interactive Ask Boundary That Must Stay Synchronous
+### 12.5 Interactive Ask Boundary That Must Stay Synchronous After Admission
 
 The current `ask` and `ask_stream` execution contract must remain synchronous for the interactive API.
 
@@ -803,6 +957,8 @@ The following steps must not be pushed behind Redis MQ in the current API surfac
 
 The current implementation depends on in-process event emission and immediate client-visible streaming semantics. Replacing this with queue polling would be a product and protocol change, not an internal refactor.
 
+Queue-backed admission may still be added before a `highThinkingQA` execution starts. If that happens, the queue controls only when execution is allowed to begin. Once admitted, this section remains unchanged.
+
 ## 13. FastQA Specification
 
 ### 13.1 Boundary Summary
@@ -812,7 +968,8 @@ The current implementation depends on in-process event emission and immediate cl
 Current rollout state must be called out explicitly:
 
 - by default, `fastQA` does not enable authority-backed chat persistence in local code defaults
-- on current non-`thinking` paths, `gateway` still performs compatibility persistence into `public-service`
+- `fastQA` request adaptation now tolerates rerouted file-QA requests where `requested_mode` may differ from `actual_mode=fast`, which narrows the old gateway-only compatibility persistence assumption
+- `gateway` compatibility persistence code still exists in the repo, but the current producer boundary should be treated as mixed and in transition rather than as gateway-only for every non-`thinking` path
 - therefore `fastQA` assistant-finalize streaming should be treated as a target-state MQ contract, not assumed current-state default behavior
 
 The strongest candidates are:
@@ -835,7 +992,7 @@ Code evidence:
 **Producer**
 
 - target state: stream wrapper finalization after `done_seen == true`
-- current state caveat: this is not yet the default fast-path producer because `gateway` still performs compatibility persistence for non-`thinking` paths
+- current state caveat: this is not yet the default fast-path producer on every route because compatibility persistence remains mixed across `fastQA` and residual gateway-era code paths
 
 **Consumer**
 
@@ -858,7 +1015,7 @@ Code evidence:
 - `final_event.used_files`
 - `final_event.timings`
 
-Optional extension fields such as `file_selection`, `source_scope`, or `reference_objects` may be included for downstream analytics or projection, but `public-service` authority materialization must not require them.
+Optional extension fields such as `file_selection`, `source_scope`, or `reference_objects` may be included for downstream analytics or projection, but `public-service` authority materialization must not require them. The recently added answer-summary contract changes how final answers are composed before completion, but it does not require a new MQ envelope family.
 
 **Idempotency key**
 
@@ -945,9 +1102,33 @@ The following remain outside MQ:
 
 The route currently emits direct JSON or SSE semantics with stage events and streamed content. Redis MQ can support prewarm and write-behind, but should not replace the primary request execution contract.
 
+### 13.5 Patent Phase1 Current State And MQ Implication
+
+The repository now contains a standalone `patent` phase1 service scaffold under `patent/`.
+
+Current state:
+
+- the scaffold already includes a FastAPI app, Redis bindings, execution cache/lock helpers, authority client, chat-persistence helpers, and ask/health contract tests
+- patent-local docs explicitly say external rollout gates still apply before durable patent traffic is enabled outside the `patent/` directory
+- this means `patent` is no longer just a missing backend name, but it is also not yet a fully enabled participant in the main MQ rollout
+
+MQ implication:
+
+- `patent` should be treated as a target-state peer execution service for `assistant_finalize` and later admission-tier scheduling
+- until public-service authority contracts and gateway rollout gates are updated end-to-end for real patent durability, patent admission must still fail readiness before consuming shared queue budget
+- no patent-specific stream family should be introduced ahead of the authority-compatible cutover requirements
+
+Code evidence:
+
+- [patent README rollout gates](/home/cqy/worktrees/highThinking/patent/README.md)
+- [patent authority models](/home/cqy/worktrees/highThinking/patent/server/schemas/authority_models.py)
+- [patent authority client tests](/home/cqy/worktrees/highThinking/patent/tests/test_conversation_authority_client.py)
+- [patent ask contract tests](/home/cqy/worktrees/highThinking/patent/tests/fastapi_contract/test_ask_contract.py)
+- [patent health contract tests](/home/cqy/worktrees/highThinking/patent/tests/fastapi_contract/test_health_contract.py)
+
 ## 14. Refined Boundary Contracts From Code Review
 
-This section tightens the earlier design using direct code-backed constraints from all four service reviews.
+This section tightens the earlier design using direct code-backed constraints from the core service reviews.
 
 ### 14.1 Contract: `authority.user.write.v1` Is A Synchronous Boundary
 
@@ -958,8 +1139,8 @@ It is the boundary that makes the current user turn visible to the authority con
 **Producer**
 
 - target state: the canonical producer should be the actual QA execution service entry point
-- current state: `gateway` still produces compatibility user-message writes for non-`thinking` execution paths, while `highThinkingQA` is closer only in producer shape for thinking execution side effects and is not the target owner of upload/file/document truth
-- rollout must therefore model `gateway` as the phase-0 compatibility producer and `fastQA` / `highThinkingQA` as the target producers
+- current state: `gateway` still produces some compatibility user-message writes, but the repo now also contains partial rerouted file-QA authority support in the `fastQA` plus `public-service` path where `requested_mode` may differ from `actual_mode=fast`; `highThinkingQA` remains closer in producer shape for thinking execution side effects and is not the target owner of upload/file/document truth
+- rollout must therefore model the phase-0 producer boundary as mixed and transitional, with `gateway` compatibility writes still present while `fastQA` / `highThinkingQA` move toward the target producer shape
 
 **Consumer**
 
@@ -1008,7 +1189,7 @@ This contract should be the main business stream of the first MQ rollout.
 **Producer**
 
 - target state: `fastQA` after stream completion and summary finalization, and `highThinkingQA` after `done_seen == true`
-- current state: fast-path compatibility persistence may still be emitted by `gateway` rather than `fastQA` directly
+- current state: fast-path compatibility persistence remains mixed across `fastQA` and residual gateway-era code paths rather than being fully converged on one producer
 - during phase 1, direct publish may still be mediated by `public-service` internal acceptance API
 
 **Consumer**
@@ -1226,11 +1407,13 @@ This is the clearest legacy path to bridge out of residual `highThinkingQA` loca
 
 The upload API should define a synchronous registration boundary, not silently turn into an ingest job submission path.
 
-This section documents the current residual `highThinkingQA` upload registration path for migration analysis only. It does not mean `highThinkingQA` should remain the long-term upload/file authority. The target owner of upload registration, file metadata truth, and conversation file-list truth should be `public-service`.
+This section documents the residual `highThinkingQA` upload registration code path for migration analysis only. It does not mean `highThinkingQA` should remain the long-term upload/file authority. The target owner of upload registration, file metadata truth, and conversation file-list truth should be `public-service`.
+
+Current mounted FastAPI route surface no longer exposes `/api/v1/upload_pdf` or `/api/v1/upload_excel`; this section is repository-residue analysis, not an active public API description.
 
 **Producer**
 
-- upload endpoints in `server_fastapi/routers/upload.py`
+- residual upload router code in `server_fastapi/routers/upload.py`, not a currently mounted public route
 
 **Consumer**
 
@@ -1276,7 +1459,7 @@ The current response explicitly returns upload registration state such as `parse
 
 **Producer**
 
-- ingest API via `create_ingest_job()`
+- residual internal ingest job creation via `create_ingest_job()`; current mounted FastAPI route surface no longer exposes `/api/v1/ingest`
 
 **Consumer**
 
@@ -1306,6 +1489,8 @@ The current response explicitly returns upload registration state such as `parse
 
 **Code evidence**
 
+- [highThinking route registration](/home/cqy/worktrees/highThinking/highThinkingQA/server_fastapi/routers/__init__.py)
+- [highThinking minimal route surface test](/home/cqy/worktrees/highThinking/highThinkingQA/tests/fastapi_migration/test_fastapi_route_surface_minimal.py)
 - [highThinking ingest API](/home/cqy/worktrees/highThinking/highThinkingQA/server_fastapi/routers/ingest.py#L32)
 - [highThinking ingest service](/home/cqy/worktrees/highThinking/highThinkingQA/server/services/ingest_service.py#L42)
 - [highThinking pipeline corpus path](/home/cqy/worktrees/highThinking/highThinkingQA/ingest/pipeline.py#L203)
@@ -1314,7 +1499,7 @@ The current response explicitly returns upload registration state such as `parse
 
 The current interactive ask path is a synchronous HTTP contract with direct SSE semantics.
 
-It must not be replaced by Redis queue polling for the current API surface because:
+It must not be replaced by Redis queue polling for the live admitted-stream path because:
 
 - it creates and holds the live stream in-process
 - it releases concurrency slots only after stream cleanup
@@ -1322,6 +1507,8 @@ It must not be replaced by Redis queue polling for the current API surface becau
 - current execution context is built from conversation history/summary rather than uploaded-file authority inputs
 - `used_files` is returned as assistant metadata, and current code does not make `highThinkingQA` the owner of file-selection or file-QA truth
 - assistant persistence is explicitly a post-`done` side effect, not the transmission mechanism itself
+
+Pre-execution admission queueing is still allowed if the deployment needs durable burst control. The queue may decide when a request is allowed to enter this path, but it must not replace this path once execution begins.
 
 **Code evidence**
 
@@ -1353,7 +1540,7 @@ This is the first MQ candidate inside `fastQA`, but it must be described as a ta
 **Producer**
 
 - target state: `_wrap_stream_with_tap()` after stream completion and summary collection
-- current state caveat: non-`thinking` persistence may still be emitted by `gateway` until the compatibility write path is removed
+- current state caveat: non-`thinking` persistence is still transitional; `gateway` compatibility emission remains in the repo, but rerouted file-QA authority persistence can already pass through `fastQA` plus `public-service` on some paths, so this contract must not assume a gateway-only producer reality
 
 **Consumer**
 
@@ -1404,7 +1591,7 @@ This is the first MQ candidate inside `fastQA`, but it must be described as a ta
 
 ### 16.3 Stream: `stream:fast:prewarm_asset:v1` With `asset_kind=workbook_profile`
 
-This prewarm flow should materialize uploaded tabular files and build workbook/profile state before first heavy use.
+This prewarm flow should materialize uploaded tabular files and build workbook/profile state before first heavy use, while paper-PDF materialization now routes through the shared `storage_service` facade rather than direct paper-storage helpers.
 
 **Producer**
 
@@ -1439,7 +1626,10 @@ The current workbook cache is local-process memory only. Stream-driven prewarm i
 
 **Code evidence**
 
+- [fastQA storage service facade](/home/cqy/worktrees/highThinking/fastQA/app/modules/storage/service.py)
 - [fastQA materialize uploaded file](/home/cqy/worktrees/highThinking/fastQA/app/modules/storage/upload_materializer.py#L99)
+- [fastQA context loading PDF resolution](/home/cqy/worktrees/highThinking/fastQA/app/modules/generation_pipeline/context_loading.py)
+- [fastQA PDF pipeline resolution](/home/cqy/worktrees/highThinking/fastQA/app/modules/generation_pipeline/pdf_pipeline.py)
 - [fastQA workbook signature and cache](/home/cqy/worktrees/highThinking/fastQA/app/modules/qa_tabular/workbook_loader.py#L64)
 - [fastQA workbook load](/home/cqy/worktrees/highThinking/fastQA/app/modules/qa_tabular/workbook_loader.py#L214)
 - [fastQA tabular answer path](/home/cqy/worktrees/highThinking/fastQA/app/modules/qa_tabular/service.py#L382)
@@ -1506,6 +1696,8 @@ The current `ask` and `ask_stream` path must stay synchronous because:
 - it has immediate branch decisions for clarification, errors, and limiter release
 - KB, PDF, and tabular paths all have true request-time serial dependencies
 - the system already isolates appropriate async concerns into cache prewarm and write-behind finalization
+
+As with `highThinkingQA`, this constraint applies to the live admitted request path. A Redis-backed admission queue may still sit before execution start if cluster-wide concurrency must be enforced above the process-local limiter.
 
 **Code evidence**
 
@@ -1632,6 +1824,18 @@ Only after core business flows are stable:
 - keep it observability-only
 - do not let gateway become the owner of truth data or business retries
 
+### 18.6 Phase 5: Add Queue-Backed Interactive Admission
+
+Only after the core background streams and worker topology are stable:
+
+- add a dedicated interactive admission dispatcher outside normal web `gunicorn` workers
+- keep route resolution and clarification synchronous in `gateway`
+- map `fast` and `patent` into the same higher-priority queue tier
+- map `thinking` into a lower-priority queue tier with starvation protection
+- preserve direct JSON or SSE behavior once execution is admitted
+- add an explicit queued-request lifecycle for every request that is not admitted immediately once the configured ceiling is full
+- treat process-local backend semaphores as fallback safety rails, not as the global admission authority
+
 ## 19. Failure Handling And Operational Rules
 
 ### 19.1 Delivery Count Policy
@@ -1741,6 +1945,7 @@ If implementation starts tomorrow, the recommended order is:
 4. Add `highThinkingQA` ingest job stream orchestration.
 5. Add `fastQA` prewarm stream and keep all request-path fallbacks.
 6. Add gateway audit stream only after the business flows are stable.
+7. Add queue-backed interactive admission only after worker topology, rollback, and queued-request API semantics are ready.
 
 ## 22. Current Recommendation Summary
 
@@ -1752,4 +1957,4 @@ The safest first production-worthy Redis MQ rollout is:
 - keep interactive ask execution out of MQ
 - keep web `gunicorn` processes producer-only by default and run MQ consumers in explicit worker processes or deployments
 - keep `highThinkingQA` scoped to thinking execution and derived background work, not long-term upload/file/document ownership
-- use Streams for prewarm and background durability, not for request admission or live streaming transport
+- use Streams for prewarm, background durability, and optional pre-execution admission control, but not for live streaming transport after execution has started
