@@ -106,6 +106,20 @@ def test_public_proxy_accepts_x_request_id_and_forwards_canonical_trace_header()
             None,
             b"page=1&page_size=10",
         ),
+        (
+            "POST",
+            "/api/admin/users/batch-delete",
+            "/api/admin/users/batch-delete",
+            {"user_ids": [1, 2, 3]},
+            b"",
+        ),
+        (
+            "POST",
+            "/api/admin/users/batch-type",
+            "/api/admin/users/batch-type",
+            {"user_ids": [1, 2, 3], "user_type": "super"},
+            b"",
+        ),
     ],
 )
 def test_public_proxy_forwards_extended_route_surface(method, path, expected_path, json_body, expected_query):

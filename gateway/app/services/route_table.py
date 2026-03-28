@@ -57,6 +57,8 @@ _PUBLIC_ROUTE_GROUPS = (
     _paths("/api/admin/users/{user_id}/password", include_v1=False),
     _paths("/api/admin/users/{user_id}/status", include_v1=False),
     _paths("/api/admin/users/{user_id}/type", include_v1=False),
+    _paths("/api/admin/users/batch-delete", include_v1=False),
+    _paths("/api/admin/users/batch-type", include_v1=False),
     _paths("/api/admin/users/batch-import", include_v1=False),
     _paths("/api/admin/users/import-template", include_v1=False),
 )

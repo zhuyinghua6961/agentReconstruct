@@ -283,5 +283,200 @@ class AdminUsersService:
                 return self._db_error(exc)
             return {"success": False, "error": "删除用户失败", "code": "DELETE_ERROR"}
 
+    def batch_delete_users(self, *, target_user_ids: list[int], actor_user_id: int) -> dict[str, Any]:
+        try:
+            normalized_ids: list[int] = []
+            seen: set[int] = set()
+            for item in list(target_user_ids or []):
+                try:
+                    parsed = int(item)
+                except Exception:
+                    continue
+                if parsed <= 0 or parsed in seen:
+                    continue
+                seen.add(parsed)
+                normalized_ids.append(parsed)
+            if not normalized_ids:
+                return {"success": False, "error": "请选择至少一个用户", "code": "VALIDATION_ERROR"}
+
+            details: list[dict[str, Any]] = []
+            success_count = 0
+            failed_count = 0
+            skipped_count = 0
+
+            for index, user_id in enumerate(normalized_ids, start=1):
+                user = self._users.get_by_id(user_id)
+                if not user:
+                    failed_count += 1
+                    details.append(
+                        {
+                            "row": index,
+                            "user_id": user_id,
+                            "username": "",
+                            "status": "failed",
+                            "message": "用户不存在",
+                        }
+                    )
+                    continue
+
+                username = str(user.get("username") or "")
+                if int(actor_user_id or 0) == int(user_id):
+                    failed_count += 1
+                    details.append(
+                        {
+                            "row": index,
+                            "user_id": user_id,
+                            "username": username,
+                            "status": "failed",
+                            "message": "不能删除自己的账号",
+                        }
+                    )
+                    continue
+                if str(user.get("role") or "").strip().lower() == "admin":
+                    failed_count += 1
+                    details.append(
+                        {
+                            "row": index,
+                            "user_id": user_id,
+                            "username": username,
+                            "status": "failed",
+                            "message": "不能删除管理员账号",
+                        }
+                    )
+                    continue
+
+                self._users.delete_user(user_id=user_id)
+                success_count += 1
+                details.append(
+                    {
+                        "row": index,
+                        "user_id": user_id,
+                        "username": username,
+                        "status": "success",
+                        "message": "删除成功",
+                    }
+                )
+
+            return {
+                "success": True,
+                "message": "批量删除完成",
+                "data": {
+                    "summary": {
+                        "total": len(normalized_ids),
+                        "success": success_count,
+                        "failed": failed_count,
+                        "skipped": skipped_count,
+                    },
+                    "details": details,
+                },
+            }
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "批量删除用户失败", "code": "BATCH_DELETE_ERROR"}
+
+    def batch_change_user_type(self, *, target_user_ids: list[int], target_type_raw: object) -> dict[str, Any]:
+        try:
+            if not self._users.has_user_type_column():
+                return {"success": False, "error": "当前数据库未启用user_type字段", "code": "NOT_SUPPORTED"}
+
+            normalized_ids: list[int] = []
+            seen: set[int] = set()
+            for item in list(target_user_ids or []):
+                try:
+                    parsed = int(item)
+                except Exception:
+                    continue
+                if parsed <= 0 or parsed in seen:
+                    continue
+                seen.add(parsed)
+                normalized_ids.append(parsed)
+            if not normalized_ids:
+                return {"success": False, "error": "请选择至少一个用户", "code": "VALIDATION_ERROR"}
+
+            target_type = self._parse_user_type_code(target_type_raw)
+            if target_type not in {2, 3}:
+                return {"success": False, "error": "用户类型必须是 super/common 或 2/3", "code": "VALIDATION_ERROR"}
+
+            details: list[dict[str, Any]] = []
+            success_count = 0
+            failed_count = 0
+            skipped_count = 0
+            label = "超级用户" if target_type == 2 else "普通用户"
+
+            for index, user_id in enumerate(normalized_ids, start=1):
+                user = self._users.get_by_id(user_id)
+                if not user:
+                    failed_count += 1
+                    details.append(
+                        {
+                            "row": index,
+                            "user_id": user_id,
+                            "username": "",
+                            "status": "failed",
+                            "message": "用户不存在",
+                        }
+                    )
+                    continue
+
+                username = str(user.get("username") or "")
+                role_text = str(user.get("role") or "").strip().lower()
+                if role_text == "admin" or int(user.get("user_type") or 0) == 1:
+                    failed_count += 1
+                    details.append(
+                        {
+                            "row": index,
+                            "user_id": user_id,
+                            "username": username,
+                            "status": "failed",
+                            "message": "不能修改管理员身份",
+                        }
+                    )
+                    continue
+
+                current_type = int(user.get("user_type") or self._role_to_user_type(role_text))
+                if current_type == target_type:
+                    skipped_count += 1
+                    details.append(
+                        {
+                            "row": index,
+                            "user_id": user_id,
+                            "username": username,
+                            "status": "skipped",
+                            "message": f"用户已是{label}",
+                        }
+                    )
+                    continue
+
+                self._users.update_user_type(user_id=user_id, user_type=target_type)
+                success_count += 1
+                details.append(
+                    {
+                        "row": index,
+                        "user_id": user_id,
+                        "username": username,
+                        "status": "success",
+                        "message": f"已切换为{label}",
+                    }
+                )
+
+            return {
+                "success": True,
+                "message": "批量修改用户类型完成",
+                "data": {
+                    "summary": {
+                        "total": len(normalized_ids),
+                        "success": success_count,
+                        "failed": failed_count,
+                        "skipped": skipped_count,
+                    },
+                    "details": details,
+                },
+            }
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "批量修改用户身份失败", "code": "BATCH_TYPE_CHANGE_ERROR"}
+
 
 admin_users_service = AdminUsersService()

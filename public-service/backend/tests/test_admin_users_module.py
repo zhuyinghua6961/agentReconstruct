@@ -47,6 +47,8 @@ class _FakeRedis:
 def test_admin_user_routes_registered():
     paths = {route.path for route in app.routes if hasattr(route, "path")}
     assert "/api/admin/users" in paths
+    assert "/api/admin/users/batch-delete" in paths
+    assert "/api/admin/users/batch-type" in paths
     assert "/api/admin/users/batch-import" in paths
     assert "/api/admin/users/import-template" in paths
 
@@ -109,6 +111,16 @@ def test_admin_user_mutation_routes_contract(monkeypatch):
             "delete_user",
             lambda **kwargs: {"success": True, "message": "delete_ok", "data": kwargs},
         )
+        monkeypatch.setattr(
+            admin_users_service,
+            "batch_delete_users",
+            lambda **kwargs: {"success": True, "message": "batch_delete_ok", "data": kwargs},
+        )
+        monkeypatch.setattr(
+            admin_users_service,
+            "batch_change_user_type",
+            lambda **kwargs: {"success": True, "message": "batch_type_ok", "data": kwargs},
+        )
 
         password_resp = client.put(
             "/api/admin/users/7/password",
@@ -123,6 +135,14 @@ def test_admin_user_mutation_routes_contract(monkeypatch):
             json={"user_type": "super"},
         )
         delete_resp = client.delete("/api/admin/users/7")
+        batch_delete_resp = client.post(
+            "/api/admin/users/batch-delete",
+            json={"user_ids": [7, 8]},
+        )
+        batch_type_resp = client.post(
+            "/api/admin/users/batch-type",
+            json={"user_ids": [7, 8], "user_type": "super"},
+        )
         client.app.dependency_overrides.clear()
 
     assert password_resp.status_code == 200
@@ -133,6 +153,10 @@ def test_admin_user_mutation_routes_contract(monkeypatch):
     assert type_resp.json()["message"] == "type_update_ok"
     assert delete_resp.status_code == 200
     assert delete_resp.json()["message"] == "delete_ok"
+    assert batch_delete_resp.status_code == 200
+    assert batch_delete_resp.json()["message"] == "batch_delete_ok"
+    assert batch_type_resp.status_code == 200
+    assert batch_type_resp.json()["message"] == "batch_type_ok"
 
 
 def test_admin_batch_import_and_template_routes(monkeypatch):
@@ -210,3 +234,53 @@ def test_admin_import_releases_quota_lease_on_validation_error(monkeypatch):
     assert increment_calls["count"] == 0
     lock_key = quota_deps._quota_lock_key(user_id=7, quota_type="excel_upload")
     assert redis_service.client.get(lock_key) is None
+
+
+def test_admin_batch_delete_users_partial_success(monkeypatch):
+    users = {
+        1: {"id": 1, "username": "admin", "role": "admin", "user_type": 1, "status": "active"},
+        2: {"id": 2, "username": "alice", "role": "user", "user_type": 3, "status": "active"},
+        3: {"id": 3, "username": "bob", "role": "admin", "user_type": 1, "status": "active"},
+    }
+    deleted: list[int] = []
+
+    monkeypatch.setattr(admin_users_service.users, "get_by_id", lambda user_id: users.get(int(user_id)))
+    monkeypatch.setattr(admin_users_service.users, "delete_user", lambda **kwargs: deleted.append(int(kwargs["user_id"])) or 1)
+
+    result = admin_users_service.batch_delete_users(target_user_ids=[2, 3, 9, 1], actor_user_id=1)
+
+    assert result["success"] is True
+    assert result["data"]["summary"] == {"total": 4, "success": 1, "failed": 3, "skipped": 0}
+    assert deleted == [2]
+    assert result["data"]["details"][0]["status"] == "success"
+    assert result["data"]["details"][1]["status"] == "failed"
+    assert "管理员" in result["data"]["details"][1]["message"]
+    assert result["data"]["details"][2]["status"] == "failed"
+    assert result["data"]["details"][3]["status"] == "failed"
+
+
+def test_admin_batch_change_user_type_partial_success(monkeypatch):
+    users = {
+        2: {"id": 2, "username": "alice", "role": "user", "user_type": 3, "status": "active"},
+        3: {"id": 3, "username": "bob", "role": "user", "user_type": 2, "status": "active"},
+        4: {"id": 4, "username": "root", "role": "admin", "user_type": 1, "status": "active"},
+    }
+    updated: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(admin_users_service.users, "has_user_type_column", lambda: True)
+    monkeypatch.setattr(admin_users_service.users, "get_by_id", lambda user_id: users.get(int(user_id)))
+    monkeypatch.setattr(
+        admin_users_service.users,
+        "update_user_type",
+        lambda **kwargs: updated.append((int(kwargs["user_id"]), int(kwargs["user_type"]))) or 1,
+    )
+
+    result = admin_users_service.batch_change_user_type(target_user_ids=[2, 3, 4, 9], target_type_raw="super")
+
+    assert result["success"] is True
+    assert result["data"]["summary"] == {"total": 4, "success": 1, "failed": 2, "skipped": 1}
+    assert updated == [(2, 2)]
+    assert result["data"]["details"][0]["status"] == "success"
+    assert result["data"]["details"][1]["status"] == "skipped"
+    assert result["data"]["details"][2]["status"] == "failed"
+    assert result["data"]["details"][3]["status"] == "failed"

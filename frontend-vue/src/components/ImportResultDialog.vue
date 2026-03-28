@@ -3,7 +3,11 @@ import { ref, computed } from 'vue'
 
 const props = defineProps({
   show: Boolean,
-  result: Object
+  result: Object,
+  title: {
+    type: String,
+    default: '操作结果'
+  }
 })
 
 const emit = defineEmits(['close'])
@@ -54,10 +58,10 @@ function downloadFailedRecords() {
   // 生成CSV内容
   const headers = ['行号', '用户名', '状态', '错误信息']
   const rows = failedRecords.map(record => [
-    record.row,
+    record.row ?? record.user_id ?? '',
     record.username,
     getStatusText(record.status),
-    record.message
+    record.message || record.reason || ''
   ])
   
   const csvContent = [
@@ -87,7 +91,7 @@ function close() {
   <div v-if="show" class="modal-overlay" @click.self="close">
     <div class="modal modal-large">
       <div class="modal-header">
-        <h3>导入结果</h3>
+        <h3>{{ title }}</h3>
         <button class="close-btn" @click="close">×</button>
       </div>
 
@@ -170,7 +174,7 @@ function close() {
           <table v-else class="results-table">
             <thead>
               <tr>
-                <th>行号</th>
+                <th>序号</th>
                 <th>用户名</th>
                 <th>状态</th>
                 <th>消息</th>
@@ -178,15 +182,15 @@ function close() {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="item in filteredDetails" :key="item.row">
-                <td>{{ item.row }}</td>
+              <tr v-for="(item, index) in filteredDetails" :key="item.row || item.user_id || `${item.username}-${index}`">
+                <td>{{ item.row || index + 1 }}</td>
                 <td>{{ item.username }}</td>
                 <td>
                   <span class="status-badge" :class="getStatusClass(item.status)">
                     {{ getStatusText(item.status) }}
                   </span>
                 </td>
-                <td>{{ item.message }}</td>
+                <td>{{ item.message || item.reason || '' }}</td>
                 <td>{{ item.user_id || '-' }}</td>
               </tr>
             </tbody>

@@ -126,6 +126,28 @@ export const adminApi = {
     return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
   },
 
+  async batchDeleteUsers(userIds) {
+    const token = readStoredToken()
+    const response = await fetch(`${API_BASE}/users/batch-delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ user_ids: userIds })
+    })
+    const data = await safeJson(response)
+    return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
+  },
+
+  async batchChangeUserType(userIds, userType) {
+    const token = readStoredToken()
+    const response = await fetch(`${API_BASE}/users/batch-type`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ user_ids: userIds, user_type: userType })
+    })
+    const data = await safeJson(response)
+    return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
+  },
+
   async batchImportUsers(file) {
     const token = readStoredToken()
     const formData = new FormData()

@@ -10,6 +10,8 @@ from fastapi.responses import JSONResponse, Response
 from app.core.deps import AuthContext
 from app.modules.admin_users.import_service import admin_users_import_service
 from app.modules.admin_users.schemas import (
+    BatchChangeUserTypeRequest,
+    BatchDeleteUsersRequest,
     UserCreateRequest,
     UserPasswordResetRequest,
     UserStatusUpdateRequest,
@@ -134,6 +136,25 @@ def update_user_type(
 def delete_user(user_id: int, context: AuthContext = Depends(require_admin_context)):
     return _respond(
         admin_users_service.delete_user(target_user_id=user_id, actor_user_id=context.user_id),
+        ok_status=200,
+    )
+
+
+@router.post("/users/batch-delete")
+def batch_delete_users(payload: BatchDeleteUsersRequest, context: AuthContext = Depends(require_admin_context)):
+    return _respond(
+        admin_users_service.batch_delete_users(target_user_ids=payload.user_ids, actor_user_id=context.user_id),
+        ok_status=200,
+    )
+
+
+@router.post("/users/batch-type")
+def batch_change_user_type(
+    payload: BatchChangeUserTypeRequest,
+    _context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(
+        admin_users_service.batch_change_user_type(target_user_ids=payload.user_ids, target_type_raw=payload.user_type),
         ok_status=200,
     )
 

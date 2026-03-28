@@ -21,3 +21,12 @@ class UserStatusUpdateRequest(BaseModel):
 
 class UserTypeUpdateRequest(BaseModel):
     user_type: str | int = Field(default="common")
+
+
+class BatchDeleteUsersRequest(BaseModel):
+    user_ids: list[int] = Field(default_factory=list)
+
+
+class BatchChangeUserTypeRequest(BaseModel):
+    user_ids: list[int] = Field(default_factory=list)
+    user_type: str | int = Field(default="common")

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { authApi } from '../services/auth'
 import { adminApi } from '../services/admin'
 import BatchImportDialog from '../components/BatchImportDialog.vue'
@@ -20,6 +20,10 @@ const showResetPasswordModal = ref(false)
 const showBatchImportDialog = ref(false)
 const showImportResultDialog = ref(false)
 const importResult = ref(null)
+const operationResultTitle = ref('操作结果')
+const selectedUserIds = ref([])
+const showBatchTypeModal = ref(false)
+const batchTargetType = ref('super')
 const selectedUser = ref(null)
 const newPassword = ref('')
 const newUsername = ref('')
@@ -28,6 +32,13 @@ const newUserType = ref('common')  // 默认为普通用户
 const showPassword = ref(false)
 const showCreatePassword = ref(false)
 const resetPasswordValue = ref('')
+
+const currentPageUserIds = computed(() => users.value.map(user => user.id))
+const hasSelectedUsers = computed(() => selectedUserIds.value.length > 0)
+const allCurrentPageSelected = computed(() => (
+  currentPageUserIds.value.length > 0
+  && currentPageUserIds.value.every(id => selectedUserIds.value.includes(id))
+))
 
 function generateTemporaryPassword(length = 14) {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*'
@@ -98,6 +109,7 @@ async function fetchUsers() {
     console.log('fetchUsers - API result:', result)
     if (result.success) {
       users.value = result.data
+      selectedUserIds.value = selectedUserIds.value.filter(id => users.value.some(user => user.id === id))
       console.log('fetchUsers - users.value:', users.value)
       pagination.value.total = result.pagination.total
     } else {
@@ -108,6 +120,33 @@ async function fetchUsers() {
   } finally {
     loading.value = false
   }
+}
+
+function toggleUserSelection(userId) {
+  const normalized = Number(userId)
+  if (selectedUserIds.value.includes(normalized)) {
+    selectedUserIds.value = selectedUserIds.value.filter(id => id !== normalized)
+    return
+  }
+  selectedUserIds.value = [...selectedUserIds.value, normalized]
+}
+
+function toggleSelectAllCurrentPage() {
+  if (allCurrentPageSelected.value) {
+    selectedUserIds.value = selectedUserIds.value.filter(id => !currentPageUserIds.value.includes(id))
+    return
+  }
+  selectedUserIds.value = Array.from(new Set([...selectedUserIds.value, ...currentPageUserIds.value]))
+}
+
+function clearSelectedUsers() {
+  selectedUserIds.value = []
+}
+
+function openOperationResult(title, resultData) {
+  operationResultTitle.value = title
+  importResult.value = resultData
+  showImportResultDialog.value = true
 }
 
 function openPasswordModal(user) {
@@ -183,6 +222,54 @@ async function submitDelete() {
     setTimeout(() => success.value = '', 3000)
   } else {
     error.value = result.error
+  }
+}
+
+async function submitBatchDelete() {
+  error.value = ''
+  if (!hasSelectedUsers.value) {
+    error.value = '请至少选择一个用户'
+    return
+  }
+  if (!window.confirm(`确定批量删除选中的 ${selectedUserIds.value.length} 个用户吗？此操作不可恢复。`)) {
+    return
+  }
+
+  const result = await adminApi.batchDeleteUsers(selectedUserIds.value)
+  if (result.success) {
+    openOperationResult('批量删除结果', result.data)
+    success.value = `批量删除完成：成功 ${result.data?.summary?.success || 0} 条，失败 ${result.data?.summary?.failed || 0} 条`
+    clearSelectedUsers()
+    await fetchUsers()
+    setTimeout(() => success.value = '', 5000)
+  } else {
+    error.value = result.error || '批量删除失败'
+  }
+}
+
+function openBatchTypeModal() {
+  error.value = ''
+  if (!hasSelectedUsers.value) {
+    error.value = '请至少选择一个用户'
+    return
+  }
+  batchTargetType.value = 'super'
+  showBatchTypeModal.value = true
+}
+
+async function submitBatchTypeChange() {
+  error.value = ''
+  const result = await adminApi.batchChangeUserType(selectedUserIds.value, batchTargetType.value)
+  if (result.success) {
+    const targetText = batchTargetType.value === 'super' ? '超级用户' : '普通用户'
+    openOperationResult('批量修改用户类型结果', result.data)
+    success.value = `批量修改完成：已尝试切换为${targetText}，成功 ${result.data?.summary?.success || 0} 条`
+    showBatchTypeModal.value = false
+    clearSelectedUsers()
+    await fetchUsers()
+    setTimeout(() => success.value = '', 5000)
+  } else {
+    error.value = result.error || '批量修改用户类型失败'
   }
 }
 
@@ -305,8 +392,7 @@ function openBatchImportDialog() {
 }
 
 function handleImportSuccess(result) {
-  importResult.value = result
-  showImportResultDialog.value = true
+  openOperationResult('批量导入结果', result)
   
   // 显示成功消息
   const { summary } = result
@@ -345,9 +431,22 @@ onMounted(async () => {
         <div class="section-header">
           <h2>用户管理</h2>
           <div class="header-actions">
+            <button class="action-btn batch-action-btn" :disabled="!hasSelectedUsers" @click="openBatchTypeModal">
+              批量改类型
+            </button>
+            <button class="action-btn btn-danger" :disabled="!hasSelectedUsers" @click="submitBatchDelete">
+              批量删除
+            </button>
+            <button class="action-btn" :disabled="!hasSelectedUsers" @click="clearSelectedUsers">
+              清空选择
+            </button>
             <button class="add-user-btn batch-import-btn" @click="openBatchImportDialog">批量导入</button>
             <button class="add-user-btn" @click="openCreateModal">添加用户</button>
           </div>
+        </div>
+
+        <div v-if="hasSelectedUsers" class="selection-summary">
+          已选择 {{ selectedUserIds.length }} 个用户
         </div>
 
         <div v-if="loading" class="loading">加载中...</div>
@@ -355,6 +454,13 @@ onMounted(async () => {
         <table v-else class="user-table">
           <thead>
             <tr>
+              <th class="checkbox-col">
+                <input
+                  type="checkbox"
+                  :checked="allCurrentPageSelected"
+                  @change="toggleSelectAllCurrentPage"
+                >
+              </th>
               <th>ID</th>
               <th>用户名</th>
               <th>角色</th>
@@ -365,6 +471,13 @@ onMounted(async () => {
           </thead>
           <tbody>
             <tr v-for="user in users" :key="user.id">
+              <td class="checkbox-col">
+                <input
+                  type="checkbox"
+                  :checked="selectedUserIds.includes(user.id)"
+                  @change="toggleUserSelection(user.id)"
+                >
+              </td>
               <td>{{ user.id }}</td>
               <td>{{ user.username }}</td>
               <td><span class="role-badge" :class="getRoleClass(user)">{{ getRoleText(user) }}</span></td>
@@ -407,6 +520,7 @@ onMounted(async () => {
     <ImportResultDialog 
       :show="showImportResultDialog" 
       :result="importResult"
+      :title="operationResultTitle"
       @close="showImportResultDialog = false"
     />
 
@@ -512,6 +626,37 @@ onMounted(async () => {
         </div>
       </div>
     </div>
+
+    <div v-if="showBatchTypeModal" class="modal-overlay" @click.self="showBatchTypeModal = false">
+      <div class="modal">
+        <h3>批量修改用户类型</h3>
+        <div class="modal-body">
+          <p>已选择 {{ selectedUserIds.length }} 个用户。</p>
+          <div class="form-group">
+            <label>目标用户类型</label>
+            <div class="user-type-selector">
+              <label class="radio-option">
+                <input type="radio" v-model="batchTargetType" value="super">
+                <span class="radio-label">
+                  <span class="role-badge super">超级用户</span>
+                </span>
+              </label>
+              <label class="radio-option">
+                <input type="radio" v-model="batchTargetType" value="common">
+                <span class="radio-label">
+                  <span class="role-badge common">普通用户</span>
+                </span>
+              </label>
+            </div>
+          </div>
+          <p class="hint-text">管理员账号会在后端校验时自动失败并出现在结果明细中。</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn-secondary" @click="showBatchTypeModal = false">取消</button>
+          <button class="btn-primary" @click="submitBatchTypeChange">确认修改</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -535,6 +680,7 @@ onMounted(async () => {
 .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
 .section-header h2 { font-size: 18px; color: #1f2937; margin: 0; }
 .section-header .header-actions { display: flex; gap: 12px; }
+.selection-summary { margin-bottom: 12px; color: #374151; font-size: 14px; }
 .add-user-btn { background: #667eea; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-size: 14px; }
 .add-user-btn:hover { background: #5a67d8; }
 .add-user-btn.batch-import-btn { background: #10b981; }
@@ -543,6 +689,7 @@ onMounted(async () => {
 .loading { text-align: center; padding: 40px; color: #6b7280; }
 .user-table { width: 100%; border-collapse: collapse; }
 .user-table th, .user-table td { padding: 12px; text-align: left; border-bottom: 1px solid #e5e7eb; }
+.user-table .checkbox-col { width: 48px; text-align: center; }
 .user-table th { background: #f9fafb; font-weight: 500; color: #374151; font-size: 14px; }
 .user-table td { color: #1f2937; font-size: 14px; }
 .role-badge { padding: 4px 8px; border-radius: 4px; font-size: 12px; }
@@ -556,6 +703,8 @@ onMounted(async () => {
 .actions { display: flex; gap: 8px; }
 .action-btn { padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; border: 1px solid #d1d5db; background: white; }
 .action-btn:hover { background: #f9fafb; }
+.action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.batch-action-btn { background: #eff6ff; border-color: #bfdbfe; color: #1d4ed8; }
 .action-btn.btn-success { background: #dcfce7; border-color: #86efac; color: #166534; }
 .action-btn.btn-danger { background: #fee2e2; border-color: #fca5a5; color: #dc2626; }
 .pagination { display: flex; justify-content: center; align-items: center; gap: 16px; margin-top: 20px; }

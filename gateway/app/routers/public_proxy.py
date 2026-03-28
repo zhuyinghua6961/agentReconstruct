@@ -101,6 +101,8 @@ _ROUTE_SPECS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (_paths("/api/admin/users/{user_id}/password", include_v1=False), ("GET", "PUT")),
     (_paths("/api/admin/users/{user_id}/status", include_v1=False), ("PUT",)),
     (_paths("/api/admin/users/{user_id}/type", include_v1=False), ("PUT",)),
+    (_paths("/api/admin/users/batch-delete", include_v1=False), ("POST",)),
+    (_paths("/api/admin/users/batch-type", include_v1=False), ("POST",)),
     (_paths("/api/admin/users/batch-import", include_v1=False), ("POST",)),
     (_paths("/api/admin/users/import-template", include_v1=False), ("GET",)),
 )
