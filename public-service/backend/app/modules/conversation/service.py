@@ -570,6 +570,8 @@ class ConversationService:
                 payload["query_mode"] = metadata.get("query_mode")
             if isinstance(metadata.get("references"), list):
                 payload["references"] = metadata.get("references")
+            if isinstance(metadata.get("reference_objects"), list):
+                payload["reference_objects"] = metadata.get("reference_objects")
             if isinstance(metadata.get("reference_links"), list):
                 payload["reference_links"] = metadata.get("reference_links")
             if isinstance(metadata.get("pdf_links"), list):
@@ -635,6 +637,8 @@ class ConversationService:
                 metadata["query_mode"] = item.get("query_mode")
             if isinstance(item.get("references"), list) and "references" not in metadata:
                 metadata["references"] = item.get("references")
+            if isinstance(item.get("reference_objects"), list) and "reference_objects" not in metadata:
+                metadata["reference_objects"] = item.get("reference_objects")
             if isinstance(item.get("reference_links"), list) and "reference_links" not in metadata:
                 metadata["reference_links"] = item.get("reference_links")
             if isinstance(item.get("pdf_links"), list) and "pdf_links" not in metadata:
@@ -654,6 +658,7 @@ class ConversationService:
                     "created_at": self._to_iso(item.get("created_at"), fallback=self._now_iso()),
                     **({"query_mode": metadata.get("query_mode")} if metadata.get("query_mode") else {}),
                     **({"references": metadata.get("references")} if isinstance(metadata.get("references"), list) else {}),
+                    **({"reference_objects": metadata.get("reference_objects")} if isinstance(metadata.get("reference_objects"), list) else {}),
                     **({"reference_links": metadata.get("reference_links")} if isinstance(metadata.get("reference_links"), list) else {}),
                     **({"pdf_links": metadata.get("pdf_links")} if isinstance(metadata.get("pdf_links"), list) else {}),
                     **({"doi_locations": metadata.get("doi_locations")} if isinstance(metadata.get("doi_locations"), dict) else {}),
@@ -751,6 +756,8 @@ class ConversationService:
                 metadata["query_mode"] = item.get("query_mode")
             if isinstance(item.get("references"), list) and "references" not in metadata:
                 metadata["references"] = list(item.get("references") or [])
+            if isinstance(item.get("reference_objects"), list) and "reference_objects" not in metadata:
+                metadata["reference_objects"] = list(item.get("reference_objects") or [])
             if isinstance(item.get("reference_links"), list) and "reference_links" not in metadata:
                 metadata["reference_links"] = list(item.get("reference_links") or [])
             if isinstance(item.get("pdf_links"), list) and "pdf_links" not in metadata:
@@ -771,6 +778,7 @@ class ConversationService:
                     "metadata": metadata,
                     **({"query_mode": metadata.get("query_mode")} if metadata.get("query_mode") else {}),
                     **({"references": metadata.get("references")} if isinstance(metadata.get("references"), list) else {}),
+                    **({"reference_objects": metadata.get("reference_objects")} if isinstance(metadata.get("reference_objects"), list) else {}),
                     **({"reference_links": metadata.get("reference_links")} if isinstance(metadata.get("reference_links"), list) else {}),
                     **({"pdf_links": metadata.get("pdf_links")} if isinstance(metadata.get("pdf_links"), list) else {}),
                     **({"doi_locations": metadata.get("doi_locations")} if isinstance(metadata.get("doi_locations"), dict) else {}),
@@ -1535,6 +1543,8 @@ class ConversationService:
                     message_payload = existing
                 else:
                     now_iso = self._now_iso()
+                    reference_objects = list(final_event.get("reference_objects") or [])
+                    references = reference_objects or list(final_event.get("references") or [])
                     assistant_metadata = {
                         "trace_id": str(metadata.get("trace_id") or "").strip(),
                         "source_service": str(metadata.get("source_service") or "").strip(),
@@ -1543,7 +1553,11 @@ class ConversationService:
                         "actual_mode": str(metadata.get("actual_mode") or "").strip(),
                         "idempotency_key": idempotency_text,
                         "used_files": list(final_event.get("used_files") or []),
-                        "references": list(final_event.get("references") or []),
+                        "references": references,
+                        "reference_objects": reference_objects or list(references),
+                        "reference_links": list(final_event.get("reference_links") or []),
+                        "pdf_links": list(final_event.get("pdf_links") or []),
+                        "doi_locations": dict(final_event.get("doi_locations") or {}),
                         "steps": list(final_event.get("steps") or []),
                         "timings": dict(final_event.get("timings") or {}),
                         "done_seen": True,
@@ -1555,7 +1569,11 @@ class ConversationService:
                         "created_at": now_iso,
                         "status": "done",
                         "metadata": assistant_metadata,
-                        "references": list(final_event.get("references") or []),
+                        "references": references,
+                        "reference_objects": reference_objects or list(references),
+                        "reference_links": list(final_event.get("reference_links") or []),
+                        "pdf_links": list(final_event.get("pdf_links") or []),
+                        "doi_locations": dict(final_event.get("doi_locations") or {}),
                         "steps": list(final_event.get("steps") or []),
                         "done_seen": True,
                     }
@@ -1640,6 +1658,8 @@ class ConversationService:
                         message_payload["query_mode"] = metadata.get("query_mode")
                     if isinstance(metadata.get("references"), list):
                         message_payload["references"] = metadata.get("references")
+                    if isinstance(metadata.get("reference_objects"), list):
+                        message_payload["reference_objects"] = metadata.get("reference_objects")
                     if isinstance(metadata.get("reference_links"), list):
                         message_payload["reference_links"] = metadata.get("reference_links")
                     if isinstance(metadata.get("pdf_links"), list):
@@ -2223,10 +2243,13 @@ class ConversationService:
         content = str((summary or {}).get("assistant_content") or "").strip()
         if not content:
             return
+        reference_objects = (summary or {}).get("reference_objects") or []
+        references = reference_objects or ((summary or {}).get("references") or [])
         metadata = {
             "source": "ask_stream",
             "query_mode": str((summary or {}).get("query_mode") or ""),
-            "references": (summary or {}).get("references") or [],
+            "references": references,
+            "reference_objects": reference_objects or list(references),
             "reference_links": (summary or {}).get("reference_links") or [],
             "pdf_links": (summary or {}).get("pdf_links") or [],
             "doi_locations": (summary or {}).get("doi_locations") or {},

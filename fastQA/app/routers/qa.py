@@ -15,7 +15,7 @@ from app.core.runtime import generation_runtime_is_ready
 from app.core.sse import sse_response
 from app.modules.qa_kb.models import QaKbRequest
 from app.modules.qa_kb.service import qa_kb_service
-from app.modules.qa_kb.streaming import normalize_reference_objects, normalize_references
+from app.modules.qa_kb.streaming import build_doi_locations, normalize_reference_objects, normalize_references
 from app.modules.storage.service import storage_service
 from app.services.file_routes import iter_pdf_route_events, iter_tabular_route_events, resolve_gateway_file_context
 from app.services.conversation_context_builder import build_conversation_context
@@ -360,7 +360,7 @@ def _done_event(
         "reference_objects": normalized_reference_objects,
         "reference_links": links,
         "pdf_links": links,
-        "doi_locations": [],
+        "doi_locations": build_doi_locations(normalized_reference_objects),
         "route": route,
         "source_scope": resolved_source_scope,
         "source_usage": resolved_source_usage,
@@ -779,7 +779,7 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
                 done_event["reference_objects"] = normalized_reference_objects
                 done_event["reference_links"] = links
                 done_event["pdf_links"] = links
-                done_event.setdefault("doi_locations", [])
+                done_event["doi_locations"] = build_doi_locations(normalized_reference_objects)
                 done_event.setdefault("timings", {})
                 done_event.setdefault("trace_id", trace_id)
                 done_event.setdefault("query_mode", query_mode)
@@ -982,7 +982,7 @@ def _collect_sync_result(events: list[dict[str, Any]], *, trace_id: str, request
         "reference_objects": reference_objects,
         "reference_links": links,
         "pdf_links": links,
-        "doi_locations": [],
+        "doi_locations": build_doi_locations(reference_objects),
         "metadata": {**metadata, "source_scope": source_scope, "source_usage": source_usage},
         "trace_id": trace_id,
         "used_files": used_files,

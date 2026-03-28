@@ -109,6 +109,10 @@ def test_persist_assistant_summary_delegates_to_authority_client(monkeypatch):
         "answer_text": "final",
         "steps": [{"step": "stage1"}],
         "references": [{"doi": "10.1/a", "chunk_count": 2}],
+        "reference_objects": [{"doi": "10.1/a", "chunk_count": 2}],
+        "reference_links": [],
+        "pdf_links": [],
+        "doi_locations": {},
         "used_files": [{"file_id": 8}],
         "timings": {"stage1": 1.0},
     }

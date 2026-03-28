@@ -160,6 +160,11 @@ def test_persist_assistant_summary_stores_overlay_then_accepts_async(monkeypatch
             "done_seen": True,
             "trace_id": "trace-1",
             "route": "thinking_qa",
+            "references": [{"doi": "10.1/a"}],
+            "reference_objects": [{"doi": "10.1/a", "section_name": "Discussion"}],
+            "reference_links": [{"doi": "10.1/a", "pdf_url": "/api/v1/view_pdf/10.1%2Fa"}],
+            "pdf_links": [{"doi": "10.1/a", "pdf_url": "/api/v1/view_pdf/10.1%2Fa"}],
+            "doi_locations": {"10.1/a": [{"section": "Discussion"}]},
             "timings": {"total_ms": 100},
         },
         async_enabled=True,
@@ -323,3 +328,59 @@ def test_shadow_public_service_failure_does_not_break_legacy_execution(monkeypat
         }
     ]
     assert warnings
+
+
+def test_persist_assistant_summary_passes_rich_reference_fields_to_authority(monkeypatch):
+    chat_persistence = _import_chat_persistence()
+
+    calls: list[dict] = []
+
+    class FakeAuthorityClient:
+        def accept_assistant_turn_async(self, **kwargs):
+            calls.append(dict(kwargs))
+            return {"accepted": True}
+
+    monkeypatch.setattr(chat_persistence, "_get_authority_client", lambda: FakeAuthorityClient())
+    monkeypatch.setattr(chat_persistence.config, "CONVERSATION_ASSISTANT_WRITE_TARGET", "public_service")
+
+    chat_persistence.persist_assistant_summary(
+        user_id=7,
+        conversation_id=11,
+        trace_id="trace-1",
+        route="thinking_qa",
+        requested_mode="thinking",
+        actual_mode="thinking",
+        summary={
+            "assistant_content": "final-answer",
+            "done_seen": True,
+            "trace_id": "trace-1",
+            "route": "thinking_qa",
+            "references": [{"doi": "10.1/a"}],
+            "reference_objects": [{"doi": "10.1/a", "section_name": "Discussion"}],
+            "reference_links": [{"doi": "10.1/a", "pdf_url": "/api/v1/view_pdf/10.1%2Fa"}],
+            "pdf_links": [{"doi": "10.1/a", "pdf_url": "/api/v1/view_pdf/10.1%2Fa"}],
+            "doi_locations": {"10.1/a": [{"section": "Discussion"}]},
+            "timings": {"total_ms": 100},
+        },
+        async_enabled=False,
+    )
+
+    assert calls == [
+        {
+            "user_id": 7,
+            "conversation_id": 11,
+            "trace_id": "trace-1",
+            "route": "thinking_qa",
+            "requested_mode": "thinking",
+            "actual_mode": "thinking",
+            "answer_text": "final-answer",
+            "steps": [],
+            "references": [{"doi": "10.1/a", "section_name": "Discussion"}],
+            "reference_objects": [{"doi": "10.1/a", "section_name": "Discussion"}],
+            "reference_links": [{"doi": "10.1/a", "pdf_url": "/api/v1/view_pdf/10.1%2Fa"}],
+            "pdf_links": [{"doi": "10.1/a", "pdf_url": "/api/v1/view_pdf/10.1%2Fa"}],
+            "doi_locations": {"10.1/a": [{"section": "Discussion"}]},
+            "used_files": [],
+            "timings": {"total_ms": 100},
+        }
+    ]

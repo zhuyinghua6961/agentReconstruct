@@ -71,6 +71,10 @@ class AuthorityAssistantFinalEvent(BaseModel):
     answer_text: str = Field(min_length=1)
     steps: list[dict[str, Any]] = Field(default_factory=list)
     references: list[dict[str, Any]] = Field(default_factory=list)
+    reference_objects: list[dict[str, Any]] = Field(default_factory=list)
+    reference_links: list[dict[str, Any]] = Field(default_factory=list)
+    pdf_links: list[dict[str, Any]] = Field(default_factory=list)
+    doi_locations: dict[str, Any] = Field(default_factory=dict)
     used_files: list[dict[str, Any]] = Field(default_factory=list)
     timings: dict[str, Any] = Field(default_factory=dict)
 

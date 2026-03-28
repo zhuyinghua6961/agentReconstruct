@@ -141,6 +141,26 @@ def _normalize_steps(summary: dict[str, Any]) -> list[dict[str, Any]]:
     return [dict(item) for item in steps if isinstance(item, dict)]
 
 
+def _normalize_reference_links(summary: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    values = summary.get(key)
+    if not isinstance(values, list):
+        return []
+    return [dict(item) for item in values if isinstance(item, dict)]
+
+
+def _normalize_doi_locations(summary: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    values = summary.get("doi_locations")
+    if not isinstance(values, dict):
+        return {}
+    normalized: dict[str, list[dict[str, Any]]] = {}
+    for key, items in values.items():
+        doi = str(key or "").strip()
+        if not doi:
+            continue
+        normalized[doi] = [dict(item) for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+    return normalized
+
+
 def _normalize_used_files(summary: dict[str, Any]) -> list[dict[str, Any]]:
     used_files = summary.get("used_files")
     if not isinstance(used_files, list):
@@ -218,6 +238,10 @@ def _persist_assistant_summary_sync(
         answer_text=assistant_content,
         steps=_normalize_steps(safe_summary),
         references=_normalize_reference_payload(safe_summary),
+        reference_objects=_normalize_reference_payload(safe_summary),
+        reference_links=_normalize_reference_links(safe_summary, "reference_links"),
+        pdf_links=_normalize_reference_links(safe_summary, "pdf_links"),
+        doi_locations=_normalize_doi_locations(safe_summary),
         used_files=_normalize_used_files(safe_summary),
         timings=dict(safe_summary.get("timings") or {}),
     )

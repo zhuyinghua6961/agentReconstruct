@@ -75,6 +75,7 @@ class StreamSummary:
     assistant_content: str = ""
     query_mode: str = ""
     references: list[Any] | None = None
+    reference_objects: list[Any] | None = None
     reference_links: list[Any] | None = None
     pdf_links: list[Any] | None = None
     doi_locations: dict[str, Any] | list[Any] | None = None
@@ -91,6 +92,7 @@ class StreamSummary:
             "source": "gateway_ask_stream",
             "query_mode": self.query_mode,
             "references": list(self.references or []),
+            "reference_objects": list(self.reference_objects or []),
             "reference_links": list(self.reference_links or []),
             "pdf_links": list(self.pdf_links or []),
             "doi_locations": self.doi_locations if isinstance(self.doi_locations, dict) else {},
@@ -157,6 +159,7 @@ class ConversationPersistenceService:
     def new_stream_summary(self) -> StreamSummary:
         return StreamSummary(
             references=[],
+            reference_objects=[],
             reference_links=[],
             pdf_links=[],
             doi_locations={},
@@ -272,6 +275,9 @@ class ConversationPersistenceService:
             refs = payload.get("references")
             if isinstance(refs, list):
                 summary.references = refs
+            reference_objects = payload.get("reference_objects")
+            if isinstance(reference_objects, list):
+                summary.reference_objects = reference_objects
             ref_links = payload.get("reference_links")
             if isinstance(ref_links, list):
                 summary.reference_links = ref_links

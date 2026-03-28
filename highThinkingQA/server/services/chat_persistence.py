@@ -66,6 +66,9 @@ def _normalize_chat_history(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _normalize_reference_payload(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    reference_objects = summary.get("reference_objects")
+    if isinstance(reference_objects, list):
+        return [dict(item) for item in reference_objects if isinstance(item, dict)]
     references = summary.get("references")
     if not isinstance(references, list):
         return []
@@ -77,6 +80,26 @@ def _normalize_reference_payload(summary: dict[str, Any]) -> list[dict[str, Any]
         doi = _normalize_text(item)
         if doi:
             normalized.append({"doi": doi})
+    return normalized
+
+
+def _normalize_reference_links(summary: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    values = summary.get(key)
+    if not isinstance(values, list):
+        return []
+    return [dict(item) for item in values if isinstance(item, dict)]
+
+
+def _normalize_doi_locations(summary: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    values = summary.get("doi_locations")
+    if not isinstance(values, dict):
+        return {}
+    normalized: dict[str, list[dict[str, Any]]] = {}
+    for key, items in values.items():
+        doi = _normalize_text(key)
+        if not doi:
+            continue
+        normalized[doi] = [dict(item) for item in items if isinstance(item, dict)] if isinstance(items, list) else []
     return normalized
 
 
@@ -281,10 +304,15 @@ def _persist_user_message_legacy(*, user_id: int, conversation_id: int, question
 def _persist_assistant_summary_legacy(*, user_id: int, conversation_id: int, assistant_content: str, summary: dict[str, Any]) -> None:
     # Deprecated: legacy local assistant summary write path kept only as a compatibility
     # path during the public-service persistence migration.
+    normalized_references = _normalize_reference_payload(summary)
     meta = {
         "source": "ask_stream",
         "query_mode": str(summary.get("query_mode") or ""),
-        "references": summary.get("references") or [],
+        "references": normalized_references,
+        "reference_objects": normalized_references,
+        "reference_links": _normalize_reference_links(summary, "reference_links"),
+        "pdf_links": _normalize_reference_links(summary, "pdf_links"),
+        "doi_locations": _normalize_doi_locations(summary),
         "steps": summary.get("steps") or [],
         "route": str(summary.get("route") or ""),
         "timings": summary.get("timings") or {},
@@ -326,6 +354,10 @@ def _persist_assistant_summary_authority(*, user_id: int, conversation_id: int, 
         answer_text=assistant_content,
         steps=_normalize_steps(safe_summary),
         references=_normalize_reference_payload(safe_summary),
+        reference_objects=_normalize_reference_payload(safe_summary),
+        reference_links=_normalize_reference_links(safe_summary, "reference_links"),
+        pdf_links=_normalize_reference_links(safe_summary, "pdf_links"),
+        doi_locations=_normalize_doi_locations(safe_summary),
         used_files=_normalize_used_files(safe_summary),
         timings=dict(safe_summary.get("timings") or {}),
     )
