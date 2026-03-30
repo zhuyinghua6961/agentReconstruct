@@ -17,11 +17,13 @@ class _TransportGuard:
     def __enter__(self):
         app.state.proxy_service.set_transport(self._transport)
         app.state.conversation_persistence_service.set_transport(self._transport)
+        app.state.quota_proxy_service.set_transport(self._transport)
         return self
 
     def __exit__(self, exc_type, exc, tb):
         app.state.proxy_service.set_transport(None)
         app.state.conversation_persistence_service.set_transport(None)
+        app.state.quota_proxy_service.set_transport(None)
         return False
 
 
@@ -75,6 +77,579 @@ class _FakeConversationPersistenceService:
                 summary.query_mode = "fast"
                 summary.reference_links = [{"doi": "10.1/demo", "pdf_url": "/api/view_pdf/10.1/demo"}]
             yield chunk
+
+
+class _FailingAsyncStream(httpx.AsyncByteStream):
+    def __init__(self, *, first_chunk: bytes, exc: Exception) -> None:
+        self._first_chunk = first_chunk
+        self._exc = exc
+
+    async def __aiter__(self):
+        yield self._first_chunk
+        raise self._exc
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _json_request_body(request: httpx.Request) -> dict:
+    raw = request.content.decode("utf-8") if request.content else ""
+    return json.loads(raw) if raw else {}
+
+
+def test_mode_ask_calls_internal_quota_precheck_and_finalize_for_plain_question(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, _json_request_body(request), dict(request.headers)))
+        if request.url.path == "/internal/quota/grants/precheck":
+            payload = _json_request_body(request)
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"grant_id": "grant-sync-1", "quota_type": payload["quota_type"], "noop": False}},
+            )
+        if request.url.path == "/internal/quota/grants/grant-sync-1/finalize":
+            payload = _json_request_body(request)
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-sync-1", "counted": payload["success"], "idempotent": False}})
+        if request.url.path == "/api/thinking/ask":
+            return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        response = client.post(
+            "/api/thinking/ask",
+            json={
+                "question": "plain qa",
+                "requested_mode": "thinking",
+                "conversation_id": 7,
+                "user_id": 42,
+            },
+        )
+
+    assert response.status_code == 200
+    assert [item[0] for item in calls] == [
+        "/internal/quota/grants/precheck",
+        "/api/thinking/ask",
+        "/internal/quota/grants/grant-sync-1/finalize",
+    ]
+    assert calls[0][1]["quota_type"] == "ask_query"
+    assert calls[0][2]["x-internal-service-name"] == "gateway"
+    assert calls[2][1]["success"] is True
+
+
+def test_mode_ask_routes_file_question_to_file_qa_quota(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, _json_request_body(request)))
+        if request.url.path == "/internal/quota/grants/precheck":
+            payload = _json_request_body(request)
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"grant_id": "grant-file-1", "quota_type": payload["quota_type"], "noop": False}},
+            )
+        if request.url.path == "/internal/quota/grants/grant-file-1/finalize":
+            payload = _json_request_body(request)
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-file-1", "counted": payload["success"], "idempotent": False}})
+        if request.url.path == "/api/fast/ask":
+            return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        response = client.post(
+            "/api/thinking/ask",
+            json={
+                "question": "请总结这篇文献",
+                "requested_mode": "thinking",
+                "conversation_id": 8,
+                "user_id": 42,
+                "pdf_context": {"selected_ids": [11]},
+            },
+        )
+
+    assert response.status_code == 200
+    assert calls[0][0] == "/internal/quota/grants/precheck"
+    assert calls[0][1]["quota_type"] == "file_qa"
+    assert calls[1][0] == "/api/fast/ask"
+    assert calls[2][0] == "/internal/quota/grants/grant-file-1/finalize"
+    assert calls[2][1]["success"] is True
+
+
+def test_mode_ask_stream_counts_quota_only_after_done_event(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, _json_request_body(request)))
+        if request.url.path == "/internal/quota/grants/precheck":
+            payload = _json_request_body(request)
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"grant_id": "grant-stream-1", "quota_type": payload["quota_type"], "noop": False}},
+            )
+        if request.url.path == "/internal/quota/grants/grant-stream-1/finalize":
+            payload = _json_request_body(request)
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-stream-1", "counted": payload["success"], "idempotent": False}})
+        if request.url.path == "/api/thinking/ask_stream":
+            return httpx.Response(
+                200,
+                content=(
+                    b'data: {"type":"metadata","query_mode":"thinking"}\n\n'
+                    b'data: {"type":"content","content":"hello"}\n\n'
+                    b'data: {"type":"done","final_answer":"hello"}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        with client.stream(
+            "POST",
+            "/api/thinking/ask_stream",
+            json={"question": "plain qa", "requested_mode": "thinking", "conversation_id": 9, "user_id": 42},
+        ) as response:
+            body = b"".join(response.iter_bytes())
+
+    assert response.status_code == 200
+    assert b'"type":"done"' in body
+    assert [item[0] for item in calls] == [
+        "/internal/quota/grants/precheck",
+        "/api/thinking/ask_stream",
+        "/internal/quota/grants/grant-stream-1/finalize",
+    ]
+    assert calls[2][1]["success"] is True
+
+
+def test_mode_ask_stream_appends_quota_warning_when_finalize_fails(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/internal/quota/grants/precheck":
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"grant_id": "grant-stream-warn", "quota_type": "ask_query", "noop": False}},
+            )
+        if request.url.path == "/internal/quota/grants/grant-stream-warn/finalize":
+            return httpx.Response(503, json={"success": False, "code": "DB_UNAVAILABLE", "error": "db_unavailable"})
+        if request.url.path == "/api/thinking/ask_stream":
+            return httpx.Response(
+                200,
+                content=(
+                    b'data: {"type":"metadata","query_mode":"thinking"}\n\n'
+                    b'data: {"type":"content","content":"hello"}\n\n'
+                    b'data: {"type":"done","final_answer":"hello"}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        with client.stream(
+            "POST",
+            "/api/thinking/ask_stream",
+            json={"question": "plain qa", "requested_mode": "thinking", "conversation_id": 10, "user_id": 42},
+        ) as response:
+            body = b"".join(response.iter_bytes())
+
+    assert response.status_code == 200
+    assert b'"type":"done"' in body
+    assert b'"quota"' in body
+    assert b'"warning"' in body
+
+
+def test_mode_ask_patent_route_skips_quota_calls(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/api/patent/ask":
+            return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        response = client.post(
+            "/api/patent/ask",
+            json={"question": "patent qa", "requested_mode": "patent", "conversation_id": 11, "user_id": 42},
+        )
+
+    assert response.status_code == 200
+    assert calls == ["/api/patent/ask"]
+
+
+def test_mode_ask_clarification_skips_quota_calls(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        response = client.post(
+            "/api/thinking/ask",
+            json={
+                "question": "请继续总结这篇文献",
+                "requested_mode": "thinking",
+                "conversation_id": 12,
+                "user_id": 42,
+                "pdf_context": {"selected_ids": [11, 22]},
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "FILE_SELECTION_CLARIFICATION_REQUIRED"
+    assert calls == []
+
+
+def test_mode_ask_returns_json_quota_error_surface_on_precheck_failure(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/internal/quota/grants/precheck":
+            return httpx.Response(429, json={"success": False, "code": "QUOTA_EXCEEDED", "error": "quota_exceeded"})
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        response = client.post(
+            "/api/thinking/ask",
+            json={"question": "plain qa", "requested_mode": "thinking", "conversation_id": 121, "user_id": 42},
+        )
+
+    assert response.status_code == 429
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["code"] == "QUOTA_EXCEEDED"
+
+
+def test_mode_ask_stream_returns_sse_quota_error_surface_on_precheck_failure(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/internal/quota/grants/precheck":
+            return httpx.Response(429, json={"success": False, "code": "QUOTA_EXCEEDED", "error": "quota_exceeded"})
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        with client.stream(
+            "POST",
+            "/api/thinking/ask_stream",
+            json={"question": "plain qa", "requested_mode": "thinking", "conversation_id": 122, "user_id": 42},
+        ) as response:
+            body = b"".join(response.iter_bytes())
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert b'"code":"QUOTA_EXCEEDED"' in body
+
+
+def test_mode_ask_aborts_quota_when_upstream_payload_is_unsuccessful(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, _json_request_body(request)))
+        if request.url.path == "/internal/quota/grants/precheck":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-sync-fail", "quota_type": "ask_query", "noop": False}})
+        if request.url.path == "/internal/quota/grants/grant-sync-fail/finalize":
+            payload = _json_request_body(request)
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-sync-fail", "counted": payload["success"], "idempotent": False}})
+        if request.url.path == "/api/thinking/ask":
+            return httpx.Response(200, json={"success": False, "error": "llm_failed"})
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        response = client.post(
+            "/api/thinking/ask",
+            json={"question": "plain qa", "requested_mode": "thinking", "conversation_id": 13, "user_id": 42},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["success"] is False
+    assert calls[-1][0] == "/internal/quota/grants/grant-sync-fail/finalize"
+    assert calls[-1][1]["success"] is False
+
+
+def test_mode_ask_keeps_success_response_when_finalize_fails(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/internal/quota/grants/precheck":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-sync-warn", "quota_type": "ask_query", "noop": False}})
+        if request.url.path == "/internal/quota/grants/grant-sync-warn/finalize":
+            return httpx.Response(503, json={"success": False, "code": "DB_UNAVAILABLE", "error": "db_unavailable"})
+        if request.url.path == "/api/thinking/ask":
+            return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        response = client.post(
+            "/api/thinking/ask",
+            json={"question": "plain qa", "requested_mode": "thinking", "conversation_id": 14, "user_id": 42},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["quota"]["warning"]["code"] == "DB_UNAVAILABLE"
+
+
+def test_mode_ask_aborts_quota_when_upstream_status_is_non_2xx(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, _json_request_body(request)))
+        if request.url.path == "/internal/quota/grants/precheck":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-sync-500", "quota_type": "ask_query", "noop": False}})
+        if request.url.path == "/internal/quota/grants/grant-sync-500/finalize":
+            payload = _json_request_body(request)
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-sync-500", "counted": payload["success"], "idempotent": False}})
+        if request.url.path == "/api/thinking/ask":
+            return httpx.Response(500, json={"detail": "backend exploded"})
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        response = client.post(
+            "/api/thinking/ask",
+            json={"question": "plain qa", "requested_mode": "thinking", "conversation_id": 141, "user_id": 42},
+        )
+
+    assert response.status_code == 500
+    assert calls[-1][0] == "/internal/quota/grants/grant-sync-500/finalize"
+    assert calls[-1][1]["success"] is False
+
+
+def test_mode_ask_aborts_quota_when_upstream_payload_has_error_field(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, _json_request_body(request)))
+        if request.url.path == "/internal/quota/grants/precheck":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-sync-error", "quota_type": "ask_query", "noop": False}})
+        if request.url.path == "/internal/quota/grants/grant-sync-error/finalize":
+            payload = _json_request_body(request)
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-sync-error", "counted": payload["success"], "idempotent": False}})
+        if request.url.path == "/api/thinking/ask":
+            return httpx.Response(200, json={"success": True, "error": "llm_failed"})
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        response = client.post(
+            "/api/thinking/ask",
+            json={"question": "plain qa", "requested_mode": "thinking", "conversation_id": 142, "user_id": 42},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["error"] == "llm_failed"
+    assert calls[-1][0] == "/internal/quota/grants/grant-sync-error/finalize"
+    assert calls[-1][1]["success"] is False
+
+
+def test_mode_ask_stream_aborts_quota_when_done_event_never_arrives(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, _json_request_body(request)))
+        if request.url.path == "/internal/quota/grants/precheck":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-stream-abort", "quota_type": "ask_query", "noop": False}})
+        if request.url.path == "/internal/quota/grants/grant-stream-abort/finalize":
+            payload = _json_request_body(request)
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-stream-abort", "counted": payload["success"], "idempotent": False}})
+        if request.url.path == "/api/thinking/ask_stream":
+            return httpx.Response(
+                200,
+                content=(
+                    b'data: {"type":"metadata","query_mode":"thinking"}\n\n'
+                    b'data: {"type":"content","content":"hello"}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        with client.stream(
+            "POST",
+            "/api/thinking/ask_stream",
+            json={"question": "plain qa", "requested_mode": "thinking", "conversation_id": 15, "user_id": 42},
+        ) as response:
+            body = b"".join(response.iter_bytes())
+
+    assert response.status_code == 200
+    assert b'"type":"done"' not in body
+    assert calls[-1][0] == "/internal/quota/grants/grant-stream-abort/finalize"
+    assert calls[-1][1]["success"] is False
+
+
+def test_mode_ask_stream_routes_file_question_to_file_qa_quota(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, _json_request_body(request)))
+        if request.url.path == "/internal/quota/grants/precheck":
+            payload = _json_request_body(request)
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"grant_id": "grant-stream-file", "quota_type": payload["quota_type"], "noop": False}},
+            )
+        if request.url.path == "/internal/quota/grants/grant-stream-file/finalize":
+            payload = _json_request_body(request)
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-stream-file", "counted": payload["success"], "idempotent": False}})
+        if request.url.path == "/api/fast/ask_stream":
+            return httpx.Response(
+                200,
+                content=(
+                    b'data: {"type":"metadata","query_mode":"fast","route":"pdf_qa"}\n\n'
+                    b'data: {"type":"content","content":"hello"}\n\n'
+                    b'data: {"type":"done","final_answer":"hello","route":"pdf_qa"}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        with client.stream(
+            "POST",
+            "/api/thinking/ask_stream",
+            json={
+                "question": "请总结这篇文献",
+                "requested_mode": "thinking",
+                "conversation_id": 16,
+                "user_id": 42,
+                "pdf_context": {"selected_ids": [11]},
+            },
+        ) as response:
+            body = b"".join(response.iter_bytes())
+
+    assert response.status_code == 200
+    assert b'"type":"done"' in body
+    assert calls[0][0] == "/internal/quota/grants/precheck"
+    assert calls[0][1]["quota_type"] == "file_qa"
+    assert calls[1][0] == "/api/fast/ask_stream"
+    assert calls[2][0] == "/internal/quota/grants/grant-stream-file/finalize"
+    assert calls[2][1]["success"] is True
+
+
+def test_mode_ask_stream_preserves_done_event_metadata_when_quota_is_appended(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/internal/quota/grants/precheck":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-stream-metadata", "quota_type": "ask_query", "noop": False}})
+        if request.url.path == "/internal/quota/grants/grant-stream-metadata/finalize":
+            payload = _json_request_body(request)
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-stream-metadata", "counted": payload["success"], "idempotent": False}})
+        if request.url.path == "/api/thinking/ask_stream":
+            return httpx.Response(
+                200,
+                content=(
+                    b'event: done\r\n'
+                    b'id: final-1\r\n'
+                    b'data: {"type":"done","final_answer":"hello"}\r\n\r\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        with client.stream(
+            "POST",
+            "/api/thinking/ask_stream",
+            json={"question": "plain qa", "requested_mode": "thinking", "conversation_id": 18, "user_id": 42},
+        ) as response:
+            body = b"".join(response.iter_bytes())
+
+    assert response.status_code == 200
+    assert b'event: done' in body
+    assert b'id: final-1' in body
+    assert b'"quota"' in body
+
+
+def test_mode_ask_stream_aborts_quota_when_upstream_returns_http_error(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, _json_request_body(request)))
+        if request.url.path == "/internal/quota/grants/precheck":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-stream-http-error", "quota_type": "ask_query", "noop": False}})
+        if request.url.path == "/internal/quota/grants/grant-stream-http-error/finalize":
+            payload = _json_request_body(request)
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-stream-http-error", "counted": payload["success"], "idempotent": False}})
+        if request.url.path == "/api/thinking/ask_stream":
+            return httpx.Response(500, json={"detail": "backend exploded"})
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        with client.stream(
+            "POST",
+            "/api/thinking/ask_stream",
+            json={"question": "plain qa", "requested_mode": "thinking", "conversation_id": 17, "user_id": 42},
+        ) as response:
+            body = b"".join(response.iter_bytes())
+
+    assert response.status_code == 200
+    assert b'"code":"UPSTREAM_ERROR"' in body
+    assert calls[-1][0] == "/internal/quota/grants/grant-stream-http-error/finalize"
+    assert calls[-1][1]["success"] is False
+
+
+def test_mode_ask_stream_aborts_quota_when_midstream_timeout_occurs(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, _json_request_body(request)))
+        if request.url.path == "/internal/quota/grants/precheck":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-stream-timeout", "quota_type": "ask_query", "noop": False}})
+        if request.url.path == "/internal/quota/grants/grant-stream-timeout/finalize":
+            payload = _json_request_body(request)
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-stream-timeout", "counted": payload["success"], "idempotent": False}})
+        if request.url.path == "/api/thinking/ask_stream":
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=_FailingAsyncStream(
+                    first_chunk=b'data: {"type":"content","content":"partial"}\n\n',
+                    exc=httpx.ReadTimeout("stream timeout", request=request),
+                ),
+            )
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        with client.stream(
+            "POST",
+            "/api/thinking/ask_stream",
+            json={"question": "plain qa", "requested_mode": "thinking", "conversation_id": 19, "user_id": 42},
+        ) as response:
+            body = b"".join(response.iter_bytes())
+
+    assert response.status_code == 200
+    assert b'"content":"partial"' in body
+    assert b'"code":"UPSTREAM_STREAM_UNAVAILABLE"' in body
+    assert calls[-1][0] == "/internal/quota/grants/grant-stream-timeout/finalize"
+    assert calls[-1][1]["success"] is False
 
 
 def test_mode_ask_routes_plain_question_to_requested_backend():
@@ -990,6 +1565,15 @@ def test_mode_ask_stream_forwards_user_id_to_fast_backend():
     captured = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/internal/quota/grants/precheck":
+            payload = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"grant_id": "grant-user-id", "quota_type": payload["quota_type"], "noop": False}},
+            )
+        if request.url.path == "/internal/quota/grants/grant-user-id/finalize":
+            payload = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-user-id", "counted": payload["success"], "idempotent": False}})
         captured["url"] = str(request.url)
         captured["body"] = json.loads(request.content.decode("utf-8"))
         return httpx.Response(

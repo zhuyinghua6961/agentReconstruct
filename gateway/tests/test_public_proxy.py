@@ -3,6 +3,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.routers.public_proxy import router as public_proxy_router
 
 
 class _TransportGuard:
@@ -298,3 +299,16 @@ def test_public_proxy_rewrites_legacy_only_public_paths(path, expected_upstream_
 
     assert response.status_code == 200
     assert response.json()["path"] == expected_upstream_path
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/internal/quota/grants/precheck",
+        "/internal/quota/grants/{grant_id}/finalize",
+    ],
+)
+def test_public_proxy_does_not_expose_internal_quota_grant_endpoints(path):
+    registered_paths = {route.path for route in public_proxy_router.routes}
+
+    assert path not in registered_paths

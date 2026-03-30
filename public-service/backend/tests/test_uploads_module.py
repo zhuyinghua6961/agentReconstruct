@@ -66,17 +66,6 @@ def test_upload_pdf_success_binds_conversation(monkeypatch):
             client.app.state.runtime.upload_folder = Path(tempdir)
             client.app.state.runtime.upload_processing_worker = None
             call_order: list[str] = []
-            monkeypatch.setattr(quota_deps.auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
-            monkeypatch.setattr(
-                quota_service_module.quota_service,
-                "check_quota",
-                lambda **kwargs: call_order.append("check_quota") or {"success": True, "allowed": True},
-            )
-            monkeypatch.setattr(
-                quota_service_module.quota_service,
-                "increment_quota",
-                lambda **kwargs: call_order.append("increment_quota") or {"success": True},
-            )
             monkeypatch.setattr(
                 conversation_service_module.conversation_service,
                 "add_uploaded_file",
@@ -99,7 +88,7 @@ def test_upload_pdf_success_binds_conversation(monkeypatch):
         assert payload["storage_ref"] == "local://mirrored"
         assert Path(payload["filepath"]).exists()
         assert client.app.state.runtime.current_pdf_path is None
-        assert call_order == ["check_quota", "add_uploaded_file", "increment_quota"]
+        assert call_order == ["add_uploaded_file"]
 
 
 def test_upload_pdf_sanitizes_client_filename(monkeypatch):
@@ -203,19 +192,7 @@ def test_upload_pdf_fails_when_storage_mirror_is_unavailable(monkeypatch):
             )
             client.app.state.runtime.upload_folder = Path(tempdir)
             client.app.state.runtime.upload_processing_worker = None
-            quota_called = {"check": 0, "increment": 0}
             add_called = {"count": 0}
-            monkeypatch.setattr(quota_deps.auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
-            monkeypatch.setattr(
-                quota_service_module.quota_service,
-                "check_quota",
-                lambda **kwargs: quota_called.__setitem__("check", quota_called["check"] + 1) or {"success": True, "allowed": True},
-            )
-            monkeypatch.setattr(
-                quota_service_module.quota_service,
-                "increment_quota",
-                lambda **kwargs: quota_called.__setitem__("increment", quota_called["increment"] + 1) or {"success": True},
-            )
             monkeypatch.setattr(
                 conversation_service_module.conversation_service,
                 "add_uploaded_file",
@@ -236,11 +213,10 @@ def test_upload_pdf_fails_when_storage_mirror_is_unavailable(monkeypatch):
     payload = response.json()
     assert payload["code"] == "UPLOAD_STORAGE_UNAVAILABLE"
     assert add_called["count"] == 0
-    assert quota_called == {"check": 1, "increment": 0}
     assert remaining_files == []
 
 
-def test_upload_pdf_returns_success_with_warning_when_quota_increment_fails(monkeypatch):
+def test_upload_pdf_does_not_consume_user_visible_upload_quota(monkeypatch):
     with TemporaryDirectory() as tempdir:
         with TestClient(app) as client:
             client.app.dependency_overrides[get_optional_auth_context] = lambda: AuthContext(
@@ -250,22 +226,21 @@ def test_upload_pdf_returns_success_with_warning_when_quota_increment_fails(monk
             )
             client.app.state.runtime.upload_folder = Path(tempdir)
             client.app.state.runtime.upload_processing_worker = None
-            call_order: list[str] = []
-            monkeypatch.setattr(quota_deps.auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+            quota_calls = {"check": 0, "increment": 0}
             monkeypatch.setattr(
                 quota_service_module.quota_service,
                 "check_quota",
-                lambda **kwargs: call_order.append("check_quota") or {"success": True, "allowed": True},
+                lambda **kwargs: quota_calls.__setitem__("check", quota_calls["check"] + 1) or {"success": True, "allowed": True},
             )
             monkeypatch.setattr(
                 quota_service_module.quota_service,
                 "increment_quota",
-                lambda **kwargs: call_order.append("increment_quota") or {"success": False, "error": "redis_down"},
+                lambda **kwargs: quota_calls.__setitem__("increment", quota_calls["increment"] + 1) or {"success": True},
             )
             monkeypatch.setattr(
                 conversation_service_module.conversation_service,
                 "add_uploaded_file",
-                lambda **kwargs: call_order.append("add_uploaded_file") or {"success": True, "data": {"file_id": 8}},
+                lambda **kwargs: {"success": True, "data": {"file_id": 8}},
             )
             monkeypatch.setattr(storage_service, "mirror_file", lambda **kwargs: "local://mirrored")
 
@@ -280,10 +255,10 @@ def test_upload_pdf_returns_success_with_warning_when_quota_increment_fails(monk
     assert response.status_code == 200
     payload = response.json()
     assert payload["success"] is True
-    assert payload["quota_counted"] is False
-    assert payload["quota_warning"] == "redis_down"
     assert payload["file_id"] == 8
-    assert call_order == ["check_quota", "add_uploaded_file", "increment_quota"]
+    assert "quota_counted" not in payload
+    assert "quota_warning" not in payload
+    assert quota_calls == {"check": 0, "increment": 0}
 
 
 def test_upload_excel_success_returns_frontend_required_fields(monkeypatch):
@@ -296,9 +271,6 @@ def test_upload_excel_success_returns_frontend_required_fields(monkeypatch):
             )
             client.app.state.runtime.upload_folder = Path(tempdir)
             client.app.state.runtime.upload_processing_worker = None
-            monkeypatch.setattr(quota_deps.auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
-            monkeypatch.setattr(quota_service_module.quota_service, "check_quota", lambda **kwargs: {"success": True, "allowed": True})
-            monkeypatch.setattr(quota_service_module.quota_service, "increment_quota", lambda **kwargs: {"success": True})
             monkeypatch.setattr(
                 conversation_service_module.conversation_service,
                 "add_uploaded_file",
@@ -338,18 +310,6 @@ def test_upload_pdf_persist_failure_cleans_orphaned_file(monkeypatch):
             client.app.state.runtime.upload_folder = Path(tempdir)
             client.app.state.runtime.upload_processing_worker = None
             cleaned: dict[str, object] = {}
-            quota_called = {"check": 0, "increment": 0}
-            monkeypatch.setattr(quota_deps.auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
-            monkeypatch.setattr(
-                quota_service_module.quota_service,
-                "check_quota",
-                lambda **kwargs: quota_called.__setitem__("check", quota_called["check"] + 1) or {"success": True, "allowed": True},
-            )
-            monkeypatch.setattr(
-                quota_service_module.quota_service,
-                "increment_quota",
-                lambda **kwargs: quota_called.__setitem__("increment", quota_called["increment"] + 1) or {"success": True},
-            )
             monkeypatch.setattr(
                 conversation_service_module.conversation_service,
                 "add_uploaded_file",
@@ -374,7 +334,6 @@ def test_upload_pdf_persist_failure_cleans_orphaned_file(monkeypatch):
     payload = response.json()
     assert payload["code"] == "DB_UNAVAILABLE"
     assert str((cleaned.get("file_row") or {}).get("storage_ref")) == "local://mirrored"
-    assert quota_called == {"check": 1, "increment": 0}
 
 
 def test_upload_pdf_persist_failure_with_path_like_filename_still_cleans_safely(monkeypatch):
@@ -388,9 +347,6 @@ def test_upload_pdf_persist_failure_with_path_like_filename_still_cleans_safely(
             client.app.state.runtime.upload_folder = Path(tempdir)
             client.app.state.runtime.upload_processing_worker = None
             cleaned: dict[str, object] = {}
-            monkeypatch.setattr(quota_deps.auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
-            monkeypatch.setattr(quota_service_module.quota_service, "check_quota", lambda **kwargs: {"success": True, "allowed": True})
-            monkeypatch.setattr(quota_service_module.quota_service, "increment_quota", lambda **kwargs: {"success": True})
             monkeypatch.setattr(
                 conversation_service_module.conversation_service,
                 "add_uploaded_file",
@@ -417,10 +373,7 @@ def test_upload_pdf_persist_failure_with_path_like_filename_still_cleans_safely(
     assert str(Path(cleaned_local_path).parent) == tempdir
 
 
-def test_upload_pdf_releases_quota_lease_on_persist_failure(monkeypatch):
-    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
-    monkeypatch.setattr(quota_service_module.quota_service, "_get_redis_service", lambda: redis_service)
-
+def test_upload_pdf_does_not_create_upload_quota_lease(monkeypatch):
     with TemporaryDirectory() as tempdir:
         with TestClient(app) as client:
             client.app.dependency_overrides[get_optional_auth_context] = lambda: AuthContext(
@@ -430,21 +383,10 @@ def test_upload_pdf_releases_quota_lease_on_persist_failure(monkeypatch):
             )
             client.app.state.runtime.upload_folder = Path(tempdir)
             client.app.state.runtime.upload_processing_worker = None
-            monkeypatch.setattr(quota_deps.auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
-            monkeypatch.setattr(
-                quota_service_module.quota_service,
-                "check_quota",
-                lambda **kwargs: {"success": True, "allowed": True, "config_active": True},
-            )
-            monkeypatch.setattr(
-                quota_service_module.quota_service,
-                "increment_quota",
-                lambda **kwargs: {"success": True},
-            )
             monkeypatch.setattr(
                 conversation_service_module.conversation_service,
                 "add_uploaded_file",
-                lambda **kwargs: {"success": False, "code": "DB_UNAVAILABLE"},
+                lambda **kwargs: {"success": True, "data": {"file_id": 8}},
             )
             monkeypatch.setattr(storage_service, "mirror_file", lambda **kwargs: "local://mirrored")
 
@@ -456,9 +398,7 @@ def test_upload_pdf_releases_quota_lease_on_persist_failure(monkeypatch):
 
             client.app.dependency_overrides.clear()
 
-    assert response.status_code == 503
-    lock_key = quota_deps._quota_lock_key(user_id=7, quota_type="file_upload")
-    assert redis_service.client.get(lock_key) is None
+    assert response.status_code == 200
 
 
 def test_clear_pdf_resets_runtime_path():

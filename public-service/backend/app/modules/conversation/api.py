@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 
 from fastapi import APIRouter, Depends, Query
@@ -36,6 +37,37 @@ def _enforce_quota_finalize(*, grant: QuotaGrant | None, result: JSONResponse | 
             code=str(finalize_result.get("code") or "DB_UNAVAILABLE"),
             status_code=503,
         )
+
+
+def _attach_quota_warning(
+    result: JSONResponse | RedirectResponse | FileResponse,
+    *,
+    warning: str,
+) -> JSONResponse | RedirectResponse | FileResponse:
+    if isinstance(result, JSONResponse):
+        try:
+            payload = json.loads(result.body.decode("utf-8"))
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict):
+            payload["quota_counted"] = False
+            payload["quota_warning"] = warning
+            return JSONResponse(status_code=result.status_code, content=payload, headers=dict(result.headers))
+    result.headers["x-quota-counted"] = "false"
+    result.headers["x-quota-warning"] = warning
+    return result
+
+
+def _finalize_quota_softly(
+    *,
+    grant: QuotaGrant | None,
+    result: JSONResponse | RedirectResponse | FileResponse,
+) -> JSONResponse | RedirectResponse | FileResponse:
+    finalize_result = finalize_quota(grant, result=result)
+    if isinstance(finalize_result, dict) and finalize_result.get("success") is False:
+        warning = str(finalize_result.get("error") or finalize_result.get("code") or "quota_finalize_failed")
+        return _attach_quota_warning(result, warning=warning)
+    return result
 
 
 @router.post("/api/v1/conversations")
@@ -173,23 +205,20 @@ def download_conversation_file(
     )
     if download is None:
         response = JSONResponse(status_code=status_code, content=payload)
-        _enforce_quota_finalize(grant=_quota, result=response)
-        return response
+        return _finalize_quota_softly(grant=_quota, result=response)
 
     mode = str(download.get("mode") or "")
     target = str(download.get("target") or "")
     file_name = str(download.get("file_name") or "file")
     if mode == "redirect":
         response = RedirectResponse(url=target, status_code=302)
-        _enforce_quota_finalize(grant=_quota, result=response)
-        return response
+        return _finalize_quota_softly(grant=_quota, result=response)
 
     background = None
     if mode == "proxy_file":
         background = BackgroundTask(lambda path: os.path.exists(path) and os.remove(path), target)
     response = FileResponse(path=target, filename=file_name, background=background)
-    _enforce_quota_finalize(grant=_quota, result=response)
-    return response
+    return _finalize_quota_softly(grant=_quota, result=response)
 
 
 @router.delete("/api/v1/conversations/{conversation_id}/files/{file_id}")

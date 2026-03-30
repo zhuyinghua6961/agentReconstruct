@@ -1,10 +1,5 @@
 import { computed, ref } from 'vue';
-import {
-  getQuotaConfigs,
-  getUserQuotas,
-  resetUserQuota,
-  updateQuotaConfig,
-} from '../../../api/quota';
+import { quotaApi } from '../../../services/quota';
 
 function toBool(value) {
   if (typeof value === 'boolean') {
@@ -56,7 +51,7 @@ export function useQuotaAdmin({ authUserRef, isAuthenticatedRef }) {
     loading.value = true;
     error.value = '';
     try {
-      const resp = await getQuotaConfigs();
+      const resp = await quotaApi.getQuotaConfigs();
       quotaConfigs.value = normalizeConfigs(resp?.data?.configs || []);
     } catch (err) {
       error.value = `加载配额配置失败: ${String(err)}`;
@@ -94,7 +89,7 @@ export function useQuotaAdmin({ authUserRef, isAuthenticatedRef }) {
     loading.value = true;
     error.value = '';
     try {
-      const resp = await updateQuotaConfig(row.quota_type, {
+      const resp = await quotaApi.updateQuotaConfig(row.quota_type, {
         default_limit: toInt(row.editDefaultLimit, 0),
         is_active: Boolean(row.editIsActive),
       });
@@ -128,7 +123,7 @@ export function useQuotaAdmin({ authUserRef, isAuthenticatedRef }) {
     loading.value = true;
     error.value = '';
     try {
-      const resp = await getUserQuotas(userId);
+      const resp = await quotaApi.getUserQuotas(userId);
       if (!resp?.success) {
         error.value = String(resp?.error || '查询用户配额失败');
         targetUserQuotas.value = [];
@@ -157,7 +152,7 @@ export function useQuotaAdmin({ authUserRef, isAuthenticatedRef }) {
     loading.value = true;
     error.value = '';
     try {
-      const resp = await resetUserQuota(userId, quotaType);
+      const resp = await quotaApi.resetUserQuota(userId, quotaType);
       if (!resp?.success) {
         error.value = String(resp?.error || '重置失败');
         return false;

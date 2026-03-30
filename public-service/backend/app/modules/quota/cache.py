@@ -6,6 +6,8 @@ from typing import Any
 
 from app.integrations.redis import RedisService
 
+MISSING_QUOTA_CONFIG_PAYLOAD = {"__quota_config_missing__": True}
+
 
 def _quota_cache_epoch() -> str:
     return str(os.getenv("QUOTA_CACHE_EPOCH", "0") or "0").strip() or "0"
@@ -73,11 +75,11 @@ def get_cached_quota_config(*, redis_service: RedisService | None, quota_type: s
 
 
 def cache_quota_config(*, redis_service: RedisService | None, quota_type: str, payload: dict[str, Any] | None) -> bool:
-    if redis_service is None or not redis_service.available or payload is None:
+    if redis_service is None or not redis_service.available:
         return False
     return redis_service.set_json(
         build_quota_config_cache_key(redis_service=redis_service, quota_type=quota_type),
-        payload,
+        payload if payload is not None else dict(MISSING_QUOTA_CONFIG_PAYLOAD),
         ttl_seconds=_config_ttl_seconds(),
     )
 

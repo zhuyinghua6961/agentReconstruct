@@ -18,6 +18,14 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw in {'1', 'true', 'yes', 'on'}
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = str(os.getenv(name, str(default)) or str(default)).strip()
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return int(default)
+
+
 def _backend_config_warnings(*, fast: str, thinking: str, patent: str) -> tuple[str, ...]:
     warnings: list[str] = []
     current = {'fast': fast, 'thinking': thinking, 'patent': patent}
@@ -36,6 +44,37 @@ class BackendEndpoints:
 
 
 @dataclass(frozen=True)
+class RedisSettings:
+    enabled: bool
+    url: str
+    host: str
+    port: int
+    username: str
+    password: str
+    db: int
+    key_prefix: str
+    socket_connect_timeout_seconds: int
+    socket_timeout_seconds: int
+
+
+@dataclass(frozen=True)
+class AdmissionSettings:
+    enabled: bool
+    runtime_role: str
+    dispatcher_enabled: bool
+    poll_interval_seconds: int
+    max_concurrent: int
+    fast_or_patent_max_concurrent: int
+    thinking_max_concurrent: int
+    queued_ttl_seconds: int
+    post_admit_attach_ttl_seconds: int
+
+    @property
+    def is_admission_worker(self) -> bool:
+        return self.runtime_role == "admission_worker"
+
+
+@dataclass(frozen=True)
 class GatewaySettings:
     app_name: str
     environment: str
@@ -46,6 +85,8 @@ class GatewaySettings:
     sse_timeout_seconds: int
     conversation_file_provider: str
     endpoints: BackendEndpoints
+    redis: RedisSettings
+    admission: AdmissionSettings
     strict_backend_config: bool = False
     backend_config_warnings: tuple[str, ...] = field(default_factory=tuple)
 
@@ -57,6 +98,9 @@ class GatewaySettings:
         thinking_base_url = str(os.getenv("THINKING_BACKEND_BASE_URL", "http://127.0.0.1:8009") or "http://127.0.0.1:8009").rstrip("/")
         patent_base_url = str(os.getenv("PATENT_BACKEND_BASE_URL", "http://127.0.0.1:8010") or "http://127.0.0.1:8010").rstrip("/")
         strict_backend_config = _env_bool("GATEWAY_STRICT_BACKEND_CONFIG", False)
+        redis_enabled = _env_bool("REDIS_ENABLED", False)
+        gateway_runtime_role = str(os.getenv("GATEWAY_RUNTIME_ROLE", "web") or "web").strip().lower() or "web"
+        admission_enabled = _env_bool("GATEWAY_ADMISSION_ENABLED", False)
         backend_warnings = _backend_config_warnings(
             fast=fast_base_url,
             thinking=thinking_base_url,
@@ -76,6 +120,29 @@ class GatewaySettings:
                 fast=fast_base_url,
                 thinking=thinking_base_url,
                 patent=patent_base_url,
+            ),
+            redis=RedisSettings(
+                enabled=redis_enabled,
+                url=str(os.getenv("REDIS_URL", "") or "").strip(),
+                host=str(os.getenv("REDIS_HOST", "127.0.0.1") or "127.0.0.1").strip(),
+                port=_env_int("REDIS_PORT", 6379),
+                username=str(os.getenv("REDIS_USERNAME", "") or "").strip(),
+                password=str(os.getenv("REDIS_PASSWORD", "") or "").strip(),
+                db=_env_int("REDIS_DB", 0),
+                key_prefix=str(os.getenv("REDIS_KEY_PREFIX", "gateway") or "gateway").strip() or "gateway",
+                socket_connect_timeout_seconds=_env_int("REDIS_SOCKET_CONNECT_TIMEOUT_SEC", 2),
+                socket_timeout_seconds=_env_int("REDIS_SOCKET_TIMEOUT_SEC", 2),
+            ),
+            admission=AdmissionSettings(
+                enabled=admission_enabled,
+                runtime_role=gateway_runtime_role,
+                dispatcher_enabled=_env_bool("GATEWAY_ADMISSION_DISPATCHER_ENABLED", admission_enabled),
+                poll_interval_seconds=max(1, _env_int("GATEWAY_ADMISSION_POLL_INTERVAL_SECONDS", 5)),
+                max_concurrent=max(1, _env_int("INTERACTIVE_EXECUTION_MAX_CONCURRENT", 10)),
+                fast_or_patent_max_concurrent=max(1, _env_int("INTERACTIVE_EXECUTION_FAST_OR_PATENT_MAX_CONCURRENT", 10)),
+                thinking_max_concurrent=max(1, _env_int("INTERACTIVE_EXECUTION_THINKING_MAX_CONCURRENT", 2)),
+                queued_ttl_seconds=max(60, _env_int("INTERACTIVE_QUEUED_TTL_SECONDS", 900)),
+                post_admit_attach_ttl_seconds=max(60, _env_int("INTERACTIVE_POST_ADMIT_ATTACH_TTL_SECONDS", 600)),
             ),
             strict_backend_config=strict_backend_config,
             backend_config_warnings=backend_warnings,

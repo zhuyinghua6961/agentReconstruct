@@ -24,6 +24,7 @@ from app.modules.conversation.outbox_worker import ChatJsonOutboxConfig, ChatJso
 from app.modules.conversation.repository import ConversationRepository
 from app.modules.conversation.service import ConversationService
 from app.modules.conversation.upload_processing_worker import UploadProcessingWorker
+from app.modules.quota import deps as quota_deps
 from app.modules.quota import service as quota_service_module
 from app.modules.storage.service import storage_service
 from app.integrations.redis import RedisService
@@ -580,6 +581,7 @@ def test_conversation_http_crud_contracts(monkeypatch):
 def test_download_conversation_file_route_accepts_query_token(monkeypatch, tmp_path):
     file_path = tmp_path / "sample.pdf"
     file_path.write_bytes(b"%PDF-1.4\n")
+    quota_calls: list[tuple[str, str]] = []
 
     with TestClient(app) as client:
         monkeypatch.setattr(auth_service_module.auth_service, "decode_token", lambda token: {"user_id": 7, "role": "user"} if token == "token-1" else None)
@@ -588,8 +590,16 @@ def test_download_conversation_file_route_accepts_query_token(monkeypatch, tmp_p
             "get_user_by_id",
             lambda user_id: {"id": user_id, "status": "active", "role": "user", "user_type": 3, "username": "alice"},
         )
-        monkeypatch.setattr(quota_service_module.quota_service, "check_quota", lambda **kwargs: {"success": True, "allowed": True})
-        monkeypatch.setattr(quota_service_module.quota_service, "increment_quota", lambda **kwargs: {"success": True})
+        monkeypatch.setattr(
+            quota_service_module.quota_service,
+            "check_quota",
+            lambda **kwargs: quota_calls.append(("check", kwargs["quota_type"])) or {"success": True, "allowed": True},
+        )
+        monkeypatch.setattr(
+            quota_service_module.quota_service,
+            "increment_quota",
+            lambda **kwargs: quota_calls.append(("increment", kwargs["quota_type"])) or {"success": True},
+        )
         monkeypatch.setattr(
             conversation_service_module.conversation_service,
             "resolve_uploaded_file_download",
@@ -605,6 +615,7 @@ def test_download_conversation_file_route_accepts_query_token(monkeypatch, tmp_p
     assert response.status_code == 200
     assert response.headers["content-disposition"].startswith("attachment;")
     assert response.content.startswith(b"%PDF-1.4")
+    assert quota_calls == [("check", "file_view"), ("increment", "file_view")]
 
 
 def test_conversation_service_round_trip():
@@ -2239,3 +2250,35 @@ def test_conversation_download_route_contracts(monkeypatch):
     )
     assert isinstance(error_response, JSONResponse)
     assert error_response.status_code == 404
+
+
+def test_conversation_download_route_soft_warns_when_quota_finalize_fails(monkeypatch, tmp_path):
+    file_path = tmp_path / "sample.pdf"
+    file_path.write_bytes(b"%PDF-1.4\n")
+
+    monkeypatch.setattr(
+        conversation_service_module.conversation_service,
+        "resolve_uploaded_file_download",
+        lambda **kwargs: (
+            {"success": True},
+            200,
+            {"mode": "local_file", "target": str(file_path), "file_name": "sample.pdf"},
+        ),
+    )
+    monkeypatch.setattr(
+        quota_service_module.quota_service,
+        "increment_quota",
+        lambda **kwargs: {"success": False, "error": "redis_down"},
+    )
+
+    response = conversation_api_module.download_conversation_file(
+        1,
+        2,
+        AuthContext(user_id=7, role="user", username="alice"),
+        quota_deps.QuotaGrant(user_id=7, quota_type="file_view", checked={"config_active": True}),
+    )
+
+    assert isinstance(response, FileResponse)
+    assert response.status_code == 200
+    assert response.headers["x-quota-counted"] == "false"
+    assert response.headers["x-quota-warning"] == "redis_down"

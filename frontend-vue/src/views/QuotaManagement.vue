@@ -10,11 +10,10 @@ const editingConfig = ref(null)
 const creatingConfig = ref(null)
 
 const PRESET_QUOTA_TYPES = [
-  { value: 'ask_query', name: '问答配额' },
-  { value: 'file_upload', name: '文件上传配额（含 Excel 导入）' },
-  { value: 'file_view', name: '查看原文配额' },
-  { value: 'pdf_summary', name: '全文总结配额' },
-  { value: 'text_translate', name: '翻译配额' },
+  { value: 'ask_query', name: '普通问答' },
+  { value: 'file_qa', name: '文件问答' },
+  { value: 'file_view', name: '查看原文' },
+  { value: 'doc_assist', name: '文档辅助' },
 ]
 
 function normalizeLimitInput(value) {
@@ -93,9 +92,13 @@ function startCreate() {
   error.value = ''
   success.value = ''
   const first = availableQuotaTypeOptions.value[0] || null
+  if (!first) {
+    error.value = '4 个标准配额类型都已存在，请直接编辑现有配置'
+    return
+  }
   creatingConfig.value = {
-    quota_type: first?.value || '',
-    quota_name: first?.name || '',
+    quota_type: first.value,
+    quota_name: first.name,
     daily_limit: '',
     weekly_limit: '',
     monthly_limit: '',
@@ -112,12 +115,6 @@ function syncCreateQuotaName() {
   if (!creatingConfig.value) return
   const selected = PRESET_QUOTA_TYPES.find((item) => item.value === creatingConfig.value.quota_type)
   if (selected) creatingConfig.value.quota_name = selected.name
-}
-
-function applyCreateQuotaPreset(value) {
-  if (!creatingConfig.value) return
-  creatingConfig.value.quota_type = String(value || '').trim()
-  syncCreateQuotaName()
 }
 
 function buildLimitPayload(source) {
@@ -138,6 +135,26 @@ function buildLimitPayload(source) {
   return { ok: true, payload }
 }
 
+function buildMutationPayload(source) {
+  const built = buildLimitPayload(source)
+  if (!built.ok) {
+    return built
+  }
+  const allPeriodLimitsEmpty =
+    built.payload.daily_limit === null &&
+    built.payload.weekly_limit === null &&
+    built.payload.monthly_limit === null
+  return {
+    ok: true,
+    payload: {
+      ...built.payload,
+      default_limit: allPeriodLimitsEmpty ? 0 : pickDefaultLimit(built.payload),
+      is_active: source.is_active ? 1 : 0,
+      ...(allPeriodLimitsEmpty && !source.is_active ? { period: 'none' } : {}),
+    },
+  }
+}
+
 async function saveCreateConfig() {
   error.value = ''
   success.value = ''
@@ -151,7 +168,7 @@ async function saveCreateConfig() {
     return
   }
 
-  const built = buildLimitPayload(creatingConfig.value)
+  const built = buildMutationPayload(creatingConfig.value)
   if (!built.ok) {
     error.value = built.error
     return
@@ -160,8 +177,6 @@ async function saveCreateConfig() {
     quota_type: quotaType,
     quota_name: String(creatingConfig.value.quota_name || '').trim() || quotaType,
     ...built.payload,
-    default_limit: pickDefaultLimit(built.payload),
-    is_active: creatingConfig.value.is_active ? 1 : 0,
   }
   const result = await quotaApi.createQuotaConfig(payload)
   if (result.success) {
@@ -179,16 +194,12 @@ async function saveConfig() {
   success.value = ''
   if (!editingConfig.value) return
 
-  const built = buildLimitPayload(editingConfig.value)
+  const built = buildMutationPayload(editingConfig.value)
   if (!built.ok) {
     error.value = built.error
     return
   }
-  const payload = {
-    ...built.payload,
-    default_limit: pickDefaultLimit(built.payload),
-    is_active: editingConfig.value.is_active ? 1 : 0,
-  }
+  const payload = { ...built.payload }
 
   const result = await quotaApi.updateQuotaConfig(editingConfig.value.quota_type, payload)
   if (result.success) {
@@ -285,35 +296,25 @@ onMounted(fetchConfigs)
 
           <div class="form-group">
             <label>配额类型</label>
-            <input
-              type="text"
-              v-model.trim="creatingConfig.quota_type"
-              placeholder="如：ask_query 或自定义类型"
-            >
-          </div>
-
-          <div v-if="availableQuotaTypeOptions.length > 0" class="form-group">
-            <label>快捷选择预置类型</label>
-            <select @change="applyCreateQuotaPreset($event.target.value)">
-              <option value="">请选择预置类型（可选）</option>
+            <select v-model="creatingConfig.quota_type" @change="syncCreateQuotaName">
               <option
                 v-for="item in availableQuotaTypeOptions"
                 :key="item.value"
                 :value="item.value"
               >
-                {{ item.value }}（{{ item.name }}）
+                {{ item.name }}（{{ item.value }}）
               </option>
             </select>
           </div>
 
-          <div v-else class="form-group">
-            <label>预置类型状态</label>
-            <p class="input-hint">预置配额类型已全部存在，如需新增请手动输入自定义 `quota_type`。</p>
+          <div class="form-group">
+            <label>预设说明</label>
+            <p class="input-hint">管理员界面只允许创建 4 个标准配额类型，不再新增 legacy 或自定义 quota_type。</p>
           </div>
 
           <div class="form-group">
             <label>配额名称</label>
-            <input type="text" v-model.trim="creatingConfig.quota_name">
+            <input type="text" :value="creatingConfig.quota_name" disabled>
           </div>
 
           <div class="form-group">

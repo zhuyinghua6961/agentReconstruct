@@ -9,15 +9,20 @@ from fastapi import FastAPI
 from app.core.config import GatewaySettings
 from app.core.logging import setup_logging
 from app.core.trace import trace_id_middleware
+from app.integrations.redis.service import bootstrap_redis_runtime
 from app.routers.health import router as health_router
 from app.routers.public_proxy import router as public_proxy_router
 from app.routers.qa import router as qa_router
 from app.services.backend_registry import BackendRegistry
 from app.services.conversation_persistence import ConversationPersistenceService
+from app.services.execution_admission import build_admission_status
+from app.services.execution_event_relay import ExecutionEventRelayStore
+from app.services.execution_queue_status import ExecutionQueueStatusStore
 from app.services.conversation_files import ConversationFileService
 from app.services.file_context_resolver import FileContextResolver
 from app.services.provider_factory import build_conversation_file_provider
 from app.services.proxy import ProxyService
+from app.services.quota_proxy import QuotaProxyService
 from app.services.route_decision import RouteDecisionService
 
 
@@ -36,7 +41,12 @@ def create_app() -> FastAPI:
     app = FastAPI(title=settings.app_name, debug=settings.debug)
     app.middleware("http")(trace_id_middleware)
 
+    redis_runtime = bootstrap_redis_runtime(settings.redis)
+
     app.state.settings = settings
+    app.state.redis_runtime = redis_runtime
+    app.state.execution_queue_status_store = ExecutionQueueStatusStore(redis_service=redis_runtime.service)
+    app.state.execution_event_relay_store = ExecutionEventRelayStore(redis_service=redis_runtime.service)
     app.state.backend_registry = BackendRegistry(settings)
     app.state.conversation_file_service = ConversationFileService(
         provider=build_conversation_file_provider(settings),
@@ -44,7 +54,14 @@ def create_app() -> FastAPI:
     app.state.file_context_resolver = FileContextResolver()
     app.state.route_decision_service = RouteDecisionService()
     app.state.proxy_service = ProxyService(settings)
+    app.state.quota_proxy_service = QuotaProxyService(settings)
     app.state.conversation_persistence_service = ConversationPersistenceService(settings)
+    app.state.component_status = {
+        "redis": redis_runtime.status.to_dict(),
+        "admission": build_admission_status(settings=settings, redis_runtime=redis_runtime),
+        "queue_status_store": app.state.execution_queue_status_store.describe(),
+        "event_relay_store": app.state.execution_event_relay_store.describe(),
+    }
 
     app.include_router(health_router)
     app.include_router(public_proxy_router)

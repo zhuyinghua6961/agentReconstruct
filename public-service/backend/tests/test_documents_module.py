@@ -11,7 +11,7 @@ from app.core import runtime as runtime_module
 from app.core.deps import AuthContext
 from app.main import app
 from app.modules.auth import service as auth_service_module
-from app.modules.auth.deps import require_auth_context
+from app.modules.auth.deps import get_optional_auth_context, require_auth_context
 from app.modules.documents import reference_preview as reference_preview_module
 from app.modules.documents.reference_preview import build_reference_preview_batch, query_graph_reference_metadata
 from app.modules.documents.service import documents_service
@@ -132,6 +132,155 @@ def test_translate_and_reference_preview_routes(monkeypatch):
     assert translate_resp.json()["translations"] == ["你好"]
     assert preview_resp.status_code == 200
     assert preview_resp.json()["count"] == 1
+
+
+def test_translate_route_uses_doc_assist_quota(monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    with TestClient(app) as client:
+        client.app.dependency_overrides[require_auth_context] = lambda: AuthContext(
+            user_id=7,
+            role="user",
+            username="alice",
+        )
+        monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+        monkeypatch.setattr(
+            quota_service_module.quota_service,
+            "check_quota",
+            lambda **kwargs: calls.append(("check", kwargs["quota_type"])) or {"success": True, "allowed": True},
+        )
+        monkeypatch.setattr(
+            quota_service_module.quota_service,
+            "increment_quota",
+            lambda **kwargs: calls.append(("increment", kwargs["quota_type"])) or {"success": True},
+        )
+        monkeypatch.setattr(
+            documents_service,
+            "translate",
+            lambda **kwargs: ({"success": True, "translations": ["你好"]}, 200),
+        )
+
+        response = client.post("/api/v1/translate", json={"texts": ["hello"]})
+        client.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert calls == [("check", "doc_assist"), ("increment", "doc_assist")]
+
+
+def test_translate_route_preserves_success_when_quota_finalize_fails(monkeypatch):
+    with TestClient(app) as client:
+        client.app.dependency_overrides[require_auth_context] = lambda: AuthContext(
+            user_id=7,
+            role="user",
+            username="alice",
+        )
+        monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+        monkeypatch.setattr(
+            quota_service_module.quota_service,
+            "check_quota",
+            lambda **kwargs: {"success": True, "allowed": True},
+        )
+        monkeypatch.setattr(
+            quota_service_module.quota_service,
+            "increment_quota",
+            lambda **kwargs: {"success": False, "error": "redis_down"},
+        )
+        monkeypatch.setattr(
+            documents_service,
+            "translate",
+            lambda **kwargs: ({"success": True, "translations": ["你好"]}, 200),
+        )
+
+        response = client.post("/api/v1/translate", json={"texts": ["hello"]})
+        client.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["quota_counted"] is False
+    assert payload["quota_warning"] == "redis_down"
+
+
+def test_reference_preview_authenticated_uses_doc_assist_quota(monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    with TestClient(app) as client:
+        client.app.dependency_overrides[get_optional_auth_context] = lambda: AuthContext(
+            user_id=7,
+            role="user",
+            username="alice",
+        )
+        monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+        monkeypatch.setattr(
+            quota_service_module.quota_service,
+            "check_quota",
+            lambda **kwargs: calls.append(("check", kwargs["quota_type"])) or {"success": True, "allowed": True},
+        )
+        monkeypatch.setattr(
+            quota_service_module.quota_service,
+            "increment_quota",
+            lambda **kwargs: calls.append(("increment", kwargs["quota_type"])) or {"success": True},
+        )
+        monkeypatch.setattr(
+            documents_service,
+            "reference_preview",
+            lambda **kwargs: ({"items": [{"doi": "10.1000/test"}], "count": 1}, 200),
+        )
+
+        response = client.get("/api/v1/reference_preview", params=[("dois", "10.1000/test")])
+        client.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["count"] == 1
+    assert calls == [("check", "doc_assist"), ("increment", "doc_assist")]
+
+
+def test_reference_preview_anonymous_compatibility_does_not_consume_quota(monkeypatch):
+    quota_calls = {"check": 0, "increment": 0}
+
+    with TestClient(app) as client:
+        monkeypatch.setattr(
+            quota_service_module.quota_service,
+            "check_quota",
+            lambda **kwargs: quota_calls.__setitem__("check", quota_calls["check"] + 1) or {"success": True, "allowed": True},
+        )
+        monkeypatch.setattr(
+            quota_service_module.quota_service,
+            "increment_quota",
+            lambda **kwargs: quota_calls.__setitem__("increment", quota_calls["increment"] + 1) or {"success": True},
+        )
+        monkeypatch.setattr(
+            documents_service,
+            "reference_preview",
+            lambda **kwargs: ({"items": [{"doi": "10.1000/test"}], "count": 1}, 200),
+        )
+
+        response = client.get("/api/v1/reference_preview", params=[("dois", "10.1000/test")])
+
+    assert response.status_code == 200
+    assert response.json()["count"] == 1
+    assert quota_calls == {"check": 0, "increment": 0}
+
+
+def test_extract_pdf_text_authenticated_missing_doc_assist_config_fails_closed(monkeypatch):
+    with TestClient(app) as client:
+        client.app.dependency_overrides[get_optional_auth_context] = lambda: AuthContext(
+            user_id=7,
+            role="user",
+            username="alice",
+        )
+        monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+        monkeypatch.setattr(
+            quota_service_module.quota_service,
+            "check_quota",
+            lambda **kwargs: {"success": True, "allowed": True, "config_missing": True, "config_active": False},
+        )
+
+        response = client.get("/api/v1/extract_pdf_text/10.1000/test")
+        client.app.dependency_overrides.clear()
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "QUOTA_CONFIG_MISSING"
 
 
 def test_literature_content_graph_query_prefers_exact_doi_match():

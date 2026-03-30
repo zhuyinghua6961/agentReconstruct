@@ -5,8 +5,17 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
 from app.core.deps import AuthContext
+from app.core.errors import AppError
 from app.modules.auth.deps import require_admin_context, require_auth_context
-from app.modules.quota.schemas import CreateQuotaConfigRequest, UpdateQuotaConfigRequest
+from app.modules.conversation.internal_api import InternalAuthorityCaller, require_internal_authority
+from app.modules.quota.schemas import (
+    CreateQuotaConfigRequest,
+    InternalQuotaGrantFinalizeResponse,
+    InternalQuotaGrantFinalizeRequest,
+    InternalQuotaGrantPrecheckResponse,
+    InternalQuotaGrantPrecheckRequest,
+    UpdateQuotaConfigRequest,
+)
 from app.modules.quota import service as quota_service_module
 
 
@@ -23,13 +32,29 @@ def _status(result: dict, *, ok_status: int) -> int:
         return 404
     if code == "ALREADY_EXISTS":
         return 409
+    if code == "GRANT_ALREADY_ACTIVE":
+        return 409
     if code == "DB_UNAVAILABLE":
+        return 503
+    if code == "QUOTA_EXCEEDED":
+        return 429
+    if code == "QUOTA_CONFIG_MISSING":
         return 503
     return 500
 
 
 def _respond(result: dict, *, ok_status: int) -> JSONResponse:
     return JSONResponse(status_code=_status(result, ok_status=ok_status), content=jsonable_encoder(result))
+
+
+def _require_gateway_internal_caller(caller: InternalAuthorityCaller = Depends(require_internal_authority)) -> InternalAuthorityCaller:
+    if str(caller.service_name or "").strip().lower() != "gateway":
+        raise AppError(
+            message="internal_source_service_forbidden",
+            code="INTERNAL_SOURCE_SERVICE_FORBIDDEN",
+            status_code=403,
+        )
+    return caller
 
 
 @router.get("/api/v1/quota/my")
@@ -101,3 +126,33 @@ def reset_user_quota(
 @router.get("/api/quota/users/{target_user_id}")
 def get_user_quotas(target_user_id: int, _context: AuthContext = Depends(require_admin_context)):
     return _respond(quota_service_module.quota_service.get_user_quotas(user_id=target_user_id), ok_status=200)
+
+
+@router.post("/internal/quota/grants/precheck", response_model=InternalQuotaGrantPrecheckResponse)
+def precheck_internal_quota_grant(
+    payload: InternalQuotaGrantPrecheckRequest,
+    _caller: InternalAuthorityCaller = Depends(_require_gateway_internal_caller),
+):
+    return _respond(
+        quota_service_module.quota_service.create_internal_quota_grant(
+            user_id=payload.user_id,
+            quota_type=payload.quota_type,
+            strict_config=payload.strict_config,
+        ),
+        ok_status=200,
+    )
+
+
+@router.post("/internal/quota/grants/{grant_id}/finalize", response_model=InternalQuotaGrantFinalizeResponse)
+def finalize_internal_quota_grant(
+    grant_id: str,
+    payload: InternalQuotaGrantFinalizeRequest,
+    _caller: InternalAuthorityCaller = Depends(_require_gateway_internal_caller),
+):
+    return _respond(
+        quota_service_module.quota_service.finalize_internal_quota_grant(
+            grant_id=grant_id,
+            success=payload.success,
+        ),
+        ok_status=200,
+    )
