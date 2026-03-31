@@ -24,6 +24,7 @@ def test_document_routes_registered():
     assert "/api/view_pdf/{doi:path}" in paths
     assert "/api/translate" in paths
     assert "/api/reference_preview" in paths
+    assert "/api/patent/original/{canonical_patent_id}" in paths
 
 
 def test_view_pdf_route_serves_file(monkeypatch, tmp_path):
@@ -101,6 +102,94 @@ def test_view_pdf_head_route_accepts_query_token_auth(monkeypatch, tmp_path):
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/pdf")
     assert response.headers["content-disposition"].startswith("inline;")
+
+
+def test_patent_original_route_uses_file_view_quota_and_json_payload(monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    with TestClient(app) as client:
+        client.app.dependency_overrides[require_auth_context] = lambda: AuthContext(
+            user_id=7,
+            role="user",
+            username="alice",
+        )
+        monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+        monkeypatch.setattr(
+            quota_service_module.quota_service,
+            "check_quota",
+            lambda **kwargs: calls.append(("check", kwargs["quota_type"])) or {"success": True, "allowed": True},
+        )
+        monkeypatch.setattr(
+            quota_service_module.quota_service,
+            "increment_quota",
+            lambda **kwargs: calls.append(("increment", kwargs["quota_type"])) or {"success": True},
+        )
+        monkeypatch.setattr(
+            documents_service,
+            "patent_original_view",
+            lambda **kwargs: {
+                "status_code": 200,
+                "headers": {"etag": '"patent-original:version-1"', "cache-control": "public, max-age=300"},
+                "media_type": "application/json",
+                "body": {
+                    "success": True,
+                    "canonical_patent_id": "CN123456789A",
+                    "section": "claim",
+                    "section_label": "权利要求1",
+                    "content_format": "json",
+                    "content": {"claim_number": 1},
+                },
+            },
+        )
+
+        response = client.get("/api/v1/patent/original/CN123456789A", params={"section": "claim", "claim_number": "1"})
+        client.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["section_label"] == "权利要求1"
+    assert response.headers["etag"] == '"patent-original:version-1"'
+    assert calls == [("check", "file_view"), ("increment", "file_view")]
+
+
+def test_patent_original_head_route_accepts_query_token_auth(monkeypatch):
+    with TestClient(app) as client:
+        monkeypatch.setattr(auth_service_module.auth_service, "decode_token", lambda token: {"user_id": 7, "role": "user"} if token == "token-1" else None)
+        monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "status": "active", "role": "user", "user_type": 3, "username": "alice"})
+        monkeypatch.setattr(quota_service_module.quota_service, "check_quota", lambda **kwargs: {"success": True, "allowed": True})
+        monkeypatch.setattr(quota_service_module.quota_service, "increment_quota", lambda **kwargs: {"success": True})
+        monkeypatch.setattr(
+            documents_service,
+            "patent_original_view",
+            lambda **kwargs: {
+                "status_code": 200,
+                "headers": {"etag": '"patent-original:version-2"', "cache-control": "public, max-age=300"},
+                "media_type": "application/json",
+                "body": {"success": True},
+            },
+        )
+
+        response = client.head("/api/v1/patent/original/CN123456789A?section=claim&claim_number=1&token=token-1")
+
+    assert response.status_code == 200
+    assert response.text == ""
+    assert response.headers["etag"] == '"patent-original:version-2"'
+
+
+def test_patent_original_route_rejects_invalid_anchor_combinations(monkeypatch):
+    with TestClient(app) as client:
+        client.app.dependency_overrides[require_auth_context] = lambda: AuthContext(
+            user_id=7,
+            role="user",
+            username="alice",
+        )
+        monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+        monkeypatch.setattr(quota_service_module.quota_service, "check_quota", lambda **kwargs: {"success": True, "allowed": True})
+
+        response = client.get("/api/v1/patent/original/CN123456789A", params={"section": "abstract", "claim_number": "1"})
+        client.app.dependency_overrides.clear()
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "INVALID_REQUEST"
 
 
 def test_translate_and_reference_preview_routes(monkeypatch):

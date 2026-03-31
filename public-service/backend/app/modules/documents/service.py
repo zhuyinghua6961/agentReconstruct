@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from html import escape
 import os
 import re
 import tempfile
@@ -8,6 +9,14 @@ from typing import Any, Iterable
 
 from app.core.config import get_settings
 from app.core.runtime import PublicServiceRuntime
+from app.core.errors import AppError
+from app.modules.documents.cache import build_patent_original_cache_control, build_patent_original_etag
+from app.modules.documents.patent_original_store import (
+    PatentOriginalNotFoundError,
+    PatentOriginalStore,
+    PatentOriginalStoreBackendError,
+    PatentOriginalUnavailableError,
+)
 from app.modules.documents.reference_preview import (
     build_reference_preview_batch,
     clamp_preview_max_items,
@@ -104,6 +113,203 @@ class DocumentsService:
             fallback = (Path(tempfile.gettempdir()) / "public-service-papers").resolve()
             fallback.mkdir(parents=True, exist_ok=True)
             return fallback
+
+    def _get_patent_original_store(self) -> PatentOriginalStore:
+        return PatentOriginalStore(project_root=str(get_settings().local_storage_root))
+
+    @staticmethod
+    def _normalize_patent_original_format(*, section: str, response_format: str | None) -> str:
+        normalized = str(response_format or "").strip().lower()
+        if normalized:
+            return normalized
+        if str(section or "").strip().lower() == "fulltext":
+            return "pdf"
+        return "json"
+
+    @staticmethod
+    def _validate_patent_original_request(
+        *,
+        section: str,
+        claim_number: int | None,
+        paragraph_id: str | None,
+        response_format: str | None,
+    ) -> None:
+        normalized_section = str(section or "").strip().lower()
+        if normalized_section not in {"abstract", "claim", "description", "figure", "fulltext"}:
+            raise AppError(message="invalid section", code="INVALID_REQUEST", status_code=400)
+        normalized_format = str(response_format or "").strip().lower()
+        if normalized_format and normalized_format not in {"json", "html", "text", "redirect"}:
+            raise AppError(message="invalid format", code="INVALID_REQUEST", status_code=400)
+        if normalized_section == "fulltext" and normalized_format in {"json", "html", "text"}:
+            raise AppError(message="format is not supported for fulltext", code="INVALID_REQUEST", status_code=400)
+        if normalized_section != "fulltext" and normalized_format == "redirect":
+            raise AppError(message="redirect is only supported for fulltext", code="INVALID_REQUEST", status_code=400)
+        if normalized_section != "claim" and claim_number is not None:
+            raise AppError(message="claim_number is only allowed when section=claim", code="INVALID_REQUEST", status_code=400)
+        if normalized_section != "description" and paragraph_id is not None:
+            raise AppError(message="paragraph_id is only allowed when section=description", code="INVALID_REQUEST", status_code=400)
+        if claim_number is not None and int(claim_number) <= 0:
+            raise AppError(message="claim_number must be greater than 0", code="INVALID_REQUEST", status_code=400)
+
+    @staticmethod
+    def _render_patent_original_html(*, section_label: str, content: Any, section: str) -> str:
+        if isinstance(content, dict) and isinstance(content.get("html"), str) and content.get("html"):
+            return str(content.get("html"))
+        if section == "abstract" and isinstance(content, dict) and isinstance(content.get("abstract_html"), str):
+            return str(content.get("abstract_html"))
+        if section == "claim" and isinstance(content, dict) and isinstance(content.get("claims"), list):
+            parts = [str(item.get("html") or "") for item in content.get("claims") or [] if isinstance(item, dict)]
+            if parts:
+                return "".join(parts)
+        if section == "description" and isinstance(content, dict) and isinstance(content.get("paragraphs"), list):
+            parts = [str(item.get("html") or "") for item in content.get("paragraphs") or [] if isinstance(item, dict)]
+            if parts:
+                return "".join(parts)
+        if section == "figure" and isinstance(content, dict):
+            figure_source = escape(str(content.get("figure_source") or ""))
+            object_key = escape(str(content.get("served_object_key") or ""))
+            return (
+                f"<article><h1>{escape(section_label)}</h1>"
+                f"<p>figure_source: {figure_source}</p>"
+                f"<p>served_object_key: {object_key}</p></article>"
+            )
+        return f"<article><h1>{escape(section_label)}</h1><p>{escape(str(content or ''))}</p></article>"
+
+    @staticmethod
+    def _render_patent_original_text(*, content: Any, section: str) -> str:
+        if isinstance(content, dict) and isinstance(content.get("text"), str) and content.get("text"):
+            return str(content.get("text"))
+        if section == "abstract" and isinstance(content, dict) and isinstance(content.get("abstract_text"), str):
+            return str(content.get("abstract_text"))
+        if section == "claim" and isinstance(content, dict) and isinstance(content.get("claims"), list):
+            parts = [str(item.get("text") or "") for item in content.get("claims") or [] if isinstance(item, dict)]
+            if parts:
+                return "\n".join(parts)
+        if section == "description" and isinstance(content, dict) and isinstance(content.get("paragraphs"), list):
+            parts = [str(item.get("text") or "") for item in content.get("paragraphs") or [] if isinstance(item, dict)]
+            if parts:
+                return "\n".join(parts)
+        if section == "figure" and isinstance(content, dict):
+            return (
+                f"figure_source: {content.get('figure_source') or ''}\n"
+                f"served_object_key: {content.get('served_object_key') or ''}"
+            ).strip()
+        return str(content or "")
+
+    def patent_original_view(
+        self,
+        *,
+        canonical_patent_id: str,
+        section: str,
+        claim_number: int | None,
+        paragraph_id: str | None,
+        response_format: str | None,
+        head_only: bool,
+        logger: Any,
+    ) -> dict[str, Any]:
+        _ = logger
+        self._validate_patent_original_request(
+            section=section,
+            claim_number=claim_number,
+            paragraph_id=paragraph_id,
+            response_format=response_format,
+        )
+        store = self._get_patent_original_store()
+        try:
+            manifest = store.load_manifest(canonical_patent_id)
+            resolved = store.resolve_section(
+                canonical_patent_id=canonical_patent_id,
+                section=section,
+                claim_number=claim_number,
+                paragraph_id=paragraph_id,
+                manifest=manifest,
+            )
+        except PatentOriginalNotFoundError as exc:
+            raise AppError(message=str(exc), code="PATENT_NOT_FOUND", status_code=404) from exc
+        except PatentOriginalUnavailableError as exc:
+            raise AppError(message=str(exc), code="ORIGINAL_NOT_AVAILABLE", status_code=404) from exc
+        except PatentOriginalStoreBackendError as exc:
+            raise AppError(message=str(exc), code="OBJECT_STORE_UNAVAILABLE", status_code=503) from exc
+
+        normalized_format = self._normalize_patent_original_format(section=resolved.section, response_format=response_format)
+        headers = {
+            "etag": build_patent_original_etag(original_version=manifest.original_version),
+            "cache-control": build_patent_original_cache_control(),
+        }
+
+        if resolved.section == "fulltext":
+            if normalized_format == "redirect":
+                raise AppError(message="provider_redirect_unavailable", code="PROVIDER_REDIRECT_ONLY", status_code=404)
+            body = b""
+            if not head_only:
+                try:
+                    body = storage_service.read_object_bytes(
+                        object_name=str(resolved.object_key or ""),
+                        project_root=str(get_settings().local_storage_root),
+                    ) or b""
+                except Exception as exc:
+                    raise AppError(message=str(exc), code="OBJECT_STORE_UNAVAILABLE", status_code=503) from exc
+                if not body:
+                    raise AppError(message="fulltext pdf unavailable", code="ORIGINAL_NOT_AVAILABLE", status_code=404)
+            return {
+                "status_code": 200,
+                "headers": headers,
+                "media_type": str(resolved.media_type or "application/pdf"),
+                "body": body,
+            }
+
+        content = resolved.content
+        if resolved.section == "figure":
+            content = {
+                "figure_source": resolved.figure_source,
+                "served_object_key": resolved.served_object_key,
+                "media_type": resolved.media_type,
+            }
+
+        payload = {
+            "success": True,
+            "canonical_patent_id": manifest.canonical_patent_id,
+            "title": manifest.title,
+            "provider": manifest.provider,
+            "section": resolved.section,
+            "section_label": resolved.section_label,
+            "content_format": normalized_format,
+            "content": content,
+            "original_version": manifest.original_version,
+        }
+        if resolved.claim_number is not None:
+            payload["claim_number"] = resolved.claim_number
+        if resolved.paragraph_id is not None:
+            payload["paragraph_id"] = resolved.paragraph_id
+        if resolved.figure_source:
+            payload["figure_source"] = resolved.figure_source
+        if resolved.served_object_key:
+            payload["served_object_key"] = resolved.served_object_key
+
+        if normalized_format == "html":
+            return {
+                "status_code": 200,
+                "headers": headers,
+                "media_type": "text/html; charset=utf-8",
+                "body": self._render_patent_original_html(
+                    section_label=str(resolved.section_label or resolved.section),
+                    content=content,
+                    section=resolved.section,
+                ),
+            }
+        if normalized_format == "text":
+            return {
+                "status_code": 200,
+                "headers": headers,
+                "media_type": "text/plain; charset=utf-8",
+                "body": self._render_patent_original_text(content=content, section=resolved.section),
+            }
+        return {
+            "status_code": 200,
+            "headers": headers,
+            "media_type": "application/json",
+            "body": payload,
+        }
 
     def _ensure_local_pdf(self, *, doi: str, logger: Any) -> Path | None:
         normalized = storage_service.normalize_doi(doi)

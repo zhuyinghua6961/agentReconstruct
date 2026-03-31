@@ -9,6 +9,8 @@ from pydantic import ValidationError
 
 from app.integrations.storage.local import LocalStorageBackend
 from app.integrations.storage.minio import MinIOStorageBackend
+from app.core.errors import AppError
+from app.modules.documents.service import documents_service
 from app.modules.storage.service import storage_service
 
 
@@ -47,6 +49,43 @@ class _ExplodingBackend(_FakeObjectBackend):
     def read_object_bytes(self, *, object_name: str, bucket: str | None = None) -> bytes | None:
         _ = object_name, bucket
         raise RuntimeError("minio unavailable")
+
+
+class _CountingBackend(_FakeObjectBackend):
+    def __init__(self, objects: dict[str, bytes]) -> None:
+        super().__init__(objects)
+        self.read_calls: list[str] = []
+
+    def read_object_bytes(self, *, object_name: str, bucket: str | None = None) -> bytes | None:
+        _ = bucket
+        self.read_calls.append(object_name)
+        return super().read_object_bytes(object_name=object_name, bucket=bucket)
+
+
+class _FakeResolved:
+    def __init__(self, **kwargs) -> None:
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+
+class _FakeManifest:
+    def __init__(self, **kwargs) -> None:
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+
+class _FakeStore:
+    def __init__(self, *, manifest: object, resolved: object) -> None:
+        self._manifest = manifest
+        self._resolved = resolved
+
+    def load_manifest(self, canonical_patent_id: str):
+        _ = canonical_patent_id
+        return self._manifest
+
+    def resolve_section(self, **kwargs):
+        _ = kwargs
+        return self._resolved
 
 
 def _fixture_bytes(name: str) -> bytes:
@@ -137,6 +176,23 @@ def test_patent_original_store_loads_manifest_and_original_version():
     assert manifest.publication_number == "CN123456789A"
     assert manifest.application_number == "CN202410001234X"
     assert store.get_original_version(CANONICAL_PATENT_ID) == manifest.original_version
+
+
+def test_patent_original_store_resolve_section_can_reuse_loaded_manifest():
+    store_module = _load_store_module()
+    backend = _CountingBackend(_backend()._objects)
+    store = store_module.PatentOriginalStore(backend=backend)
+
+    manifest = store.load_manifest(CANONICAL_PATENT_ID)
+    claim = store.resolve_section(
+        canonical_patent_id=CANONICAL_PATENT_ID,
+        section="claim",
+        claim_number=1,
+        manifest=manifest,
+    )
+
+    assert claim.claim_number == 1
+    assert backend.read_calls.count(storage_service.build_patent_original_manifest_object_name(CANONICAL_PATENT_ID)) == 1
 
 
 def test_patent_original_store_requires_manifest_minimum_fields(tmp_path):
@@ -240,6 +296,279 @@ def test_patent_original_store_keeps_local_backend_figure_media_type(tmp_path):
     figure = store.resolve_section(canonical_patent_id=CANONICAL_PATENT_ID, section="figure")
 
     assert figure.media_type == "image/png"
+
+
+def test_documents_service_renders_patent_original_claim_payloads(monkeypatch):
+    manifest = _FakeManifest(
+        canonical_patent_id=CANONICAL_PATENT_ID,
+        title="一种电池热管理系统",
+        provider="patent_source_x",
+        original_version="version-1",
+    )
+    resolved = _FakeResolved(
+        canonical_patent_id=CANONICAL_PATENT_ID,
+        section="claim",
+        section_label="权利要求1",
+        original_version="version-1",
+        content={
+            "claim_number": 1,
+            "label": "权利要求1",
+            "text": "一种电池热管理系统。",
+            "html": "<p>一种电池热管理系统。</p>",
+        },
+        anchor_hit=True,
+        claim_number=1,
+        paragraph_id=None,
+        figure_source=None,
+        served_object_key=None,
+        object_key=None,
+        media_type=None,
+    )
+    monkeypatch.setattr(
+        documents_service,
+        "_get_patent_original_store",
+        lambda: _FakeStore(manifest=manifest, resolved=resolved),
+    )
+
+    as_json = documents_service.patent_original_view(
+        canonical_patent_id=CANONICAL_PATENT_ID,
+        section="claim",
+        claim_number=1,
+        paragraph_id=None,
+        response_format=None,
+        head_only=False,
+        logger=None,
+    )
+    as_html = documents_service.patent_original_view(
+        canonical_patent_id=CANONICAL_PATENT_ID,
+        section="claim",
+        claim_number=1,
+        paragraph_id=None,
+        response_format="html",
+        head_only=False,
+        logger=None,
+    )
+    as_text = documents_service.patent_original_view(
+        canonical_patent_id=CANONICAL_PATENT_ID,
+        section="claim",
+        claim_number=1,
+        paragraph_id=None,
+        response_format="text",
+        head_only=False,
+        logger=None,
+    )
+
+    assert as_json["status_code"] == 200
+    assert as_json["body"]["section_label"] == "权利要求1"
+    assert as_json["body"]["content"]["claim_number"] == 1
+    assert as_json["body"]["content_format"] == "json"
+    assert as_json["headers"]["etag"] == '"patent-original:version-1"'
+    assert as_json["headers"]["cache-control"] == "public, max-age=300"
+    assert as_html["media_type"] == "text/html; charset=utf-8"
+    assert "<p>一种电池热管理系统。</p>" in as_html["body"]
+    assert as_text["media_type"] == "text/plain; charset=utf-8"
+    assert "一种电池热管理系统。" in as_text["body"]
+
+
+def test_documents_service_allows_claim_section_level_payload(monkeypatch):
+    manifest = _FakeManifest(
+        canonical_patent_id=CANONICAL_PATENT_ID,
+        title="一种电池热管理系统",
+        provider="patent_source_x",
+        original_version="version-1",
+    )
+    resolved = _FakeResolved(
+        canonical_patent_id=CANONICAL_PATENT_ID,
+        section="claim",
+        section_label="权利要求",
+        original_version="version-1",
+        content={
+            "claims": [
+                {"claim_number": 1, "label": "权利要求1", "text": "一种电池热管理系统。"},
+                {"claim_number": 2, "label": "权利要求2", "text": "根据权利要求1所述的系统。"},
+            ],
+        },
+        anchor_hit=False,
+        claim_number=None,
+        paragraph_id=None,
+        figure_source=None,
+        served_object_key=None,
+        object_key=None,
+        media_type=None,
+    )
+    monkeypatch.setattr(
+        documents_service,
+        "_get_patent_original_store",
+        lambda: _FakeStore(manifest=manifest, resolved=resolved),
+    )
+
+    result = documents_service.patent_original_view(
+        canonical_patent_id=CANONICAL_PATENT_ID,
+        section="claim",
+        claim_number=None,
+        paragraph_id=None,
+        response_format=None,
+        head_only=False,
+        logger=None,
+    )
+
+    assert result["status_code"] == 200
+    assert result["body"]["content_format"] == "json"
+    assert len(result["body"]["content"]["claims"]) == 2
+
+
+def test_documents_service_renders_patent_original_fulltext_pdf(monkeypatch):
+    manifest = _FakeManifest(
+        canonical_patent_id=CANONICAL_PATENT_ID,
+        title="一种电池热管理系统",
+        provider="patent_source_x",
+        original_version="version-2",
+    )
+    resolved = _FakeResolved(
+        canonical_patent_id=CANONICAL_PATENT_ID,
+        section="fulltext",
+        section_label="全文",
+        original_version="version-2",
+        content=None,
+        anchor_hit=False,
+        claim_number=None,
+        paragraph_id=None,
+        figure_source=None,
+        served_object_key=None,
+        object_key="patent/originals/CN123456789A/fulltext/original.pdf",
+        media_type="application/pdf",
+    )
+    monkeypatch.setattr(
+        documents_service,
+        "_get_patent_original_store",
+        lambda: _FakeStore(manifest=manifest, resolved=resolved),
+    )
+    monkeypatch.setattr(
+        storage_service,
+        "read_object_bytes",
+        lambda **kwargs: b"%PDF-1.4\n",
+    )
+
+    result = documents_service.patent_original_view(
+        canonical_patent_id=CANONICAL_PATENT_ID,
+        section="fulltext",
+        claim_number=None,
+        paragraph_id=None,
+        response_format=None,
+        head_only=False,
+        logger=None,
+    )
+
+    assert result["status_code"] == 200
+    assert result["media_type"] == "application/pdf"
+    assert result["body"] == b"%PDF-1.4\n"
+    assert result["headers"]["etag"] == '"patent-original:version-2"'
+
+
+def test_documents_service_rejects_invalid_patent_original_query_combinations():
+    with pytest.raises(AppError) as exc:
+        documents_service.patent_original_view(
+            canonical_patent_id=CANONICAL_PATENT_ID,
+            section="abstract",
+            claim_number=1,
+            paragraph_id=None,
+            response_format=None,
+            head_only=False,
+            logger=None,
+        )
+
+    assert exc.value.code == "INVALID_REQUEST"
+
+
+def test_documents_service_rejects_non_positive_claim_number():
+    with pytest.raises(AppError) as exc:
+        documents_service.patent_original_view(
+            canonical_patent_id=CANONICAL_PATENT_ID,
+            section="claim",
+            claim_number=0,
+            paragraph_id=None,
+            response_format=None,
+            head_only=False,
+            logger=None,
+        )
+
+    assert exc.value.code == "INVALID_REQUEST"
+
+
+def test_documents_service_rejects_redirect_for_structured_sections():
+    with pytest.raises(AppError) as exc:
+        documents_service.patent_original_view(
+            canonical_patent_id=CANONICAL_PATENT_ID,
+            section="claim",
+            claim_number=1,
+            paragraph_id=None,
+            response_format="redirect",
+            head_only=False,
+            logger=None,
+        )
+
+    assert exc.value.code == "INVALID_REQUEST"
+
+
+def test_documents_service_rejects_non_stream_formats_for_fulltext():
+    with pytest.raises(AppError) as exc:
+        documents_service.patent_original_view(
+            canonical_patent_id=CANONICAL_PATENT_ID,
+            section="fulltext",
+            claim_number=None,
+            paragraph_id=None,
+            response_format="json",
+            head_only=False,
+            logger=None,
+        )
+
+    assert exc.value.code == "INVALID_REQUEST"
+
+
+def test_documents_service_maps_fulltext_read_failures_to_object_store_unavailable(monkeypatch):
+    manifest = _FakeManifest(
+        canonical_patent_id=CANONICAL_PATENT_ID,
+        title="一种电池热管理系统",
+        provider="patent_source_x",
+        original_version="version-3",
+    )
+    resolved = _FakeResolved(
+        canonical_patent_id=CANONICAL_PATENT_ID,
+        section="fulltext",
+        section_label="全文",
+        original_version="version-3",
+        content=None,
+        anchor_hit=False,
+        claim_number=None,
+        paragraph_id=None,
+        figure_source=None,
+        served_object_key=None,
+        object_key="patent/originals/CN123456789A/fulltext/original.pdf",
+        media_type="application/pdf",
+    )
+    monkeypatch.setattr(
+        documents_service,
+        "_get_patent_original_store",
+        lambda: _FakeStore(manifest=manifest, resolved=resolved),
+    )
+    monkeypatch.setattr(
+        storage_service,
+        "read_object_bytes",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("minio unavailable")),
+    )
+
+    with pytest.raises(AppError) as exc:
+        documents_service.patent_original_view(
+            canonical_patent_id=CANONICAL_PATENT_ID,
+            section="fulltext",
+            claim_number=None,
+            paragraph_id=None,
+            response_format=None,
+            head_only=False,
+            logger=None,
+        )
+
+    assert exc.value.code == "OBJECT_STORE_UNAVAILABLE"
 
 
 def test_patent_original_store_resolves_fulltext_pdf_reference():

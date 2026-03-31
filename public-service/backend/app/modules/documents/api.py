@@ -37,6 +37,20 @@ def _logger(request: Request) -> logging.Logger:
     return getattr(request.app, "logger", None) or logging.getLogger(__name__)
 
 
+def _patent_original_response(*, result: dict[str, object], head_only: bool) -> Response:
+    status_code = int(result.get("status_code") or 200)
+    headers = {str(key): str(value) for key, value in dict(result.get("headers") or {}).items()}
+    media_type = str(result.get("media_type") or "application/json")
+    body = result.get("body")
+    if head_only:
+        return Response(status_code=status_code, headers=headers, media_type=media_type)
+    if isinstance(body, (bytes, bytearray)):
+        return Response(content=bytes(body), status_code=status_code, headers=headers, media_type=media_type)
+    if isinstance(body, str):
+        return Response(content=body, status_code=status_code, headers=headers, media_type=media_type)
+    return JSONResponse(status_code=status_code, content=dict(body or {}), headers=headers)
+
+
 def _enforce_quota_finalize(*, grant: QuotaGrant | None, result: Response | dict[str, object]) -> None:
     finalize_result = finalize_quota(grant, result=result)
     if isinstance(finalize_result, dict) and finalize_result.get("success") is False:
@@ -113,6 +127,33 @@ def view_pdf(
             "Content-Disposition": f"inline; filename*=UTF-8''{quote(filename)}",
         },
     )
+    return _finalize_quota_softly(grant=_quota, result=response, logger=_logger(request))
+
+
+@router.get("/api/v1/patent/original/{canonical_patent_id}")
+@router.head("/api/v1/patent/original/{canonical_patent_id}")
+@router.get("/api/patent/original/{canonical_patent_id}")
+@router.head("/api/patent/original/{canonical_patent_id}")
+def view_patent_original(
+    canonical_patent_id: str,
+    request: Request,
+    section: str = Query(default="fulltext"),
+    claim_number: int | None = Query(default=None),
+    paragraph_id: str | None = Query(default=None),
+    format: str | None = Query(default=None),
+    _context: AuthContext = Depends(require_auth_context),
+    _quota: QuotaGrant | None = Depends(require_quota("file_view")),
+):
+    result = documents_service.patent_original_view(
+        canonical_patent_id=canonical_patent_id,
+        section=section,
+        claim_number=claim_number,
+        paragraph_id=paragraph_id,
+        response_format=format,
+        head_only=str(request.method or "").upper() == "HEAD",
+        logger=_logger(request),
+    )
+    response = _patent_original_response(result=dict(result or {}), head_only=str(request.method or "").upper() == "HEAD")
     return _finalize_quota_softly(grant=_quota, result=response, logger=_logger(request))
 
 

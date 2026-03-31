@@ -44,19 +44,20 @@ class PatentOriginalStore:
         section: str,
         claim_number: int | None = None,
         paragraph_id: str | None = None,
+        manifest: PatentOriginalManifest | None = None,
     ) -> PatentOriginalResolvedSection:
-        manifest = self.load_manifest(canonical_patent_id)
+        active_manifest = manifest or self.load_manifest(canonical_patent_id)
         normalized_section = str(section or "").strip().lower()
         if normalized_section == "claim":
-            return self._resolve_claim(manifest, claim_number=claim_number)
+            return self._resolve_claim(active_manifest, claim_number=claim_number)
         if normalized_section == "description":
-            return self._resolve_description(manifest, paragraph_id=paragraph_id)
+            return self._resolve_description(active_manifest, paragraph_id=paragraph_id)
         if normalized_section == "abstract":
-            return self._resolve_abstract(manifest)
+            return self._resolve_abstract(active_manifest)
         if normalized_section == "figure":
-            return self._resolve_figure(manifest)
+            return self._resolve_figure(active_manifest)
         if normalized_section == "fulltext":
-            return self._resolve_fulltext(manifest)
+            return self._resolve_fulltext(active_manifest)
         raise PatentOriginalUnavailableError(f"unsupported section: {section}")
 
     def _read_json_object(self, object_name: str) -> dict[str, Any] | list[Any] | None:
