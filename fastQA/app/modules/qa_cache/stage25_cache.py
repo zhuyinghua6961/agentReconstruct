@@ -18,11 +18,11 @@ def _kb_data_epoch() -> str:
 
 
 def _stage25_cache_ttl_seconds() -> int:
-    raw = str(os.getenv("QA_STAGE25_CACHE_TTL_SECONDS", "1800") or "1800").strip()
+    raw = str(os.getenv("QA_STAGE25_CACHE_TTL_SECONDS", "43200") or "43200").strip()
     try:
         return max(60, int(raw))
     except Exception:
-        return 1800
+        return 43200
 
 
 def _normalize_question(question: str) -> str:

@@ -14,11 +14,11 @@ def _qa_cache_epoch() -> str:
 
 
 def _stage1_cache_ttl_seconds() -> int:
-    raw = str(os.getenv("QA_STAGE1_CACHE_TTL_SECONDS", "3600") or "3600").strip()
+    raw = str(os.getenv("QA_STAGE1_CACHE_TTL_SECONDS", "43200") or "43200").strip()
     try:
         return max(60, int(raw))
     except Exception:
-        return 3600
+        return 43200
 
 
 def _normalize_question(question: str) -> str:
@@ -218,4 +218,3 @@ def cache_stage1_result(
     if ok:
         increment_cache_metric("stage1", "cache_write")
     return ok
-

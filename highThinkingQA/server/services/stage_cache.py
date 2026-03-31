@@ -110,15 +110,15 @@ def _prompt_hash(template_name: str) -> str:
 
 
 def _direct_answer_ttl() -> int:
-    return _env_int("HT_QA_DIRECT_CACHE_TTL_SECONDS", 3600, minimum=60, maximum=86400)
+    return _env_int("HT_QA_DIRECT_CACHE_TTL_SECONDS", 43200, minimum=60, maximum=86400)
 
 
 def _decompose_ttl() -> int:
-    return _env_int("HT_QA_DECOMPOSE_CACHE_TTL_SECONDS", 3600, minimum=60, maximum=86400)
+    return _env_int("HT_QA_DECOMPOSE_CACHE_TTL_SECONDS", 43200, minimum=60, maximum=86400)
 
 
 def _retrieve_ttl() -> int:
-    return _env_int("HT_QA_RETRIEVE_CACHE_TTL_SECONDS", 1800, minimum=60, maximum=86400)
+    return _env_int("HT_QA_RETRIEVE_CACHE_TTL_SECONDS", 43200, minimum=60, maximum=86400)
 
 
 def _cache_lock_enabled() -> bool:

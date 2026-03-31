@@ -9,6 +9,6 @@ def test_highthinking_stage_cache_default_ttls_align_with_fastqa_principles(monk
     ):
         monkeypatch.delenv(name, raising=False)
 
-    assert _direct_answer_ttl() == 3600
-    assert _decompose_ttl() == 3600
-    assert _retrieve_ttl() == 1800
+    assert _direct_answer_ttl() == 43200
+    assert _decompose_ttl() == 43200
+    assert _retrieve_ttl() == 43200
