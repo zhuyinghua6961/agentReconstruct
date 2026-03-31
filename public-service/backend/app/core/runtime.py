@@ -235,6 +235,18 @@ def _bootstrap_services(runtime: PublicServiceRuntime) -> None:
     runtime.quota_repository = QuotaRepository(database=runtime.db)
     runtime.quota_service = QuotaService(repo=runtime.quota_repository, redis_service=runtime.redis_service)
     set_quota_service(runtime.quota_service)
+    try:
+        cleanup_result = runtime.quota_service.cleanup_pending_internal_quota_grants()
+        cleanup_data = cleanup_result.get("data") if isinstance(cleanup_result.get("data"), dict) else {}
+        logger.info(
+            "quota pending grant cleanup at startup: cleaned=%s failed=%s",
+            cleanup_data.get("cleaned", 0),
+            cleanup_data.get("failed", 0),
+        )
+        if int(cleanup_data.get("failed") or 0) > 0:
+            logger.warning("quota pending grant cleanup errors: %s", cleanup_data.get("errors") or [])
+    except Exception:
+        logger.warning("quota pending grant cleanup at startup failed", exc_info=True)
     _set_component_status(
         runtime,
         "quota",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import re
 import os
 import time
@@ -339,9 +340,9 @@ class QuotaService:
     @staticmethod
     def quota_grant_ttl_seconds() -> int:
         try:
-            return max(60, min(3600, int(str(os.getenv("QUOTA_GRANT_TTL_SECONDS", "900") or "900").strip())))
+            return max(30, min(3600, int(str(os.getenv("QUOTA_GRANT_TTL_SECONDS", "60") or "60").strip())))
         except Exception:
-            return 900
+            return 60
 
     def _repo_get_quota_config(self, quota_type: str) -> dict[str, Any] | None:
         redis_service = self._get_redis_service()
@@ -376,6 +377,30 @@ class QuotaService:
     def _quota_grant_lock_file_path(self, *, user_id: int, quota_type: str) -> Path:
         safe_type = re.sub(r"[^a-z0-9_]+", "_", str(quota_type or "").strip().lower())
         return self._quota_grants_root_dir() / "locks" / f"{int(user_id)}__{safe_type}.lock.json"
+
+    def _iter_redis_keys(self, pattern: str) -> list[str]:
+        redis_service = self._get_redis_service()
+        client = getattr(redis_service, "client", None)
+        if client is None:
+            return []
+        scan_iter = getattr(client, "scan_iter", None)
+        if callable(scan_iter):
+            try:
+                return [str(item.decode("utf-8") if isinstance(item, bytes) else item) for item in scan_iter(match=pattern)]
+            except TypeError:
+                return [str(item.decode("utf-8") if isinstance(item, bytes) else item) for item in scan_iter(pattern)]
+            except Exception:
+                return []
+        keys_fn = getattr(client, "keys", None)
+        if callable(keys_fn):
+            try:
+                return [str(item.decode("utf-8") if isinstance(item, bytes) else item) for item in keys_fn(pattern)]
+            except Exception:
+                return []
+        values = getattr(client, "values", None)
+        if isinstance(values, dict):
+            return [str(key) for key in values.keys() if fnmatch.fnmatch(str(key), pattern)]
+        return []
 
     @staticmethod
     def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
@@ -441,6 +466,38 @@ class QuotaService:
         self._cleanup_file_grant(path=path)
         payload = self._read_json_file(path)
         return payload if isinstance(payload, dict) else None
+
+    def _iter_pending_internal_quota_grants(self) -> list[tuple[str, dict[str, Any]]]:
+        results: list[tuple[str, dict[str, Any]]] = []
+        seen: set[str] = set()
+        redis_service = self._get_redis_service()
+        if redis_service is not None and redis_service.available:
+            for key in self._iter_redis_keys(self._quota_grant_pending_key("*")):
+                payload = redis_service.get_json(key, default=None)
+                if not isinstance(payload, dict):
+                    continue
+                grant_id = str(payload.get("grant_id") or "").strip()
+                if not grant_id or grant_id in seen:
+                    continue
+                seen.add(grant_id)
+                results.append((grant_id, payload))
+
+        pending_dir = self._quota_grants_root_dir() / "pending"
+        try:
+            paths = sorted(pending_dir.glob("*.json"))
+        except Exception:
+            paths = []
+        for path in paths:
+            self._cleanup_file_grant(path=path)
+            payload = self._read_json_file(path)
+            if not isinstance(payload, dict):
+                continue
+            grant_id = str(payload.get("grant_id") or path.stem).strip()
+            if not grant_id or grant_id in seen:
+                continue
+            seen.add(grant_id)
+            results.append((grant_id, payload))
+        return results
 
     def _delete_internal_quota_grant(self, *, grant_id: str, finalized: bool = False) -> None:
         redis_service = self._get_redis_service()
@@ -602,6 +659,29 @@ class QuotaService:
             renewer = self._internal_quota_grant_renewers.pop(grant_id, None)
         if renewer is not None:
             renewer.stop()
+
+    def cleanup_pending_internal_quota_grants(self) -> dict[str, Any]:
+        cleaned = 0
+        failed = 0
+        errors: list[str] = []
+        for grant_id, payload in self._iter_pending_internal_quota_grants():
+            lease = payload.get("lease") if isinstance(payload.get("lease"), dict) else None
+            try:
+                self._release_internal_quota_grant_lease(lease)
+                self._delete_internal_quota_grant(grant_id=grant_id, finalized=False)
+                self._unregister_internal_quota_grant_renewer(grant_id=grant_id)
+                cleaned += 1
+            except Exception as exc:
+                failed += 1
+                errors.append(f"{grant_id}:{exc}")
+        return {
+            "success": failed == 0,
+            "data": {
+                "cleaned": cleaned,
+                "failed": failed,
+                "errors": errors,
+            },
+        }
 
     def _repo_list_active_configs(self) -> list[dict[str, Any]]:
         redis_service = self._get_redis_service()

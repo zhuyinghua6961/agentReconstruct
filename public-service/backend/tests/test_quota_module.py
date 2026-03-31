@@ -549,6 +549,27 @@ def test_service_internal_quota_grant_keeps_lease_alive_past_ttl(monkeypatch, tm
     get_settings.cache_clear()
 
 
+def test_service_cleanup_pending_internal_quota_grants_releases_redis_lease(monkeypatch):
+    monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+    repo = _FakeQuotaRepo()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    first_service = QuotaService(repo=repo, redis_service=redis_service)
+    second_service = QuotaService(repo=repo, redis_service=redis_service)
+
+    created = first_service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+    overlapping = second_service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+    cleaned = second_service.cleanup_pending_internal_quota_grants()
+    retried = second_service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+
+    assert created["success"] is True
+    assert overlapping["success"] is False
+    assert overlapping["code"] == "GRANT_ALREADY_ACTIVE"
+    assert cleaned["success"] is True
+    assert cleaned["data"]["cleaned"] == 1
+    assert cleaned["data"]["failed"] == 0
+    assert retried["success"] is True
+
+
 def test_internal_quota_grant_routes_require_trusted_headers(monkeypatch):
     monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
 
