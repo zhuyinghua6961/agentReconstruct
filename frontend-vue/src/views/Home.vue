@@ -11,8 +11,9 @@ import { buildQuestionOutlineItems, buildQuestionOutlineSignature, getQuestionAn
 import { DEFAULT_NEAR_BOTTOM_THRESHOLD_PX, isNearBottom, shouldAutoScroll } from '../utils/scrollFollow'
 import { mergeSelectedFileIdsAfterUpload, resolveUploadedFileDisplayNumber } from '../utils/fileSelection'
 import PdfReader from '../components/PdfReader.vue'
+import QuotaLimitCard from '../components/QuotaLimitCard.vue'
 import { buildCitationLocationsForDoi } from '../utils/citationEvidence'
-import { buildRoutingErrorMarkdown, getRouteModeLabel, mergeRoutingMetadata } from '../utils/routingStatus'
+import { buildRoutingErrorMarkdown, buildRoutingErrorPresentation, getRouteModeLabel, mergeRoutingMetadata } from '../utils/routingStatus'
 
 const PINNED_CHATS_COLLAPSED_KEY = 'lfp.sidebar.pinned-collapsed.v1'
 const RECENT_CHATS_COLLAPSED_KEY = 'lfp.sidebar.recent-collapsed.v1'
@@ -238,6 +239,11 @@ function getMessageByAbsoluteIndex(messageIndex) {
   return Number.isInteger(messageIndex) && messageIndex >= 0
     ? store.currentMessages[messageIndex] || null
     : null
+}
+
+function getQuotaCard(message) {
+  const card = message?.metadata?.quota_card
+  return card && typeof card === 'object' ? card : null
 }
 
 function clearQuestionHighlight() {
@@ -1198,11 +1204,20 @@ async function sendMessage() {
         const existingMeta = (targetMessage.metadata && typeof targetMessage.metadata === 'object') ? targetMessage.metadata : {}
         const mergedMeta = mergeRoutingMetadata(existingMeta, data)
         const errorText = String(data.message || data.error || '处理失败')
-        const renderedError = buildRoutingErrorMarkdown({
+        const presentation = buildRoutingErrorPresentation({
           code: data.code,
           message: errorText,
           metadata: mergedMeta,
+          data: data.data,
         })
+        if (presentation.kind === 'quota_card' && presentation.card) {
+          mergedMeta.quota_card = presentation.card
+        } else {
+          delete mergedMeta.quota_card
+        }
+        const renderedError = presentation.kind === 'markdown'
+          ? presentation.markdown
+          : errorText
         if (activeStepKey) {
           markActiveStep('error', errorText)
         } else {
@@ -1237,11 +1252,20 @@ async function sendMessage() {
     const payload = (e?.payload && typeof e.payload === 'object') ? e.payload : {}
     const mergedMeta = mergeRoutingMetadata(existingMeta, payload)
     const errorMessage = String(payload?.message || e?.message || '未知错误')
-    const renderedError = buildRoutingErrorMarkdown({
+    const presentation = buildRoutingErrorPresentation({
       code: payload?.code,
       message: errorMessage,
       metadata: mergedMeta,
+      data: payload?.data,
     })
+    if (presentation.kind === 'quota_card' && presentation.card) {
+      mergedMeta.quota_card = presentation.card
+    } else {
+      delete mergedMeta.quota_card
+    }
+    const renderedError = presentation.kind === 'markdown'
+      ? presentation.markdown
+      : errorMessage
     updateStreamingTargetMessage({
       content: renderedError,
       queryMode: getFallbackQueryModeLabel(payload, mergedMeta) || targetMessage.queryMode || '',
@@ -1825,7 +1849,8 @@ watch(
                     </div>
                   </div>
                 </div>
-                <div v-if="entry.message.content && isStreamingTextMessage(entry.message)" v-html="getStreamingMessageHtml(entry.message)"></div>
+                <QuotaLimitCard v-if="getQuotaCard(entry.message)" :card="getQuotaCard(entry.message)" />
+                <div v-else-if="entry.message.content && isStreamingTextMessage(entry.message)" v-html="getStreamingMessageHtml(entry.message)"></div>
                 <div v-else-if="entry.message.content" v-html="getRenderedMessageHtml(entry.message)"></div>
                 <div v-else class="loading-animation"><span>思考中...</span></div>
               </div>

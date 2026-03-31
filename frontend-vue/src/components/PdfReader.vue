@@ -24,10 +24,23 @@
             <!-- PDF错误提示 -->
             <div v-if="pdfError" class="pdf-error-container">
               <div class="pdf-error-content">
-                <div class="error-icon">⚠️</div>
-                <h3>{{ pdfError.message }}</h3>
-                <p class="error-doi">DOI: {{ pdfError.doi }}</p>
-                <div class="error-actions">
+                <QuotaLimitCard v-if="pdfError?.quotaCard" :card="pdfError.quotaCard" />
+                <template v-else>
+                  <div class="error-icon">⚠️</div>
+                  <h3>{{ pdfError.message }}</h3>
+                  <p class="error-doi">DOI: {{ pdfError.doi }}</p>
+                  <div class="error-actions">
+                    <a
+                      :href="`https://doi.org/${pdfError.doi}`"
+                      target="_blank"
+                      class="online-view-btn"
+                    >
+                      🌐 在线查看文献
+                    </a>
+                    <button @click="closeReader" class="close-error-btn">关闭</button>
+                  </div>
+                </template>
+                <div v-if="pdfError?.quotaCard" class="error-actions">
                   <a
                     :href="`https://doi.org/${pdfError.doi}`"
                     target="_blank"
@@ -147,7 +160,8 @@
                 </button>
               </div>
               <div class="summary-panel-content">
-                <p v-if="summaryError" class="summary-error">{{ summaryError }}</p>
+                <QuotaLimitCard v-if="summaryQuotaCard" :card="summaryQuotaCard" />
+                <p v-else-if="summaryError" class="summary-error">{{ summaryError }}</p>
                 <p v-else-if="isSummarizing" class="summary-loading">正在生成全文总结，请稍候...</p>
                 <p v-else-if="summaryText" class="summary-text">{{ summaryText }}</p>
                 <p v-else class="summary-placeholder">点击“生成总结”可快速获取论文核心结论。</p>
@@ -162,8 +176,9 @@
               </div>
 
               <div class="translation-panel-content">
+                <QuotaLimitCard v-if="translationQuotaCard" :card="translationQuotaCard" />
                 <!-- 欢迎页 -->
-                <div v-if="translations.length === 0" class="translation-welcome">
+                <div v-if="!translationQuotaCard && translations.length === 0" class="translation-welcome">
                   <div class="welcome-icon">📖</div>
                   <p class="welcome-title">欢迎使用翻译助手</p>
                   <p class="welcome-desc">在下方输入框粘贴英文文本，点击翻译按钮即可</p>
@@ -216,9 +231,12 @@
 
 <script setup>
 import { computed, onBeforeUnmount, ref } from 'vue'
-import { checkPdfAvailability } from '../api/literature'
+import QuotaLimitCard from './QuotaLimitCard.vue'
+import { fetchPdfDocument } from '../api/literature'
 import { api } from '../services/api'
+import { buildQuotaErrorCardModel } from '../services/quota-error-formatting.js'
 import { resolvePdfReaderInitialPanelMode, isPdfReaderPanelActive } from '../utils/pdfReaderPanelMode'
+import { buildPdfReaderOpenState, releasePdfBlobUrl } from '../utils/pdfReaderOpenFlow'
 import { resolveLocationBadge, resolveLocationSentence, resolveLocationSource, resolveLocationTitle } from '../utils/referenceLocation'
 
 // Props & Emits
@@ -242,7 +260,10 @@ const layoutRef = ref(null)
 const panelMode = ref('summary')
 const summaryText = ref('')
 const summaryError = ref('')
+const summaryQuotaCard = ref(null)
+const translationQuotaCard = ref(null)
 const isSummarizing = ref(false)
+const activeBlobUrl = ref('')
 
 const MIN_SIDEBAR_WIDTH = 260
 const MIN_LEFT_WIDTH = 420
@@ -250,30 +271,18 @@ const isCitationsVisible = computed(() => isPdfReaderPanelActive(panelMode.value
 const isSummaryVisible = computed(() => isPdfReaderPanelActive(panelMode.value, 'summary'))
 const isTranslationVisible = computed(() => isPdfReaderPanelActive(panelMode.value, 'translation'))
 
-function getAuthToken() {
-  return localStorage.getItem('token')
-    || localStorage.getItem('agentcode.auth.token.v1')
-    || ''
+function withPdfPageAnchor(url, page = null) {
+  if (!url || !page) return url
+  return `${url}#page=${page}`
 }
 
-function encodeDoiPath(doi) {
-  return String(doi || '')
-    .split('/')
-    .map((item) => encodeURIComponent(item))
-    .join('/')
-}
-
-function buildPdfUrl(doi, page = null) {
-  const token = getAuthToken()
-  const encodedDoi = encodeDoiPath(doi)
-  let url = `/api/view_pdf/${encodedDoi}`
-  if (token) {
-    url += `?token=${encodeURIComponent(token)}`
-  }
-  if (page) {
-    url += `#page=${page}`
-  }
-  return url
+function buildDocAssistQuotaCard(error, featureTitle) {
+  return buildQuotaErrorCardModel({
+    code: error?.code || error?.payload?.code,
+    message: error?.message || error?.payload?.message || '',
+    data: error?.payload?.data,
+    featureTitle,
+  })
 }
 
 // Methods
@@ -283,15 +292,14 @@ async function openReader(doi, locations = []) {
   isPdfLoading.value = true
   summaryText.value = ''
   summaryError.value = ''
+  summaryQuotaCard.value = null
+  translationQuotaCard.value = null
   isSummarizing.value = false
   panelMode.value = resolvePdfReaderInitialPanelMode(locations)
-
-  let url = buildPdfUrl(doi)
   
   // 如果有位置信息，添加页码锚点
   if (locations.length > 0) {
     targetPage.value = locations[0].page || 1
-    url = buildPdfUrl(doi, targetPage.value)
   } else {
     targetPage.value = 1
   }
@@ -303,21 +311,37 @@ async function openReader(doi, locations = []) {
   manualText.value = ''
 
   try {
-    const payload = await checkPdfAvailability(doi)
-    if (!payload?.exists) {
-      pdfError.value = {
-        message: 'PDF文件不存在',
-        doi: currentDoi.value
-      }
+    const loadResult = await fetchPdfDocument(doi)
+    const nextState = buildPdfReaderOpenState({
+      doi: currentDoi.value,
+      loadResult,
+      previousBlobUrl: activeBlobUrl.value,
+      revokeObjectURL: (value) => releasePdfBlobUrl(value),
+    })
+    activeBlobUrl.value = nextState.activeBlobUrl || ''
+    pdfError.value = nextState.pdfError
+    pdfUrl.value = nextState.pdfUrl ? withPdfPageAnchor(nextState.pdfUrl, targetPage.value) : ''
+    if (!nextState.pdfUrl) {
       isPdfLoading.value = false
-      return
     }
-    pdfUrl.value = url
-  } catch (_error) {
-    pdfError.value = {
-      message: 'PDF文件不存在',
-      doi: currentDoi.value
-    }
+  } catch (error) {
+    const nextState = buildPdfReaderOpenState({
+      doi: currentDoi.value,
+      loadResult: {
+        ok: false,
+        errorPayload: {
+          message: error?.message || 'PDF加载失败',
+          code: error?.code || '',
+          data: error?.payload?.data,
+          status: Number(error?.status || 0),
+        },
+      },
+      previousBlobUrl: activeBlobUrl.value,
+      revokeObjectURL: (value) => releasePdfBlobUrl(value),
+    })
+    activeBlobUrl.value = nextState.activeBlobUrl || ''
+    pdfUrl.value = ''
+    pdfError.value = nextState.pdfError
     isPdfLoading.value = false
   }
 }
@@ -366,6 +390,8 @@ function stopResize() {
 }
 
 function closeReader() {
+  releasePdfBlobUrl(activeBlobUrl.value)
+  activeBlobUrl.value = ''
   isOpen.value = false
   currentDoi.value = ''
   pdfUrl.value = ''
@@ -374,6 +400,8 @@ function closeReader() {
   isPdfLoading.value = false
   summaryText.value = ''
   summaryError.value = ''
+  summaryQuotaCard.value = null
+  translationQuotaCard.value = null
   isSummarizing.value = false
   emit('close')
 }
@@ -383,41 +411,27 @@ function handleIframeLoad() {
   console.log('PDF iframe 加载完成')
 }
 
-function buildQuotaErrorMessage(error, featureName) {
-  const status = Number(error?.status || 0)
-  const code = String(error?.code || '')
-  if (status === 429 || code === 'QUOTA_EXCEEDED') {
-    return `${featureName}配额不足，请在个人中心查看剩余额度`
-  }
-  if (
-    status === 401 ||
-    code === 'TOKEN_MISSING' ||
-    code === 'TOKEN_INVALID' ||
-    code === 'USER_NOT_FOUND'
-  ) {
-    return '请先登录后使用'
-  }
-  return ''
-}
-
 async function generateSummary(force = false) {
   if (!currentDoi.value || isSummarizing.value) return
   if (!force && summaryText.value) return
 
   isSummarizing.value = true
   summaryError.value = ''
+  summaryQuotaCard.value = null
   try {
     const result = await api.summarizePdf(currentDoi.value)
     const summary = String(result?.summary || result?.data?.summary || '').trim()
     if (summary) {
       summaryText.value = summary
+      summaryQuotaCard.value = null
       return
     }
     summaryError.value = String(result?.error || result?.message || '总结生成失败')
   } catch (error) {
-    const quotaMessage = buildQuotaErrorMessage(error, '全文总结')
-    if (quotaMessage) {
-      summaryError.value = quotaMessage
+    const quotaCard = buildDocAssistQuotaCard(error, '全文总结')
+    if (quotaCard) {
+      summaryQuotaCard.value = quotaCard
+      summaryError.value = ''
     } else {
       summaryError.value = `总结生成失败: ${error.message || '未知错误'}`
     }
@@ -430,6 +444,7 @@ async function translateSelected() {
   if (!manualText.value || isTranslating.value) return
 
   isTranslating.value = true
+  translationQuotaCard.value = null
 
   // 添加翻译项
   const item = {
@@ -446,14 +461,16 @@ async function translateSelected() {
     const translations = Array.isArray(payload?.translations) ? payload.translations : []
     if (result.success && translations.length > 0) {
       item.translation = String(translations[0] || '')
+      translationQuotaCard.value = null
     } else {
       item.translation = String(result?.error || payload?.error || '翻译失败')
     }
   } catch (error) {
     console.error('翻译错误:', error)
-    const quotaMessage = buildQuotaErrorMessage(error, '翻译')
-    if (quotaMessage) {
-      item.translation = quotaMessage
+    const quotaCard = buildDocAssistQuotaCard(error, '翻译')
+    if (quotaCard) {
+      translationQuotaCard.value = quotaCard
+      translations.value = translations.value.filter((candidate) => candidate !== item)
     } else {
       item.translation = '翻译失败: ' + (error.message || '未知错误')
     }
@@ -471,7 +488,7 @@ defineExpose({
 })
 
 onBeforeUnmount(() => {
-  stopResize()
+  releasePdfBlobUrl(activeBlobUrl.value)
   stopResize()
 })
 </script>

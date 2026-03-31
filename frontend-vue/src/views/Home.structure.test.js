@@ -53,3 +53,13 @@ test('Home routes outline jumps through reveal-first flow while preserving stabl
   assert.match(source, /function toggleSteps\(index\) \{\s*const msg = getMessageByAbsoluteIndex\(index\)/s)
   assert.match(source, /:class="\{ active: highlightedQuestionMessageIndex === item\.messageIndex \}"/)
 })
+
+test('Home renders quota limit cards inline for quota failures while keeping markdown fallback', () => {
+  assert.match(source, /import QuotaLimitCard from '\.\.\/components\/QuotaLimitCard\.vue'/)
+  assert.match(source, /import \{ buildRoutingErrorMarkdown, buildRoutingErrorPresentation, getRouteModeLabel, mergeRoutingMetadata \} from '\.\.\/utils\/routingStatus'/)
+  assert.match(source, /function getQuotaCard\(message\)/)
+  assert.match(source, /mergedMeta\.quota_card = presentation\.card/)
+  assert.match(source, /<QuotaLimitCard v-if="getQuotaCard\(entry\.message\)" :card="getQuotaCard\(entry\.message\)" \/>/)
+  assert.match(source, /<QuotaLimitCard v-if="getQuotaCard\(entry\.message\)" :card="getQuotaCard\(entry\.message\)" \/>\s*<div v-else-if="entry\.message\.content && isStreamingTextMessage\(entry\.message\)"/s)
+  assert.match(source, /<div v-else-if="entry\.message\.content" v-html="getRenderedMessageHtml\(entry\.message\)"><\/div>/)
+})

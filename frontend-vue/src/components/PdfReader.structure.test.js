@@ -32,3 +32,10 @@ test('PdfReader citation panel uses the full right-panel space when citations ta
   assert.match(source, /flex:\s*1 1 auto;/)
   assert.match(source, /max-height:\s*none;/)
 })
+
+test('PdfReader uses the shared quota card and single-request pdf open flow', () => {
+  assert.match(source, /import QuotaLimitCard from '\.\/QuotaLimitCard\.vue'/)
+  assert.match(source, /import \{ fetchPdfDocument \} from '\.\.\/api\/literature'/)
+  assert.match(source, /import \{ buildPdfReaderOpenState, releasePdfBlobUrl \} from '\.\.\/utils\/pdfReaderOpenFlow'/)
+  assert.match(source, /<QuotaLimitCard v-if="pdfError\?\.quotaCard" :card="pdfError\.quotaCard" \/>/)
+})

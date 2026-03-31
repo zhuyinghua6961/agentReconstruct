@@ -1,4 +1,5 @@
-const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
+const viteEnv = (typeof import.meta !== 'undefined' && import.meta?.env) ? import.meta.env : {};
+const API_BASE = viteEnv.VITE_API_BASE_URL || '';
 const TOKEN_KEYS = ['agentcode.auth.token.v1', 'token'];
 
 function withBase(path) {

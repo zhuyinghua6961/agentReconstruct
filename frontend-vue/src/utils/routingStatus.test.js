@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { buildRoutingErrorMarkdown, getRouteModeLabel, mergeRoutingMetadata } from './routingStatus.js'
+import { buildRoutingErrorMarkdown, buildRoutingErrorPresentation, getRouteModeLabel, mergeRoutingMetadata } from './routingStatus.js'
 
 test('getRouteModeLabel maps known routes to readable labels', () => {
   assert.equal(getRouteModeLabel('kb_qa'), '知识库问答')
@@ -61,4 +61,27 @@ test('buildRoutingErrorMarkdown formats file-not-ready status with retry guidanc
   assert.match(markdown, /当前路由：PDF问答/)
   assert.match(markdown, /已选文件：#44/)
   assert.match(markdown, /等待文件状态变为“就绪”后再重试/)
+})
+
+test('buildRoutingErrorPresentation returns quota card model for chat quota failures', () => {
+  const presentation = buildRoutingErrorPresentation({
+    code: 'QUOTA_EXCEEDED',
+    message: 'quota exceeded',
+    metadata: {
+      route: 'pdf_qa',
+    },
+    data: {
+      quota_type: 'file_qa',
+      quota_name: '文件问答',
+      current: 20,
+      limit: 20,
+      remaining: 0,
+      reset_hint: 'next_day_start',
+    },
+  })
+
+  assert.equal(presentation.kind, 'quota_card')
+  assert.equal(presentation.card.variant, 'quota_exceeded')
+  assert.equal(presentation.card.featureTitle, '文件问答')
+  assert.equal(presentation.card.quotaType, 'file_qa')
 })

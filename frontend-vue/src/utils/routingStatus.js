@@ -1,3 +1,5 @@
+import { buildQuotaErrorCardModel, isQuotaBlockingErrorCode } from '../services/quota-error-formatting.js'
+
 const ROUTE_LABELS = {
   kb_qa: '知识库问答',
   pdf_qa: 'PDF问答',
@@ -134,4 +136,32 @@ export function buildRoutingErrorMarkdown({ code = '', message = '', metadata = 
   lines.push('处理失败', '', normalizedMessage)
   if (routeLabel) lines.push('', `当前路由：${routeLabel}`)
   return lines.join('\n')
+}
+
+function resolveChatQuotaFeatureTitle(metadata = {}, data = {}) {
+  const route = normalizeRoute(metadata?.route)
+  const quotaType = String(data?.quota_type || '').trim().toLowerCase()
+  if (quotaType === 'file_qa' || route === 'pdf_qa' || route === 'tabular_qa' || route === 'hybrid_qa') {
+    return '文件问答'
+  }
+  return '普通问答'
+}
+
+export function buildRoutingErrorPresentation({ code = '', message = '', metadata = {}, data = null } = {}) {
+  if (isQuotaBlockingErrorCode(code)) {
+    return {
+      kind: 'quota_card',
+      card: buildQuotaErrorCardModel({
+        code,
+        message,
+        data,
+        featureTitle: resolveChatQuotaFeatureTitle(metadata, data || {}),
+      }),
+    }
+  }
+
+  return {
+    kind: 'markdown',
+    markdown: buildRoutingErrorMarkdown({ code, message, metadata }),
+  }
 }

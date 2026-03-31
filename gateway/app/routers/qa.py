@@ -455,19 +455,27 @@ def _upstream_stream_error_stream(*, trace_id: str, backend: str, exc: Exception
 
 def _quota_precheck_error_stream(*, trace_id: str, route_decision, result: QuotaProxyResult) -> StreamingResponse:
     payload = dict(result.payload or {})
-    message = str(payload.get("message") or payload.get("error") or "quota_precheck_failed").replace('"', '\\"')
-    code = str(payload.get("code") or "QUOTA_PRECHECK_FAILED").replace('"', '\\"')
-    error = str(payload.get("error") or "quota_precheck_failed").replace('"', '\\"')
+    message = str(payload.get("message") or payload.get("error") or "quota_precheck_failed")
+    code = str(payload.get("code") or "QUOTA_PRECHECK_FAILED")
+    error = str(payload.get("error") or "quota_precheck_failed")
+    data = payload.get("data")
 
     def _frames():
         yield (
             'data: {"type":"metadata","requested_mode":"%s","actual_mode":"%s","route":"%s","trace_id":"%s"}\n\n'
             % (route_decision.requested_mode, route_decision.actual_mode, route_decision.route, trace_id)
         )
-        yield (
-            'data: {"type":"error","code":"%s","error":"%s","message":"%s","retriable":false,"trace_id":"%s"}\n\n'
-            % (code, error, message, trace_id)
-        )
+        error_payload = {
+            "type": "error",
+            "code": code,
+            "error": error,
+            "message": message,
+            "retriable": False,
+            "trace_id": trace_id,
+        }
+        if isinstance(data, dict):
+            error_payload["data"] = data
+        yield _encode_sse_payload(error_payload)
 
     return StreamingResponse(
         _frames(),

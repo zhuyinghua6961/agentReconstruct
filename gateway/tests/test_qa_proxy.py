@@ -375,7 +375,16 @@ def test_mode_ask_stream_returns_sse_quota_error_surface_on_precheck_failure(mon
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/internal/quota/grants/precheck":
-            return httpx.Response(429, json={"success": False, "code": "QUOTA_EXCEEDED", "error": "quota_exceeded"})
+            return httpx.Response(
+                429,
+                json={
+                    "success": False,
+                    "code": "QUOTA_EXCEEDED",
+                    "error": "quota_exceeded",
+                    "message": "quota exceeded",
+                    "data": {"quota_type": "ask_query", "remaining": 0, "limit": 20},
+                },
+            )
         raise AssertionError(f"unexpected upstream path: {request.url.path}")
 
     with _TransportGuard(handler):
@@ -389,7 +398,75 @@ def test_mode_ask_stream_returns_sse_quota_error_surface_on_precheck_failure(mon
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
+    assert body.index(b'"type":"metadata"') < body.index(b'"type":"error"')
     assert b'"code":"QUOTA_EXCEEDED"' in body
+    assert b'"data":{"quota_type":"ask_query","remaining":0,"limit":20}' in body
+
+
+def test_mode_ask_stream_returns_sse_system_quota_error_with_data_on_precheck_failure(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/internal/quota/grants/precheck":
+            return httpx.Response(
+                503,
+                json={
+                    "success": False,
+                    "code": "QUOTA_CONFIG_MISSING",
+                    "error": "quota_config_missing",
+                    "message": "quota config missing",
+                    "data": {"quota_type": "ask_query", "config_missing": True},
+                },
+            )
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        with client.stream(
+            "POST",
+            "/api/thinking/ask_stream",
+            json={"question": "plain qa", "requested_mode": "thinking", "conversation_id": 123, "user_id": 42},
+        ) as response:
+            body = b"".join(response.iter_bytes())
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert body.index(b'"type":"metadata"') < body.index(b'"type":"error"')
+    assert b'"code":"QUOTA_CONFIG_MISSING"' in body
+    assert b'"data":{"quota_type":"ask_query","config_missing":true}' in body
+
+
+def test_mode_ask_stream_quota_error_payload_is_not_double_escaped(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/internal/quota/grants/precheck":
+            return httpx.Response(
+                429,
+                json={
+                    "success": False,
+                    "code": 'QUOTA_"EXCEEDED"',
+                    "error": 'quota_"exceeded"\\path',
+                    "message": 'quota "limit" hit at C:\\quota\\path',
+                    "data": {"quota_type": "ask_query"},
+                },
+            )
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        with client.stream(
+            "POST",
+            "/api/thinking/ask_stream",
+            json={"question": "plain qa", "requested_mode": "thinking", "conversation_id": 124, "user_id": 42},
+        ) as response:
+            body = b"".join(response.iter_bytes())
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert b'quota \\"limit\\" hit at C:\\\\quota\\\\path' in body
+    assert b'\\\\\\\\quota' not in body
+    assert b'quota_\\"exceeded\\"\\\\path' in body
 
 
 def test_mode_ask_aborts_quota_when_upstream_payload_is_unsuccessful(monkeypatch):
