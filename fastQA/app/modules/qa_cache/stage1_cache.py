@@ -197,6 +197,8 @@ def cache_stage1_result(
         return False
     if not isinstance(stage1_result, dict) or stage1_result.get("success") is not True:
         return False
+    if str(stage1_result.get("fallback") or "").strip():
+        return False
     payload = dict(stage1_result)
     claims = payload.get("retrieval_claims") or []
     if not isinstance(claims, list):

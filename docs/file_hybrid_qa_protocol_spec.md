@@ -28,10 +28,10 @@ Primary goal:
 The current system has already moved major responsibilities into `gateway`, but the file QA boundary is not yet fully clean.
 
 Current problems:
-- `gateway` resolves file context first, but `fastQA` still performs a second-pass local file-context resolution.
+- route/file intent ownership used to be split across `gateway` and `fastQA`, which created duplicate judgment risk
 - `pdf_qa`, `tabular_qa`, and `hybrid_qa` semantics are not frozen as a protocol.
 - "mixed QA" is still partially represented as `allow_kb_verification` attached to single-source routes, which creates ambiguous execution semantics.
-- frontend-visible stream behavior and file-selection metadata can drift if both `gateway` and `fastQA` reinterpret the same user turn.
+- frontend-visible stream behavior and file-selection metadata can drift if route authority and frontend-visible short-circuit contracts are not documented precisely.
 
 This spec fixes those problems by defining a strict upstream/downstream contract.
 
@@ -175,7 +175,7 @@ Examples:
 - performing table planning / execution
 - performing KB retrieval when enabled by source_scope
 - answer synthesis
-- streaming step / content / citation / done events
+- streaming step / content / done events
 - returning source usage and references
 
 ### 5.3 FastQA must not own
@@ -193,6 +193,9 @@ Examples:
 FastQA may reject invalid upstream input.
 
 Examples of valid rejection:
+- missing explicit `route` for a file execution payload
+- missing explicit `source_scope` for a file route
+- missing explicit `turn_mode` for a file route
 - `route=pdf_qa` but no PDF file in `execution_files`
 - `route=tabular_qa` but no table file in `execution_files`
 - `route=hybrid_qa` with `source_scope=pdf+table` but no table file present
@@ -357,6 +360,9 @@ Clarification is required when, for example:
   "primary_file_id": 1,
   "trace_id": "req_xxx",
   "file_selection": {},
+  "route_reasons": [],
+  "route_confidence": 1.0,
+  "classifier_used": false,
   "options": {}
 }
 ```
@@ -393,6 +399,15 @@ Recommended fields:
 - `source_scope`
 - `kb_enabled`
 
+#### `route_reasons`
+Gateway-owned explainability field describing why the final route was chosen.
+
+#### `route_confidence`
+Gateway-owned confidence score. Deterministic rule outputs are typically `1.0`; classifier-assisted ambiguity paths may be lower.
+
+#### `classifier_used`
+Boolean trace flag indicating whether the ambiguity-only classifier seam participated in the final gateway decision.
+
 ### 8.3 File descriptor schema
 
 Each `execution_files` item should be fully normalized.
@@ -422,6 +437,7 @@ Recommended schema:
 FastQA must be allowed to assume all of the following are true:
 - `route` is final
 - `source_scope` is final
+- `turn_mode` is final
 - `selected_file_ids` and `execution_files` correspond to the same upstream choice
 - `kb_enabled` matches `source_scope`
 - `execution_files` contains all files needed for execution
@@ -439,7 +455,7 @@ All file-aware routes should follow the same top-level phases:
 3. route-specific retrieval / execution
 4. synthesis preparation
 5. final answer generation
-6. citation normalization
+6. reference normalization
 7. done event emission
 
 ### 9.2 `pdf_qa`
@@ -547,7 +563,6 @@ Required event types:
 - `metadata`
 - `step`
 - `content`
-- `citation`
 - `done`
 - `error`
 
@@ -559,8 +574,7 @@ Every event should include:
 - `source_scope`
 
 Recommended common fields:
-- `seq`
-- `ts`
+- none beyond route-relevant payload fields and `trace_id`
 
 ### 10.3 Metadata
 
@@ -572,7 +586,7 @@ Example:
   "trace_id": "req_xxx",
   "route": "hybrid_qa",
   "source_scope": "pdf+kb",
-  "query_mode": "混合问答",
+  "query_mode": "hybrid_qa",
   "requested_mode": "fast",
   "actual_mode": "fast"
 }
@@ -624,25 +638,7 @@ Incremental answer output.
 }
 ```
 
-### 10.6 Citation
-
-Optional mid-stream citation exposure.
-
-Example:
-
-```json
-{
-  "type": "citation",
-  "trace_id": "req_xxx",
-  "route": "hybrid_qa",
-  "source_scope": "pdf+table",
-  "citation_kind": "pdf|table|kb",
-  "label": "10.xxxx/xxxx",
-  "payload": {}
-}
-```
-
-### 10.7 Done
+### 10.6 Done
 
 Example:
 
@@ -668,7 +664,7 @@ Example:
 }
 ```
 
-### 10.8 Error
+### 10.7 Error
 
 Protocol / execution errors must be explicit.
 
@@ -680,8 +676,8 @@ Example:
   "trace_id": "req_xxx",
   "route": "hybrid_qa",
   "source_scope": "pdf+table",
-  "code": "FASTQA_EXECUTION_FILES_MISSING_TABLE",
-  "error": "table_file_missing",
+  "code": "EXECUTION_FILES_REQUIRED",
+  "error": "selected source_scope requires at least one table file",
   "message": "hybrid_qa with source_scope=pdf+table requires at least one table file"
 }
 ```
@@ -695,20 +691,21 @@ Example:
 Gateway should own and emit:
 - `FILE_SELECTION_CLARIFICATION_REQUIRED`
 - `CONVERSATION_FILE_PROVIDER_UNAVAILABLE`
-- `INVALID_FILE_REFERENCE`
-- `FILE_REFERENCE_DELETED`
-- `NO_EXECUTABLE_FILE_SELECTION`
+- `FILE_NOT_READY`
+- `FILE_PROCESSING_FAILED`
+- `FILE_NOT_FOUND`
 
 These errors happen before forwarding.
 
 ### 11.2 FastQA protocol errors
 
 FastQA should own and emit:
-- `FASTQA_ROUTE_SCOPE_MISMATCH`
-- `FASTQA_EXECUTION_FILES_MISSING_PDF`
-- `FASTQA_EXECUTION_FILES_MISSING_TABLE`
-- `FASTQA_PRIMARY_FILE_INVALID`
-- `FASTQA_UNSUPPORTED_SOURCE_SCOPE`
+- `ROUTE_REQUIRED`
+- `CONTRACT_FIELD_REQUIRED`
+- `CONTRACT_FIELD_INVALID`
+- `SOURCE_SCOPE_INVALID`
+- `EXECUTION_FILES_REQUIRED`
+- `PRIMARY_FILE_INVALID`
 
 ### 11.3 FastQA execution errors
 

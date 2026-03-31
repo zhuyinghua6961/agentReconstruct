@@ -67,6 +67,27 @@ def test_stage1_cache_rejects_invalid_payloads():
     assert cache_stage1_result(redis_service=service, runtime=runtime, question="q", stage1_result={"success": False}) is False
     assert get_cached_stage1_result(redis_service=service, runtime=runtime, question="q") is None
 
+
+def test_stage1_cache_does_not_store_json_parse_fallback_payload():
+    service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    runtime = _runtime()
+
+    cached = cache_stage1_result(
+        redis_service=service,
+        runtime=runtime,
+        question="q",
+        stage1_result={
+            "success": True,
+            "deep_answer": "too long raw pre-answer",
+            "retrieval_claims": [],
+            "fallback": "json_parse_failed",
+            "raw_response": "```json ... ```",
+        },
+    )
+
+    assert cached is False
+    assert get_cached_stage1_result(redis_service=service, runtime=runtime, question="q") is None
+
 def test_stage1_cache_key_changes_when_conversation_context_changes():
     service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
     runtime = _runtime()

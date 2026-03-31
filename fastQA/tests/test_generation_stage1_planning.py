@@ -77,6 +77,44 @@ def test_stage1_planning_falls_back_when_json_invalid():
     assert result["fallback"] == "json_parse_failed"
 
 
+def test_stage1_planning_parses_fenced_json_when_deep_answer_contains_inner_code_fence():
+    client = _FakeClient(
+        """```json
+{
+  "deep_answer": "先给方案。\\n\\n```python\\nprint('demo')\\n```\\n\\n补充说明。",
+  "retrieval_claims": [
+    {
+      "claim": "c1",
+      "keywords": ["k1"],
+      "preferred_sections": ["methods"],
+      "filters": {"must_contains": ["LFP"]}
+    }
+  ]
+}
+```"""
+    )
+    result = run_stage1_pre_answer_and_planning(
+        user_question="what is lfp?",
+        stage1_prompt="prompt",
+        vector_db_context="",
+        client=client,
+        model="gpt-test",
+        logger=_Logger(),
+    )
+
+    assert result["success"] is True
+    assert result["fallback"] if "fallback" in result else None is None
+    assert "```python" in result["deep_answer"]
+    assert result["retrieval_claims"] == [
+        {
+            "claim": "c1",
+            "keywords": ["k1"],
+            "preferred_sections": ["methods"],
+            "filters": {"must_contains": ["LFP"]},
+        }
+    ]
+
+
 def test_stage1_planning_does_not_accept_legacy_alias_fields_for_normal_qa():
     client = _FakeClient(
         '{"answer":"legacy-answer","claims":[{"claim":"c1","keywords":["k1"]},"plain-claim"]}'

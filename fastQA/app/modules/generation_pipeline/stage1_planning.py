@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict
 
 
@@ -33,6 +34,75 @@ def _create_stage1_completion(*, client: Any, model: str, messages: list[dict[st
             temperature=0.5,
             max_tokens=3000,
         )
+
+
+_OUTER_JSON_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*(.*)\s*```\s*$", re.IGNORECASE | re.DOTALL)
+
+
+def _unwrap_outer_json_fence(text: str) -> str | None:
+    match = _OUTER_JSON_FENCE_RE.match(str(text or ""))
+    if not match:
+        return None
+    candidate = str(match.group(1) or "").strip()
+    return candidate or None
+
+
+def _extract_balanced_json_object(text: str) -> str | None:
+    source = str(text or "")
+    start = source.find("{")
+    if start < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(source)):
+        ch = source[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "{":
+            depth += 1
+            continue
+        if ch == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = source[start : index + 1].strip()
+                return candidate or None
+    return None
+
+
+def _candidate_json_payloads(result_text: str) -> list[str]:
+    candidates: list[str] = []
+    for candidate in (
+        str(result_text or "").strip(),
+        _unwrap_outer_json_fence(result_text),
+        _extract_balanced_json_object(result_text),
+        _extract_balanced_json_object(_unwrap_outer_json_fence(result_text) or ""),
+    ):
+        normalized = str(candidate or "").strip()
+        if normalized and normalized not in candidates:
+            candidates.append(normalized)
+    return candidates
+
+
+def _parse_stage1_json_payload(result_text: str) -> tuple[dict[str, Any] | None, str | None]:
+    for candidate in _candidate_json_payloads(result_text):
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload, candidate
+    return None, None
 
 
 def _format_conversation_context(conversation_context: dict[str, Any] | None) -> str:
@@ -105,27 +175,18 @@ def run_stage1_pre_answer_and_planning(
         )
 
         result_text = str(response.choices[0].message.content or "").strip()
-        cleaned_text = result_text
-        if "```json" in cleaned_text:
-            cleaned_text = cleaned_text.split("```json", 1)[1].split("```", 1)[0].strip()
-        elif "```" in cleaned_text:
-            cleaned_text = cleaned_text.split("```", 1)[1].split("```", 1)[0].strip()
-
-        try:
-            stage1_result = json.loads(cleaned_text)
-        except json.JSONDecodeError:
-            try:
-                stage1_result = json.loads(result_text)
-                cleaned_text = result_text
-            except json.JSONDecodeError as exc:
-                logger.error("阶段一 JSON 解析失败，降级为仅预回答: %s", exc)
-                return {
-                    "success": True,
-                    "deep_answer": result_text,
-                    "retrieval_claims": [],
-                    "raw_response": result_text,
-                    "fallback": "json_parse_failed",
-                }
+        stage1_result, cleaned_text = _parse_stage1_json_payload(result_text)
+        if stage1_result is None or cleaned_text is None:
+            preview = result_text[:500].replace("\n", "\\n")
+            logger.error("阶段一 JSON 解析失败，降级为仅预回答")
+            logger.error("阶段一原始响应前500字符: %s", preview)
+            return {
+                "success": True,
+                "deep_answer": result_text,
+                "retrieval_claims": [],
+                "raw_response": result_text,
+                "fallback": "json_parse_failed",
+            }
 
         deep_answer = str(stage1_result.get("deep_answer") or "").strip()
         raw_claims = stage1_result.get("retrieval_claims") or []
