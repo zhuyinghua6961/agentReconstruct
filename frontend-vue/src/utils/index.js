@@ -4,6 +4,7 @@ import { marked } from 'marked'
 
 const DOI_INLINE_LINK_PATTERN = /\((?:doi\s*=|DOI:\s*)(10\.(?:[^\s,()]+|\([^\s,()]+\))+)(?:\s*·\s*查看原文[^)]*)?\)/gi
 const DOI_LABELED_TEXT_PATTERN = /\[DOI:\s*[^\]\n]+\]|\((?:doi\s*=|DOI:\s*)[^)\n]+(?:\)[^)\n]*)?\)|\bdoi[:=]\s*10\.\d{4,9}[A-Za-z0-9._;()/:+-]*/gi
+const DOI_PLAIN_TEXT_PATTERN = /\b(doi[:=]\s*)?(10\.[A-Za-z0-9._;()/:+-]+)/gi
 
 function normalizeDoiForLink(raw) {
   return extractDoiLinks(raw)[0] || ''
@@ -13,7 +14,7 @@ function extractDoiLinks(raw) {
   let doi = String(raw || '').replace(/<[^>]*>/g, '').trim()
   if (!doi) return []
 
-  doi = doi.replace(/^doi\s*=\s*/i, '')
+  doi = doi.replace(/^doi\s*[:=]\s*/i, '')
   doi = doi.replace(/·\s*查看原文.*/i, '')
   doi = doi.replace(/[)\],;:]+$/g, '')
   doi = doi.replace(/(10\.\d{1,9})(?=[A-Za-z])/gi, '$1/')
@@ -52,7 +53,36 @@ function applyDoiLinksToHtml(html) {
     return cleanDois.map((cleanDoi) => `(<a href="#" class="doi-link" data-doi="${cleanDoi}">${cleanDoi}</a>)`).join(' ')
   })
 
-  return nextHtml
+  return applyPlainTextDoiLinksToHtml(nextHtml)
+}
+
+function applyPlainTextDoiLinksToHtml(html) {
+  const segments = String(html || '').split(/(<[^>]+>)/g)
+  let inAnchor = false
+
+  return segments
+    .map((segment) => {
+      if (!segment) return segment
+      if (segment.startsWith('<')) {
+        if (/^<a\b/i.test(segment)) {
+          inAnchor = true
+        } else if (/^<\/a\b/i.test(segment)) {
+          inAnchor = false
+        }
+        return segment
+      }
+      if (inAnchor) return segment
+
+      return segment.replace(DOI_PLAIN_TEXT_PATTERN, (match, prefix = '') => {
+        const cleanDois = extractDoiLinks(match)
+        if (cleanDois.length === 0) return match
+        const rendered = cleanDois
+          .map((cleanDoi) => `<a href="#" class="doi-link" data-doi="${cleanDoi}">${cleanDoi}</a>`)
+          .join(' ')
+        return prefix ? `${prefix}${rendered}` : rendered
+      })
+    })
+    .join('')
 }
 
 function protectDoiSegments(text) {

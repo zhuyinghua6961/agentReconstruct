@@ -100,14 +100,15 @@ test('formatStreamingAnswer does not render malformed DOI underscores as subscri
   assert.doesNotMatch(html, /<sub>/i)
 })
 
-test('formatAnswer does not treat raw DOI fragments as math markup', () => {
+test('formatAnswer does not treat raw DOI fragments as math markup and keeps them linkable', () => {
   installMinimalDom()
   const input = '补充参考 doi:10.1039c2jm15273h 和 doi:10.1016\/S0378-7753(03)00297-0。'
 
   const html = formatAnswer(input)
 
-  assert.match(html, /10\.1039c2jm15273h/i)
-  assert.match(html, /10\.1016\/S0378-7753\(03\)00297-0/i)
+  assert.match(html, /class="doi-link"/i)
+  assert.match(html, /data-doi="10\.1039\/c2jm15273h"/i)
+  assert.match(html, /data-doi="10\.1016\/S0378-7753\(03\)00297-0"/i)
   assert.doesNotMatch(html, /<sub>|<sup>/i)
 })
 
@@ -118,4 +119,34 @@ test('formatAnswer still renders ordinary numeric math starting with 10 dot as s
   const html = formatAnswer(input)
 
   assert.match(html, /10\.2<sup>3<\/sup>/i)
+})
+
+test('formatAnswer renders bare DOI links inside markdown table cells', () => {
+  installMinimalDom()
+  const input = [
+    '| DOI |',
+    '| --- |',
+    '| 10.1016/j.est.2024.113859 |',
+  ].join('\n')
+
+  const html = formatAnswer(input)
+
+  assert.match(html, /<table>/i)
+  assert.match(html, /class="doi-link"/i)
+  assert.match(html, /data-doi="10\.1016\/j\.est\.2024\.113859"/i)
+})
+
+test('formatAnswer renders prefixed doi links inside markdown table cells', () => {
+  installMinimalDom()
+  const input = [
+    '| DOI |',
+    '| --- |',
+    '| doi:10.1039c2jm15273h |',
+  ].join('\n')
+
+  const html = formatAnswer(input)
+
+  assert.match(html, /<table>/i)
+  assert.match(html, /class="doi-link"/i)
+  assert.match(html, /data-doi="10\.1039\/c2jm15273h"/i)
 })
