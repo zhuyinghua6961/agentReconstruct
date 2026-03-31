@@ -20,6 +20,12 @@ _STREAMING_ROUTE_PATHS = {
 def _is_streaming_route(request: Request) -> bool:
     route = request.scope.get("route")
     route_path = str(getattr(route, "path", "") or "")
+    if route_path in {
+        "/api/patent/original/{canonical_patent_id}",
+        "/api/v1/patent/original/{canonical_patent_id}",
+    }:
+        requested_section = str(request.query_params.get("section") or "").strip().lower()
+        return requested_section in {"", "fulltext"}
     return route_path in _STREAMING_ROUTE_PATHS
 
 
@@ -87,6 +93,7 @@ _ROUTE_SPECS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (_paths("/api/health"), ("GET",)),
     (_paths("/api/literature_content"), ("GET",)),
     (_paths("/api/reference_preview"), ("POST",)),
+    (_paths("/api/patent/original/{canonical_patent_id}"), ("GET", "HEAD")),
     (_paths("/api/summarize_pdf/{doi:path}"), ("POST",)),
     (_paths("/api/extract_pdf_text/{doi:path}"), ("GET",)),
     (_paths("/api/check_pdf/{doi:path}"), ("GET",)),

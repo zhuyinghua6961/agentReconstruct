@@ -43,6 +43,7 @@ _PUBLIC_ROUTE_GROUPS = (
     _paths("/api/health"),
     _paths("/api/literature_content"),
     _paths("/api/reference_preview"),
+    _paths("/api/patent/original/{canonical_patent_id}"),
     _paths("/api/summarize_pdf/{doi:path}"),
     _paths("/api/extract_pdf_text/{doi:path}"),
     _paths("/api/check_pdf/{doi:path}"),

@@ -188,6 +188,128 @@ def test_public_proxy_preserves_query_token_for_v1_view_pdf():
     assert response.headers["content-disposition"].startswith("inline;")
 
 
+def test_public_proxy_forwards_patent_original_json_requests():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/api/v1/patent/original/CN123456789A"
+        assert request.url.query == b"section=claim&claim_number=1"
+        assert request.headers["authorization"] == "Bearer demo"
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "canonical_patent_id": "CN123456789A",
+                "section": "claim",
+                "section_label": "权利要求1",
+            },
+            headers={"etag": '"patent-original:version-1"'},
+        )
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        response = client.get(
+            "/api/v1/patent/original/CN123456789A?section=claim&claim_number=1",
+            headers={"Authorization": "Bearer demo"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["section_label"] == "权利要求1"
+    assert response.headers["etag"] == '"patent-original:version-1"'
+    assert response.headers["x-gateway-backend"] == "public"
+
+
+def test_public_proxy_forwards_patent_original_head_requests():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "HEAD"
+        assert request.url.path == "/api/patent/original/CN123456789A"
+        assert request.url.query == b"section=fulltext"
+        return httpx.Response(
+            200,
+            headers={
+                "etag": '"patent-original:version-2"',
+                "cache-control": "public, max-age=300",
+                "content-type": "application/pdf",
+            },
+        )
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        response = client.head("/api/patent/original/CN123456789A?section=fulltext")
+
+    assert response.status_code == 200
+    assert response.text == ""
+    assert response.headers["etag"] == '"patent-original:version-2"'
+    assert response.headers["x-gateway-backend"] == "public"
+
+
+def test_public_proxy_streams_patent_fulltext_requests(monkeypatch):
+    class _Handle:
+        status_code = 200
+        headers = {
+            "content-type": "application/pdf",
+            "etag": '"patent-original:version-3"',
+        }
+
+        async def body_iter(self):
+            yield b"chunk-1"
+            yield b"chunk-2"
+
+    async def _open_request_stream(*, request, target, path=None):
+        assert request.url.path == "/api/patent/original/CN123456789A"
+        assert request.url.query == "section=fulltext"
+        _ = target, path
+        return _Handle()
+
+    async def _forward(*, request, target, path=None):
+        _ = request, target, path
+        raise AssertionError("fulltext patent original route should use streaming proxy")
+
+    monkeypatch.setattr(app.state.proxy_service, "open_request_stream", _open_request_stream)
+    monkeypatch.setattr(app.state.proxy_service, "forward", _forward)
+
+    client = TestClient(app)
+    response = client.get("/api/patent/original/CN123456789A?section=fulltext")
+
+    assert response.status_code == 200
+    assert response.content == b"chunk-1chunk-2"
+    assert response.headers["content-type"].startswith("application/pdf")
+    assert response.headers["etag"] == '"patent-original:version-3"'
+
+
+def test_public_proxy_streams_patent_fulltext_requests_when_section_is_omitted(monkeypatch):
+    class _Handle:
+        status_code = 200
+        headers = {
+            "content-type": "application/pdf",
+            "etag": '"patent-original:version-4"',
+        }
+
+        async def body_iter(self):
+            yield b"chunk-a"
+            yield b"chunk-b"
+
+    async def _open_request_stream(*, request, target, path=None):
+        assert request.url.path == "/api/patent/original/CN123456789A"
+        assert request.url.query == ""
+        _ = target, path
+        return _Handle()
+
+    async def _forward(*, request, target, path=None):
+        _ = request, target, path
+        raise AssertionError("default patent original route should stream because section defaults to fulltext")
+
+    monkeypatch.setattr(app.state.proxy_service, "open_request_stream", _open_request_stream)
+    monkeypatch.setattr(app.state.proxy_service, "forward", _forward)
+
+    client = TestClient(app)
+    response = client.get("/api/patent/original/CN123456789A")
+
+    assert response.status_code == 200
+    assert response.content == b"chunk-achunk-b"
+    assert response.headers["content-type"].startswith("application/pdf")
+    assert response.headers["etag"] == '"patent-original:version-4"'
+
+
 def test_public_proxy_streams_conversation_file_download():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"
