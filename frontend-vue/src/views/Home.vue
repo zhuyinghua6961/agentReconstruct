@@ -5,6 +5,10 @@ import { api } from '../services/api'
 import { formatTime, formatAnswer } from '../utils'
 import { createStreamingHtmlRenderer } from '../utils/streamingRender'
 import { buildMessageRenderMemoKey } from '../utils/messageRenderMemo'
+import { buildVisibleMessageWindow, resolveHiddenHistoryReveal } from '../utils/messageWindowing'
+import { resolveStreamingTarget } from '../utils/streamingTarget'
+import { buildQuestionOutlineItems, buildQuestionOutlineSignature, getQuestionAnchorId } from '../utils/questionOutline'
+import { DEFAULT_NEAR_BOTTOM_THRESHOLD_PX, isNearBottom, shouldAutoScroll } from '../utils/scrollFollow'
 import { mergeSelectedFileIdsAfterUpload, resolveUploadedFileDisplayNumber } from '../utils/fileSelection'
 import PdfReader from '../components/PdfReader.vue'
 import { buildCitationLocationsForDoi } from '../utils/citationEvidence'
@@ -27,6 +31,7 @@ const uploadProgress = ref(0)
 const streamingAbortController = ref(null)
 const streamingChatId = ref('')
 const streamingMessageRequestId = ref('')
+const streamingTargetIndex = ref(-1)
 const selectedFileIds = ref([])
 const selectedAskMode = ref(localStorage.getItem(ASK_MODE_STORAGE_KEY) || 'thinking')
 const leftSidebarCollapsed = ref(false)
@@ -64,6 +69,9 @@ const RIGHT_PANEL_COLLAPSED_WIDTH = 92
 const MAIN_CHAT_MIN_WIDTH = 520
 const PANEL_SPLITTER_WIDTH = 10
 const PANEL_SPLITTER_TOTAL_WIDTH = PANEL_SPLITTER_WIDTH * 2
+const MESSAGE_WINDOW_THRESHOLD = 30
+const DEFAULT_VISIBLE_MESSAGE_COUNT = 24
+const HISTORY_REVEAL_BATCH_SIZE = 20
 
 const hasMessages = computed(() => store.currentMessages.length > 0)
 const canSend = computed(() => inputMessage.value.trim() && !store.isStreaming)
@@ -87,20 +95,19 @@ const currentRightPanelWidth = computed(() =>
 )
 const pinnedChats = computed(() => store.chats.filter(chat => Boolean(chat?.isPinned)))
 const recentChats = computed(() => store.chats.filter(chat => !Boolean(chat?.isPinned)))
-const questionOutlineItems = computed(() => {
-  let outlineIndex = 0
-  return store.currentMessages.reduce((items, msg, messageIndex) => {
-    if (msg?.role !== 'user') return items
-    outlineIndex += 1
-    items.push({
-      outlineIndex,
-      messageIndex,
-      anchorId: getQuestionAnchorId(messageIndex),
-      preview: getQuestionPreview(msg?.content || '')
-    })
-    return items
-  }, [])
+const questionOutlineItems = ref([])
+const revealedHiddenMessageCount = ref(0)
+const activeVisibleWindow = computed(() => {
+  const totalMessages = store.currentMessages.length
+  const shouldWindow = totalMessages > MESSAGE_WINDOW_THRESHOLD
+  return buildVisibleMessageWindow({
+    messages: store.currentMessages,
+    visibleCount: shouldWindow ? DEFAULT_VISIBLE_MESSAGE_COUNT : totalMessages,
+    revealedCount: shouldWindow ? revealedHiddenMessageCount.value : 0,
+  })
 })
+const visibleMessageEntries = computed(() => activeVisibleWindow.value.visibleMessages)
+const hiddenHistoryCount = computed(() => activeVisibleWindow.value.hiddenCount)
 const kbSummaryText = computed(() => {
   if (store.kbInfo.loading) return '向量库: 加载中 | 知识图谱: 加载中'
   const vectorSize = Number(store.kbInfo.vectorSize ?? store.kbInfo.size ?? 0)
@@ -109,6 +116,9 @@ const kbSummaryText = computed(() => {
   return `向量库: ${vectorSize} 条 | 知识图谱: ${graphPart}`
 })
 const isHistoryLocked = computed(() => store.isStreaming && Boolean(streamingChatId.value))
+const questionOutlineSignature = computed(() => buildQuestionOutlineSignature(store.currentMessages))
+const isNearBottomRef = ref(true)
+const pendingAutoScroll = ref(false)
 
 const renderedMessageCache = new WeakMap()
 const renderStreamingMessageHtml = createStreamingHtmlRenderer()
@@ -135,38 +145,34 @@ function getChatSyncStatus(chat) {
   return 'local'
 }
 
-function startStreamingSession(chatId, requestId) {
+function startStreamingSession(chatId, requestId, targetIndex = -1) {
   streamingChatId.value = normalizeChatId(chatId)
   streamingMessageRequestId.value = String(requestId || '').trim()
+  streamingTargetIndex.value = Number.isInteger(targetIndex) ? targetIndex : -1
 }
 
 function clearStreamingSession() {
   streamingChatId.value = ''
   streamingMessageRequestId.value = ''
+  streamingTargetIndex.value = -1
 }
 
 function getStreamingTargetMessage() {
   const chat = getChatById(streamingChatId.value)
   if (!chat || !Array.isArray(chat.messages) || chat.messages.length === 0) return null
 
-  const requestId = String(streamingMessageRequestId.value || '').trim()
-  if (requestId) {
-    for (let index = chat.messages.length - 1; index >= 0; index -= 1) {
-      const message = chat.messages[index]
-      if ((message?.role === 'assistant' || message?.role === 'bot') && message?.streamRequestId === requestId) {
-        return { chat, message, index }
-      }
-    }
+  const target = resolveStreamingTarget({
+    messages: chat.messages,
+    requestId: streamingMessageRequestId.value,
+    cachedTargetIndex: streamingTargetIndex.value,
+  })
+  if (!target) {
+    streamingTargetIndex.value = -1
+    return null
   }
 
-  for (let index = chat.messages.length - 1; index >= 0; index -= 1) {
-    const message = chat.messages[index]
-    if (message?.role === 'assistant' || message?.role === 'bot') {
-      return { chat, message, index }
-    }
-  }
-
-  return null
+  streamingTargetIndex.value = target.index
+  return { chat, message: target.message, index: target.index }
 }
 
 function updateStreamingTargetMessage(updates) {
@@ -220,22 +226,18 @@ function formatQueryModeLabel(mode) {
   return ASK_MODE_LABELS[key] || String(mode || '').trim()
 }
 
-function getQuestionAnchorId(messageIndex) {
-  return `question-${messageIndex}`
-}
-
-function getQuestionPreview(content) {
-  const normalized = String(content || '').replace(/\s+/g, ' ').trim()
-  if (!normalized) return '未命名问题'
-  return normalized.length > 48 ? `${normalized.slice(0, 48)}...` : normalized
-}
-
 function setUserMessageElement(messageIndex, el) {
   if (el) {
     userMessageElements.set(messageIndex, el)
     return
   }
   userMessageElements.delete(messageIndex)
+}
+
+function getMessageByAbsoluteIndex(messageIndex) {
+  return Number.isInteger(messageIndex) && messageIndex >= 0
+    ? store.currentMessages[messageIndex] || null
+    : null
 }
 
 function clearQuestionHighlight() {
@@ -249,6 +251,10 @@ function clearQuestionHighlight() {
 function resetQuestionOutlineState() {
   clearQuestionHighlight()
   userMessageElements.clear()
+}
+
+function resetHiddenHistoryState() {
+  revealedHiddenMessageCount.value = 0
 }
 
 function clampValue(value, min, max) {
@@ -366,8 +372,12 @@ function startPanelResize(panel, event) {
   window.addEventListener('mouseup', stopPanelResize)
 }
 
-function scrollToQuestion(item) {
+async function scrollToQuestion(item) {
   if (!item) return
+  const didReveal = revealHiddenHistory(item.messageIndex)
+  if (didReveal) {
+    await nextTick()
+  }
   const target = userMessageElements.get(item.messageIndex)
   if (!target) return
   target.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -386,7 +396,7 @@ function isStepsCollapsed(msg) {
 }
 
 function toggleSteps(index) {
-  const msg = store.currentMessages[index]
+  const msg = getMessageByAbsoluteIndex(index)
   if (!msg) return
   msg.stepsCollapsed = !isStepsCollapsed(msg)
 }
@@ -883,9 +893,7 @@ onMounted(async () => {
 
       const messageElement = target.closest('.message[data-message-index]')
       const messageIndex = Number(messageElement?.dataset?.messageIndex || -1)
-      const currentMsg = Number.isInteger(messageIndex) && messageIndex >= 0
-        ? store.currentMessages[messageIndex]
-        : null
+      const currentMsg = getMessageByAbsoluteIndex(messageIndex)
       const locations = buildCitationLocationsForDoi({
         doi,
         doiLocations: currentMsg?.doiLocations || {},
@@ -1041,7 +1049,7 @@ async function sendMessage() {
 
   await store.addUserMessage(message)
   inputMessage.value = ''
-  scrollToBottom()
+  scrollToBottom({ force: true })
 
   const streamRequestId = `stream_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
   store.addBotMessage({
@@ -1057,8 +1065,8 @@ async function sendMessage() {
     streamRequestId
   })
   const streamChatId = normalizeChatId(store.currentChatId || chat.id)
-  startStreamingSession(streamChatId, streamRequestId)
-  scrollToBottom()
+  startStreamingSession(streamChatId, streamRequestId, store.currentMessages.length - 1)
+  scrollToBottom({ force: true })
 
   store.setStreaming(true)
   streamingAbortController.value = new AbortController()
@@ -1264,13 +1272,75 @@ function stopStreaming() {
   clearStreamingSession()
 }
 
-function scrollToBottom() {
+function revealHiddenHistory(targetAbsoluteIndex = null) {
+  const totalMessages = store.currentMessages.length
+  const shouldWindow = totalMessages > MESSAGE_WINDOW_THRESHOLD
+  if (!shouldWindow) return false
+
+  const visibleCount = DEFAULT_VISIBLE_MESSAGE_COUNT
+  if (targetAbsoluteIndex === null || targetAbsoluteIndex === undefined) {
+    const nextRevealCount = Math.min(
+      revealedHiddenMessageCount.value + HISTORY_REVEAL_BATCH_SIZE,
+      Math.max(0, totalMessages - visibleCount)
+    )
+    const changed = nextRevealCount !== revealedHiddenMessageCount.value
+    revealedHiddenMessageCount.value = nextRevealCount
+    return changed
+  }
+
+  const decision = resolveHiddenHistoryReveal({
+    totalMessages,
+    visibleCount,
+    revealedCount: revealedHiddenMessageCount.value,
+    batchSize: HISTORY_REVEAL_BATCH_SIZE,
+    targetAbsoluteIndex,
+  })
+  revealedHiddenMessageCount.value = decision.nextRevealedCount
+  return decision.needsReveal
+}
+
+function updateQuestionOutlineItems() {
+  questionOutlineItems.value = buildQuestionOutlineItems(store.currentMessages)
+}
+
+function updateNearBottomState() {
+  if (!messagesArea.value) {
+    isNearBottomRef.value = true
+    pendingAutoScroll.value = false
+    return
+  }
+
+  const nearBottom = isNearBottom({
+    scrollTop: messagesArea.value.scrollTop,
+    clientHeight: messagesArea.value.clientHeight,
+    scrollHeight: messagesArea.value.scrollHeight,
+    thresholdPx: DEFAULT_NEAR_BOTTOM_THRESHOLD_PX,
+  })
+  isNearBottomRef.value = nearBottom
+  if (nearBottom) {
+    pendingAutoScroll.value = false
+  }
+}
+
+function handleMessagesScroll() {
+  updateNearBottomState()
+}
+
+function scrollToBottom(options = {}) {
+  const force = Boolean(options?.force)
+  if (!shouldAutoScroll({ force, nearBottom: isNearBottomRef.value })) {
+    pendingAutoScroll.value = true
+    return
+  }
+
+  pendingAutoScroll.value = false
   if (scrollFrame !== null) return
   scrollFrame = window.requestAnimationFrame(() => {
     scrollFrame = null
     nextTick(() => {
       if (messagesArea.value) {
         messagesArea.value.scrollTop = messagesArea.value.scrollHeight
+        updateNearBottomState()
       }
     })
   })
@@ -1454,6 +1524,25 @@ async function handleRemoveExcel(excelId) {
 watch(mergedAndSortedFiles, () => {
   normalizeSelectedFileIds()
 }, { deep: true })
+
+watch(
+  () => normalizeChatId(store.currentChatId),
+  () => {
+    resetHiddenHistoryState()
+  },
+  { immediate: true }
+)
+
+watch(
+  () => [normalizeChatId(store.currentChatId), questionOutlineSignature.value],
+  () => {
+    updateQuestionOutlineItems()
+    nextTick(() => {
+      updateNearBottomState()
+    })
+  },
+  { immediate: true }
+)
 </script>
 
 <template>
@@ -1659,7 +1748,7 @@ watch(mergedAndSortedFiles, () => {
         </div>
       </div>
 
-      <div class="messages-area" ref="messagesArea">
+      <div class="messages-area" ref="messagesArea" @scroll="handleMessagesScroll">
         <template v-if="!hasMessages">
           <div class="empty-state">
             <div class="empty-icon">🔋</div>
@@ -1668,57 +1757,62 @@ watch(mergedAndSortedFiles, () => {
           </div>
         </template>
         <template v-else>
+          <div v-if="hiddenHistoryCount > 0" class="hidden-history-banner">
+            <button class="hidden-history-btn" type="button" @click="revealHiddenHistory()">
+              查看更早消息（{{ hiddenHistoryCount }}）
+            </button>
+          </div>
           <div
-            v-for="(msg, index) in store.currentMessages"
-            :key="index"
-            v-memo="[getMessageRenderMemoKey(msg), highlightedQuestionMessageIndex === index]"
+            v-for="entry in visibleMessageEntries"
+            :key="entry.absoluteMessageIndex"
+            v-memo="[getMessageRenderMemoKey(entry.message), highlightedQuestionMessageIndex === entry.absoluteMessageIndex]"
             class="message"
-            :data-message-index="index"
+            :data-message-index="entry.absoluteMessageIndex"
             :class="[
-              'message-' + msg.role,
+              'message-' + entry.message.role,
               {
-                'message-question-anchor': msg.role === 'user',
-                'message-highlighted': highlightedQuestionMessageIndex === index
+                'message-question-anchor': entry.message.role === 'user',
+                'message-highlighted': highlightedQuestionMessageIndex === entry.absoluteMessageIndex
               }
             ]"
-            :id="msg.role === 'user' ? getQuestionAnchorId(index) : undefined"
-            :ref="msg.role === 'user' ? (el) => setUserMessageElement(index, el) : null"
+            :id="entry.message.role === 'user' ? getQuestionAnchorId(entry.absoluteMessageIndex) : undefined"
+            :ref="entry.message.role === 'user' ? (el) => setUserMessageElement(entry.absoluteMessageIndex, el) : null"
           >
-            <template v-if="msg.role === 'user'">
-              <div class="message-content">{{ msg.content }}</div>
+            <template v-if="entry.message.role === 'user'">
+              <div class="message-content">{{ entry.message.content }}</div>
             </template>
-            <template v-else-if="msg.role === 'system'">
+            <template v-else-if="entry.message.role === 'system'">
               <div class="system-message">
                 <span class="system-icon">ℹ️</span>
-                <span class="system-text">{{ msg.content }}</span>
+                <span class="system-text">{{ entry.message.content }}</span>
               </div>
             </template>
-            <template v-else-if="msg.role === 'bot' || msg.role === 'assistant'">
+            <template v-else-if="entry.message.role === 'bot' || entry.message.role === 'assistant'">
               <div class="bot-avatar">✨</div>
               <div class="message-content">
-                <div v-if="msg.queryMode" class="query-mode-badge">{{ msg.queryMode }}</div>
-                <div v-if="msg.steps && msg.steps.length > 0" class="steps-panel">
-                  <div class="steps-header" @click="toggleSteps(index)">
+                <div v-if="entry.message.queryMode" class="query-mode-badge">{{ entry.message.queryMode }}</div>
+                <div v-if="entry.message.steps && entry.message.steps.length > 0" class="steps-panel">
+                  <div class="steps-header" @click="toggleSteps(entry.absoluteMessageIndex)">
                     <div class="steps-title">
-                      <span class="steps-toggle">{{ isStepsCollapsed(msg) ? '▶' : '▼' }}</span>
+                      <span class="steps-toggle">{{ isStepsCollapsed(entry.message) ? '▶' : '▼' }}</span>
                       <span>处理过程</span>
-                      <span class="steps-count">{{ msg.steps.length }}</span>
+                      <span class="steps-count">{{ entry.message.steps.length }}</span>
                     </div>
                     <div class="steps-meta">
-                      <span v-if="getStepOverview(msg)" class="steps-overview">{{ getStepOverview(msg) }}</span>
-                      <div v-if="isStepsCollapsed(msg) && getCollapsedStepSummary(msg)" class="steps-summary">
-                        <span class="step-icon" :class="'step-icon-' + normalizeStepStatus(getCollapsedStepSummary(msg).status)">
-                          {{ getStepIcon(getCollapsedStepSummary(msg)) }}
+                      <span v-if="getStepOverview(entry.message)" class="steps-overview">{{ getStepOverview(entry.message) }}</span>
+                      <div v-if="isStepsCollapsed(entry.message) && getCollapsedStepSummary(entry.message)" class="steps-summary">
+                        <span class="step-icon" :class="'step-icon-' + normalizeStepStatus(getCollapsedStepSummary(entry.message).status)">
+                          {{ getStepIcon(getCollapsedStepSummary(entry.message)) }}
                         </span>
-                        <span class="step-message">{{ getStepTitle(getCollapsedStepSummary(msg)) }}</span>
-                        <span v-if="getStepCount(getCollapsedStepSummary(msg))" class="step-badge">
-                          {{ getStepCount(getCollapsedStepSummary(msg)) }}
+                        <span class="step-message">{{ getStepTitle(getCollapsedStepSummary(entry.message)) }}</span>
+                        <span v-if="getStepCount(getCollapsedStepSummary(entry.message))" class="step-badge">
+                          {{ getStepCount(getCollapsedStepSummary(entry.message)) }}
                         </span>
                       </div>
                     </div>
                   </div>
-                  <div v-show="!isStepsCollapsed(msg)" class="processing-steps">
-                    <div v-for="(step, idx) in msg.steps" :key="step.step || idx" class="step-item" :class="'step-' + normalizeStepStatus(step.status)">
+                  <div v-show="!isStepsCollapsed(entry.message)" class="processing-steps">
+                    <div v-for="(step, idx) in entry.message.steps" :key="step.step || idx" class="step-item" :class="'step-' + normalizeStepStatus(step.status)">
                       <span class="step-icon" :class="'step-icon-' + normalizeStepStatus(step.status)">{{ getStepIcon(step) }}</span>
                       <div class="step-body">
                         <div class="step-row">
@@ -1731,8 +1825,8 @@ watch(mergedAndSortedFiles, () => {
                     </div>
                   </div>
                 </div>
-                <div v-if="msg.content && isStreamingTextMessage(msg)" v-html="getStreamingMessageHtml(msg)"></div>
-                <div v-else-if="msg.content" v-html="getRenderedMessageHtml(msg)"></div>
+                <div v-if="entry.message.content && isStreamingTextMessage(entry.message)" v-html="getStreamingMessageHtml(entry.message)"></div>
+                <div v-else-if="entry.message.content" v-html="getRenderedMessageHtml(entry.message)"></div>
                 <div v-else class="loading-animation"><span>思考中...</span></div>
               </div>
             </template>

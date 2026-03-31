@@ -4,7 +4,8 @@
 import { getRouteModeLabel } from '../utils/routingStatus.js'
 
 function resolveBackendBase() {
-  const explicit = String(import.meta.env.VITE_API_BASE_URL || '').trim();
+  const viteEnv = (typeof import.meta !== 'undefined' && import.meta?.env) ? import.meta.env : {};
+  const explicit = String(viteEnv.VITE_API_BASE_URL || '').trim();
   if (explicit) {
     return explicit.replace(/\/$/, '');
   }
@@ -250,6 +251,9 @@ function normalizeMessage(item) {
     metadata.doi_locations = doiLocations;
   }
 
+  const hasStepsCollapsed = Object.prototype.hasOwnProperty.call(item || {}, 'stepsCollapsed');
+  const hasIsComplete = Object.prototype.hasOwnProperty.call(item || {}, 'isComplete');
+
   return {
     role: String(item?.role || 'assistant'),
     content: String(item?.content || ''),
@@ -260,8 +264,8 @@ function normalizeMessage(item) {
     referenceLinks,
     doiLocations,
     steps,
-    stepsCollapsed: false,
-    isComplete: true,
+    ...(hasStepsCollapsed ? { stepsCollapsed: Boolean(item?.stepsCollapsed) } : {}),
+    ...(hasIsComplete ? { isComplete: item?.isComplete !== false } : {}),
   };
 }
 

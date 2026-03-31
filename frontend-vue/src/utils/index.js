@@ -2,61 +2,196 @@
 
 import { marked } from 'marked'
 
-const DOI_INLINE_LINK_PATTERN = /\((?:doi\s*=|DOI:\s*)(10\.(?:[^\s,()]+|\([^\s,()]+\))+)(?:\s*·\s*查看原文[^)]*)?\)/gi
-const DOI_LABELED_TEXT_PATTERN = /\[DOI:\s*[^\]\n]+\]|\((?:doi\s*=|DOI:\s*)[^)\n]+(?:\)[^)\n]*)?\)|\bdoi[:=]\s*10\.\d{4,9}[A-Za-z0-9._;()/:+-]*/gi
-const DOI_PLAIN_TEXT_PATTERN = /\b(doi[:=]\s*)?(10\.[A-Za-z0-9._;()/:+-]+)/gi
-
-function normalizeDoiForLink(raw) {
-  return extractDoiLinks(raw)[0] || ''
+function isDigit(char) {
+  return char >= '0' && char <= '9'
 }
 
-function extractDoiLinks(raw) {
-  let doi = String(raw || '').replace(/<[^>]*>/g, '').trim()
-  if (!doi) return []
+function isAsciiLetter(char) {
+  const code = char.charCodeAt(0)
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122)
+}
 
-  doi = doi.replace(/^doi\s*[:=]\s*/i, '')
-  doi = doi.replace(/·\s*查看原文.*/i, '')
-  doi = doi.replace(/[)\],;:]+$/g, '')
-  doi = doi.replace(/(10\.\d{1,9})(?=[A-Za-z])/gi, '$1/')
+function isDoiBoundary(char) {
+  return !char || /\s|[>"'([{<]/.test(char)
+}
 
-  const matches = doi.match(/10\.\d{1,9}[/_][A-Za-z0-9._;()/:-]+?(?=(?:10\.\d{1,9}[/_])|$)/gi)
-  const candidates = matches && matches.length > 0 ? matches : [doi]
-  const results = []
-  const seen = new Set()
+function isDoiBodyChar(char) {
+  return /[A-Za-z0-9._;/:+\-_()-]/.test(char)
+}
 
-  for (const candidate of candidates) {
-    let normalized = String(candidate || '').trim()
-    if (normalized.includes('_') && !normalized.includes('/')) {
-      normalized = normalized.replace('_', '/')
-    }
-    normalized = normalized.replace(/[)\],;:]+$/g, '')
-    if (!/^10\.\d{1,9}\//i.test(normalized)) continue
-    const key = normalized.toLowerCase()
-    if (seen.has(key)) continue
-    seen.add(key)
-    results.push(normalized)
+function normalizeDoiForLink(raw) {
+  let value = String(raw || '').trim()
+  if (!value) return ''
+  value = value.replace(/[)\],;:]+$/g, '')
+  if (value.includes('_') && !value.includes('/')) {
+    value = value.replace('_', '/')
   }
-  return results
+  return /^10\.\d{1,9}\//i.test(value) ? value : ''
+}
+
+function readEnclosedSpan(text, startIndex, openChar, closeChar) {
+  if (text[startIndex] !== openChar) return null
+  let depth = 0
+  for (let i = startIndex; i < text.length; i += 1) {
+    const char = text[i]
+    if (char === openChar) {
+      depth += 1
+      continue
+    }
+    if (char === closeChar) {
+      depth -= 1
+      if (depth === 0) {
+        return {
+          start: startIndex,
+          end: i + 1,
+          raw: text.slice(startIndex, i + 1),
+          inner: text.slice(startIndex + 1, i),
+        }
+      }
+    }
+  }
+  return null
+}
+
+function readDoiToken(text, startIndex) {
+  if (!String(text || '').startsWith('10.', startIndex)) return null
+  let i = startIndex + 3
+  while (i < text.length && isDigit(text[i])) i += 1
+  if (i === startIndex + 3) return null
+  if (i >= text.length || !['/', '_'].includes(text[i])) return null
+  i += 1
+
+  let bodyStart = i
+  let depth = 0
+  while (i < text.length) {
+    const char = text[i]
+    if (!isDoiBodyChar(char)) break
+    if (char === '(') depth += 1
+    if (char === ')') {
+      if (depth === 0) break
+      depth -= 1
+    }
+    i += 1
+  }
+
+  if (i === bodyStart || depth !== 0) return null
+
+  let end = i
+  while (end > startIndex && /[.,;:]+/.test(text[end - 1])) {
+    end -= 1
+  }
+  if (end <= startIndex) return null
+
+  const normalized = normalizeDoiForLink(text.slice(startIndex, end))
+  if (!normalized) return null
+
+  return {
+    start: startIndex,
+    end,
+    raw: text.slice(startIndex, end),
+    normalized,
+  }
+}
+
+function readDoiPrefixedSpan(text, startIndex) {
+  const lower = text.slice(startIndex).toLowerCase()
+  if (!lower.startsWith('doi')) return null
+  const before = startIndex > 0 ? text[startIndex - 1] : ''
+  if (before && /[A-Za-z0-9]/.test(before)) return null
+  if (before === '(' || before === '[') return null
+
+  let i = startIndex + 3
+  while (i < text.length && /\s/.test(text[i])) i += 1
+  if (![':', '='].includes(text[i])) return null
+  i += 1
+  while (i < text.length && /\s/.test(text[i])) i += 1
+
+  const doiToken = readDoiToken(text, i)
+  if (!doiToken) return null
+
+  return {
+    start: startIndex,
+    end: doiToken.end,
+    prefix: text.slice(startIndex, i),
+    normalized: doiToken.normalized,
+  }
+}
+
+function parseWrappedDoi(inner) {
+  const trimmed = String(inner || '').trim()
+  const prefixed = readDoiPrefixedSpan(trimmed, 0)
+  if (!prefixed || prefixed.start !== 0) return null
+  const suffix = trimmed.slice(prefixed.end).trim()
+  if (suffix && !suffix.startsWith('·查看原文')) return null
+  return prefixed.normalized
+}
+
+function readWrappedDoiSegment(text, startIndex) {
+  const openChar = text[startIndex]
+  const closeChar = openChar === '[' ? ']' : ')'
+  const span = readEnclosedSpan(text, startIndex, openChar, closeChar)
+  if (!span) return null
+  const normalized = parseWrappedDoi(span.inner)
+  if (!normalized) return null
+  return {
+    start: span.start,
+    end: span.end,
+    openChar,
+    closeChar,
+    normalized,
+  }
+}
+
+function renderWrappedDoiLink(match) {
+  return `${match.openChar}<a href="#" class="doi-link" data-doi="${match.normalized}">${match.normalized}</a>${match.closeChar}`
+}
+
+function readPlainDoiSegment(text, startIndex) {
+  const current = text[startIndex]
+  if (current !== '1' || text[startIndex + 1] !== '0' || text[startIndex + 2] !== '.') return null
+  const before = startIndex > 0 ? text[startIndex - 1] : ''
+  if (before && !isDoiBoundary(before) && before !== '\n') return null
+  if (['=', ':'].includes(before)) return null
+  return readDoiToken(text, startIndex)
+}
+
+function linkifyDoiTextSegment(text) {
+  const source = String(text || '')
+  let output = ''
+  let i = 0
+
+  while (i < source.length) {
+    const wrapped = (source[i] === '(' || source[i] === '[')
+      ? readWrappedDoiSegment(source, i)
+      : null
+    if (wrapped) {
+      output += renderWrappedDoiLink(wrapped)
+      i = wrapped.end
+      continue
+    }
+
+    const prefixed = isAsciiLetter(source[i]) ? readDoiPrefixedSpan(source, i) : null
+    if (prefixed) {
+      output += `${prefixed.prefix}<a href="#" class="doi-link" data-doi="${prefixed.normalized}">${prefixed.normalized}</a>`
+      i = prefixed.end
+      continue
+    }
+
+    const plain = source[i] === '1' ? readPlainDoiSegment(source, i) : null
+    if (plain) {
+      output += `<a href="#" class="doi-link" data-doi="${plain.normalized}">${plain.normalized}</a>`
+      i = plain.end
+      continue
+    }
+
+    output += source[i]
+    i += 1
+  }
+
+  return output
 }
 
 function applyDoiLinksToHtml(html) {
-  let nextHtml = String(html || '')
-  nextHtml = nextHtml.replace(/\[DOI:\s*([^\]]+)\]/gi, (match, doi) => {
-    const cleanDois = extractDoiLinks(doi)
-    if (cleanDois.length === 0) return match
-    return cleanDois.map((cleanDoi) => `<a href="#" class="doi-link" data-doi="${cleanDoi}">[DOI: ${cleanDoi}]</a>`).join(' ')
-  })
-
-  nextHtml = nextHtml.replace(DOI_INLINE_LINK_PATTERN, (match, doi) => {
-    const cleanDois = extractDoiLinks(doi)
-    if (cleanDois.length === 0) return match
-    return cleanDois.map((cleanDoi) => `(<a href="#" class="doi-link" data-doi="${cleanDoi}">${cleanDoi}</a>)`).join(' ')
-  })
-
-  return applyPlainTextDoiLinksToHtml(nextHtml)
-}
-
-function applyPlainTextDoiLinksToHtml(html) {
   const segments = String(html || '').split(/(<[^>]+>)/g)
   let inAnchor = false
 
@@ -73,26 +208,36 @@ function applyPlainTextDoiLinksToHtml(html) {
       }
       if (inAnchor) return segment
 
-      return segment.replace(DOI_PLAIN_TEXT_PATTERN, (match, prefix = '') => {
-        const cleanDois = extractDoiLinks(match)
-        if (cleanDois.length === 0) return match
-        const rendered = cleanDois
-          .map((cleanDoi) => `<a href="#" class="doi-link" data-doi="${cleanDoi}">${cleanDoi}</a>`)
-          .join(' ')
-        return prefix ? `${prefix}${rendered}` : rendered
-      })
+      return linkifyDoiTextSegment(segment)
     })
     .join('')
 }
 
 function protectDoiSegments(text) {
   const placeholders = []
-  const protectedText = String(text || '').replace(DOI_LABELED_TEXT_PATTERN, (match) => {
-    if (!/10\.\d{1,9}/i.test(match)) return match
-    const token = `@@DOI${placeholders.length}@@`
-    placeholders.push(match)
-    return token
-  })
+  const source = String(text || '')
+  let protectedText = ''
+  let i = 0
+
+  while (i < source.length) {
+    const wrapped = (source[i] === '(' || source[i] === '[')
+      ? readWrappedDoiSegment(source, i)
+      : null
+    const prefixed = wrapped ? null : (isAsciiLetter(source[i]) ? readDoiPrefixedSpan(source, i) : null)
+    const match = wrapped || prefixed
+
+    if (match) {
+      const raw = source.slice(match.start, match.end)
+      const token = `@@DOI${placeholders.length}@@`
+      placeholders.push(raw)
+      protectedText += token
+      i = match.end
+      continue
+    }
+
+    protectedText += source[i]
+    i += 1
+  }
 
   return {
     text: protectedText,

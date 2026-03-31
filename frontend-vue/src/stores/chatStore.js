@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia'
+import { prepareChatsForPersistence, restorePersistedChats } from './chatPersistence.js'
+import { resolveChatPersistPolicy, shouldForcePersistForStreamingTransition } from './streamPersistPolicy.js'
 import { ref, computed } from 'vue'
-import { api } from '../services/api'
+import { api } from '../services/api.js'
 
 export const useChatStore = defineStore('chat', () => {
   const DEFAULT_CHAT_TITLE = '新对话'
@@ -20,7 +22,6 @@ export const useChatStore = defineStore('chat', () => {
   })
   const userId = ref(null)
   const syncStatus = ref('synced') // synced/syncing/failed
-  const STREAM_PERSIST_DEBOUNCE_MS = 250
   let persistTimer = null
   let switchChatRequestToken = 0
   
@@ -519,7 +520,7 @@ export const useChatStore = defineStore('chat', () => {
     let cachedChats = []
     if (saved) {
       try {
-        cachedChats = (JSON.parse(saved) || []).map((chat) => normalizeChat(chat))
+        cachedChats = restorePersistedChats(JSON.parse(saved) || [])
       } catch (e) {
         cachedChats = []
       }
@@ -604,7 +605,7 @@ export const useChatStore = defineStore('chat', () => {
       preferredChatId: currentChatId.value,
       preservePreferredTemp: true,
     })
-    const persistedChats = sanitizeChats(chats.value, { preferredChatId: currentChatId.value })
+    const persistedChats = prepareChatsForPersistence(sanitizeChats(chats.value, { preferredChatId: currentChatId.value }))
     localStorage.setItem(CHATS_STORAGE_KEY, JSON.stringify(persistedChats))
 
     const persistedCurrentChatId = persistedChats.some((chat) => chat.id === currentChatId.value)
@@ -619,8 +620,12 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function saveChats(options = {}) {
-    const force = Boolean(options.force)
-    if (force) {
+    const persistPolicy = resolveChatPersistPolicy({
+      force: options.force,
+      isStreaming: isStreaming.value,
+    })
+
+    if (persistPolicy.mode === 'immediate') {
       if (persistTimer) {
         clearTimeout(persistTimer)
         persistTimer = null
@@ -629,17 +634,11 @@ export const useChatStore = defineStore('chat', () => {
       return
     }
 
-    // During streaming, avoid blocking main thread on every chunk update.
-    if (isStreaming.value) {
-      if (persistTimer) return
-      persistTimer = setTimeout(() => {
-        persistTimer = null
-        persistChatsNow()
-      }, STREAM_PERSIST_DEBOUNCE_MS)
-      return
-    }
-
-    persistChatsNow()
+    if (persistTimer) return
+    persistTimer = setTimeout(() => {
+      persistTimer = null
+      persistChatsNow()
+    }, persistPolicy.debounceMs)
   }
 
   function createChat() {
@@ -716,14 +715,28 @@ export const useChatStore = defineStore('chat', () => {
               if (!sameMessage) {
                 return normalizeMessage(message)
               }
-              return normalizeMessage({
+              const mergedSameMessage = {
                 ...cached,
                 ...message,
                 metadata: {
                   ...(cached?.metadata && typeof cached.metadata === 'object' ? cached.metadata : {}),
                   ...(message?.metadata && typeof message.metadata === 'object' ? message.metadata : {}),
                 },
-              })
+              }
+
+              // Preserve locally restored incomplete/expanded UI state when the server
+              // detail payload does not carry the corresponding state for the same message.
+              const serverProvidedIsComplete = Object.prototype.hasOwnProperty.call(message || {}, 'isComplete')
+              const serverProvidedStepsCollapsed = Object.prototype.hasOwnProperty.call(message || {}, 'stepsCollapsed')
+
+              if (cached?.isComplete === false && !serverProvidedIsComplete) {
+                mergedSameMessage.isComplete = false
+              }
+              if (cached?.stepsCollapsed === true && !serverProvidedStepsCollapsed) {
+                mergedSameMessage.stepsCollapsed = true
+              }
+
+              return normalizeMessage(mergedSameMessage)
             })
             // 使用 Vue 3 的响应式方式更新数组
             chat.messages = mergedMessages
@@ -983,8 +996,9 @@ export const useChatStore = defineStore('chat', () => {
   // ==================== 其他 ====================
   
   function setStreaming(value) {
+    const previousIsStreaming = isStreaming.value
     isStreaming.value = value
-    if (!value) {
+    if (shouldForcePersistForStreamingTransition({ previousIsStreaming, nextIsStreaming: value })) {
       saveChats({ force: true })
     }
   }
