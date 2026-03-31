@@ -1,0 +1,13 @@
+{
+  "canonical_patent_id": "CN123456789A",
+  "section": "abstract",
+  "title": "一种电池热管理系统",
+  "abstract_text": "本发明公开了一种电池热管理系统。",
+  "abstract_html": "<p>本发明公开了一种电池热管理系统。</p>",
+  "bibliography": {
+    "publication_number": "CN123456789A",
+    "application_number": "CN202410001234X",
+    "country": "CN",
+    "kind_code": "A"
+  }
+}

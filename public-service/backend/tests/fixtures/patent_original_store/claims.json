@@ -1,0 +1,19 @@
+{
+  "canonical_patent_id": "CN123456789A",
+  "section": "claim",
+  "section_label": "权利要求",
+  "claims": [
+    {
+      "claim_number": 1,
+      "label": "权利要求1",
+      "text": "一种电池热管理系统。",
+      "html": "<p>一种电池热管理系统。</p>"
+    },
+    {
+      "claim_number": 2,
+      "label": "权利要求2",
+      "text": "根据权利要求1所述的系统。",
+      "html": "<p>根据权利要求1所述的系统。</p>"
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "canonical_patent_id": "CN123456789A",
+  "title": "一种电池热管理系统",
+  "provider": "patent_source_x",
+  "original_version": "2026-03-31T12:00:00Z#sha256:test",
+  "country": "CN",
+  "kind_code": "A",
+  "publication_number": "CN123456789A",
+  "application_number": "CN202410001234X",
+  "objects": {
+    "structured": {
+      "claims": "patent/originals/CN123456789A/structured/claims.json",
+      "description": "patent/originals/CN123456789A/structured/description.json",
+      "bibliography": "patent/originals/CN123456789A/structured/bibliography.json"
+    },
+    "figures": {
+      "summary": {
+        "primary_object": "patent/originals/CN123456789A/figures/summary/figure-001.png",
+        "ordered_objects": [
+          "patent/originals/CN123456789A/figures/summary/figure-001.png"
+        ]
+      },
+      "fulltext": {
+        "primary_object": "patent/originals/CN123456789A/figures/fulltext/figure-002.png",
+        "ordered_objects": [
+          "patent/originals/CN123456789A/figures/fulltext/figure-002.png"
+        ]
+      }
+    },
+    "fulltext_pdf": "patent/originals/CN123456789A/fulltext/original.pdf"
+  },
+  "availability": {
+    "claims": true,
+    "description": true,
+    "abstract": true,
+    "figure": true,
+    "fulltext_pdf": true
+  }
+}

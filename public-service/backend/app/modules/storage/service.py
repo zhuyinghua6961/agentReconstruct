@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import mimetypes
 import os
 import re
 import tempfile
@@ -17,6 +19,10 @@ _PAPER_DOWNLOAD_LOCKS_GUARD = threading.Lock()
 
 
 class StorageService:
+    @staticmethod
+    def normalize_patent_id(value: str) -> str:
+        return str(value or "").strip().upper()
+
     @staticmethod
     def normalize_doi(value: str) -> str:
         text = str(value or "").strip()
@@ -67,6 +73,81 @@ class StorageService:
     @classmethod
     def build_paper_object_name(cls, doi: str) -> str:
         return f"papers/{cls.build_paper_filename(doi)}"
+
+    @classmethod
+    def build_patent_original_prefix(cls, canonical_patent_id: str) -> str:
+        normalized = cls.normalize_patent_id(canonical_patent_id)
+        return f"patent/originals/{normalized}" if normalized else "patent/originals"
+
+    @classmethod
+    def build_patent_original_manifest_object_name(cls, canonical_patent_id: str) -> str:
+        return f"{cls.build_patent_original_prefix(canonical_patent_id)}/manifest.json"
+
+    @staticmethod
+    def _resolve_backend(*, backend: Any | None, project_root: str | None):
+        if backend is not None:
+            return backend
+        return get_storage_backend(project_root=project_root)
+
+    @staticmethod
+    def _resolve_local_backend_path(*, backend: Any, object_name: str) -> Path:
+        path = Path(object_name)
+        if path.is_absolute():
+            return path
+        root_dir = Path(str(getattr(backend, "root_dir", "") or "")).expanduser()
+        if str(root_dir):
+            return (root_dir / path).resolve()
+        return path.resolve()
+
+    def read_object_bytes(
+        self,
+        *,
+        object_name: str,
+        project_root: str | None = None,
+        backend: Any | None = None,
+    ) -> bytes | None:
+        active_backend = self._resolve_backend(backend=backend, project_root=project_root)
+        reader = getattr(active_backend, "read_object_bytes", None)
+        if callable(reader):
+            return reader(object_name=object_name)
+        path = self._resolve_local_backend_path(backend=active_backend, object_name=object_name)
+        if not path.exists() or not path.is_file():
+            return None
+        return path.read_bytes()
+
+    def read_json_object(
+        self,
+        *,
+        object_name: str,
+        project_root: str | None = None,
+        backend: Any | None = None,
+    ) -> dict[str, Any] | list[Any] | None:
+        payload = self.read_object_bytes(object_name=object_name, project_root=project_root, backend=backend)
+        if payload is None:
+            return None
+        return json.loads(payload.decode("utf-8"))
+
+    def stat_object(
+        self,
+        *,
+        object_name: str,
+        project_root: str | None = None,
+        backend: Any | None = None,
+    ) -> dict[str, Any] | None:
+        active_backend = self._resolve_backend(backend=backend, project_root=project_root)
+        stater = getattr(active_backend, "stat_object", None)
+        if callable(stater):
+            return stater(object_name=object_name)
+        path = self._resolve_local_backend_path(backend=active_backend, object_name=object_name)
+        if not path.exists() or not path.is_file():
+            return None
+        return {
+            "object_name": object_name,
+            "etag": "",
+            "size": int(path.stat().st_size),
+            "content_type": mimetypes.guess_type(str(path.name))[0] or "application/octet-stream",
+            "last_modified": path.stat().st_mtime,
+        }
 
     @staticmethod
     def parse_storage_ref(storage_ref: str | None) -> dict[str, str | None] | None:

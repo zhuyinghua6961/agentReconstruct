@@ -1,0 +1,19 @@
+{
+  "canonical_patent_id": "CN123456789A",
+  "section": "description",
+  "section_label": "说明书",
+  "paragraphs": [
+    {
+      "paragraph_id": "p-001",
+      "label": "段落1",
+      "text": "本发明涉及电池热管理。",
+      "html": "<p>本发明涉及电池热管理。</p>"
+    },
+    {
+      "paragraph_id": "p-002",
+      "label": "段落2",
+      "text": "该系统包括冷却回路。",
+      "html": "<p>该系统包括冷却回路。</p>"
+    }
+  ]
+}

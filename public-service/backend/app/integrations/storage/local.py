@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import mimetypes
 import shutil
 from pathlib import Path
+from typing import Any
 
 from app.integrations.storage.base import StorageBackend
 
@@ -9,6 +11,30 @@ from app.integrations.storage.base import StorageBackend
 class LocalStorageBackend(StorageBackend):
     def __init__(self, *, root_dir: str):
         self.root_dir = Path(root_dir)
+
+    def stat_object(self, *, object_name: str, bucket: str | None = None) -> dict[str, Any] | None:
+        _ = bucket
+        path = Path(object_name)
+        if not path.is_absolute():
+            path = (self.root_dir / path).resolve()
+        if not path.exists() or not path.is_file():
+            return None
+        return {
+            "object_name": object_name,
+            "etag": "",
+            "size": int(path.stat().st_size),
+            "content_type": mimetypes.guess_type(str(path.name))[0] or "application/octet-stream",
+            "last_modified": path.stat().st_mtime,
+        }
+
+    def read_object_bytes(self, *, object_name: str, bucket: str | None = None) -> bytes | None:
+        _ = bucket
+        path = Path(object_name)
+        if not path.is_absolute():
+            path = (self.root_dir / path).resolve()
+        if not path.exists() or not path.is_file():
+            return None
+        return path.read_bytes()
 
     def object_exists(self, *, object_name: str, bucket: str | None = None) -> bool:
         _ = bucket

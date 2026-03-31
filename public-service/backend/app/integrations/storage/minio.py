@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Any
 
 from app.integrations.storage.base import StorageBackend
 
@@ -48,6 +49,47 @@ class MinIOStorageBackend(StorageBackend):
             return True
         except Exception:
             return False
+
+    @staticmethod
+    def _is_not_found_error(exc: Exception) -> bool:
+        return str(getattr(exc, "code", "") or "") in {"NoSuchKey", "NoSuchObject"}
+
+    def stat_object(self, *, object_name: str, bucket: str | None = None) -> dict[str, Any] | None:
+        target_bucket = str(bucket or "").strip() or self._bucket
+        try:
+            result = self._client.stat_object(target_bucket, object_name)
+        except self._s3_error_cls as exc:
+            if self._is_not_found_error(exc):
+                return None
+            raise
+        return {
+            "bucket": target_bucket,
+            "object_name": object_name,
+            "etag": str(getattr(result, "etag", "") or ""),
+            "size": int(getattr(result, "size", 0) or 0),
+            "content_type": str(getattr(result, "content_type", "") or ""),
+            "last_modified": getattr(result, "last_modified", None),
+        }
+
+    def read_object_bytes(self, *, object_name: str, bucket: str | None = None) -> bytes | None:
+        target_bucket = str(bucket or "").strip() or self._bucket
+        try:
+            response = self._client.get_object(target_bucket, object_name)
+        except self._s3_error_cls as exc:
+            if self._is_not_found_error(exc):
+                return None
+            raise
+        try:
+            return response.read()
+        finally:
+            try:
+                response.close()
+            except Exception:
+                pass
+            try:
+                response.release_conn()
+            except Exception:
+                pass
 
     def upload_file(self, *, local_path: str, object_name: str, content_type: str | None = None) -> str:
         self._client.fput_object(self._bucket, object_name, local_path, content_type=content_type)
