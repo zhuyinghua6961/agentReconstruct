@@ -143,9 +143,11 @@ Run services in the foreground.
 Recommended foreground commands:
 
 - `gateway`
-  - `gunicorn -k uvicorn.workers.UvicornWorker app.main:app --chdir /app/gateway --bind 0.0.0.0:8101 --workers 8 --timeout 600`
+  - preferred: `bash /app/gateway/scripts/run_gunicorn_foreground.sh`
+  - equivalent raw command: `gunicorn -k uvicorn.workers.UvicornWorker app.main:app --chdir /app/gateway --bind 0.0.0.0:8101 --workers 8 --timeout 600`
 - `gateway-admission-worker`
-  - run a dedicated gateway admission worker entrypoint in the foreground, not the normal web `gunicorn` command
+  - preferred: `bash /app/gateway/scripts/run_admission_worker_foreground.sh`
+  - equivalent raw command: `python -m app.services.execution_admission`
 - `public-service`
   - `gunicorn -k uvicorn.workers.UvicornWorker app.main:app --chdir /app/public-service/backend --bind 0.0.0.0:8102 --workers 8 --timeout 600`
 - `fastQA`
@@ -206,17 +208,87 @@ These items are already driven by environment variables in current code and are 
   - `GATEWAY_CONVERSATION_FILE_PROVIDER`
 - gateway interactive admission
   - `INTERACTIVE_EXECUTION_MAX_CONCURRENT`
-  - backend-specific admission ceilings for at least `fast_or_patent` and `thinking`
-  - queued retention TTL
-  - post-admit attach retention TTL
-  - dispatcher role enablement or worker-role selector
-  - gateway Redis connection settings and Redis key prefix for admission state
+  - `INTERACTIVE_EXECUTION_FAST_OR_PATENT_MAX_CONCURRENT`
+  - `INTERACTIVE_EXECUTION_THINKING_MAX_CONCURRENT`
+  - `INTERACTIVE_QUEUED_TTL_SECONDS`
+  - `INTERACTIVE_POST_ADMIT_ATTACH_TTL_SECONDS`
+  - `GATEWAY_ADMISSION_ENABLED`
+  - `GATEWAY_ADMISSION_DISPATCHER_ENABLED`
+  - `GATEWAY_RUNTIME_ROLE`
+  - `GATEWAY_ADMISSION_CONTROL_TOKEN`
+  - `REDIS_ENABLED`
+  - `REDIS_URL`
+  - `REDIS_HOST`
+  - `REDIS_PORT`
+  - `REDIS_USERNAME`
+  - `REDIS_PASSWORD`
+  - `REDIS_DB`
+  - `REDIS_KEY_PREFIX`
 
 Recommended deployment rule for these admission settings:
 
 - keep them in Compose `environment` or shared `env_file`
 - let `gateway-web` and `gateway-admission-worker` read the same values
 - override only role-selection variables per service
+
+Recommended baseline values for the first admission rollout:
+
+- `INTERACTIVE_EXECUTION_MAX_CONCURRENT=10`
+- `INTERACTIVE_EXECUTION_FAST_OR_PATENT_MAX_CONCURRENT=10`
+- `INTERACTIVE_EXECUTION_THINKING_MAX_CONCURRENT=2`
+- `INTERACTIVE_QUEUED_TTL_SECONDS=900`
+- `INTERACTIVE_POST_ADMIT_ATTACH_TTL_SECONDS=600`
+- `GATEWAY_ADMISSION_ENABLED=1`
+- `GATEWAY_ADMISSION_DISPATCHER_ENABLED=1`
+
+### Gateway Compose Pattern
+
+Use one shared image and env file, but run separate Compose services for the two gateway roles.
+
+```yaml
+services:
+  gateway-web:
+    image: your-registry/gateway:latest
+    command: ["bash", "/app/gateway/scripts/run_gunicorn_foreground.sh"]
+    env_file:
+      - ./gateway.env
+    environment:
+      GATEWAY_RUNTIME_ROLE: web
+      GATEWAY_ADMISSION_ENABLED: "1"
+      GATEWAY_ADMISSION_DISPATCHER_ENABLED: "1"
+    depends_on:
+      redis:
+        condition: service_healthy
+      public-service:
+        condition: service_started
+      fastqa:
+        condition: service_started
+      highthinkingqa:
+        condition: service_started
+    ports:
+      - "8101:8101"
+
+  gateway-admission-worker:
+    image: your-registry/gateway:latest
+    command: ["bash", "/app/gateway/scripts/run_admission_worker_foreground.sh"]
+    restart: unless-stopped
+    env_file:
+      - ./gateway.env
+    environment:
+      GATEWAY_RUNTIME_ROLE: admission_worker
+      GATEWAY_ADMISSION_ENABLED: "1"
+      GATEWAY_ADMISSION_DISPATCHER_ENABLED: "1"
+    depends_on:
+      redis:
+        condition: service_healthy
+```
+
+Operational rule:
+
+- `gateway-web` can scale horizontally behind one service endpoint, but all replicas must share the same Redis admission state
+- `gateway-admission-worker` should run as a dedicated worker deployment and may also scale later if the dispatcher logic is designed for multi-consumer coordination
+- `gunicorn` worker counts do not replace `INTERACTIVE_EXECUTION_MAX_CONCURRENT`; the Redis admission ceiling remains the cluster-wide source of truth
+- if the admission worker is configured fail-closed on missing Redis, Compose should use Redis healthchecks plus a worker restart policy so cold-start ordering does not leave the worker permanently exited
 
 #### public-service
 

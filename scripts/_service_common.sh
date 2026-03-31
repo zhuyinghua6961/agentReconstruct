@@ -6,6 +6,53 @@ RESOURCE_DIR="$ROOT_DIR/resource"
 
 SERVICES=(public-service fastQA highThinkingQA gateway)
 
+env_bool() {
+  local value
+  value="$(printf '%s' "${1:-0}" | tr '[:upper:]' '[:lower:]')"
+  [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "on" ]]
+}
+
+gateway_env_files() {
+  local config_dir_default="$ROOT_DIR/gateway"
+  if [[ -d "$RESOURCE_DIR/config/services/gateway" ]]; then
+    config_dir_default="$RESOURCE_DIR/config/services/gateway"
+  fi
+  echo "${GATEWAY_ENV_FILES:-$config_dir_default/config.env:$config_dir_default/config.shared.env:$config_dir_default/config.secret.env:$ROOT_DIR/gateway/.env}"
+}
+
+load_gateway_env_files() {
+  if [[ "${_GATEWAY_ENV_FILES_LOADED:-0}" == "1" ]]; then
+    return 0
+  fi
+  local env_files
+  env_files="$(gateway_env_files)"
+  local -a preserved_names=()
+  local -A preserved_values=()
+  while IFS='=' read -r name value; do
+    [[ -n "${name:-}" ]] || continue
+    preserved_names+=("$name")
+    preserved_values["$name"]="$value"
+  done < <(env)
+  local old_allexport
+  old_allexport="$(set +o | rg '^set \\+o allexport$' || true)"
+  set -a
+  IFS=':' read -r -a files <<< "$env_files"
+  for file in "${files[@]}"; do
+    [[ -n "${file:-}" ]] || continue
+    [[ -f "$file" ]] || continue
+    # shellcheck disable=SC1090
+    source "$file"
+  done
+  set +a
+  if [[ -n "$old_allexport" ]]; then
+    eval "$old_allexport"
+  fi
+  for name in "${preserved_names[@]}"; do
+    export "$name=${preserved_values[$name]}"
+  done
+  _GATEWAY_ENV_FILES_LOADED=1
+}
+
 service_port() {
   case "$1" in
     gateway) echo 8101 ;;
@@ -42,18 +89,12 @@ run_service_script() {
 
   case "$service:$action" in
     gateway:start)
-      GATEWAY_PORT=8101 \
-      PUBLIC_BACKEND_BASE_URL="http://127.0.0.1:8102" \
-      FAST_BACKEND_BASE_URL="http://127.0.0.1:8008" \
-      THINKING_BACKEND_BASE_URL="http://127.0.0.1:8009" \
       bash "$ROOT_DIR/gateway/scripts/start_gunicorn.sh"
       ;;
     gateway:stop)
-      GATEWAY_PORT=8101 \
       bash "$ROOT_DIR/gateway/scripts/stop_gunicorn.sh"
       ;;
     gateway:status)
-      GATEWAY_PORT=8101 \
       bash "$ROOT_DIR/gateway/scripts/status_gunicorn.sh"
       ;;
     public-service:start)
@@ -176,6 +217,66 @@ wait_for_service_health() {
   for _ in $(seq 1 "$timeout"); do
     if probe_health "$service"; then
       return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+gateway_admission_worker_enabled() {
+  load_gateway_env_files
+  env_bool "${GATEWAY_ADMISSION_WORKER_ENABLED:-0}"
+}
+
+gateway_admission_worker_pid_file() {
+  echo "$ROOT_DIR/gateway/.runtime/gateway-admission-worker.pid"
+}
+
+run_gateway_admission_worker() {
+  local action="$1"
+  case "$action" in
+    start)
+      bash "$ROOT_DIR/gateway/scripts/start_admission_worker.sh"
+      ;;
+    stop)
+      bash "$ROOT_DIR/gateway/scripts/stop_admission_worker.sh"
+      ;;
+    status)
+      bash "$ROOT_DIR/gateway/scripts/status_admission_worker.sh"
+      ;;
+    *)
+      echo "unsupported gateway admission worker action: $action" >&2
+      return 1
+      ;;
+  esac
+}
+
+wait_for_pid_state() {
+  local pid_file="$1"
+  local expected="$2"
+  local timeout="${3:-30}"
+  local stable_checks="${4:-1}"
+  local consecutive_matches=0
+  for _ in $(seq 1 "$timeout"); do
+    local active="0"
+    if [[ -f "$pid_file" ]]; then
+      local pid
+      pid="$(cat "$pid_file" 2>/dev/null || true)"
+      if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
+        active="1"
+      fi
+    fi
+    if [[ "$active" == "$expected" ]]; then
+      if [[ "$expected" == "1" ]]; then
+        consecutive_matches=$((consecutive_matches + 1))
+        if (( consecutive_matches >= stable_checks )); then
+          return 0
+        fi
+      else
+        return 0
+      fi
+    else
+      consecutive_matches=0
     fi
     sleep 1
   done

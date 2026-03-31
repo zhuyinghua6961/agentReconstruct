@@ -24,4 +24,18 @@ for service in "${SERVICES[@]}"; do
   fi
 done
 
+if gateway_admission_worker_enabled; then
+  echo "[start] gateway-admission-worker"
+  run_gateway_admission_worker stop >/dev/null 2>&1 || true
+  if ! wait_for_pid_state "$(gateway_admission_worker_pid_file)" 0 15; then
+    echo "[error] gateway-admission-worker pid was not released before start"
+    exit 1
+  fi
+  run_gateway_admission_worker start
+  if ! wait_for_pid_state "$(gateway_admission_worker_pid_file)" 1 30 3; then
+    echo "[error] gateway-admission-worker did not stay running"
+    exit 1
+  fi
+fi
+
 echo "all backend services started"

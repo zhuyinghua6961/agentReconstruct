@@ -6,7 +6,7 @@ __pycache__/
 gunicorn.ctl
 **/.runtime/
 **/.run/
-
+.venv-test/
 frontend-vue/node_modules/
 frontend-vue/dist/
 gateway/frontend-vue/node_modules/

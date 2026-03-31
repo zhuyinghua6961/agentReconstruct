@@ -15,3 +15,11 @@ for service in "${SERVICES[@]}"; do
   fi
   echo
 done
+
+echo "== gateway-admission-worker =="
+if gateway_admission_worker_enabled; then
+  run_gateway_admission_worker status || true
+else
+  echo "disabled by GATEWAY_ADMISSION_WORKER_ENABLED"
+fi
+echo
