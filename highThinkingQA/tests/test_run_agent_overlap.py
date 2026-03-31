@@ -40,6 +40,34 @@ def test_run_agent_starts_pipeline_after_decompose_without_waiting_for_direct(mo
     assert state.timings["step5_revise_total"] == 0
 
 
+def test_run_agent_falls_back_when_direct_answer_times_out(monkeypatch):
+    monkeypatch.setattr("agent_core.graph.get_llm_client", lambda *args, **kwargs: object())
+    monkeypatch.setattr("agent_core.graph.get_async_llm_client", lambda: object())
+    monkeypatch.setattr("agent_core.graph.get_embedding_client", lambda: object())
+    monkeypatch.setattr("agent_core.graph.get_or_create_collection", lambda: object())
+    monkeypatch.setattr("agent_core.graph.decompose_question", lambda *args, **kwargs: ["q1"])
+    monkeypatch.setattr(
+        "agent_core.graph._run_pre_answer_retrieval_pipeline",
+        lambda **kwargs: (["a1"], [[object()]], {"pre_answer_completed_at": 0.1, "retrieval_completed_at": 0.2}),
+    )
+    monkeypatch.setattr("agent_core.graph.synthesize_answer", lambda **kwargs: "draft-answer")
+
+    def raise_timeout(*args, **kwargs):
+        raise TimeoutError("direct answer timed out")
+
+    monkeypatch.setattr("agent_core.graph.direct_answer", raise_timeout)
+
+    progress_events = []
+    state = run_agent("demo", progress_callback=progress_events.append, max_check_loops=0)
+
+    assert state.error == ""
+    assert state.final_answer == "draft-answer"
+    assert state.direct_answer
+    fallback_event = next(item for item in progress_events if item["stage"] == "step1" and item["status"] == "warning")
+    assert "直接回答" in fallback_event["message"]
+    assert fallback_event["data"]["fallback"] is True
+
+
 def test_run_agent_uses_stage_specific_thinking_flags(monkeypatch):
     monkeypatch.setattr("agent_core.graph.get_llm_client", lambda *args, **kwargs: object())
     monkeypatch.setattr("agent_core.graph.get_async_llm_client", lambda: object())

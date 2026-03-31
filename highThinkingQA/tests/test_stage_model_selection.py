@@ -42,6 +42,26 @@ def test_direct_answer_uses_stage_model(monkeypatch):
     assert captured["model"] == "direct-test-model"
 
 
+def test_direct_answer_uses_stage_runtime_bounds(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(direct_answerer, "load_prompt_template", lambda _: "{question}")
+
+    def fake_chat_completion_stream(**kwargs):
+        captured.update(kwargs)
+        yield "answer"
+
+    monkeypatch.setattr(direct_answerer, "chat_completion_stream", fake_chat_completion_stream)
+    monkeypatch.setattr(direct_answerer.config, "DIRECT_ANSWER_MAX_TOKENS", 1536, raising=False)
+    monkeypatch.setattr(direct_answerer.config, "DIRECT_ANSWER_REQUEST_TIMEOUT_SECONDS", 45, raising=False)
+
+    result = direct_answerer.direct_answer("demo")
+
+    assert result == "answer"
+    assert captured["max_tokens"] == 1536
+    assert captured["timeout_seconds"] == 45
+
+
 def test_sub_answer_kwargs_use_stage_model(monkeypatch):
     monkeypatch.setattr(sub_answerer.config, "SUB_ANSWER_MODEL", "sub-answer-test-model")
 
