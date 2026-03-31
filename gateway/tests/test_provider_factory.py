@@ -4,7 +4,13 @@ import httpx
 from starlette.requests import Request
 
 from app.core.trace import TRACE_ID_HEADER
-from app.core.config import BackendEndpoints, GatewaySettings
+from app.core.config import (
+    AdmissionSettings,
+    BackendEndpoints,
+    GatewaySettings,
+    RedisSettings,
+    RouteClassifierSettings,
+)
 from app.providers.conversation_files.noop import NoopConversationFileProvider
 from app.providers.conversation_files.base import ConversationFileProviderError
 from app.providers.conversation_files.public_http import PublicHttpConversationFileProvider
@@ -22,10 +28,40 @@ def _settings(provider: str) -> GatewaySettings:
         sse_timeout_seconds=600,
         conversation_file_provider=provider,
         endpoints=BackendEndpoints(
-            public="http://127.0.0.1:8008",
+            public="http://127.0.0.1:8102",
             fast="http://127.0.0.1:8008",
             thinking="http://127.0.0.1:8009",
             patent="http://127.0.0.1:8010",
+        ),
+        redis=RedisSettings(
+            enabled=False,
+            url="",
+            host="127.0.0.1",
+            port=6379,
+            username="",
+            password="",
+            db=0,
+            key_prefix="gateway",
+            socket_connect_timeout_seconds=2,
+            socket_timeout_seconds=2,
+        ),
+        admission=AdmissionSettings(
+            enabled=False,
+            runtime_role="web",
+            dispatcher_enabled=False,
+            control_api_token="",
+            poll_interval_seconds=5,
+            max_concurrent=10,
+            fast_or_patent_max_concurrent=10,
+            thinking_max_concurrent=2,
+            queued_ttl_seconds=900,
+            post_admit_attach_ttl_seconds=600,
+        ),
+        route_classifier=RouteClassifierSettings(
+            enabled=False,
+            provider="noop",
+            high_confidence_threshold=0.8,
+            medium_confidence_threshold=0.6,
         ),
     )
 
@@ -40,6 +76,7 @@ def test_build_public_http_conversation_file_provider():
     provider = build_conversation_file_provider(_settings("public_http"))
     assert isinstance(provider, PublicHttpConversationFileProvider)
     assert provider.provider_name == "public_http"
+    assert provider._base_url == "http://127.0.0.1:8102"
 
 
 def test_public_http_provider_fetches_and_normalizes_rows():

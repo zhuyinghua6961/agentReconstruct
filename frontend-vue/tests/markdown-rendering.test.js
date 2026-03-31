@@ -89,3 +89,33 @@ test('formatStreamingAnswer preserves inline math markup during streaming', () =
   assert.match(html, /<sub>loss<\/sub>/i)
   assert.match(html, /<sup>2<\/sup>/i)
 })
+
+test('formatStreamingAnswer does not render malformed DOI underscores as subscripts', () => {
+  installMinimalDom()
+  const input = '参考 doi:10.10881742-6596_25841_012046) 的实验设置。'
+
+  const html = formatStreamingAnswer(input)
+
+  assert.match(html, /10\.10881742-6596_25841_012046\)/i)
+  assert.doesNotMatch(html, /<sub>/i)
+})
+
+test('formatAnswer does not treat raw DOI fragments as math markup', () => {
+  installMinimalDom()
+  const input = '补充参考 doi:10.1039c2jm15273h 和 doi:10.1016\/S0378-7753(03)00297-0。'
+
+  const html = formatAnswer(input)
+
+  assert.match(html, /10\.1039c2jm15273h/i)
+  assert.match(html, /10\.1016\/S0378-7753\(03\)00297-0/i)
+  assert.doesNotMatch(html, /<sub>|<sup>/i)
+})
+
+test('formatAnswer still renders ordinary numeric math starting with 10 dot as superscript', () => {
+  installMinimalDom()
+  const input = '倍率关系可写作 $10.2^3$。'
+
+  const html = formatAnswer(input)
+
+  assert.match(html, /10\.2<sup>3<\/sup>/i)
+})

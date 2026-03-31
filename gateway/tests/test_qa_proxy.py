@@ -1,12 +1,15 @@
 import json
+import anyio
 
 import httpx
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from app.main import app
 from app.core.trace import TRACE_ID_HEADER
 from app.models.files import ConversationFileRow
 from app.providers.conversation_files.public_http import PublicHttpConversationFileProvider
+from app.routers.qa import _stream_with_quota
 from app.services.conversation_files import ConversationFileService
 
 
@@ -92,6 +95,28 @@ class _FailingAsyncStream(httpx.AsyncByteStream):
         return None
 
 
+class _RecordingQuotaProxy:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def finalize(self, *, request, grant_id, success):
+        self.calls.append({"request": request, "grant_id": grant_id, "success": success})
+        return type(
+            "_FinalizeResult",
+            (),
+            {"success": True, "status_code": 200, "payload": {"success": True, "data": {"counted": success, "idempotent": False}}},
+        )()
+
+
+class _SimpleStreamingHandle:
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = list(chunks)
+
+    async def body_iter(self):
+        for chunk in self._chunks:
+            yield chunk
+
+
 def _json_request_body(request: httpx.Request) -> dict:
     raw = request.content.decode("utf-8") if request.content else ""
     return json.loads(raw) if raw else {}
@@ -141,6 +166,8 @@ def test_mode_ask_calls_internal_quota_precheck_and_finalize_for_plain_question(
 
 def test_mode_ask_routes_file_question_to_file_qa_quota(monkeypatch):
     monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    original = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -158,18 +185,21 @@ def test_mode_ask_routes_file_question_to_file_qa_quota(monkeypatch):
             return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
         raise AssertionError(f"unexpected upstream path: {request.url.path}")
 
-    with _TransportGuard(handler):
-        client = TestClient(app)
-        response = client.post(
-            "/api/thinking/ask",
-            json={
-                "question": "请总结这篇文献",
-                "requested_mode": "thinking",
-                "conversation_id": 8,
-                "user_id": 42,
-                "pdf_context": {"selected_ids": [11]},
-            },
-        )
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            response = client.post(
+                "/api/thinking/ask",
+                json={
+                    "question": "请总结这篇文献",
+                    "requested_mode": "thinking",
+                    "conversation_id": 8,
+                    "user_id": 42,
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            )
+    finally:
+        app.state.conversation_file_service = original
 
     assert response.status_code == 200
     assert calls[0][0] == "/internal/quota/grants/precheck"
@@ -286,24 +316,34 @@ def test_mode_ask_patent_route_skips_quota_calls(monkeypatch):
 
 def test_mode_ask_clarification_skips_quota_calls(monkeypatch):
     monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    original = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub(
+        [
+            ConversationFileRow(file_id=11, file_type="pdf", file_name="solid-state-review.pdf"),
+            ConversationFileRow(file_id=22, file_type="pdf", file_name="battery-paper.pdf"),
+        ]
+    )
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request.url.path)
         raise AssertionError(f"unexpected upstream path: {request.url.path}")
 
-    with _TransportGuard(handler):
-        client = TestClient(app)
-        response = client.post(
-            "/api/thinking/ask",
-            json={
-                "question": "请继续总结这篇文献",
-                "requested_mode": "thinking",
-                "conversation_id": 12,
-                "user_id": 42,
-                "pdf_context": {"selected_ids": [11, 22]},
-            },
-        )
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            response = client.post(
+                "/api/thinking/ask",
+                json={
+                    "question": "请继续总结这篇文献",
+                    "requested_mode": "thinking",
+                    "conversation_id": 12,
+                    "user_id": 42,
+                    "pdf_context": {"selected_ids": [11, 22]},
+                },
+            )
+    finally:
+        app.state.conversation_file_service = original
 
     assert response.status_code == 400
     assert response.json()["code"] == "FILE_SELECTION_CLARIFICATION_REQUIRED"
@@ -499,6 +539,8 @@ def test_mode_ask_stream_aborts_quota_when_done_event_never_arrives(monkeypatch)
 
 def test_mode_ask_stream_routes_file_question_to_file_qa_quota(monkeypatch):
     monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    original = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -524,20 +566,23 @@ def test_mode_ask_stream_routes_file_question_to_file_qa_quota(monkeypatch):
             )
         raise AssertionError(f"unexpected upstream path: {request.url.path}")
 
-    with _TransportGuard(handler):
-        client = TestClient(app)
-        with client.stream(
-            "POST",
-            "/api/thinking/ask_stream",
-            json={
-                "question": "请总结这篇文献",
-                "requested_mode": "thinking",
-                "conversation_id": 16,
-                "user_id": 42,
-                "pdf_context": {"selected_ids": [11]},
-            },
-        ) as response:
-            body = b"".join(response.iter_bytes())
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            with client.stream(
+                "POST",
+                "/api/thinking/ask_stream",
+                json={
+                    "question": "请总结这篇文献",
+                    "requested_mode": "thinking",
+                    "conversation_id": 16,
+                    "user_id": 42,
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            ) as response:
+                body = b"".join(response.iter_bytes())
+    finally:
+        app.state.conversation_file_service = original
 
     assert response.status_code == 200
     assert b'"type":"done"' in body
@@ -652,6 +697,79 @@ def test_mode_ask_stream_aborts_quota_when_midstream_timeout_occurs(monkeypatch)
     assert calls[-1][1]["success"] is False
 
 
+def test_stream_with_quota_aborts_grant_when_client_closes_stream_early():
+    async def _run():
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/thinking/ask_stream",
+            "headers": [],
+            "app": app,
+        }
+        quota_proxy = _RecordingQuotaProxy()
+        handle = _SimpleStreamingHandle(
+            [
+                b'data: {"type":"metadata","query_mode":"thinking"}\n\n',
+                b'data: {"type":"content","content":"partial"}\n\n',
+                b'data: {"type":"done","final_answer":"partial"}\n\n',
+            ]
+        )
+        stream = _stream_with_quota(
+            handle=handle,
+            request=Request(scope),
+            quota_proxy=quota_proxy,
+            grant_id="grant-stream-close",
+            quota_type="ask_query",
+            trace_id="trace-close",
+            backend="thinking",
+        )
+        first_chunk = await anext(stream)
+        assert b'"type":"metadata"' in first_chunk
+        await stream.aclose()
+        assert len(quota_proxy.calls) == 1
+        assert quota_proxy.calls[0]["grant_id"] == "grant-stream-close"
+        assert quota_proxy.calls[0]["success"] is False
+
+    anyio.run(_run)
+
+
+def test_stream_with_quota_counts_success_when_client_closes_after_done_is_seen():
+    async def _run():
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/thinking/ask_stream",
+            "headers": [],
+            "app": app,
+        }
+        quota_proxy = _RecordingQuotaProxy()
+        handle = _SimpleStreamingHandle(
+            [
+                (
+                    b'data: {"type":"metadata","query_mode":"thinking"}\n\n'
+                    b'data: {"type":"done","final_answer":"partial"}\n\n'
+                ),
+            ]
+        )
+        stream = _stream_with_quota(
+            handle=handle,
+            request=Request(scope),
+            quota_proxy=quota_proxy,
+            grant_id="grant-stream-close-after-done",
+            quota_type="ask_query",
+            trace_id="trace-close-after-done",
+            backend="thinking",
+        )
+        first_chunk = await anext(stream)
+        assert b'"type":"metadata"' in first_chunk
+        await stream.aclose()
+        assert len(quota_proxy.calls) == 1
+        assert quota_proxy.calls[0]["grant_id"] == "grant-stream-close-after-done"
+        assert quota_proxy.calls[0]["success"] is True
+
+    anyio.run(_run)
+
+
 def test_mode_ask_routes_plain_question_to_requested_backend():
     captured = {}
 
@@ -675,6 +793,14 @@ def test_mode_ask_routes_plain_question_to_requested_backend():
     assert captured["url"].endswith("/api/thinking/ask")
     assert captured["body"]["actual_mode"] == "thinking"
     assert captured["body"]["route"] == "kb_qa"
+    assert captured["body"]["turn_mode"] == "kb_only"
+    assert captured["body"]["source_scope"] == "kb"
+    assert captured["body"]["needs_clarification"] is False
+    assert captured["body"]["strategy"] == "none"
+    assert captured["body"]["execution_files"] == []
+    assert captured["body"]["classifier_used"] is False
+    assert captured["body"]["route_confidence"] == 1.0
+    assert "NO_FILE_INTENT" in captured["body"]["route_reasons"]
     assert response.headers["x-gateway-backend"] == "thinking"
 
 
@@ -712,7 +838,11 @@ def test_mode_ask_fast_does_not_persist_gateway_messages():
 
 
 def test_mode_ask_routes_file_question_to_fast_backend():
+    original = app.state.conversation_file_service
     original_persistence = app.state.conversation_persistence_service
+    app.state.conversation_file_service = _ConversationFilesStub(
+        [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")]
+    )
     fake_persistence = _FakeConversationPersistenceService()
     app.state.conversation_persistence_service = fake_persistence
     captured = {}
@@ -735,6 +865,7 @@ def test_mode_ask_routes_file_question_to_fast_backend():
                 },
             )
     finally:
+        app.state.conversation_file_service = original
         app.state.conversation_persistence_service = original_persistence
 
     assert response.status_code == 200
@@ -742,14 +873,20 @@ def test_mode_ask_routes_file_question_to_fast_backend():
     assert captured["body"]["actual_mode"] == "fast"
     assert captured["body"]["route"] == "pdf_qa"
     assert captured["body"]["source_scope"] == "pdf"
+    assert captured["body"]["turn_mode"] == "file_only"
+    assert captured["body"]["needs_clarification"] is False
     assert captured["body"]["kb_enabled"] is False
     assert captured["body"]["selected_file_ids"] == [11]
+    assert captured["body"]["strategy"] == "explicit_selection"
+    assert captured["body"]["classifier_used"] is False
+    assert captured["body"]["route_confidence"] == 1.0
+    assert "EXPLICIT_SELECTED_FILES" in captured["body"]["route_reasons"]
     assert fake_persistence.user_calls == []
     assert fake_persistence.assistant_calls == []
     assert response.headers["x-gateway-backend"] == "fast"
 
 
-def test_mode_ask_routes_selected_file_scope_to_fast_backend_even_for_plain_question():
+def test_mode_ask_keeps_requested_backend_for_plain_question_with_selected_scope():
     original = app.state.conversation_file_service
     original_persistence = app.state.conversation_persistence_service
     app.state.conversation_file_service = _ConversationFilesStub(
@@ -787,14 +924,17 @@ def test_mode_ask_routes_selected_file_scope_to_fast_backend_even_for_plain_ques
         app.state.conversation_persistence_service = original_persistence
 
     assert response.status_code == 200
-    assert captured["url"].endswith("/api/fast/ask")
-    assert captured["body"]["actual_mode"] == "fast"
-    assert captured["body"]["route"] == "pdf_qa"
-    assert captured["body"]["source_scope"] == "pdf"
+    assert captured["url"].endswith("/api/thinking/ask")
+    assert captured["body"]["actual_mode"] == "thinking"
+    assert captured["body"]["route"] == "kb_qa"
+    assert captured["body"]["source_scope"] == "kb"
     assert captured["body"]["selected_file_ids"] == [11]
+    assert captured["body"]["strategy"] == "none"
+    assert captured["body"]["execution_files"] == []
+    assert "NO_FILE_INTENT" in captured["body"]["route_reasons"]
     assert fake_persistence.user_calls == []
     assert fake_persistence.assistant_calls == []
-    assert response.headers["x-gateway-backend"] == "fast"
+    assert response.headers["x-gateway-backend"] == "thinking"
 
 def test_mode_ask_routes_mixed_question_to_fast_backend():
     original = app.state.conversation_file_service
@@ -838,8 +978,55 @@ def test_mode_ask_routes_mixed_question_to_fast_backend():
     assert captured["body"]["actual_mode"] == "fast"
     assert captured["body"]["route"] == "hybrid_qa"
     assert captured["body"]["source_scope"] == "pdf+kb"
+    assert captured["body"]["turn_mode"] == "mixed"
+    assert captured["body"]["strategy"] == "explicit_selection"
+    assert captured["body"]["classifier_used"] is False
+    assert "EXPLICIT_MIXED_INTENT" in captured["body"]["route_reasons"]
     assert fake_persistence.user_calls == []
     assert fake_persistence.assistant_calls == []
+    assert response.headers["x-gateway-backend"] == "fast"
+
+
+def test_mode_ask_routes_patent_file_question_to_fast_backend():
+    original = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub(
+        [
+            ConversationFileRow(
+                file_id=11,
+                file_type="pdf",
+                file_name="battery-paper.pdf",
+            )
+        ]
+    )
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            response = client.post(
+                "/api/patent/ask",
+                json={
+                    "question": "请总结这篇文献",
+                    "requested_mode": "patent",
+                    "conversation_id": 301,
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            )
+    finally:
+        app.state.conversation_file_service = original
+
+    assert response.status_code == 200
+    assert captured["url"].endswith("/api/fast/ask")
+    assert captured["body"]["requested_mode"] == "patent"
+    assert captured["body"]["actual_mode"] == "fast"
+    assert captured["body"]["route"] == "pdf_qa"
+    assert captured["body"]["source_scope"] == "pdf"
+    assert "EXPLICIT_SELECTED_FILES" in captured["body"]["route_reasons"]
     assert response.headers["x-gateway-backend"] == "fast"
 
 def test_v1_ask_stream_alias_is_removed():
@@ -872,6 +1059,10 @@ def test_v1_ask_stream_alias_is_removed():
 
 
 def test_mode_ask_stream_routes_file_question_to_fast_backend():
+    original = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub(
+        [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")]
+    )
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -887,18 +1078,21 @@ def test_mode_ask_stream_routes_file_question_to_fast_backend():
             headers={"content-type": "text/event-stream"},
         )
 
-    with _TransportGuard(handler):
-        client = TestClient(app)
-        with client.stream(
-            "POST",
-            "/api/thinking/ask_stream",
-            json={
-                "question": "请总结这篇文献",
-                "requested_mode": "thinking",
-                "pdf_context": {"selected_ids": [11]},
-            },
-        ) as response:
-            body = b"".join(response.iter_bytes())
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            with client.stream(
+                "POST",
+                "/api/thinking/ask_stream",
+                json={
+                    "question": "请总结这篇文献",
+                    "requested_mode": "thinking",
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            ) as response:
+                body = b"".join(response.iter_bytes())
+    finally:
+        app.state.conversation_file_service = original
 
     assert response.status_code == 200
     assert b'"type":"done"' in body
@@ -988,7 +1182,11 @@ def test_mode_ask_stream_does_not_persist_gateway_messages():
 
 
 def test_mode_ask_stream_does_not_persist_file_turn_context_hints():
+    original_files = app.state.conversation_file_service
     original = app.state.conversation_persistence_service
+    app.state.conversation_file_service = _ConversationFilesStub(
+        [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")]
+    )
     fake_persistence = _FakeConversationPersistenceService()
     app.state.conversation_persistence_service = fake_persistence
 
@@ -1019,6 +1217,7 @@ def test_mode_ask_stream_does_not_persist_file_turn_context_hints():
             ) as response:
                 _ = b"".join(response.iter_bytes())
     finally:
+        app.state.conversation_file_service = original_files
         app.state.conversation_persistence_service = original
 
     assert response.status_code == 200
@@ -1468,38 +1667,137 @@ def test_mode_ask_forwards_canonical_file_aware_fields():
     assert captured["body"]["source_scope"] == "pdf+kb"
     assert captured["body"]["kb_enabled"] is True
     assert captured["body"]["selected_file_ids"] == [11]
+    assert captured["body"]["execution_files"][0]["file_id"] == 11
+    assert captured["body"]["strategy"] == "explicit_selection"
     assert captured["body"]["primary_file_id"] == 11
+    assert captured["body"]["route_confidence"] == 1.0
+    assert captured["body"]["classifier_used"] is False
     assert captured["body"]["file_selection"] == {
-        "strategy": "selected_single",
+        "strategy": "explicit_selection",
         "selected_file_ids": [11],
         "turn_mode": "mixed",
         "source_scope": "pdf+kb",
         "kb_enabled": True,
     }
+    assert "EXPLICIT_SELECTED_FILES" in captured["body"]["route_reasons"]
+    assert "EXPLICIT_MIXED_INTENT" in captured["body"]["route_reasons"]
 
 
 
 def test_mode_ask_short_circuits_clarification_in_gateway():
+    original = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub(
+        [
+            ConversationFileRow(file_id=11, file_type="pdf", file_name="solid-state-review.pdf"),
+            ConversationFileRow(file_id=22, file_type="pdf", file_name="battery-paper.pdf"),
+        ]
+    )
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request.url.path)
         raise AssertionError(f"unexpected upstream path: {request.url.path}")
 
-    with _TransportGuard(handler):
-        client = TestClient(app)
-        response = client.post(
-            "/api/thinking/ask",
-            json={
-                "question": "请继续总结这篇文献",
-                "requested_mode": "thinking",
-                "pdf_context": {"selected_ids": [11, 22]},
-            },
-        )
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            response = client.post(
+                "/api/thinking/ask",
+                json={
+                    "question": "请继续总结这篇文献",
+                    "requested_mode": "thinking",
+                    "pdf_context": {"selected_ids": [11, 22]},
+                },
+            )
+    finally:
+        app.state.conversation_file_service = original
 
     assert response.status_code == 400
     assert response.json()["code"] == "FILE_SELECTION_CLARIFICATION_REQUIRED"
+    assert response.json()["needs_clarification"] is True
+    assert [item["file_id"] for item in response.json()["detail"]["clarify_candidates"]] == [11, 22]
+    assert response.json()["detail"]["file_selection"]["strategy"] == "clarify_required"
+    assert response.json()["detail"]["file_selection"]["selected_file_ids"] == [11, 22]
+    assert response.json()["detail"]["route_reasons"] == ["MULTIPLE_FILES_NEED_CLARIFICATION"]
+    assert response.json()["detail"]["route_confidence"] == 0.0
+    assert response.json()["detail"]["classifier_used"] is False
     assert calls == []
+
+
+def test_mode_ask_short_circuits_file_not_ready_status_in_gateway():
+    original = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub(
+        [
+            ConversationFileRow(
+                file_id=44,
+                file_type="pdf",
+                file_name="processing.pdf",
+                parse_status="uploaded",
+                index_status="pending",
+                processing_stage="indexing",
+                display_no=1,
+            )
+        ]
+    )
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            response = client.post(
+                "/api/thinking/ask",
+                json={
+                    "question": "#1",
+                    "requested_mode": "thinking",
+                    "pdf_context": {},
+                },
+            )
+    finally:
+        app.state.conversation_file_service = original
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "FILE_NOT_READY"
+    assert response.json()["retriable"] is True
+    assert response.json()["detail"]["file_selection"]["strategy"] == "explicit_ref"
+    assert response.json()["detail"]["file_selection"]["selected_file_ids"] == [44]
+    assert response.json()["detail"]["route_reasons"] == ["EXPLICIT_FILE_REF"]
+    assert response.json()["detail"]["route_confidence"] == 1.0
+    assert response.json()["detail"]["classifier_used"] is False
+    assert calls == []
+
+
+def test_mode_ask_short_circuits_unresolved_file_reference_as_clarification():
+    original = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub([])
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            response = client.post(
+                "/api/thinking/ask",
+                json={
+                    "question": "#1",
+                    "requested_mode": "thinking",
+                    "pdf_context": {},
+                },
+            )
+    finally:
+        app.state.conversation_file_service = original
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "FILE_SELECTION_CLARIFICATION_REQUIRED"
+    assert response.json()["needs_clarification"] is True
+    assert calls == []
+
 
 def test_mode_ask_forwards_chat_history_without_pdf_context():
     captured = {}
@@ -1535,30 +1833,135 @@ def test_mode_ask_forwards_chat_history_without_pdf_context():
 
 
 def test_mode_ask_stream_short_circuits_clarification_in_gateway():
+    original = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub(
+        [
+            ConversationFileRow(file_id=11, file_type="pdf", file_name="solid-state-review.pdf"),
+            ConversationFileRow(file_id=22, file_type="pdf", file_name="battery-paper.pdf"),
+        ]
+    )
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request.url.path)
         raise AssertionError(f"unexpected upstream path: {request.url.path}")
 
-    with _TransportGuard(handler):
-        client = TestClient(app)
-        with client.stream(
-            "POST",
-            "/api/thinking/ask_stream",
-            json={
-                "question": "请继续总结这篇文献",
-                "requested_mode": "thinking",
-                "pdf_context": {"selected_ids": [11, 22]},
-            },
-        ) as response:
-            body = b"".join(response.iter_bytes())
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            with client.stream(
+                "POST",
+                "/api/thinking/ask_stream",
+                json={
+                    "question": "请继续总结这篇文献",
+                    "requested_mode": "thinking",
+                    "pdf_context": {"selected_ids": [11, 22]},
+                },
+            ) as response:
+                body = b"".join(response.iter_bytes())
+    finally:
+        app.state.conversation_file_service = original
 
     assert response.status_code == 200
     assert calls == []
     assert b'"type":"metadata"' in body
+    assert b'"needs_clarification":true' in body
+    assert b'"clarify_candidates"' in body
+    assert b'"file_selection"' in body
+    assert b'"route_reasons":["MULTIPLE_FILES_NEED_CLARIFICATION"]' in body
+    assert b'"route_confidence":0.0' in body
+    assert b'"classifier_used":false' in body
     assert b'FILE_SELECTION_CLARIFICATION_REQUIRED' in body
     assert response.headers["content-type"].startswith("text/event-stream")
+
+
+def test_mode_ask_stream_short_circuits_file_not_ready_status_in_gateway():
+    original = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub(
+        [
+            ConversationFileRow(
+                file_id=44,
+                file_type="pdf",
+                file_name="processing.pdf",
+                parse_status="uploaded",
+                index_status="pending",
+                processing_stage="indexing",
+                display_no=1,
+            )
+        ]
+    )
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            with client.stream(
+                "POST",
+                "/api/thinking/ask_stream",
+                json={
+                    "question": "#1",
+                    "requested_mode": "thinking",
+                    "pdf_context": {},
+                },
+            ) as response:
+                body = b"".join(response.iter_bytes())
+    finally:
+        app.state.conversation_file_service = original
+
+    assert response.status_code == 200
+    assert calls == []
+    assert b'"type":"metadata"' in body
+    assert b'FILE_NOT_READY' in body
+    assert b'"retriable":true' in body
+    assert b'"file_selection"' in body
+    assert b'"route_reasons":["EXPLICIT_FILE_REF"]' in body
+    assert b'"route_confidence":1.0' in body
+    assert b'"classifier_used":false' in body
+    assert response.headers["content-type"].startswith("text/event-stream")
+
+
+def test_mode_ask_logs_route_decision_context(caplog):
+    original = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub(
+        [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            with caplog.at_level("INFO", logger="app.routers.qa"):
+                response = client.post(
+                    "/api/thinking/ask",
+                    json={
+                        "question": "请总结这篇文献",
+                        "requested_mode": "thinking",
+                        "conversation_id": 88,
+                        "pdf_context": {"selected_ids": [11]},
+                    },
+                )
+    finally:
+        app.state.conversation_file_service = original
+
+    assert response.status_code == 200
+    text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "gateway route decision" in text
+    assert "requested_mode=thinking" in text
+    assert "actual_mode=fast" in text
+    assert "route=pdf_qa" in text
+    assert "turn_mode=file_only" in text
+    assert "source_scope=pdf" in text
+    assert "selected_file_ids=[11]" in text
+    assert "strategy=explicit_selection" in text
+    assert "route_reasons=['EXPLICIT_SELECTED_FILES']" in text
+    assert "classifier_used=False" in text
+    assert "route_confidence=1.0" in text
 
 
 def test_mode_ask_stream_forwards_user_id_to_fast_backend():

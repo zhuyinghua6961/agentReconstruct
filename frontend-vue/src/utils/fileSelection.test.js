@@ -9,13 +9,13 @@ async function loadFileSelectionUtils() {
   }
 }
 
-test('mergeSelectedFileIdsAfterUpload keeps existing selections and appends the new uploaded file', async () => {
+test('mergeSelectedFileIdsAfterUpload replaces previous selections with the newly uploaded file', async () => {
   const { mergeSelectedFileIdsAfterUpload } = await loadFileSelectionUtils()
 
   assert.equal(typeof mergeSelectedFileIdsAfterUpload, 'function')
   assert.deepEqual(
     mergeSelectedFileIdsAfterUpload([9, 2], 15),
-    [9, 2, 15]
+    [15]
   )
 })
 

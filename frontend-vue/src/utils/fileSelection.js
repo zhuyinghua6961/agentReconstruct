@@ -8,22 +8,19 @@ function normalizePositiveFileId(value) {
 }
 
 export function mergeSelectedFileIdsAfterUpload(selectedFileIds, uploadedFileId) {
-  const merged = []
+  const nextUploadedFileId = normalizePositiveFileId(uploadedFileId)
+  if (nextUploadedFileId) {
+    return [nextUploadedFileId]
+  }
+  const fallback = []
   const seen = new Set()
-
   for (const value of Array.isArray(selectedFileIds) ? selectedFileIds : []) {
     const id = normalizePositiveFileId(value)
     if (!id || seen.has(id)) continue
     seen.add(id)
-    merged.push(id)
+    fallback.push(id)
   }
-
-  const nextUploadedFileId = normalizePositiveFileId(uploadedFileId)
-  if (nextUploadedFileId && !seen.has(nextUploadedFileId)) {
-    merged.push(nextUploadedFileId)
-  }
-
-  return merged
+  return fallback
 }
 
 export function resolveUploadedFileDisplayNumber(documentLike) {

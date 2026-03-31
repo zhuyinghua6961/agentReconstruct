@@ -73,6 +73,7 @@ def test_gateway_settings_expose_admission_defaults(monkeypatch):
 def test_gateway_settings_accept_runtime_role_and_redis_env(monkeypatch):
     monkeypatch.setenv("GATEWAY_RUNTIME_ROLE", "admission_worker")
     monkeypatch.setenv("GATEWAY_ADMISSION_ENABLED", "1")
+    monkeypatch.setenv("GATEWAY_ADMISSION_CONTROL_TOKEN", "secret-token")
     monkeypatch.setenv("REDIS_ENABLED", "1")
     monkeypatch.setenv("REDIS_KEY_PREFIX", "gateway_dev")
     monkeypatch.setenv("INTERACTIVE_EXECUTION_MAX_CONCURRENT", "12")
@@ -81,6 +82,7 @@ def test_gateway_settings_accept_runtime_role_and_redis_env(monkeypatch):
 
     assert settings.admission.enabled is True
     assert settings.admission.is_admission_worker is True
+    assert settings.admission.control_api_token == "secret-token"
     assert settings.redis.enabled is True
     assert settings.redis.key_prefix == "gateway_dev"
     assert settings.admission.max_concurrent == 12

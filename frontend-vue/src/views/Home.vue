@@ -2,10 +2,13 @@
 import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
 import { useChatStore } from '../stores/chatStore'
 import { api } from '../services/api'
-import { formatTime, formatAnswer, formatStreamingAnswer } from '../utils'
+import { formatTime, formatAnswer } from '../utils'
+import { createStreamingHtmlRenderer } from '../utils/streamingRender'
+import { buildMessageRenderMemoKey } from '../utils/messageRenderMemo'
 import { mergeSelectedFileIdsAfterUpload, resolveUploadedFileDisplayNumber } from '../utils/fileSelection'
 import PdfReader from '../components/PdfReader.vue'
 import { buildCitationLocationsForDoi } from '../utils/citationEvidence'
+import { buildRoutingErrorMarkdown, getRouteModeLabel, mergeRoutingMetadata } from '../utils/routingStatus'
 
 const PINNED_CHATS_COLLAPSED_KEY = 'lfp.sidebar.pinned-collapsed.v1'
 const RECENT_CHATS_COLLAPSED_KEY = 'lfp.sidebar.recent-collapsed.v1'
@@ -108,6 +111,7 @@ const kbSummaryText = computed(() => {
 const isHistoryLocked = computed(() => store.isStreaming && Boolean(streamingChatId.value))
 
 const renderedMessageCache = new WeakMap()
+const renderStreamingMessageHtml = createStreamingHtmlRenderer()
 
 function normalizeAskMode(mode) {
   const value = String(mode || 'thinking').trim().toLowerCase()
@@ -568,7 +572,17 @@ function isStreamingTextMessage(msg) {
 }
 
 function getStreamingMessageHtml(msg) {
-  return formatStreamingAnswer(String(msg?.content || ''))
+  return renderStreamingMessageHtml(msg)
+}
+
+function getMessageRenderMemoKey(msg) {
+  return buildMessageRenderMemoKey(msg)
+}
+
+function getFallbackQueryModeLabel(data, existingMeta = {}) {
+  const modeRaw = String(data?.query_mode || data?.queryMode || '').trim()
+  if (modeRaw) return formatQueryModeLabel(modeRaw)
+  return getRouteModeLabel(data?.route || existingMeta?.route || '')
 }
 
 function flushPendingStreamContent() {
@@ -1111,7 +1125,9 @@ async function sendMessage() {
         })
         activeStepKey = stepPayload.step
       } else if (data.type === 'metadata') {
-        const modeRaw = String(data.query_mode || data.queryMode || '').trim()
+        const targetMessage = getStreamingTargetMessage()?.message || {}
+        const existingMeta = (targetMessage.metadata && typeof targetMessage.metadata === 'object') ? targetMessage.metadata : {}
+        const mergedMeta = mergeRoutingMetadata(existingMeta, data)
         const modeFromExpert = data.expert === 'neo4j'
           ? '知识图谱'
           : data.expert === 'community'
@@ -1121,7 +1137,8 @@ async function sendMessage() {
               : '文献检索'
         updateStreamingTargetMessage({
           expert: data.expert,
-          queryMode: formatQueryModeLabel(modeRaw) || modeFromExpert
+          queryMode: getFallbackQueryModeLabel(data, mergedMeta) || modeFromExpert,
+          metadata: mergedMeta
         })
       } else if (data.type === 'content') {
         pendingStreamContent += String(data.content || '')
@@ -1135,6 +1152,7 @@ async function sendMessage() {
         const references = Array.isArray(data.reference_objects)
           ? data.reference_objects
           : (Array.isArray(data.references) ? data.references : [])
+        const mergedMeta = mergeRoutingMetadata({ ...existingMeta, ...doneMeta }, data)
         const finalizedSteps = updateStreamingSteps((steps) => {
           if (activeStepKey) {
             const activeIdx = steps.findIndex((step) => step.step === activeStepKey)
@@ -1157,21 +1175,26 @@ async function sendMessage() {
         if (data.final_answer) updates.content = data.final_answer
         if (data.doi_locations) updates.doiLocations = data.doi_locations
         updates.metadata = {
-          ...existingMeta,
-          ...doneMeta,
-          route: data.route || existingMeta.route || '',
+          ...mergedMeta,
           used_files: Array.isArray(data.used_files) ? data.used_files : (existingMeta.used_files || []),
           timings: (data.timings && typeof data.timings === 'object') ? data.timings : (existingMeta.timings || {}),
-          trace_id: data.trace_id || existingMeta.trace_id || '',
-          file_selection: (data.file_selection && typeof data.file_selection === 'object')
-            ? data.file_selection
-            : (existingMeta.file_selection || {})
+        }
+        if (!targetMessage.queryMode) {
+          updates.queryMode = getFallbackQueryModeLabel(data, mergedMeta)
         }
 
         updateStreamingTargetMessage(updates)
       } else if (data.type === 'error') {
         flushPendingStreamContent()
+        const targetMessage = getStreamingTargetMessage()?.message || {}
+        const existingMeta = (targetMessage.metadata && typeof targetMessage.metadata === 'object') ? targetMessage.metadata : {}
+        const mergedMeta = mergeRoutingMetadata(existingMeta, data)
         const errorText = String(data.message || data.error || '处理失败')
+        const renderedError = buildRoutingErrorMarkdown({
+          code: data.code,
+          message: errorText,
+          metadata: mergedMeta,
+        })
         if (activeStepKey) {
           markActiveStep('error', errorText)
         } else {
@@ -1187,7 +1210,13 @@ async function sendMessage() {
             })
           })
         }
-        updateStreamingTargetMessage({ content: '错误: ' + errorText, isComplete: true })
+        const existingContent = String(targetMessage.content || '').trim()
+        updateStreamingTargetMessage({
+          content: existingContent ? `${existingContent}\n\n${renderedError}` : renderedError,
+          queryMode: getFallbackQueryModeLabel(data, mergedMeta) || targetMessage.queryMode || '',
+          metadata: mergedMeta,
+          isComplete: true
+        })
       }
     }
   } catch (e) {
@@ -1195,8 +1224,22 @@ async function sendMessage() {
     if (e?.name === 'AbortError') {
       return
     }
-    const errorMessage = String(e?.payload?.message || e?.message || '未知错误')
-    updateStreamingTargetMessage({ content: '错误: ' + errorMessage, isComplete: true })
+    const targetMessage = getStreamingTargetMessage()?.message || {}
+    const existingMeta = (targetMessage.metadata && typeof targetMessage.metadata === 'object') ? targetMessage.metadata : {}
+    const payload = (e?.payload && typeof e.payload === 'object') ? e.payload : {}
+    const mergedMeta = mergeRoutingMetadata(existingMeta, payload)
+    const errorMessage = String(payload?.message || e?.message || '未知错误')
+    const renderedError = buildRoutingErrorMarkdown({
+      code: payload?.code,
+      message: errorMessage,
+      metadata: mergedMeta,
+    })
+    updateStreamingTargetMessage({
+      content: renderedError,
+      queryMode: getFallbackQueryModeLabel(payload, mergedMeta) || targetMessage.queryMode || '',
+      metadata: mergedMeta,
+      isComplete: true
+    })
   } finally {
     streamingAbortController.value = null
     resetStreamFlushState()
@@ -1628,6 +1671,7 @@ watch(mergedAndSortedFiles, () => {
           <div
             v-for="(msg, index) in store.currentMessages"
             :key="index"
+            v-memo="[getMessageRenderMemoKey(msg), highlightedQuestionMessageIndex === index]"
             class="message"
             :data-message-index="index"
             :class="[

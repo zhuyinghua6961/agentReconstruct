@@ -3,6 +3,7 @@
 import { marked } from 'marked'
 
 const DOI_INLINE_LINK_PATTERN = /\((?:doi\s*=|DOI:\s*)(10\.(?:[^\s,()]+|\([^\s,()]+\))+)(?:\s*·\s*查看原文[^)]*)?\)/gi
+const DOI_LABELED_TEXT_PATTERN = /\[DOI:\s*[^\]\n]+\]|\((?:doi\s*=|DOI:\s*)[^)\n]+(?:\)[^)\n]*)?\)|\bdoi[:=]\s*10\.\d{4,9}[A-Za-z0-9._;()/:+-]*/gi
 
 function normalizeDoiForLink(raw) {
   return extractDoiLinks(raw)[0] || ''
@@ -52,6 +53,32 @@ function applyDoiLinksToHtml(html) {
   })
 
   return nextHtml
+}
+
+function protectDoiSegments(text) {
+  const placeholders = []
+  const protectedText = String(text || '').replace(DOI_LABELED_TEXT_PATTERN, (match) => {
+    if (!/10\.\d{1,9}/i.test(match)) return match
+    const token = `@@DOI${placeholders.length}@@`
+    placeholders.push(match)
+    return token
+  })
+
+  return {
+    text: protectedText,
+    restore(value) {
+      return placeholders.reduce(
+        (result, original, index) => result.replaceAll(`@@DOI${index}@@`, original),
+        String(value || '')
+      )
+    }
+  }
+}
+
+function containsMathMarkup(text) {
+  const protectedText = protectDoiSegments(text).text
+  return /\\\(|\\\[|\$\$?/.test(protectedText)
+    || /[A-Za-z)\]](?:_\{[^{}\n]{1,32}\}|_[A-Za-z0-9+\-]{1,16}|\^\{[^{}\n]{1,32}\}|\^[A-Za-z0-9+\-]{1,16})/.test(protectedText)
 }
 
 function normalizeMarkdownForRender(text) {
@@ -170,10 +197,13 @@ function formatStreamingFallback(text) {
     .replace(/\n/g, '<br>')
 }
 
-function normalizeAnswerMarkdown(text) {
+function normalizeAnswerMarkdown(text, options = {}) {
+  const { renderMath = true } = options
   let normalizedText = normalizeMarkdownForRender(text)
   normalizedText = fixTableFormat(normalizedText)
-  normalizedText = renderMathMarkup(normalizedText)
+  if (renderMath) {
+    normalizedText = renderMathMarkup(normalizedText)
+  }
   return normalizedText
 }
 
@@ -201,13 +231,15 @@ export function formatAnswer(text, referenceSnippets = []) {
 export function formatStreamingAnswer(text) {
   if (!text) return ''
 
-  const normalizedText = normalizeAnswerMarkdown(text)
-  let html = ''
+  const baseText = normalizeAnswerMarkdown(text, { renderMath: false })
+  const shouldRenderMath = containsMathMarkup(baseText) || containsInlineRenderMarkup(baseText)
 
-  if (!containsStructuredMarkdown(normalizedText) && !containsInlineRenderMarkup(normalizedText)) {
-    html = formatStreamingFallback(normalizedText)
-    return applyDoiLinksToHtml(html)
+  if (!containsStructuredMarkdown(baseText) && !shouldRenderMath) {
+    return applyDoiLinksToHtml(formatStreamingFallback(baseText))
   }
+
+  const normalizedText = shouldRenderMath ? renderMathMarkup(baseText) : baseText
+  let html = ''
 
   try {
     html = renderMarkdownToHtml(normalizedText)
@@ -262,14 +294,15 @@ function fixTableFormat(text) {
 }
 
 function renderMathMarkup(text) {
-  let next = String(text || '')
+  const doiProtection = protectDoiSegments(text)
+  let next = doiProtection.text
 
   next = next.replace(/\\\[((?:.|\n)*?)\\\]/g, (_match, expr) => renderMathExpression(expr))
   next = next.replace(/\$\$([\s\S]*?)\$\$/g, (_match, expr) => renderMathExpression(expr))
   next = next.replace(/\\\(((?:.|\n)*?)\\\)/g, (_match, expr) => renderMathExpression(expr))
   next = next.replace(/\$([^$\n]+)\$/g, (_match, expr) => renderMathExpression(expr))
 
-  return renderSubSupMarkup(next)
+  return doiProtection.restore(renderSubSupMarkup(next))
 }
 
 function renderMathExpression(text) {

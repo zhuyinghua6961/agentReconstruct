@@ -161,30 +161,6 @@ def _file_types(files: list[dict[str, Any]]) -> set[str]:
     }
 
 
-def _infer_route(
-    *,
-    route: str,
-    execution_files: list[dict[str, Any]],
-    used_files: list[dict[str, Any]],
-    use_pdf: bool,
-    pdf_path: str,
-) -> str:
-    normalized = str(route or "").strip().lower()
-    if normalized:
-        return normalized
-    file_items = execution_files or used_files
-    file_types = _file_types(file_items)
-    has_pdf = bool(pdf_path) or use_pdf or ("pdf" in file_types)
-    has_table = bool(file_types & _TABLE_FILE_TYPES)
-    if has_pdf and has_table:
-        return "hybrid_qa"
-    if has_pdf:
-        return "pdf_qa"
-    if has_table:
-        return "tabular_qa"
-    return "kb_qa"
-
-
 def _infer_turn_mode(*, route: str, turn_mode: str, allow_kb_verification: bool) -> str:
     explicit = str(turn_mode or "").strip().lower()
     if explicit in {"kb_only", "file_only", "mixed"}:
@@ -194,6 +170,14 @@ def _infer_turn_mode(*, route: str, turn_mode: str, allow_kb_verification: bool)
     if allow_kb_verification:
         return "mixed"
     return "file_only"
+
+
+def _require_contract_field(*, route: str, field: str) -> None:
+    raise RequestAdapterError(
+        code="contract_field_required",
+        message=f"gateway route contract requires explicit {field} for file routes",
+        detail={"field": field, "route": route},
+    )
 
 
 def _normalize_source_scope(value: Any) -> str:
@@ -285,13 +269,8 @@ def adapt_gateway_ask_payload(payload: Mapping[str, Any]) -> GatewayAskRequest:
         or pdf_context.get("primary_pdf_path")
         or ""
     ).strip()
-    route = _infer_route(
-        route=str(source.get("route") or source.get("route_hint") or ""),
-        execution_files=execution_files,
-        used_files=used_files,
-        use_pdf=_coerce_bool(source.get("use_pdf")),
-        pdf_path=pdf_path,
-    )
+    explicit_route = str(source.get("route") or source.get("route_hint") or "").strip().lower()
+    route = explicit_route or "kb_qa"
     if route not in _ALLOWED_ROUTES:
         raise RequestAdapterError(
             code="route_invalid",
@@ -303,7 +282,7 @@ def adapt_gateway_ask_payload(payload: Mapping[str, Any]) -> GatewayAskRequest:
     raw_file_selection = _as_options(source.get("file_selection"))
     selected_file_ids = _as_int_list(source.get("selected_file_ids")) or _as_int_list(raw_file_selection.get("selected_file_ids"))
     primary_file_id = _coerce_positive_int(source.get("primary_file_id")) or _coerce_positive_int(raw_file_selection.get("primary_file_id"))
-    file_items = execution_files or used_files
+    file_items = execution_files
     available_file_ids = _file_ids(file_items)
     if primary_file_id is not None:
         if selected_file_ids and primary_file_id not in selected_file_ids:
@@ -321,9 +300,33 @@ def adapt_gateway_ask_payload(payload: Mapping[str, Any]) -> GatewayAskRequest:
     present_types = _file_types(file_items)
     has_pdf = bool(pdf_path) or _coerce_bool(source.get("use_pdf")) or ("pdf" in present_types)
     has_table = bool(present_types & _TABLE_FILE_TYPES)
-    has_file_resolution_context = bool(_coerce_positive_int(source.get("conversation_id"))) or bool(pdf_context)
-
-    source_scope = _normalize_source_scope(source.get("source_scope") or raw_file_selection.get("source_scope"))
+    raw_source_scope = source.get("source_scope") or raw_file_selection.get("source_scope")
+    source_scope = _normalize_source_scope(raw_source_scope)
+    raw_turn_mode = str(source.get("turn_mode") or raw_file_selection.get("turn_mode") or "").strip().lower()
+    has_file_execution_signal = bool(execution_files or pdf_path or _coerce_bool(source.get("use_pdf")))
+    has_file_scope_signal = bool(source_scope and source_scope != "kb")
+    if not explicit_route and (has_file_execution_signal or has_file_scope_signal):
+        raise RequestAdapterError(
+            code="route_required",
+            message="gateway route contract requires explicit route for file execution",
+            detail={
+                "has_execution_files": bool(execution_files),
+                "has_pdf_path": bool(pdf_path),
+                "use_pdf": _coerce_bool(source.get("use_pdf")),
+                "source_scope": source_scope,
+            },
+        )
+    if route in {"pdf_qa", "tabular_qa", "hybrid_qa"}:
+        if not raw_source_scope:
+            _require_contract_field(route=route, field="source_scope")
+        if not raw_turn_mode:
+            _require_contract_field(route=route, field="turn_mode")
+        if raw_turn_mode not in {"file_only", "mixed"}:
+            raise RequestAdapterError(
+                code="contract_field_invalid",
+                message="gateway route contract requires turn_mode=file_only or mixed for file routes",
+                detail={"field": "turn_mode", "route": route, "turn_mode": raw_turn_mode},
+            )
     kb_enabled = _coerce_bool(
         source.get(
             "kb_enabled",
@@ -338,23 +341,17 @@ def adapt_gateway_ask_payload(payload: Mapping[str, Any]) -> GatewayAskRequest:
         _validate_route_source_scope(route=route, source_scope=source_scope)
 
     if _route_requires_pdf(route=route, source_scope=source_scope) and not has_pdf:
-        if has_file_resolution_context:
-            has_pdf = True
-        else:
-            raise RequestAdapterError(
-                code="execution_files_required",
-                message="pdf_qa requires a PDF file or pdf_path" if route == "pdf_qa" else "selected source_scope requires at least one PDF file",
-                detail={"route": route, "source_scope": source_scope},
-            )
+        raise RequestAdapterError(
+            code="execution_files_required",
+            message="pdf_qa requires a PDF file or pdf_path" if route == "pdf_qa" else "selected source_scope requires at least one PDF file",
+            detail={"route": route, "source_scope": source_scope},
+        )
     if _route_requires_table(route=route, source_scope=source_scope) and not has_table:
-        if has_file_resolution_context:
-            has_table = True
-        else:
-            raise RequestAdapterError(
-                code="execution_files_required",
-                message="tabular_qa requires at least one table file" if route == "tabular_qa" else "selected source_scope requires at least one table file",
-                detail={"route": route, "source_scope": source_scope},
-            )
+        raise RequestAdapterError(
+            code="execution_files_required",
+            message="tabular_qa requires at least one table file" if route == "tabular_qa" else "selected source_scope requires at least one table file",
+            detail={"route": route, "source_scope": source_scope},
+        )
 
     n_results_per_claim = _coerce_positive_int(source.get("n_results_per_claim")) or _coerce_positive_int(options.get("n_results_per_claim")) or 10
     active_stream_count = _coerce_positive_int(source.get("active_stream_count")) or _coerce_positive_int(options.get("active_stream_count"))
@@ -366,6 +363,13 @@ def adapt_gateway_ask_payload(payload: Mapping[str, Any]) -> GatewayAskRequest:
     file_selection = dict(raw_file_selection)
     file_selection["source_scope"] = source_scope
     file_selection["kb_enabled"] = kb_enabled
+    normalized_turn_mode = _infer_turn_mode(
+        route=route,
+        turn_mode=raw_turn_mode,
+        allow_kb_verification=allow_kb_verification,
+    )
+    if raw_turn_mode:
+        file_selection["turn_mode"] = normalized_turn_mode
     if selected_file_ids:
         file_selection["selected_file_ids"] = list(selected_file_ids)
     if primary_file_id is not None:
@@ -382,14 +386,10 @@ def adapt_gateway_ask_payload(payload: Mapping[str, Any]) -> GatewayAskRequest:
         requested_mode=requested_mode,
         actual_mode=actual_mode,
         route=route,
-        route_was_explicit=bool(str(source.get("route") or source.get("route_hint") or "").strip()),
+        route_was_explicit=bool(explicit_route),
         source_scope=source_scope,
         kb_enabled=kb_enabled,
-        turn_mode=_infer_turn_mode(
-            route=route,
-            turn_mode=str(source.get("turn_mode") or ""),
-            allow_kb_verification=allow_kb_verification,
-        ),
+        turn_mode=normalized_turn_mode,
         allow_kb_verification=allow_kb_verification,
         trace_id=str(source.get("trace_id") or "").strip(),
         request_use_generation_driven=request_use_generation_driven,

@@ -17,7 +17,7 @@ from app.modules.qa_kb.models import QaKbRequest
 from app.modules.qa_kb.service import qa_kb_service
 from app.modules.qa_kb.streaming import build_doi_locations, normalize_reference_objects, normalize_references
 from app.modules.storage.service import storage_service
-from app.services.file_routes import iter_pdf_route_events, iter_tabular_route_events, resolve_gateway_file_context
+from app.services.file_routes import iter_pdf_route_events, iter_tabular_route_events
 from app.services.conversation_context_builder import build_conversation_context
 from app.services.request_adapter import GatewayAskRequest, RequestAdapterError, adapt_gateway_ask_payload
 from app.services.stream_contract import AskStreamTap
@@ -501,7 +501,7 @@ def _upstream_file_context(adapted_request: GatewayAskRequest) -> dict[str, Any]
     if route not in {"pdf_qa", "tabular_qa", "hybrid_qa"}:
         return None
 
-    execution_files = list(adapted_request.execution_files or adapted_request.used_files or [])
+    execution_files = list(adapted_request.execution_files or [])
     used_files = list(adapted_request.used_files or adapted_request.execution_files or [])
     file_selection = dict(adapted_request.file_selection or {})
 
@@ -519,15 +519,8 @@ def _upstream_file_context(adapted_request: GatewayAskRequest) -> dict[str, Any]
 
 
 def _resolve_route_context(adapted_request: GatewayAskRequest, request: Request) -> tuple[str, dict[str, Any] | None, list[dict[str, Any]], dict[str, Any]]:
-    logger = request.app.logger if hasattr(request.app, "logger") else None
     route = adapted_request.route
-    explicit_upstream_file_route = adapted_request.route_was_explicit and route in {"pdf_qa", "tabular_qa", "hybrid_qa"}
-    if explicit_upstream_file_route:
-        file_context = _upstream_file_context(adapted_request)
-    else:
-        file_context = resolve_gateway_file_context(adapted_request=adapted_request, logger=logger)
-        if file_context and not adapted_request.route_was_explicit:
-            route = str(file_context.get("route_hint") or route)
+    file_context = _upstream_file_context(adapted_request)
     used_files = list((file_context or {}).get("used_files") or adapted_request.used_files or adapted_request.execution_files or [])
     file_selection = dict(adapted_request.file_selection or {})
     if file_context:
@@ -537,9 +530,8 @@ def _resolve_route_context(adapted_request: GatewayAskRequest, request: Request)
             "selection_semantic": str(file_context.get("selection_semantic") or file_selection.get("selection_semantic") or ""),
             "selected_file_ids": list(file_context.get("selected_file_ids") or file_selection.get("selected_file_ids") or []),
         }
-        if not explicit_upstream_file_route:
-            file_selection["turn_mode"] = str(file_context.get("turn_mode") or adapted_request.turn_mode or file_selection.get("turn_mode") or "kb_only")
-            file_selection["allow_kb_verification"] = bool(file_context.get("allow_kb_verification", adapted_request.allow_kb_verification))
+        file_selection["turn_mode"] = str(file_context.get("turn_mode") or adapted_request.turn_mode or file_selection.get("turn_mode") or "kb_only")
+        file_selection["allow_kb_verification"] = bool(file_context.get("allow_kb_verification", adapted_request.allow_kb_verification))
     if adapted_request.source_scope:
         file_selection["source_scope"] = adapted_request.source_scope
     file_selection["kb_enabled"] = bool(adapted_request.kb_enabled)

@@ -62,6 +62,7 @@ class AdmissionSettings:
     enabled: bool
     runtime_role: str
     dispatcher_enabled: bool
+    control_api_token: str
     poll_interval_seconds: int
     max_concurrent: int
     fast_or_patent_max_concurrent: int
@@ -72,6 +73,14 @@ class AdmissionSettings:
     @property
     def is_admission_worker(self) -> bool:
         return self.runtime_role == "admission_worker"
+
+
+@dataclass(frozen=True)
+class RouteClassifierSettings:
+    enabled: bool
+    provider: str
+    high_confidence_threshold: float
+    medium_confidence_threshold: float
 
 
 @dataclass(frozen=True)
@@ -87,6 +96,7 @@ class GatewaySettings:
     endpoints: BackendEndpoints
     redis: RedisSettings
     admission: AdmissionSettings
+    route_classifier: RouteClassifierSettings
     strict_backend_config: bool = False
     backend_config_warnings: tuple[str, ...] = field(default_factory=tuple)
 
@@ -137,12 +147,19 @@ class GatewaySettings:
                 enabled=admission_enabled,
                 runtime_role=gateway_runtime_role,
                 dispatcher_enabled=_env_bool("GATEWAY_ADMISSION_DISPATCHER_ENABLED", admission_enabled),
+                control_api_token=str(os.getenv("GATEWAY_ADMISSION_CONTROL_TOKEN", "") or "").strip(),
                 poll_interval_seconds=max(1, _env_int("GATEWAY_ADMISSION_POLL_INTERVAL_SECONDS", 5)),
                 max_concurrent=max(1, _env_int("INTERACTIVE_EXECUTION_MAX_CONCURRENT", 10)),
                 fast_or_patent_max_concurrent=max(1, _env_int("INTERACTIVE_EXECUTION_FAST_OR_PATENT_MAX_CONCURRENT", 10)),
                 thinking_max_concurrent=max(1, _env_int("INTERACTIVE_EXECUTION_THINKING_MAX_CONCURRENT", 2)),
                 queued_ttl_seconds=max(60, _env_int("INTERACTIVE_QUEUED_TTL_SECONDS", 900)),
                 post_admit_attach_ttl_seconds=max(60, _env_int("INTERACTIVE_POST_ADMIT_ATTACH_TTL_SECONDS", 600)),
+            ),
+            route_classifier=RouteClassifierSettings(
+                enabled=_env_bool("GATEWAY_ROUTE_CLASSIFIER_ENABLED", False),
+                provider=str(os.getenv("GATEWAY_ROUTE_CLASSIFIER_PROVIDER", "noop") or "noop").strip().lower(),
+                high_confidence_threshold=float(str(os.getenv("GATEWAY_ROUTE_CLASSIFIER_HIGH_CONFIDENCE", "0.8") or "0.8")),
+                medium_confidence_threshold=float(str(os.getenv("GATEWAY_ROUTE_CLASSIFIER_MEDIUM_CONFIDENCE", "0.6") or "0.6")),
             ),
             strict_backend_config=strict_backend_config,
             backend_config_warnings=backend_warnings,

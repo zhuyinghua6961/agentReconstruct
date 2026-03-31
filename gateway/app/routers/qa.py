@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import httpx
@@ -50,14 +51,48 @@ def _normalized_payload(*, payload: AskRequest, route_decision, file_context, tr
         "turn_mode": route_decision.turn_mode,
         "kb_enabled": route_decision.kb_enabled,
         "allow_kb_verification": route_decision.allow_kb_verification,
+        "needs_clarification": route_decision.needs_clarification,
         "used_files": file_context.used_files,
-        "execution_files": file_context.execution_files,
+        "execution_files": route_decision.execution_files,
         "selected_file_ids": route_decision.selected_file_ids,
+        "strategy": route_decision.strategy,
         "primary_file_id": route_decision.primary_file_id,
         "file_selection": route_decision.file_selection,
+        "route_reasons": route_decision.route_reasons,
+        "route_confidence": route_decision.route_confidence,
+        "classifier_used": route_decision.classifier_used,
         "trace_id": trace_id,
         "options": payload.options,
     }
+
+
+def _route_context_payload(route_decision) -> dict:
+    return {
+        "source_scope": route_decision.source_scope,
+        "selected_file_ids": list(route_decision.selected_file_ids or []),
+        "strategy": route_decision.strategy,
+        "file_selection": dict(route_decision.file_selection or {}),
+        "route_reasons": list(route_decision.route_reasons or []),
+        "route_confidence": route_decision.route_confidence,
+        "classifier_used": route_decision.classifier_used,
+    }
+
+
+def _log_route_decision(*, trace_id: str, route_decision) -> None:
+    logger.info(
+        "gateway route decision trace_id=%s requested_mode=%s actual_mode=%s route=%s turn_mode=%s source_scope=%s selected_file_ids=%s strategy=%s route_reasons=%s classifier_used=%s route_confidence=%s",
+        trace_id,
+        route_decision.requested_mode,
+        route_decision.actual_mode,
+        route_decision.route,
+        route_decision.turn_mode,
+        route_decision.source_scope,
+        list(route_decision.selected_file_ids or []),
+        route_decision.strategy,
+        list(route_decision.route_reasons or []),
+        route_decision.classifier_used,
+        route_decision.route_confidence,
+    )
 
 
 def _quota_type_for_route(route_decision) -> str | None:
@@ -140,14 +175,16 @@ async def _abort_quota_grant(
     request: Request,
     quota_proxy: QuotaProxyService,
     grant_id: str | None,
+    success: bool = False,
 ) -> None:
     if not str(grant_id or "").strip():
         return
-    result = await quota_proxy.finalize(request=request, grant_id=str(grant_id), success=False)
+    result = await asyncio.shield(quota_proxy.finalize(request=request, grant_id=str(grant_id), success=success))
     if not result.success:
         logger.warning(
-            "gateway quota abort finalize failed: grant_id=%s status=%s code=%s error=%s",
+            "gateway quota finalize failed: grant_id=%s success=%s status=%s code=%s error=%s",
             grant_id,
+            success,
             result.status_code,
             result.payload.get("code"),
             result.payload.get("error"),
@@ -186,19 +223,40 @@ async def _stream_with_quota(
     frame_buffer = SSEFrameBuffer()
     done_payload: dict | None = None
     done_prefix_lines: list[str] = []
+    finalized = False
+    stream_error: Exception | None = None
     try:
         async for chunk in handle.body_iter():
+            outbound_frames: list[str] = []
             for frame in frame_buffer.feed(chunk):
                 payload, prefix_lines = parse_sse_json_frame(frame)
                 if isinstance(payload, dict) and str(payload.get("type") or "").strip().lower() == "done":
                     done_payload = payload
                     done_prefix_lines = prefix_lines
                     continue
+                outbound_frames.append(frame)
+            for frame in outbound_frames:
                 yield f"{frame}\n\n".encode("utf-8")
     except (httpx.HTTPError, TimeoutError, OSError) as exc:
-        await _abort_quota_grant(request=request, quota_proxy=quota_proxy, grant_id=grant_id)
-        yield _stream_error_frame_bytes(trace_id=trace_id, backend=backend, exc=exc)
-        return
+        stream_error = exc
+    except BaseException:
+        if not finalized:
+            await _abort_quota_grant(
+                request=request,
+                quota_proxy=quota_proxy,
+                grant_id=grant_id,
+                success=done_payload is not None,
+            )
+            finalized = True
+        raise
+
+    if stream_error is not None:
+        if done_payload is None:
+            if not finalized:
+                await _abort_quota_grant(request=request, quota_proxy=quota_proxy, grant_id=grant_id)
+                finalized = True
+            yield _stream_error_frame_bytes(trace_id=trace_id, backend=backend, exc=stream_error)
+            return
 
     buffer = frame_buffer.flush()
     if buffer is not None:
@@ -209,11 +267,14 @@ async def _stream_with_quota(
         else:
             yield buffer.encode("utf-8")
 
-    finalize_result = await quota_proxy.finalize(
-        request=request,
-        grant_id=str(grant_id),
-        success=done_payload is not None,
+    finalize_result = await asyncio.shield(
+        quota_proxy.finalize(
+            request=request,
+            grant_id=str(grant_id),
+            success=done_payload is not None,
+        )
     )
+    finalized = True
     if not finalize_result.success:
         logger.warning(
             "gateway stream quota finalize failed: grant_id=%s quota_type=%s status=%s code=%s error=%s",
@@ -272,6 +333,11 @@ def _clarification_json(*, trace_id: str, route_decision) -> JSONResponse:
             "requested_mode": route_decision.requested_mode,
             "actual_mode": route_decision.actual_mode,
             "route": route_decision.route,
+            "needs_clarification": route_decision.needs_clarification,
+            "detail": {
+                "clarify_candidates": list(route_decision.clarify_candidates or []),
+                **_route_context_payload(route_decision),
+            },
         },
     )
 
@@ -279,12 +345,89 @@ def _clarification_json(*, trace_id: str, route_decision) -> JSONResponse:
 def _clarification_stream(*, trace_id: str, route_decision) -> StreamingResponse:
     def _frames():
         yield (
-            'data: {"type":"metadata","requested_mode":"%s","actual_mode":"%s","route":"%s","trace_id":"%s"}\n\n'
-            % (route_decision.requested_mode, route_decision.actual_mode, route_decision.route, trace_id)
+            'data: {"type":"metadata","requested_mode":"%s","actual_mode":"%s","route":"%s","needs_clarification":%s,"clarify_candidates":%s,"source_scope":%s,"selected_file_ids":%s,"strategy":%s,"file_selection":%s,"route_reasons":%s,"route_confidence":%s,"classifier_used":%s,"trace_id":"%s"}\n\n'
+            % (
+                route_decision.requested_mode,
+                route_decision.actual_mode,
+                route_decision.route,
+                "true" if route_decision.needs_clarification else "false",
+                json.dumps(list(route_decision.clarify_candidates or []), ensure_ascii=False),
+                json.dumps(route_decision.source_scope, ensure_ascii=False),
+                json.dumps(list(route_decision.selected_file_ids or []), ensure_ascii=False),
+                json.dumps(route_decision.strategy, ensure_ascii=False),
+                json.dumps(dict(route_decision.file_selection or {}), ensure_ascii=False),
+                json.dumps(list(route_decision.route_reasons or []), ensure_ascii=False),
+                json.dumps(route_decision.route_confidence, ensure_ascii=False),
+                json.dumps(route_decision.classifier_used, ensure_ascii=False),
+                trace_id,
+            )
         )
         yield (
             'data: {"type":"error","code":"FILE_SELECTION_CLARIFICATION_REQUIRED","error":"file_selection_clarification_required","message":"%s","retriable":false,"trace_id":"%s"}\n\n'
             % ((route_decision.clarification_message or "File selection requires clarification").replace('"', '\\"'), trace_id)
+        )
+
+    return StreamingResponse(
+        _frames(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _file_status_http_code(status_code: str) -> int:
+    if status_code == "FILE_NOT_FOUND":
+        return 404
+    return 409
+
+
+def _file_status_json(*, trace_id: str, route_decision) -> JSONResponse:
+    return JSONResponse(
+        status_code=_file_status_http_code(route_decision.status_code),
+        content={
+            "success": False,
+            "code": route_decision.status_code,
+            "error": route_decision.status_error or "file_state_blocked",
+            "message": route_decision.status_message or route_decision.status_code,
+            "trace_id": trace_id,
+            "requested_mode": route_decision.requested_mode,
+            "actual_mode": route_decision.actual_mode,
+            "route": route_decision.route,
+            "retriable": route_decision.status_retriable,
+            "detail": {
+                **dict(route_decision.status_detail or {}),
+                **_route_context_payload(route_decision),
+            },
+        },
+    )
+
+
+def _file_status_stream(*, trace_id: str, route_decision) -> StreamingResponse:
+    def _frames():
+        yield (
+            'data: {"type":"metadata","requested_mode":"%s","actual_mode":"%s","route":"%s","source_scope":%s,"selected_file_ids":%s,"strategy":%s,"file_selection":%s,"route_reasons":%s,"route_confidence":%s,"classifier_used":%s,"trace_id":"%s"}\n\n'
+            % (
+                route_decision.requested_mode,
+                route_decision.actual_mode,
+                route_decision.route,
+                json.dumps(route_decision.source_scope, ensure_ascii=False),
+                json.dumps(list(route_decision.selected_file_ids or []), ensure_ascii=False),
+                json.dumps(route_decision.strategy, ensure_ascii=False),
+                json.dumps(dict(route_decision.file_selection or {}), ensure_ascii=False),
+                json.dumps(list(route_decision.route_reasons or []), ensure_ascii=False),
+                json.dumps(route_decision.route_confidence, ensure_ascii=False),
+                json.dumps(route_decision.classifier_used, ensure_ascii=False),
+                trace_id,
+            )
+        )
+        yield (
+            'data: {"type":"error","code":"%s","error":"%s","message":"%s","retriable":%s,"trace_id":"%s"}\n\n'
+            % (
+                (route_decision.status_code or "FILE_STATE_BLOCKED").replace('"', '\\"'),
+                (route_decision.status_error or "file_state_blocked").replace('"', '\\"'),
+                (route_decision.status_message or route_decision.status_code or "file_state_blocked").replace('"', '\\"'),
+                "true" if route_decision.status_retriable else "false",
+                trace_id,
+            )
         )
 
     return StreamingResponse(
@@ -355,8 +498,11 @@ async def _proxy_ask(request: Request, payload: AskRequest, mode: str) -> JSONRe
         route_decision, file_context = await _resolve(request, payload, mode)
     except ConversationFileProviderError as exc:
         return _conversation_files_error_json(trace_id=trace_id, exc=exc)
+    _log_route_decision(trace_id=trace_id, route_decision=route_decision)
     if route_decision.needs_clarification:
         return _clarification_json(trace_id=trace_id, route_decision=route_decision)
+    if route_decision.status_code:
+        return _file_status_json(trace_id=trace_id, route_decision=route_decision)
 
     registry = request.app.state.backend_registry
     proxy_service: ProxyService = request.app.state.proxy_service
@@ -421,8 +567,11 @@ async def _proxy_ask_stream(request: Request, payload: AskRequest, mode: str):
         route_decision, file_context = await _resolve(request, payload, mode)
     except ConversationFileProviderError as exc:
         return _conversation_files_error_stream(trace_id=trace_id, exc=exc)
+    _log_route_decision(trace_id=trace_id, route_decision=route_decision)
     if route_decision.needs_clarification:
         return _clarification_stream(trace_id=trace_id, route_decision=route_decision)
+    if route_decision.status_code:
+        return _file_status_stream(trace_id=trace_id, route_decision=route_decision)
 
     registry = request.app.state.backend_registry
     proxy_service: ProxyService = request.app.state.proxy_service

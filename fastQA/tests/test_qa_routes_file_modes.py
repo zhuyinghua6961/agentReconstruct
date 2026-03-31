@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from app.main import app
 import app.routers.qa as qa_router_module
+from app.services.request_adapter import adapt_gateway_ask_payload
 import app.services.file_routes as file_routes_module
 
 
@@ -24,6 +26,7 @@ def test_pdf_route_is_dispatched(monkeypatch):
             "requested_mode": "fast",
             "route": "pdf_qa",
             "source_scope": "pdf",
+            "turn_mode": "file_only",
             "execution_files": [{"file_id": 1, "file_type": "pdf", "local_path": "/tmp/demo.pdf"}],
         },
     )
@@ -53,6 +56,7 @@ def test_tabular_route_is_dispatched(monkeypatch):
             "requested_mode": "fast",
             "route": "tabular_qa",
             "source_scope": "table",
+            "turn_mode": "file_only",
             "execution_files": [{"file_id": 2, "file_type": "excel", "local_path": "/tmp/demo.xlsx"}],
         },
     )
@@ -96,6 +100,7 @@ def test_hybrid_pdf_kb_route_dispatches_to_pdf_handler(monkeypatch):
             "requested_mode": "fast",
             "route": "hybrid_qa",
             "source_scope": "pdf+kb",
+            "turn_mode": "mixed",
             "kb_enabled": True,
             "allow_kb_verification": True,
             "execution_files": [{"file_id": 1, "file_type": "pdf", "local_path": "/tmp/demo.pdf"}],
@@ -140,6 +145,7 @@ def test_explicit_upstream_route_preserves_selection_without_re_resolving(monkey
             "requested_mode": "fast",
             "route": "pdf_qa",
             "source_scope": "pdf",
+            "turn_mode": "file_only",
             "kb_enabled": False,
             "selected_file_ids": [1],
             "primary_file_id": 1,
@@ -165,7 +171,28 @@ def test_explicit_upstream_route_preserves_selection_without_re_resolving(monkey
         "kb_enabled": False,
         "selected_file_ids": [1],
         "primary_file_id": 1,
+        "turn_mode": "file_only",
+        "allow_kb_verification": False,
     }
+
+
+def test_kb_route_context_does_not_re_resolve_from_used_files():
+    adapted = adapt_gateway_ask_payload(
+        {
+            "question": "磷酸铁锂电压范围是多少？",
+            "requested_mode": "fast",
+            "used_files": [{"file_id": 1, "file_type": "pdf", "local_path": "/tmp/demo.pdf"}],
+        }
+    )
+    fake_request = SimpleNamespace(app=SimpleNamespace(logger=None))
+
+    route, file_context, used_files, file_selection = qa_router_module._resolve_route_context(adapted, fake_request)
+
+    assert route == "kb_qa"
+    assert file_context is None
+    assert used_files == adapted.used_files
+    assert file_selection["source_scope"] == "kb"
+    assert file_selection["kb_enabled"] is True
 
 
 def test_legacy_v1_ask_uses_stream_contract_for_file_route(monkeypatch):
@@ -182,6 +209,7 @@ def test_legacy_v1_ask_uses_stream_contract_for_file_route(monkeypatch):
             "requested_mode": "fast",
             "route": "pdf_qa",
             "source_scope": "pdf",
+            "turn_mode": "file_only",
             "execution_files": [{"file_id": 1, "file_type": "pdf", "local_path": "/tmp/demo.pdf"}],
         },
     )
@@ -224,6 +252,7 @@ def test_pdf_route_accepts_thinking_request_when_gateway_has_rerouted_to_fast(mo
             "actual_mode": "fast",
             "route": "pdf_qa",
             "source_scope": "pdf",
+            "turn_mode": "file_only",
             "execution_files": [{"file_id": 1, "file_type": "pdf", "local_path": "/tmp/demo.pdf"}],
         },
     )
@@ -301,6 +330,7 @@ def test_hybrid_route_dispatch_matrix(monkeypatch):
                 "requested_mode": "fast",
                 "route": "hybrid_qa",
                 "source_scope": case["source_scope"],
+                "turn_mode": "mixed" if "kb" in case["source_scope"] else "file_only",
                 "kb_enabled": case["kb_enabled"],
                 "execution_files": case["execution_files"],
             },

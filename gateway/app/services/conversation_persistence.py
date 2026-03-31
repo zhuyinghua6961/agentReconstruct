@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -11,6 +10,7 @@ import httpx
 from fastapi import Request
 
 from app.core.config import GatewaySettings
+from app.services.sse_frames import SSEFrameBuffer, parse_sse_json_frame
 
 
 def _conversation_id_int(value: Any) -> int | None:
@@ -175,19 +175,14 @@ class ConversationPersistenceService:
         body_iter: AsyncIterator[bytes],
         summary: StreamSummary,
     ) -> AsyncIterator[bytes]:
-        buffer = ""
+        frame_buffer = SSEFrameBuffer()
         step_order: list[str] = []
         step_map: dict[str, dict[str, Any]] = {}
         state = {"thinking_count": 0}
         async for chunk in body_iter:
             if not chunk:
                 continue
-            try:
-                buffer += chunk.decode("utf-8")
-            except UnicodeDecodeError:
-                buffer += chunk.decode("utf-8", errors="ignore")
-            while "\n\n" in buffer:
-                frame, buffer = buffer.split("\n\n", 1)
+            for frame in frame_buffer.feed(chunk):
                 self._apply_sse_frame(
                     frame=frame,
                     summary=summary,
@@ -196,7 +191,8 @@ class ConversationPersistenceService:
                     state=state,
                 )
             yield chunk
-        if buffer.strip():
+        buffer = frame_buffer.flush()
+        if buffer is not None:
             self._apply_sse_frame(
                 frame=buffer,
                 summary=summary,
@@ -214,13 +210,8 @@ class ConversationPersistenceService:
         step_map: dict[str, dict[str, Any]],
         state: dict[str, int],
     ) -> None:
-        lines = [line.strip() for line in frame.splitlines() if line.strip()]
-        data_lines = [line[5:].strip() for line in lines if line.startswith("data:")]
-        if not data_lines:
-            return
-        try:
-            payload = json.loads("\n".join(data_lines))
-        except Exception:
+        payload, _prefix_lines = parse_sse_json_frame(frame)
+        if not isinstance(payload, dict):
             return
         event_type = str(payload.get("type") or "").strip().lower()
         if event_type == "content":

@@ -1,6 +1,8 @@
 // API service layer for the UI-aligned pages.
 // This adapter normalizes current backend contracts to the shape expected by the UI.
 
+import { getRouteModeLabel } from '../utils/routingStatus.js'
+
 function resolveBackendBase() {
   const explicit = String(import.meta.env.VITE_API_BASE_URL || '').trim();
   if (explicit) {
@@ -212,7 +214,8 @@ function normalizeMessage(item) {
     hybrid_qa: '混合文件问答',
     tabular: '表格问答',
   };
-  const queryMode = rawMode ? (queryModeMap[rawMode] || rawMode) : '';
+  const fallbackRouteMode = getRouteModeLabel(metadata?.route || item?.route || '');
+  const queryMode = rawMode ? (queryModeMap[rawMode] || rawMode) : fallbackRouteMode;
   const referenceLinks = normalizeReferenceLinks(
     item?.referenceLinks
     || item?.reference_links
