@@ -330,6 +330,47 @@ def _persist_assistant_summary_legacy(*, user_id: int, conversation_id: int, ass
         conversation_service.refresh_conversation_summary(user_id=user_id, conversation_id=conversation_id)
 
 
+def _persist_assistant_terminal_legacy(
+    *,
+    user_id: int,
+    conversation_id: int,
+    assistant_content: str,
+    summary: dict[str, Any],
+    terminal_status: str,
+    failure: dict[str, Any] | None = None,
+) -> None:
+    safe_summary = dict(summary or {})
+    normalized_terminal_status = _normalize_text(terminal_status).lower() or "failed"
+    normalized_references = _normalize_reference_payload(safe_summary)
+    meta = {
+        "source": "ask_stream",
+        "query_mode": str(safe_summary.get("query_mode") or ""),
+        "references": normalized_references,
+        "reference_objects": normalized_references,
+        "reference_links": _normalize_reference_links(safe_summary, "reference_links"),
+        "pdf_links": _normalize_reference_links(safe_summary, "pdf_links"),
+        "doi_locations": _normalize_doi_locations(safe_summary),
+        "steps": safe_summary.get("steps") or [],
+        "route": str(safe_summary.get("route") or ""),
+        "timings": safe_summary.get("timings") or {},
+        "trace_id": str(safe_summary.get("trace_id") or ""),
+        "terminal_status": normalized_terminal_status,
+        "done_seen": normalized_terminal_status == "done",
+    }
+    normalized_failure = _normalize_failure_payload(failure)
+    if normalized_failure is not None:
+        meta["failure"] = normalized_failure
+    result = conversation_service.add_message(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        role="assistant",
+        content=str(assistant_content or ""),
+        metadata=meta,
+    )
+    if isinstance(result, dict) and result.get("success"):
+        conversation_service.refresh_conversation_summary(user_id=user_id, conversation_id=conversation_id)
+
+
 def _persist_user_message_authority(*, user_id: int, conversation_id: int, question: str, trace_id: str, route: str, requested_mode: str, actual_mode: str) -> dict[str, Any]:
     return _get_authority_client().write_user_turn(
         user_id=user_id,
@@ -344,13 +385,14 @@ def _persist_user_message_authority(*, user_id: int, conversation_id: int, quest
 
 def _persist_assistant_summary_authority(*, user_id: int, conversation_id: int, trace_id: str, route: str, requested_mode: str, actual_mode: str, assistant_content: str, summary: dict[str, Any]) -> dict[str, Any]:
     safe_summary = dict(summary or {})
-    return _get_authority_client().accept_assistant_turn_async(
+    return _get_authority_client().accept_assistant_turn_terminal_async(
         user_id=user_id,
         conversation_id=conversation_id,
         trace_id=_normalize_text(safe_summary.get("trace_id") or trace_id),
         route=_normalize_text(safe_summary.get("route") or route),
         requested_mode=requested_mode,
         actual_mode=actual_mode,
+        terminal_status="done",
         answer_text=assistant_content,
         steps=_normalize_steps(safe_summary),
         references=_normalize_reference_payload(safe_summary),
@@ -360,6 +402,83 @@ def _persist_assistant_summary_authority(*, user_id: int, conversation_id: int, 
         doi_locations=_normalize_doi_locations(safe_summary),
         used_files=_normalize_used_files(safe_summary),
         timings=dict(safe_summary.get("timings") or {}),
+        failure=None,
+    )
+
+
+def _normalize_failure_payload(failure: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(failure, dict):
+        return None
+    normalized: dict[str, Any] = {}
+    for key in ("stage", "message", "code"):
+        value = _normalize_text(failure.get(key))
+        if value:
+            normalized[key] = value
+    if "retriable" in failure and failure.get("retriable") is not None:
+        normalized["retriable"] = bool(failure.get("retriable"))
+    return normalized or None
+
+
+def _report_terminal_persistence_unconfirmed(
+    *,
+    user_id: int,
+    conversation_id: int,
+    trace_id: str,
+    route: str,
+    terminal_status: str,
+    error: Exception | str,
+) -> dict[str, Any]:
+    payload = {
+        "user_id": int(user_id),
+        "conversation_id": int(conversation_id),
+        "trace_id": _normalize_text(trace_id),
+        "route": _normalize_text(route),
+        "terminal_status": _normalize_text(terminal_status).lower() or "failed",
+        "error": _normalize_text(error) or "terminal persistence unconfirmed",
+    }
+    logger.warning(
+        "highThinking terminal_persistence_unconfirmed conversation_id=%s trace_id=%s route=%s status=%s error=%s",
+        payload["conversation_id"],
+        payload["trace_id"],
+        payload["route"],
+        payload["terminal_status"],
+        payload["error"],
+    )
+    return payload
+
+
+def _persist_assistant_terminal_sync(
+    *,
+    user_id: int,
+    conversation_id: int,
+    trace_id: str,
+    route: str,
+    requested_mode: str,
+    actual_mode: str,
+    terminal_status: str,
+    assistant_content: str,
+    summary: dict[str, Any],
+    failure: dict[str, Any] | None,
+) -> dict[str, Any]:
+    safe_summary = dict(summary or {})
+    return _get_authority_client().accept_assistant_turn_terminal_async(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        trace_id=_normalize_text(safe_summary.get("trace_id") or trace_id),
+        route=_normalize_text(safe_summary.get("route") or route),
+        requested_mode=requested_mode,
+        actual_mode=actual_mode,
+        terminal_status=_normalize_text(terminal_status).lower() or "failed",
+        answer_text=str(assistant_content or ""),
+        steps=_normalize_steps(safe_summary),
+        references=_normalize_reference_payload(safe_summary),
+        reference_objects=_normalize_reference_payload(safe_summary),
+        reference_links=_normalize_reference_links(safe_summary, "reference_links"),
+        pdf_links=_normalize_reference_links(safe_summary, "pdf_links"),
+        doi_locations=_normalize_doi_locations(safe_summary),
+        used_files=_normalize_used_files(safe_summary),
+        timings=dict(safe_summary.get("timings") or {}),
+        failure=_normalize_failure_payload(failure),
     )
 
 
@@ -371,6 +490,44 @@ def _submit_shadow_task(*, key: str, fn, kwargs: dict[str, Any]) -> None:
             logger.warning("highThinking shadow authority task failed", exc_info=True)
 
     get_default_dispatcher().submit(key=key, fn=_run_shadow)
+
+
+def _persist_assistant_terminal_dispatch(
+    *,
+    user_id: int,
+    conversation_id: int,
+    trace_id: str,
+    route: str,
+    requested_mode: str,
+    actual_mode: str,
+    terminal_status: str,
+    assistant_content: str,
+    summary: dict[str, Any],
+    failure: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    try:
+        return _persist_assistant_terminal_sync(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            trace_id=trace_id,
+            route=route,
+            requested_mode=requested_mode,
+            actual_mode=actual_mode,
+            terminal_status=terminal_status,
+            assistant_content=assistant_content,
+            summary=summary,
+            failure=failure,
+        )
+    except Exception as exc:
+        _report_terminal_persistence_unconfirmed(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            trace_id=trace_id,
+            route=route,
+            terminal_status=terminal_status,
+            error=str(exc),
+        )
+        return None
 
 
 def load_conversation_context(
@@ -518,60 +675,99 @@ def persist_assistant_summary(
         return
     if not bool(safe_summary.get("done_seen")) or not assistant_content:
         return
+    persist_assistant_terminal(
+        user_id=resolved_user_id,
+        conversation_id=resolved_conversation_id,
+        trace_id=trace_id,
+        route=route,
+        requested_mode=requested_mode,
+        actual_mode=actual_mode,
+        terminal_status="done",
+        assistant_content=assistant_content,
+        summary=safe_summary,
+        failure=None,
+        async_enabled=async_enabled,
+    )
 
-    target = str(getattr(config, "CONVERSATION_ASSISTANT_WRITE_TARGET", "legacy") or "legacy").strip().lower()
+ 
+
+def persist_assistant_terminal(
+    *,
+    user_id: int | None,
+    conversation_id: int | None,
+    trace_id: str,
+    route: str,
+    requested_mode: str,
+    actual_mode: str,
+    terminal_status: str,
+    assistant_content: str = "",
+    summary: dict[str, Any],
+    failure: dict[str, Any] | None = None,
+    async_enabled: bool = True,
+) -> None:
+    resolved_user_id = _safe_positive_int(user_id)
+    resolved_conversation_id = _safe_positive_int(conversation_id)
+    if resolved_user_id is None or resolved_conversation_id is None:
+        return
+    normalized_status = _normalize_text(terminal_status).lower() or "failed"
+    safe_summary = dict(summary or {})
+    content = str(assistant_content if assistant_content else safe_summary.get("assistant_content") or "")
+    resolved_trace_id = _normalize_text(safe_summary.get("trace_id") or trace_id)
+    resolved_route = _normalize_text(safe_summary.get("route") or route)
     key = _persistence_key(user_id=resolved_user_id, conversation_id=resolved_conversation_id)
+    target = str(getattr(config, "CONVERSATION_ASSISTANT_WRITE_TARGET", "legacy") or "legacy").strip().lower()
+
+    if normalized_status == "done" and str(content).strip() and _pending_overlay_enabled():
+        _store_pending_assistant_overlay(
+            user_id=resolved_user_id,
+            conversation_id=resolved_conversation_id,
+            trace_id=resolved_trace_id,
+            route=resolved_route,
+            assistant_content=content,
+        )
 
     if target == "public_service":
-        if _pending_overlay_enabled():
-            _store_pending_assistant_overlay(
-                user_id=resolved_user_id,
-                conversation_id=resolved_conversation_id,
-                trace_id=_normalize_text(safe_summary.get("trace_id") or trace_id),
-                route=_normalize_text(safe_summary.get("route") or route),
-                assistant_content=assistant_content,
-            )
-
-        def _run_accept() -> None:
-            try:
-                _persist_assistant_summary_authority(
-                    user_id=resolved_user_id,
-                    conversation_id=resolved_conversation_id,
-                    trace_id=trace_id,
-                    route=route,
-                    requested_mode=requested_mode,
-                    actual_mode=actual_mode,
-                    assistant_content=assistant_content,
-                    summary=safe_summary,
-                )
-            except Exception:
-                logger.warning("highThinking authority assistant accept failed", exc_info=True)
-
+        kwargs = {
+            "user_id": resolved_user_id,
+            "conversation_id": resolved_conversation_id,
+            "trace_id": resolved_trace_id,
+            "route": resolved_route,
+            "requested_mode": requested_mode,
+            "actual_mode": actual_mode,
+            "terminal_status": normalized_status,
+            "assistant_content": content,
+            "summary": safe_summary,
+            "failure": failure,
+        }
         if async_enabled:
-            get_default_dispatcher().submit(key=key, fn=_run_accept)
+            get_default_dispatcher().submit(key=key, fn=_persist_assistant_terminal_dispatch, kwargs=kwargs)
             return
-        _run_accept()
+        _persist_assistant_terminal_dispatch(**kwargs)
         return
 
     if target == "shadow_public_service":
-        _persist_assistant_summary_legacy(
+        _persist_assistant_terminal_legacy(
             user_id=resolved_user_id,
             conversation_id=resolved_conversation_id,
-            assistant_content=assistant_content,
+            assistant_content=content,
             summary=safe_summary,
+            terminal_status=normalized_status,
+            failure=failure,
         )
         _submit_shadow_task(
             key=key,
-            fn=_persist_assistant_summary_authority,
+            fn=_persist_assistant_terminal_dispatch,
             kwargs={
                 "user_id": resolved_user_id,
                 "conversation_id": resolved_conversation_id,
-                "trace_id": trace_id,
-                "route": route,
+                "trace_id": resolved_trace_id,
+                "route": resolved_route,
                 "requested_mode": requested_mode,
                 "actual_mode": actual_mode,
-                "assistant_content": assistant_content,
+                "terminal_status": normalized_status,
+                "assistant_content": content,
                 "summary": safe_summary,
+                "failure": failure,
             },
         )
         return
@@ -579,10 +775,12 @@ def persist_assistant_summary(
     kwargs = {
         "user_id": resolved_user_id,
         "conversation_id": resolved_conversation_id,
-        "assistant_content": assistant_content,
+        "assistant_content": content,
         "summary": safe_summary,
+        "terminal_status": normalized_status,
+        "failure": failure,
     }
     if async_enabled:
-        get_default_dispatcher().submit(key=key, fn=_persist_assistant_summary_legacy, kwargs=kwargs)
+        get_default_dispatcher().submit(key=key, fn=_persist_assistant_terminal_legacy, kwargs=kwargs)
         return
-    _persist_assistant_summary_legacy(**kwargs)
+    _persist_assistant_terminal_legacy(**kwargs)

@@ -258,3 +258,93 @@ def test_accept_assistant_turn_async_uses_highthinking_service_name() -> None:
     }
 
     client.close()
+
+
+def test_accept_assistant_turn_terminal_async_uses_highthinking_terminal_contract() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        captured["headers"] = dict(request.headers)
+        captured["json"] = __import__("json").loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            202,
+            json={
+                "accepted": True,
+                "event_id": "assistant-async:42:trace-1",
+                "trace_id": "trace-1",
+                "idempotency_key": "42:trace-1:assistant",
+                "status": "accepted",
+            },
+        )
+
+    client = ConversationAuthorityClient(
+        base_url="http://authority.test",
+        service_token="secret-token",
+        transport=httpx.MockTransport(handler),
+    )
+
+    response = client.accept_assistant_turn_terminal_async(
+        user_id=7,
+        conversation_id=42,
+        trace_id="trace-1",
+        route="/api/ask",
+        requested_mode="fast",
+        actual_mode="fast",
+        terminal_status="failed",
+        answer_text="partial answer",
+        steps=[{"type": "reasoning"}],
+        references=[{"title": "doc"}],
+        reference_objects=[{"doi": "10.1/a", "section_name": "Discussion", "chunk_index": 2}],
+        reference_links=[{"doi": "10.1/a", "pdf_url": "/api/v1/view_pdf/10.1%2Fa"}],
+        pdf_links=[{"doi": "10.1/a", "pdf_url": "/api/v1/view_pdf/10.1%2Fa"}],
+        doi_locations={"10.1/a": [{"section": "Discussion", "chunk_index": 2}]},
+        used_files=[{"file_id": 11}],
+        timings={"total_ms": 12},
+        failure={"stage": "citation_validation", "message": "validation timeout", "code": "VALIDATION_TIMEOUT", "retriable": True},
+    )
+
+    assert response == {
+        "accepted": True,
+        "event_id": "assistant-async:42:trace-1",
+        "trace_id": "trace-1",
+        "idempotency_key": "42:trace-1:assistant",
+        "status": "accepted",
+    }
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://authority.test/internal/conversations/42/messages/assistant-terminal-async"
+    assert captured["headers"]["x-internal-service-name"] == "highThinkingQA"
+    assert captured["headers"]["x-internal-service-token"] == "secret-token"
+    assert captured["headers"]["x-trace-id"] == "trace-1"
+    assert captured["json"] == {
+        "conversation_id": 42,
+        "user_id": 7,
+        "trace_id": "trace-1",
+        "source_service": "highThinkingQA",
+        "route": "/api/ask",
+        "requested_mode": "thinking",
+        "actual_mode": "thinking",
+        "idempotency_key": "42:trace-1:assistant",
+        "terminal_event": {
+            "terminal_status": "failed",
+            "done_seen": False,
+            "answer_text": "partial answer",
+            "steps": [{"type": "reasoning"}],
+            "references": [{"title": "doc"}],
+            "reference_objects": [{"doi": "10.1/a", "section_name": "Discussion", "chunk_index": 2}],
+            "reference_links": [{"doi": "10.1/a", "pdf_url": "/api/v1/view_pdf/10.1%2Fa"}],
+            "pdf_links": [{"doi": "10.1/a", "pdf_url": "/api/v1/view_pdf/10.1%2Fa"}],
+            "doi_locations": {"10.1/a": [{"section": "Discussion", "chunk_index": 2}]},
+            "used_files": [{"file_id": 11}],
+            "timings": {"total_ms": 12},
+            "failure": {
+                "stage": "citation_validation",
+                "message": "validation timeout",
+                "code": "VALIDATION_TIMEOUT",
+                "retriable": True,
+            },
+        },
+    }
+
+    client.close()

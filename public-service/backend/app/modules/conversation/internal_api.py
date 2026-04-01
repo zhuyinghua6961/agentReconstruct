@@ -12,6 +12,7 @@ from app.core.errors import AppError
 from app.modules.conversation import service as conversation_service_module
 from app.modules.conversation.authority_schemas import (
     AuthorityAssistantAsyncRequest,
+    AuthorityAssistantTerminalAsyncRequest,
     AuthorityContextSnapshotRequest,
     AuthorityContextSnapshotResponse,
     AuthorityConversationState,
@@ -188,13 +189,14 @@ def get_context_snapshot(
     _raise_service_error(result=result, ok_status=200)
     payload = result.get("data") if isinstance(result.get("data"), dict) else {}
     raw_conversation_state = payload.get("conversation_state") if isinstance(payload.get("conversation_state"), dict) else {}
+    raw_recent_turns = payload.get("recent_turns") if isinstance(payload.get("recent_turns"), list) else []
     response = AuthorityContextSnapshotResponse(
         conversation_id=int(payload.get("conversation_id") or request_contract.conversation_id),
         user_id=int(payload.get("user_id") or request_contract.user_id),
         snapshot_version=int(payload.get("snapshot_version") or 0),
         updated_at=payload.get("updated_at") or _utc_now(),
         summary=payload.get("summary") or AuthorityConversationSummary(),
-        recent_turns=payload.get("recent_turns") or [],
+        recent_turns=raw_recent_turns,
         conversation_state=AuthorityConversationState(
             last_turn_route=str(raw_conversation_state.get("last_turn_route") or "").strip() or None,
             last_focus_file_ids=list(raw_conversation_state.get("last_focus_file_ids") or []),
@@ -241,6 +243,50 @@ def accept_assistant_event(
         content={
             "accepted": True,
             "event_id": str(result.get("event_id") or f"assistant-async:{payload.conversation_id}:{payload.trace_id}"),
+            "trace_id": payload.trace_id,
+            "idempotency_key": payload.idempotency_key,
+            "status": str(result.get("status") or "accepted"),
+        },
+    )
+
+
+@router.post("/internal/conversations/{conversation_id}/messages/assistant-terminal-async")
+def accept_assistant_terminal_event(
+    conversation_id: int,
+    payload: AuthorityAssistantTerminalAsyncRequest,
+    caller: InternalAuthorityCaller = Depends(require_internal_authority),
+):
+    _enforce_path_conversation_id(path_conversation_id=conversation_id, payload_conversation_id=payload.conversation_id)
+    _enforce_source_service_policy(
+        caller_service_name=caller.service_name,
+        source_service=payload.source_service,
+        requested_mode=payload.requested_mode,
+        actual_mode=payload.actual_mode,
+    )
+    _enforce_idempotency_key(
+        idempotency_key=payload.idempotency_key,
+        conversation_id=payload.conversation_id,
+        trace_id=payload.trace_id,
+        operation="assistant",
+    )
+
+    result = _conversation_service().accept_authority_assistant_terminal_async(
+        user_id=payload.user_id,
+        conversation_id=payload.conversation_id,
+        trace_id=payload.trace_id,
+        source_service=payload.source_service,
+        route=payload.route,
+        requested_mode=payload.requested_mode,
+        actual_mode=payload.actual_mode,
+        idempotency_key=payload.idempotency_key,
+        terminal_event=payload.terminal_event.model_dump(exclude_none=True),
+    )
+    _raise_service_error(result=result, ok_status=202)
+    return JSONResponse(
+        status_code=202,
+        content={
+            "accepted": True,
+            "event_id": str(result.get("event_id") or f"assistant-terminal-async:{payload.conversation_id}:{payload.trace_id}"),
             "trace_id": payload.trace_id,
             "idempotency_key": payload.idempotency_key,
             "status": str(result.get("status") or "accepted"),

@@ -75,6 +75,15 @@ class _AssistantAsyncResponse(BaseModel):
     status: str = Field(min_length=1)
 
 
+class _AssistantTerminalFailure(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    stage: str | None = None
+    message: str | None = None
+    code: str | None = None
+    retriable: bool | None = None
+
+
 def _normalize_positive_int_list(value: Any) -> list[int]:
     if not isinstance(value, list):
         return []
@@ -231,6 +240,60 @@ class ConversationAuthorityClient:
         response = self._request(
             method="POST",
             path=f"/internal/conversations/{int(conversation_id)}/messages/assistant-async",
+            trace_id=trace_id,
+            json=payload,
+        )
+        return _AssistantAsyncResponse.model_validate(response).model_dump()
+
+    def accept_assistant_turn_terminal_async(
+        self,
+        *,
+        user_id: int,
+        conversation_id: int,
+        trace_id: str,
+        route: str,
+        requested_mode: str,
+        actual_mode: str,
+        terminal_status: str,
+        answer_text: str,
+        steps: list[dict[str, Any]] | None = None,
+        references: list[dict[str, Any]] | None = None,
+        reference_objects: list[dict[str, Any]] | None = None,
+        reference_links: list[dict[str, Any]] | None = None,
+        pdf_links: list[dict[str, Any]] | None = None,
+        doi_locations: dict[str, Any] | None = None,
+        used_files: list[dict[str, Any]] | None = None,
+        timings: dict[str, Any] | None = None,
+        failure: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_status = str(terminal_status or "").strip().lower() or "failed"
+        payload = {
+            "conversation_id": int(conversation_id),
+            "user_id": int(user_id),
+            "trace_id": str(trace_id),
+            "source_service": self._service_name,
+            "route": str(route),
+            "requested_mode": str(requested_mode),
+            "actual_mode": str(actual_mode),
+            "idempotency_key": self._idempotency_key(conversation_id=conversation_id, trace_id=trace_id, operation="assistant"),
+            "terminal_event": {
+                "terminal_status": normalized_status,
+                "done_seen": normalized_status == "done",
+                "answer_text": str(answer_text or ""),
+                "steps": list(steps or []),
+                "references": list(references or []),
+                "reference_objects": list(reference_objects or []),
+                "reference_links": list(reference_links or []),
+                "pdf_links": list(pdf_links or []),
+                "doi_locations": dict(doi_locations or {}),
+                "used_files": list(used_files or []),
+                "timings": dict(timings or {}),
+                "failure": _AssistantTerminalFailure.model_validate(failure or {}).model_dump(exclude_none=True) if failure is not None else None,
+            },
+        }
+        response = self._request(
+            method="POST",
+            path=f"/internal/conversations/{int(conversation_id)}/messages/assistant-terminal-async",
             trace_id=trace_id,
             json=payload,
         )

@@ -129,7 +129,7 @@ def test_persist_assistant_summary_stores_overlay_then_accepts_async(monkeypatch
     order: list[tuple[str, str]] = []
 
     class FakeAuthorityClient:
-        def accept_assistant_turn_async(self, **kwargs):
+        def accept_assistant_turn_terminal_async(self, **kwargs):
             order.append(("accept", kwargs["answer_text"]))
             return {"accepted": True}
 
@@ -336,7 +336,7 @@ def test_persist_assistant_summary_passes_rich_reference_fields_to_authority(mon
     calls: list[dict] = []
 
     class FakeAuthorityClient:
-        def accept_assistant_turn_async(self, **kwargs):
+        def accept_assistant_turn_terminal_async(self, **kwargs):
             calls.append(dict(kwargs))
             return {"accepted": True}
 
@@ -373,6 +373,7 @@ def test_persist_assistant_summary_passes_rich_reference_fields_to_authority(mon
             "route": "thinking_qa",
             "requested_mode": "thinking",
             "actual_mode": "thinking",
+            "terminal_status": "done",
             "answer_text": "final-answer",
             "steps": [],
             "references": [{"doi": "10.1/a", "section_name": "Discussion"}],
@@ -382,5 +383,109 @@ def test_persist_assistant_summary_passes_rich_reference_fields_to_authority(mon
             "doi_locations": {"10.1/a": [{"section": "Discussion"}]},
             "used_files": [],
             "timings": {"total_ms": 100},
+            "failure": None,
+        }
+    ]
+
+
+def test_persist_assistant_terminal_passes_failed_payload_to_authority(monkeypatch):
+    chat_persistence = _import_chat_persistence()
+
+    calls: list[dict] = []
+
+    class FakeAuthorityClient:
+        def accept_assistant_turn_terminal_async(self, **kwargs):
+            calls.append(dict(kwargs))
+            return {"accepted": True}
+
+    monkeypatch.setattr(chat_persistence, "_get_authority_client", lambda: FakeAuthorityClient())
+    monkeypatch.setattr(chat_persistence.config, "CONVERSATION_ASSISTANT_WRITE_TARGET", "public_service")
+
+    chat_persistence.persist_assistant_terminal(
+        user_id=7,
+        conversation_id=11,
+        trace_id="trace-1",
+        route="thinking_qa",
+        requested_mode="thinking",
+        actual_mode="thinking",
+        terminal_status="failed",
+        summary={
+            "assistant_content": "partial-answer",
+            "done_seen": False,
+            "trace_id": "trace-1",
+            "route": "thinking_qa",
+            "timings": {"total_ms": 100},
+        },
+        failure={"stage": "citation_validation", "message": "validation timeout", "code": "VALIDATION_TIMEOUT", "retriable": True},
+        async_enabled=False,
+    )
+
+    assert calls == [
+        {
+            "user_id": 7,
+            "conversation_id": 11,
+            "trace_id": "trace-1",
+            "route": "thinking_qa",
+            "requested_mode": "thinking",
+            "actual_mode": "thinking",
+            "terminal_status": "failed",
+            "answer_text": "partial-answer",
+            "steps": [],
+            "references": [],
+            "reference_objects": [],
+            "reference_links": [],
+            "pdf_links": [],
+            "doi_locations": {},
+            "used_files": [],
+            "timings": {"total_ms": 100},
+            "failure": {
+                "stage": "citation_validation",
+                "message": "validation timeout",
+                "code": "VALIDATION_TIMEOUT",
+                "retriable": True,
+            },
+        }
+    ]
+
+
+def test_persist_assistant_terminal_reports_unconfirmed_when_authority_accept_fails(monkeypatch):
+    chat_persistence = _import_chat_persistence()
+
+    reports: list[dict] = []
+
+    class FakeAuthorityClient:
+        def accept_assistant_turn_terminal_async(self, **kwargs):
+            raise RuntimeError("authority down")
+
+    monkeypatch.setattr(chat_persistence, "_get_authority_client", lambda: FakeAuthorityClient())
+    monkeypatch.setattr(chat_persistence.config, "CONVERSATION_ASSISTANT_WRITE_TARGET", "public_service")
+    monkeypatch.setattr(
+        chat_persistence,
+        "_report_terminal_persistence_unconfirmed",
+        lambda **kwargs: reports.append(dict(kwargs)),
+        raising=False,
+    )
+
+    chat_persistence.persist_assistant_terminal(
+        user_id=7,
+        conversation_id=11,
+        trace_id="trace-1",
+        route="thinking_qa",
+        requested_mode="thinking",
+        actual_mode="thinking",
+        terminal_status="failed",
+        summary={"assistant_content": "partial-answer", "done_seen": False, "trace_id": "trace-1", "route": "thinking_qa"},
+        failure={"stage": "llm_stream", "message": "timeout", "retriable": True},
+        async_enabled=False,
+    )
+
+    assert reports == [
+        {
+            "user_id": 7,
+            "conversation_id": 11,
+            "trace_id": "trace-1",
+            "route": "thinking_qa",
+            "terminal_status": "failed",
+            "error": "authority down",
         }
     ]

@@ -171,6 +171,10 @@ def _call_hook(*, request: Request, hook_name: str, kwargs: dict[str, Any], stri
         return None
 
 
+def _hook_exists(*, request: Request, hook_name: str) -> bool:
+    return callable(getattr(request.app.state, hook_name, None))
+
+
 def _persist_user_message_if_needed(*, request: Request, adapted_request: GatewayAskRequest, route: str, trace_id: str) -> None:
     conversation_id = _conversation_id_int(adapted_request.conversation_id)
     if conversation_id is None:
@@ -260,49 +264,107 @@ def _load_conversation_context_if_needed(
     return _apply_authority_context(adapted_request=adapted_request, authority_context=authority_context)
 
 
-def _persist_assistant_summary_if_needed(
+def _terminal_summary_payload(*, tap: AskStreamTap, route: str, trace_id: str) -> dict[str, Any]:
+    summary = tap.summary
+    return {
+        "assistant_content": str(summary.assistant_content or ""),
+        "query_mode": summary.query_mode or route,
+        "references": list(summary.references or []),
+        "reference_objects": list(summary.reference_objects or []),
+        "steps": list(summary.steps or []),
+        "route": summary.route or route,
+        "used_files": list(summary.used_files or []),
+        "timings": dict(summary.timings or {}),
+        "trace_id": summary.trace_id or trace_id,
+        "file_selection": dict(summary.file_selection or {}),
+        "source_scope": str(summary.source_scope or ""),
+        "source_usage": dict(summary.source_usage or {}),
+        "done_seen": bool(summary.done_seen),
+    }
+
+
+def _is_cancel_error(error_payload: dict[str, Any]) -> bool:
+    code = str(error_payload.get("code") or "").strip().upper()
+    error_text = str(error_payload.get("error") or error_payload.get("message") or "").strip().lower()
+    return code in {"ASK_CANCELLED", "FASTQA_CANCELLED", "CLIENT_CANCELLED"} or error_text == "cancelled"
+
+
+def _failure_from_error_payload(*, error_payload: dict[str, Any], terminal_status: str) -> dict[str, Any]:
+    detail = error_payload.get("detail") if isinstance(error_payload.get("detail"), dict) else {}
+    failure_stage = (
+        str(error_payload.get("failure_stage") or detail.get("failure_stage") or "").strip()
+        or ("cancelled" if terminal_status == "canceled" else "unknown")
+    )
+    failure_code = str(error_payload.get("code") or detail.get("failure_code") or "").strip()
+    failure_message = str(error_payload.get("message") or error_payload.get("error") or "").strip() or (
+        "已取消" if terminal_status == "canceled" else "处理失败"
+    )
+    retriable_raw = error_payload.get("retriable")
+    if retriable_raw is None:
+        retriable_raw = detail.get("retriable")
+    retriable = False if terminal_status == "canceled" else bool(retriable_raw if retriable_raw is not None else True)
+    return {
+        "stage": failure_stage,
+        "code": failure_code,
+        "message": failure_message,
+        "retriable": retriable,
+    }
+
+
+def _persist_assistant_terminal_if_needed(
     *,
     request: Request,
     adapted_request: GatewayAskRequest,
     tap: AskStreamTap,
     route: str,
     trace_id: str,
+    terminal_status: str,
+    error_payload: dict[str, Any] | None = None,
 ) -> None:
     conversation_id = _conversation_id_int(adapted_request.conversation_id)
     if conversation_id is None:
         return
-    summary = tap.summary
-    if not summary.done_seen:
-        return
-    _call_hook(
-        request=request,
-        hook_name="persist_assistant_summary_hook",
-        kwargs={
-            "user_id": adapted_request.user_id,
-            "conversation_id": conversation_id,
-            "trace_id": summary.trace_id or trace_id,
-            "route": summary.route or route,
-            "requested_mode": adapted_request.requested_mode,
-            "actual_mode": adapted_request.actual_mode,
-            "assistant_content": str(summary.assistant_content or ""),
-            "summary": {
-                "assistant_content": str(summary.assistant_content or ""),
-                "query_mode": summary.query_mode or route,
-                "references": list(summary.references or []),
-                "reference_objects": list(summary.reference_objects or []),
-                "steps": list(summary.steps or []),
-                "route": summary.route or route,
-                "used_files": list(summary.used_files or []),
-                "timings": dict(summary.timings or {}),
-                "trace_id": summary.trace_id or trace_id,
-                "file_selection": dict(summary.file_selection or {}),
-                "source_scope": str(summary.source_scope or ""),
-                "source_usage": dict(summary.source_usage or {}),
-                "done_seen": bool(summary.done_seen),
-            },
-            "payload": adapted_request,
-        },
+    summary_payload = _terminal_summary_payload(tap=tap, route=route, trace_id=trace_id)
+    assistant_content = str(summary_payload.get("assistant_content") or "")
+    failure = None if terminal_status == "done" else _failure_from_error_payload(
+        error_payload=error_payload or {},
+        terminal_status=terminal_status,
     )
+    hook_kwargs = {
+        "user_id": adapted_request.user_id,
+        "conversation_id": conversation_id,
+        "trace_id": str(summary_payload.get("trace_id") or trace_id),
+        "route": str(summary_payload.get("route") or route),
+        "requested_mode": adapted_request.requested_mode,
+        "actual_mode": adapted_request.actual_mode,
+        "terminal_status": terminal_status,
+        "assistant_content": assistant_content,
+        "summary": summary_payload,
+        "failure": failure,
+        "payload": adapted_request,
+    }
+    if _hook_exists(request=request, hook_name="persist_assistant_terminal_hook"):
+        _call_hook(
+            request=request,
+            hook_name="persist_assistant_terminal_hook",
+            kwargs=hook_kwargs,
+        )
+    elif terminal_status == "done":
+        _call_hook(
+            request=request,
+            hook_name="persist_assistant_summary_hook",
+            kwargs={
+                "user_id": adapted_request.user_id,
+                "conversation_id": conversation_id,
+                "trace_id": str(summary_payload.get("trace_id") or trace_id),
+                "route": str(summary_payload.get("route") or route),
+                "requested_mode": adapted_request.requested_mode,
+                "actual_mode": adapted_request.actual_mode,
+                "assistant_content": assistant_content,
+                "summary": summary_payload,
+                "payload": adapted_request,
+            },
+        )
 
 
 def _source_usage_from_scope(source_scope: str | None) -> dict[str, bool]:
@@ -835,17 +897,6 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
                     error_event.get("error") or error_event.get("message") or "",
                 )
                 yield _enrich_outbound_event(error_event)
-                if not done_emitted:
-                    done_emitted = True
-                    yield _done_event(
-                        route=route,
-                        used_files=used_files,
-                        trace_id=trace_id,
-                        file_selection=file_selection,
-                        source_scope=source_scope,
-                        source_usage=source_usage,
-                        query_mode=_event_query_mode(error_event, route),
-                    )
                 return
             yield _enrich_outbound_event(dict(event))
         if not cancel_event.is_set() and not done_emitted:
@@ -881,9 +932,8 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
             requested_mode=requested_mode,
             actual_mode=actual_mode,
             source_scope=source_scope,
-            detail={"exception_type": exc.__class__.__name__},
+            detail={"exception_type": exc.__class__.__name__, "failure_stage": "runtime_prepare", "retriable": True},
         )
-        yield _done_event(route=route, used_files=used_files, trace_id=trace_id, file_selection=file_selection, source_scope=source_scope, source_usage=source_usage, query_mode=route)
     finally:
         limiter.release()
 
@@ -916,17 +966,35 @@ def _wrap_stream_with_tap(
     tap = AskStreamTap()
 
     def _iter() -> Iterator[dict[str, Any]]:
+        terminal_persisted = False
         try:
-            yield from tap.wrap(source)
+            for payload in tap.wrap(source):
+                event_type = str(payload.get("type") or "").strip().lower()
+                if event_type == "done" and not terminal_persisted:
+                    terminal_persisted = True
+                    _persist_assistant_terminal_if_needed(
+                        request=request,
+                        adapted_request=adapted_request,
+                        tap=tap,
+                        route=route,
+                        trace_id=trace_id,
+                        terminal_status="done",
+                    )
+                elif event_type == "error" and not terminal_persisted:
+                    terminal_persisted = True
+                    terminal_status = "canceled" if _is_cancel_error(payload) else "failed"
+                    _persist_assistant_terminal_if_needed(
+                        request=request,
+                        adapted_request=adapted_request,
+                        tap=tap,
+                        route=route,
+                        trace_id=trace_id,
+                        terminal_status=terminal_status,
+                        error_payload=payload,
+                    )
+                yield payload
         finally:
             _log_stream_summary(request=request, tap=tap, trace_id=trace_id, route=route)
-            _persist_assistant_summary_if_needed(
-                request=request,
-                adapted_request=adapted_request,
-                tap=tap,
-                route=route,
-                trace_id=trace_id,
-            )
 
     return _iter()
 

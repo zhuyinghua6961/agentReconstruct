@@ -557,13 +557,16 @@ class ConversationService:
         items: list[dict[str, Any]] = []
         for idx, row in enumerate(rows, start=1):
             metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            if metadata.get("authority_assistant_async") is True or metadata.get("authority_assistant_terminal_async") is True:
+                continue
             db_id = self._safe_int(row.get("id"), default=idx)
+            status = self._normalize_terminal_status(metadata.get("terminal_status"), default="done")
             payload: dict[str, Any] = {
                 "message_id": f"m_{db_id:06d}",
                 "role": str(row.get("role") or "assistant"),
                 "content": str(row.get("content") or ""),
                 "created_at": self._to_iso(row.get("created_at"), fallback=self._now_iso()),
-                "status": "done",
+                "status": status,
                 "metadata": metadata,
             }
             if metadata.get("query_mode"):
@@ -582,6 +585,14 @@ class ConversationService:
                 payload["steps"] = metadata.get("steps")
             if "done_seen" in metadata:
                 payload["done_seen"] = bool(metadata.get("done_seen"))
+            if str(metadata.get("failure_stage") or "").strip():
+                payload["failure_stage"] = str(metadata.get("failure_stage") or "")
+            if str(metadata.get("failure_code") or "").strip():
+                payload["failure_code"] = str(metadata.get("failure_code") or "")
+            if str(metadata.get("failure_message") or "").strip():
+                payload["failure_message"] = str(metadata.get("failure_message") or "")
+            if "retriable" in metadata:
+                payload["retriable"] = bool(metadata.get("retriable"))
             items.append(payload)
         return items
 
@@ -649,6 +660,7 @@ class ConversationService:
                 metadata["steps"] = item.get("steps")
             if "done_seen" in item and "done_seen" not in metadata:
                 metadata["done_seen"] = bool(item.get("done_seen"))
+            status = self._message_terminal_status(item)
             rows.append(
                 {
                     "id": self._message_numeric_id(item, idx),
@@ -656,6 +668,8 @@ class ConversationService:
                     "content": str(item.get("content") or ""),
                     "metadata": metadata,
                     "created_at": self._to_iso(item.get("created_at"), fallback=self._now_iso()),
+                    "status": status,
+                    "terminal_status": status,
                     **({"query_mode": metadata.get("query_mode")} if metadata.get("query_mode") else {}),
                     **({"references": metadata.get("references")} if isinstance(metadata.get("references"), list) else {}),
                     **({"reference_objects": metadata.get("reference_objects")} if isinstance(metadata.get("reference_objects"), list) else {}),
@@ -664,6 +678,10 @@ class ConversationService:
                     **({"doi_locations": metadata.get("doi_locations")} if isinstance(metadata.get("doi_locations"), dict) else {}),
                     **({"steps": metadata.get("steps")} if isinstance(metadata.get("steps"), list) else {}),
                     **({"done_seen": bool(metadata.get("done_seen"))} if "done_seen" in metadata else {}),
+                    **({"failure_stage": metadata.get("failure_stage")} if str(metadata.get("failure_stage") or "").strip() else {}),
+                    **({"failure_code": metadata.get("failure_code")} if str(metadata.get("failure_code") or "").strip() else {}),
+                    **({"failure_message": metadata.get("failure_message")} if str(metadata.get("failure_message") or "").strip() else {}),
+                    **({"retriable": bool(metadata.get("retriable"))} if "retriable" in metadata else {}),
                 }
             )
         return rows
@@ -768,6 +786,18 @@ class ConversationService:
                 metadata["steps"] = list(item.get("steps") or [])
             if "done_seen" in item and "done_seen" not in metadata:
                 metadata["done_seen"] = bool(item.get("done_seen"))
+            if item.get("terminal_status") and "terminal_status" not in metadata:
+                metadata["terminal_status"] = str(item.get("terminal_status") or "")
+            if item.get("status") and "terminal_status" not in metadata:
+                metadata["terminal_status"] = str(item.get("status") or "")
+            if item.get("failure_stage") and "failure_stage" not in metadata:
+                metadata["failure_stage"] = str(item.get("failure_stage") or "")
+            if item.get("failure_code") and "failure_code" not in metadata:
+                metadata["failure_code"] = str(item.get("failure_code") or "")
+            if item.get("failure_message") and "failure_message" not in metadata:
+                metadata["failure_message"] = str(item.get("failure_message") or "")
+            if "retriable" in item and "retriable" not in metadata:
+                metadata["retriable"] = bool(item.get("retriable"))
             messages.append(
                 {
                     "message_id": str(item.get("message_id") or f"m_{idx:06d}"),
@@ -1088,6 +1118,44 @@ class ConversationService:
                 return item
         return None
 
+    def _normalize_terminal_status(self, value: Any, *, default: str = "done") -> str:
+        status = str(value or "").strip().lower() or default
+        if status not in {"done", "failed", "canceled"}:
+            return default
+        return status
+
+    def _message_terminal_status(self, item: dict[str, Any]) -> str:
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        return self._normalize_terminal_status(
+            item.get("status") or metadata.get("terminal_status"),
+            default="done",
+        )
+
+    def _terminal_status_rank(self, status: str) -> int:
+        normalized = self._normalize_terminal_status(status, default="canceled")
+        if normalized == "done":
+            return 3
+        if normalized == "failed":
+            return 2
+        return 1
+
+    def _terminal_failure_metadata(self, *, terminal_status: str, terminal_event: dict[str, Any]) -> dict[str, Any]:
+        if terminal_status == "done":
+            return {}
+        failure = terminal_event.get("failure") if isinstance(terminal_event.get("failure"), dict) else {}
+        failure_stage = str(failure.get("stage") or "").strip() or "unknown"
+        failure_code = str(failure.get("code") or "").strip()
+        default_message = "已取消" if terminal_status == "canceled" else "处理失败"
+        failure_message = str(failure.get("message") or "").strip() or default_message
+        retriable_raw = failure.get("retriable")
+        retriable = False if terminal_status == "canceled" else bool(retriable_raw)
+        return {
+            "failure_stage": failure_stage,
+            "failure_code": failure_code,
+            "failure_message": failure_message,
+            "retriable": retriable,
+        }
+
     def _build_authority_recent_turns(self, *, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         recent_turns: list[dict[str, Any]] = []
         for idx, item in enumerate(messages, start=1):
@@ -1097,6 +1165,7 @@ class ConversationService:
             if role not in {"user", "assistant"}:
                 continue
             metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            status = self._message_terminal_status(item)
             recent_turns.append(
                 {
                     "message_id": str(item.get("message_id") or f"m_{idx:06d}"),
@@ -1104,12 +1173,27 @@ class ConversationService:
                     "content": str(item.get("content") or ""),
                     "created_at": self._to_iso(item.get("created_at"), fallback=self._now_iso()),
                     "trace_id": str(metadata.get("trace_id") or "").strip(),
+                    "status": status,
+                    "terminal_status": status,
+                    **({"failure_stage": str(metadata.get("failure_stage") or "")} if str(metadata.get("failure_stage") or "").strip() else {}),
+                    **({"failure_code": str(metadata.get("failure_code") or "")} if str(metadata.get("failure_code") or "").strip() else {}),
+                    **({"failure_message": str(metadata.get("failure_message") or "")} if str(metadata.get("failure_message") or "").strip() else {}),
+                    **({"retriable": bool(metadata.get("retriable"))} if "retriable" in metadata else {}),
                 }
             )
         return recent_turns
 
     def _build_authority_summary(self, *, recent_turns: list[dict[str, Any]]) -> dict[str, Any]:
-        return build_authority_summary(recent_turns=recent_turns)
+        summary_turns: list[dict[str, Any]] = []
+        for item in recent_turns:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "").strip().lower()
+            status = self._normalize_terminal_status(item.get("status"), default="done")
+            if role == "assistant" and status != "done":
+                continue
+            summary_turns.append(item)
+        return build_authority_summary(recent_turns=summary_turns)
 
     def _build_authority_conversation_state(self, *, messages: list[dict[str, Any]]) -> dict[str, Any]:
         last_turn_route = ""
@@ -1457,43 +1541,49 @@ class ConversationService:
         if source_service_text not in {"fastQA", "highThinkingQA"}:
             return {"success": False, "error": "invalid_source_service", "code": "VALIDATION_ERROR"}
         try:
-            row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id)
-            if not row:
-                return {"success": False, "error": "conversation_not_found", "code": "NOT_FOUND"}
-            document, _ = self._load_or_bootstrap_document(
-                row=row,
-                conversation_id=conversation_id,
-                user_id=user_id,
-                prefer_cached_detail=False,
-            )
-            messages = document.get("messages") if isinstance(document.get("messages"), list) else []
-            existing = self._find_message_by_idempotency_key(
-                messages=messages,
-                role="assistant",
-                idempotency_key=idempotency_text,
-            )
-            if isinstance(existing, dict):
-                return {
-                    "success": True,
-                    "accepted": True,
-                    "conversation_id": int(conversation_id),
-                    "event_id": f"assistant-async:{conversation_id}:{trace_id}",
-                    "trace_id": str(trace_id or "").strip(),
-                    "idempotency_key": idempotency_text,
-                    "status": "accepted",
-                    "deduped": True,
-                }
-            queued = self._repo.enqueue_authority_assistant_task(
-                conversation_id=conversation_id,
-                user_id=user_id,
-                trace_id=trace_id,
-                source_service=source_service_text,
-                route=route,
-                requested_mode=requested_mode,
-                actual_mode=actual_mode,
-                idempotency_key=idempotency_text,
-                final_event=dict(final_event or {}),
-            )
+            with self._json_store.conversation_lock(user_id=user_id, conversation_id=conversation_id):
+                row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id)
+                if not row:
+                    return {"success": False, "error": "conversation_not_found", "code": "NOT_FOUND"}
+                document, _ = self._load_or_bootstrap_document(
+                    row=row,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    prefer_cached_detail=False,
+                )
+                messages = document.get("messages") if isinstance(document.get("messages"), list) else []
+                existing = self._find_message_by_idempotency_key(
+                    messages=messages,
+                    role="assistant",
+                    idempotency_key=idempotency_text,
+                )
+                if isinstance(existing, dict):
+                    existing_status = self._message_terminal_status(existing)
+                    if self._terminal_status_rank("done") <= self._terminal_status_rank(existing_status):
+                        return {
+                            "success": True,
+                            "accepted": True,
+                            "conversation_id": int(conversation_id),
+                            "event_id": f"assistant-async:{conversation_id}:{trace_id}",
+                            "trace_id": str(trace_id or "").strip(),
+                            "idempotency_key": idempotency_text,
+                            "status": "accepted",
+                            "deduped": True,
+                        }
+                if isinstance(existing, dict):
+                    existing = None
+                if existing is None:
+                    queued = self._repo.enqueue_authority_assistant_task(
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        trace_id=trace_id,
+                        source_service=source_service_text,
+                        route=route,
+                        requested_mode=requested_mode,
+                        actual_mode=actual_mode,
+                        idempotency_key=idempotency_text,
+                        final_event=dict(final_event or {}),
+                    )
             return {
                 "success": True,
                 "accepted": True,
@@ -1510,16 +1600,109 @@ class ConversationService:
         except Exception as exc:
             return {"success": False, "error": str(exc), "code": "AUTHORITY_ASSISTANT_ACCEPT_ERROR"}
 
+    def accept_authority_assistant_terminal_async(
+        self,
+        *,
+        user_id: int,
+        conversation_id: int,
+        trace_id: str,
+        source_service: str,
+        route: str,
+        requested_mode: str,
+        actual_mode: str,
+        idempotency_key: str,
+        terminal_event: dict[str, Any],
+    ) -> dict[str, Any]:
+        idempotency_text = str(idempotency_key or "").strip()
+        source_service_text = str(source_service or "").strip()
+        if not idempotency_text:
+            return {"success": False, "error": "idempotency_key_required", "code": "VALIDATION_ERROR"}
+        if source_service_text not in {"fastQA", "highThinkingQA"}:
+            return {"success": False, "error": "invalid_source_service", "code": "VALIDATION_ERROR"}
+        try:
+            with self._json_store.conversation_lock(user_id=user_id, conversation_id=conversation_id):
+                row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id)
+                if not row:
+                    return {"success": False, "error": "conversation_not_found", "code": "NOT_FOUND"}
+                document, _ = self._load_or_bootstrap_document(
+                    row=row,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    prefer_cached_detail=False,
+                )
+                messages = document.get("messages") if isinstance(document.get("messages"), list) else []
+                existing = self._find_message_by_idempotency_key(
+                    messages=messages,
+                    role="assistant",
+                    idempotency_key=idempotency_text,
+                )
+                if isinstance(existing, dict):
+                    existing_status = self._message_terminal_status(existing)
+                    incoming_status = self._normalize_terminal_status((terminal_event or {}).get("terminal_status"), default="done")
+                    if self._terminal_status_rank(incoming_status) <= self._terminal_status_rank(existing_status):
+                        return {
+                            "success": True,
+                            "accepted": True,
+                            "conversation_id": int(conversation_id),
+                            "event_id": f"assistant-terminal-async:{conversation_id}:{trace_id}",
+                            "trace_id": str(trace_id or "").strip(),
+                            "idempotency_key": idempotency_text,
+                            "status": "accepted",
+                            "deduped": True,
+                        }
+                if isinstance(existing, dict):
+                    existing = None
+                if existing is None:
+                    queued = self._repo.enqueue_authority_assistant_terminal_task(
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        trace_id=trace_id,
+                        source_service=source_service_text,
+                        route=route,
+                        requested_mode=requested_mode,
+                        actual_mode=actual_mode,
+                        idempotency_key=idempotency_text,
+                        terminal_event=dict(terminal_event or {}),
+                    )
+            return {
+                "success": True,
+                "accepted": True,
+                "conversation_id": int(conversation_id),
+                "event_id": f"assistant-terminal-async:{conversation_id}:{trace_id}",
+                "trace_id": str(trace_id or "").strip(),
+                "idempotency_key": idempotency_text,
+                "status": "accepted",
+                "deduped": bool(queued.get("deduped")),
+                "task_id": int(queued.get("task_id") or 0),
+            }
+        except DatabaseUnavailableError as exc:
+            return {"success": False, "error": exc.message, "code": exc.code}
+        except Exception as exc:
+            return {"success": False, "error": str(exc), "code": "AUTHORITY_ASSISTANT_TERMINAL_ACCEPT_ERROR"}
+
     def materialize_authority_assistant_task(self, *, task: dict[str, Any]) -> dict[str, Any]:
-        metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
-        conversation_id = self._safe_int(task.get("conversation_id"), default=0)
-        user_id = self._safe_int(task.get("user_id"), default=0)
+        refreshed_task = task
+        task_id = self._safe_int(task.get("id"), default=0)
+        if task_id > 0:
+            latest = self._repo.get_authority_assistant_task(task_id=task_id)
+            if isinstance(latest, dict):
+                refreshed_task = latest
+        metadata = refreshed_task.get("metadata") if isinstance(refreshed_task.get("metadata"), dict) else {}
+        conversation_id = self._safe_int(refreshed_task.get("conversation_id"), default=0)
+        user_id = self._safe_int(refreshed_task.get("user_id"), default=0)
         idempotency_text = str(metadata.get("idempotency_key") or "").strip()
         if conversation_id <= 0 or user_id <= 0 or not idempotency_text:
             return {"success": False, "error": "invalid_task_payload", "code": "VALIDATION_ERROR"}
+        terminal_event = metadata.get("terminal_event") if isinstance(metadata.get("terminal_event"), dict) else {}
         final_event = metadata.get("final_event") if isinstance(metadata.get("final_event"), dict) else {}
-        answer_text = str(final_event.get("answer_text") or task.get("content") or "").strip()
-        if not answer_text:
+        is_terminal = metadata.get("authority_assistant_terminal_async") is True or bool(terminal_event)
+        event_payload = terminal_event if is_terminal else final_event
+        terminal_status = self._normalize_terminal_status(
+            event_payload.get("terminal_status") if is_terminal else "done",
+            default="done",
+        )
+        answer_text = str(event_payload.get("answer_text") or refreshed_task.get("content") or "").strip()
+        if terminal_status == "done" and not answer_text:
             return {"success": False, "error": "empty_answer_text", "code": "VALIDATION_ERROR"}
         try:
             row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id)
@@ -1539,71 +1722,90 @@ class ConversationService:
                     role="assistant",
                     idempotency_key=idempotency_text,
                 )
+                now_iso = self._now_iso()
+                reference_objects = list(event_payload.get("reference_objects") or [])
+                references = reference_objects or list(event_payload.get("references") or [])
+                assistant_metadata = {
+                    "trace_id": str(metadata.get("trace_id") or "").strip(),
+                    "source_service": str(metadata.get("source_service") or "").strip(),
+                    "route": str(metadata.get("route") or "").strip(),
+                    "requested_mode": str(metadata.get("requested_mode") or "").strip(),
+                    "actual_mode": str(metadata.get("actual_mode") or "").strip(),
+                    "idempotency_key": idempotency_text,
+                    "used_files": list(event_payload.get("used_files") or []),
+                    "references": references,
+                    "reference_objects": reference_objects or list(references),
+                    "reference_links": list(event_payload.get("reference_links") or []),
+                    "pdf_links": list(event_payload.get("pdf_links") or []),
+                    "doi_locations": dict(event_payload.get("doi_locations") or {}),
+                    "steps": list(event_payload.get("steps") or []),
+                    "timings": dict(event_payload.get("timings") or {}),
+                    "done_seen": bool(event_payload.get("done_seen")) if is_terminal else True,
+                    "terminal_status": terminal_status,
+                }
+                assistant_metadata.update(self._terminal_failure_metadata(terminal_status=terminal_status, terminal_event=event_payload))
+                built_payload = {
+                    "message_id": self._next_message_id(messages),
+                    "role": "assistant",
+                    "content": answer_text,
+                    "created_at": now_iso,
+                    "status": terminal_status,
+                    "metadata": assistant_metadata,
+                    "references": references,
+                    "reference_objects": reference_objects or list(references),
+                    "reference_links": list(event_payload.get("reference_links") or []),
+                    "pdf_links": list(event_payload.get("pdf_links") or []),
+                    "doi_locations": dict(event_payload.get("doi_locations") or {}),
+                    "steps": list(event_payload.get("steps") or []),
+                    "done_seen": bool(event_payload.get("done_seen")) if is_terminal else True,
+                    **({"failure_stage": assistant_metadata.get("failure_stage")} if str(assistant_metadata.get("failure_stage") or "").strip() else {}),
+                    **({"failure_code": assistant_metadata.get("failure_code")} if str(assistant_metadata.get("failure_code") or "").strip() else {}),
+                    **({"failure_message": assistant_metadata.get("failure_message")} if str(assistant_metadata.get("failure_message") or "").strip() else {}),
+                    **({"retriable": bool(assistant_metadata.get("retriable"))} if "retriable" in assistant_metadata else {}),
+                }
                 if isinstance(existing, dict):
-                    message_payload = existing
+                    existing_status = self._message_terminal_status(existing)
+                    if self._terminal_status_rank(terminal_status) <= self._terminal_status_rank(existing_status):
+                        message_payload = existing
+                    else:
+                        built_payload["message_id"] = str(existing.get("message_id") or built_payload.get("message_id") or "")
+                        built_payload["created_at"] = existing.get("created_at") or built_payload.get("created_at")
+                        for index, item in enumerate(messages):
+                            if not isinstance(item, dict):
+                                continue
+                            if str(item.get("message_id") or "") == str(existing.get("message_id") or ""):
+                                messages[index] = built_payload
+                                break
+                        message_payload = built_payload
                 else:
-                    now_iso = self._now_iso()
-                    reference_objects = list(final_event.get("reference_objects") or [])
-                    references = reference_objects or list(final_event.get("references") or [])
-                    assistant_metadata = {
-                        "trace_id": str(metadata.get("trace_id") or "").strip(),
-                        "source_service": str(metadata.get("source_service") or "").strip(),
-                        "route": str(metadata.get("route") or "").strip(),
-                        "requested_mode": str(metadata.get("requested_mode") or "").strip(),
-                        "actual_mode": str(metadata.get("actual_mode") or "").strip(),
-                        "idempotency_key": idempotency_text,
-                        "used_files": list(final_event.get("used_files") or []),
-                        "references": references,
-                        "reference_objects": reference_objects or list(references),
-                        "reference_links": list(final_event.get("reference_links") or []),
-                        "pdf_links": list(final_event.get("pdf_links") or []),
-                        "doi_locations": dict(final_event.get("doi_locations") or {}),
-                        "steps": list(final_event.get("steps") or []),
-                        "timings": dict(final_event.get("timings") or {}),
-                        "done_seen": True,
-                    }
-                    message_payload = {
-                        "message_id": self._next_message_id(messages),
-                        "role": "assistant",
-                        "content": answer_text,
-                        "created_at": now_iso,
-                        "status": "done",
-                        "metadata": assistant_metadata,
-                        "references": references,
-                        "reference_objects": reference_objects or list(references),
-                        "reference_links": list(final_event.get("reference_links") or []),
-                        "pdf_links": list(final_event.get("pdf_links") or []),
-                        "doi_locations": dict(final_event.get("doi_locations") or {}),
-                        "steps": list(final_event.get("steps") or []),
-                        "done_seen": True,
-                    }
-                    messages.append(message_payload)
-                    document["messages"] = messages
-                    meta = document.get("meta") if isinstance(document.get("meta"), dict) else {}
-                    meta["title"] = str(row.get("title") or meta.get("title") or "New Conversation")
-                    meta["updated_at"] = now_iso
-                    meta["message_count"] = len(messages)
-                    meta["last_message_at"] = now_iso
-                    document["meta"] = meta
-                    self._persist_document_and_index(
-                        row=row,
-                        user_id=user_id,
-                        conversation_id=conversation_id,
-                        document=document,
-                    )
-                    self._repo.set_message_count(
-                        conversation_id=conversation_id,
-                        user_id=user_id,
-                        message_count=len(messages),
-                        touch_updated_at=False,
-                    )
-                    row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id) or row
-                    self._refresh_detail_cache(
-                        row=row,
-                        user_id=user_id,
-                        conversation_id=conversation_id,
-                        document=document,
-                    )
+                    messages.append(built_payload)
+                    message_payload = built_payload
+                document["messages"] = messages
+                meta = document.get("meta") if isinstance(document.get("meta"), dict) else {}
+                meta["title"] = str(row.get("title") or meta.get("title") or "New Conversation")
+                meta["updated_at"] = now_iso
+                meta["message_count"] = len(messages)
+                meta["last_message_at"] = now_iso
+                document["meta"] = meta
+                self._persist_document_and_index(
+                    row=row,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    document=document,
+                )
+                self._repo.set_message_count(
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    message_count=len(messages),
+                    touch_updated_at=False,
+                )
+                row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id) or row
+                self._refresh_detail_cache(
+                    row=row,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    document=document,
+                )
             self._refresh_primary_list_cache(user_id=user_id)
             return {
                 "success": True,
@@ -1645,12 +1847,15 @@ class ConversationService:
                 )
                 messages = doc.get("messages") if isinstance(doc.get("messages"), list) else []
                 now_iso = self._now_iso()
+                message_status = "done"
+                if role_text == "assistant" and isinstance(metadata, dict):
+                    message_status = self._normalize_terminal_status(metadata.get("terminal_status"), default="done")
                 message_payload: dict[str, Any] = {
                     "message_id": self._next_message_id(messages),
                     "role": role_text,
                     "content": content_text,
                     "created_at": now_iso,
-                    "status": "done",
+                    "status": message_status,
                     "metadata": metadata or {},
                 }
                 if role_text == "assistant" and isinstance(metadata, dict):

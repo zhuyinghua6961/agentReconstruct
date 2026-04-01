@@ -246,6 +246,38 @@ function getQuotaCard(message) {
   return card && typeof card === 'object' ? card : null
 }
 
+function getTerminalMessageState(message) {
+  const raw = String(
+    message?.terminalStatus
+    || message?.status
+    || message?.metadata?.terminal_status
+    || message?.metadata?.status
+    || ''
+  ).trim().toLowerCase()
+  if (raw === 'failed' || raw === 'canceled') return raw
+  return ''
+}
+
+function getTerminalMessageTitle(message) {
+  const state = getTerminalMessageState(message)
+  if (state === 'failed') return '处理失败'
+  if (state === 'canceled') return '已取消'
+  return ''
+}
+
+function getTerminalMessageDetail(message) {
+  const failureMessage = String(
+    message?.failureMessage
+    || message?.metadata?.failure_message
+    || ''
+  ).trim()
+  if (failureMessage) return failureMessage
+  const state = getTerminalMessageState(message)
+  if (state === 'failed') return '这次回答没有成功完成，你可以稍后重试。'
+  if (state === 'canceled') return '这次回答已结束，没有继续生成。'
+  return ''
+}
+
 function clearQuestionHighlight() {
   highlightedQuestionMessageIndex.value = null
   if (questionHighlightTimer !== null) {
@@ -1851,7 +1883,17 @@ watch(
                 </div>
                 <QuotaLimitCard v-if="getQuotaCard(entry.message)" :card="getQuotaCard(entry.message)" />
                 <div v-else-if="entry.message.content && isStreamingTextMessage(entry.message)" v-html="getStreamingMessageHtml(entry.message)"></div>
-                <div v-else-if="entry.message.content" v-html="getRenderedMessageHtml(entry.message)"></div>
+                <template v-else-if="entry.message.content">
+                  <div v-html="getRenderedMessageHtml(entry.message)"></div>
+                  <div v-if="getTerminalMessageState(entry.message)" class="terminal-message-inline" :class="'terminal-message-' + getTerminalMessageState(entry.message)">
+                    <div class="terminal-message-title">{{ getTerminalMessageTitle(entry.message) }}</div>
+                    <div v-if="getTerminalMessageDetail(entry.message)" class="terminal-message-detail">{{ getTerminalMessageDetail(entry.message) }}</div>
+                  </div>
+                </template>
+                <div v-else-if="getTerminalMessageState(entry.message)" class="terminal-message-card" :class="'terminal-message-' + getTerminalMessageState(entry.message)">
+                  <div class="terminal-message-title">{{ getTerminalMessageTitle(entry.message) }}</div>
+                  <div v-if="getTerminalMessageDetail(entry.message)" class="terminal-message-detail">{{ getTerminalMessageDetail(entry.message) }}</div>
+                </div>
                 <div v-else class="loading-animation"><span>思考中...</span></div>
               </div>
             </template>
@@ -2622,6 +2664,41 @@ watch(
 .loading-animation {
   color: #64748b;
   font-size: 14px;
+}
+
+.terminal-message-card,
+.terminal-message-inline {
+  margin-top: 10px;
+  border-radius: 10px;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+}
+
+.terminal-message-card {
+  margin-top: 0;
+}
+
+.terminal-message-title {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.terminal-message-detail {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.terminal-message-failed {
+  background: #fff1f2;
+  border-color: #fecdd3;
+  color: #9f1239;
+}
+
+.terminal-message-canceled {
+  background: #fff7ed;
+  border-color: #fed7aa;
+  color: #9a3412;
 }
 
 .references-section {

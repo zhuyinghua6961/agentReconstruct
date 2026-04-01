@@ -232,6 +232,13 @@ function normalizeMessage(item) {
   const doiLocations = normalizeDoiLocations(
     item?.doiLocations || item?.doi_locations || metadata?.doiLocations || metadata?.doi_locations
   );
+  const terminalStatus = String(item?.terminalStatus || item?.terminal_status || item?.status || metadata?.terminal_status || metadata?.status || '').trim()
+  const failureMessage = String(item?.failureMessage || item?.failure_message || metadata?.failure_message || '').trim()
+  const failureCode = String(item?.failureCode || item?.failure_code || metadata?.failure_code || '').trim()
+  const doneSeen = item?.doneSeen ?? item?.done_seen ?? metadata?.done_seen
+  const retriable = item?.retriable ?? metadata?.retriable
+  const normalizedTerminalStatus = terminalStatus.toLowerCase()
+  const terminalCompleted = ['done', 'failed', 'canceled'].includes(normalizedTerminalStatus)
 
   if (references.length > 0) {
     metadata.references = references;
@@ -250,9 +257,26 @@ function normalizeMessage(item) {
   if (Object.keys(doiLocations).length > 0) {
     metadata.doi_locations = doiLocations;
   }
+  if (terminalStatus) {
+    metadata.status = terminalStatus;
+    metadata.terminal_status = terminalStatus;
+  }
+  if (failureMessage) {
+    metadata.failure_message = failureMessage;
+  }
+  if (failureCode) {
+    metadata.failure_code = failureCode;
+  }
+  if (doneSeen !== undefined) {
+    metadata.done_seen = Boolean(doneSeen);
+  }
+  if (retriable !== undefined) {
+    metadata.retriable = Boolean(retriable);
+  }
 
   const hasStepsCollapsed = Object.prototype.hasOwnProperty.call(item || {}, 'stepsCollapsed');
   const hasIsComplete = Object.prototype.hasOwnProperty.call(item || {}, 'isComplete');
+  const resolvedIsComplete = hasIsComplete ? item?.isComplete !== false : (terminalCompleted ? true : undefined);
 
   return {
     role: String(item?.role || 'assistant'),
@@ -264,8 +288,13 @@ function normalizeMessage(item) {
     referenceLinks,
     doiLocations,
     steps,
+    ...(terminalStatus ? { status: terminalStatus, terminalStatus } : {}),
+    ...(failureMessage ? { failureMessage } : {}),
+    ...(failureCode ? { failureCode } : {}),
+    ...(doneSeen !== undefined ? { doneSeen: Boolean(doneSeen) } : {}),
+    ...(retriable !== undefined ? { retriable: Boolean(retriable) } : {}),
     ...(hasStepsCollapsed ? { stepsCollapsed: Boolean(item?.stepsCollapsed) } : {}),
-    ...(hasIsComplete ? { isComplete: item?.isComplete !== false } : {}),
+    ...(resolvedIsComplete !== undefined ? { isComplete: resolvedIsComplete } : {}),
   };
 }
 

@@ -9,6 +9,7 @@ def test_public_route_surface_contains_key_modules():
         "/internal/conversations/{conversation_id}/messages/user",
         "/internal/conversations/{conversation_id}/context-snapshot",
         "/internal/conversations/{conversation_id}/messages/assistant-async",
+        "/internal/conversations/{conversation_id}/messages/assistant-terminal-async",
         "/api/upload_pdf",
         "/api/reference_preview",
         "/api/patent/original/{canonical_patent_id}",

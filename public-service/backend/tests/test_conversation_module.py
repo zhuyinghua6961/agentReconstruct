@@ -223,6 +223,72 @@ class _MemoryConversationRepo:
         row = self.assistant_tasks.get(int(task_id))
         return copy.deepcopy(row) if row else None
 
+    def find_authority_assistant_placeholder_by_idempotency_key(
+        self,
+        *,
+        conversation_id: int,
+        user_id: int,
+        idempotency_key: str,
+    ) -> dict | None:
+        lookup = str(idempotency_key or "")
+        for row in self.assistant_tasks.values():
+            if int(row.get("conversation_id") or 0) != int(conversation_id):
+                continue
+            if int(row.get("user_id") or 0) != int(user_id):
+                continue
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            if str(metadata.get("assistant_async_state") or "").strip().lower() in {"done", "dead"}:
+                continue
+            if str(metadata.get("idempotency_key") or "") == lookup:
+                return copy.deepcopy(row)
+        return None
+
+    @staticmethod
+    def _assistant_placeholder_terminal_status(metadata: dict) -> str:
+        terminal_event = metadata.get("terminal_event") if isinstance(metadata.get("terminal_event"), dict) else {}
+        if terminal_event:
+            status = str(terminal_event.get("terminal_status") or "").strip().lower()
+            return status if status in {"done", "failed", "canceled"} else "done"
+        if isinstance(metadata.get("final_event"), dict):
+            return "done"
+        return "done"
+
+    @staticmethod
+    def _assistant_terminal_rank(status: str) -> int:
+        normalized = str(status or "").strip().lower()
+        if normalized == "done":
+            return 3
+        if normalized == "failed":
+            return 2
+        return 1
+
+    def _update_authority_assistant_placeholder(self, *, row: dict, final_event: dict | None = None, terminal_event: dict | None = None) -> dict:
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        if metadata.get("authority_assistant_terminal_async") is True:
+            next_terminal_event = copy.deepcopy(terminal_event or {})
+            if not next_terminal_event and isinstance(final_event, dict):
+                next_terminal_event = {"terminal_status": "done", **copy.deepcopy(final_event or {})}
+            metadata["terminal_event"] = next_terminal_event
+            metadata["assistant_async_state"] = "pending"
+            metadata["terminal_async_state"] = "accepted"
+        else:
+            next_final_event = copy.deepcopy(final_event or {})
+            if not next_final_event and isinstance(terminal_event, dict):
+                next_final_event = {
+                    key: value
+                    for key, value in copy.deepcopy(terminal_event or {}).items()
+                    if key not in {"terminal_status", "failure"}
+                }
+                next_final_event["done_seen"] = True
+            metadata["final_event"] = next_final_event
+            metadata["assistant_async_state"] = "pending"
+        metadata["processing_started_at"] = None
+        metadata["last_error"] = ""
+        metadata["materialized_message_id"] = ""
+        metadata["next_retry_at"] = None
+        row["content"] = str(((terminal_event or final_event) or {}).get("answer_text") or "")
+        return {"task_id": int(row["id"]), "deduped": False, "metadata": copy.deepcopy(metadata)}
+
     def enqueue_authority_assistant_task(
         self,
         *,
@@ -236,14 +302,18 @@ class _MemoryConversationRepo:
         idempotency_key: str,
         final_event: dict[str, object],
     ) -> dict:
-        for row in self.assistant_tasks.values():
-            if int(row.get("conversation_id") or 0) != int(conversation_id):
-                continue
-            if int(row.get("user_id") or 0) != int(user_id):
-                continue
-            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-            if str(metadata.get("idempotency_key") or "") == str(idempotency_key or ""):
-                return {"task_id": int(row["id"]), "deduped": True, "metadata": copy.deepcopy(metadata)}
+        existing = self.find_authority_assistant_placeholder_by_idempotency_key(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            idempotency_key=idempotency_key,
+        )
+        if isinstance(existing, dict):
+            metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+            current_status = self._assistant_placeholder_terminal_status(metadata)
+            if self._assistant_terminal_rank("done") > self._assistant_terminal_rank(current_status):
+                row = self.assistant_tasks[int(existing["id"])]
+                return self._update_authority_assistant_placeholder(row=row, final_event=final_event)
+            return {"task_id": int(existing["id"]), "deduped": True, "metadata": copy.deepcopy(metadata)}
         task_id = self._next_assistant_task_id
         self._next_assistant_task_id += 1
         metadata = {
@@ -269,6 +339,58 @@ class _MemoryConversationRepo:
         }
         return {"task_id": int(task_id), "deduped": False, "metadata": copy.deepcopy(metadata)}
 
+    def enqueue_authority_assistant_terminal_task(
+        self,
+        *,
+        conversation_id: int,
+        user_id: int,
+        trace_id: str,
+        source_service: str,
+        route: str,
+        requested_mode: str,
+        actual_mode: str,
+        idempotency_key: str,
+        terminal_event: dict[str, object],
+    ) -> dict:
+        existing = self.find_authority_assistant_placeholder_by_idempotency_key(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            idempotency_key=idempotency_key,
+        )
+        if isinstance(existing, dict):
+            metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+            current_status = self._assistant_placeholder_terminal_status(metadata)
+            incoming_status = self._assistant_placeholder_terminal_status({"terminal_event": terminal_event})
+            if self._assistant_terminal_rank(incoming_status) > self._assistant_terminal_rank(current_status):
+                row = self.assistant_tasks[int(existing["id"])]
+                return self._update_authority_assistant_placeholder(row=row, terminal_event=terminal_event)
+            return {"task_id": int(existing["id"]), "deduped": True, "metadata": copy.deepcopy(metadata)}
+        task_id = self._next_assistant_task_id
+        self._next_assistant_task_id += 1
+        metadata = {
+            "authority_assistant_terminal_async": True,
+            "assistant_async_state": "pending",
+            "terminal_async_state": "accepted",
+            "trace_id": str(trace_id or ""),
+            "source_service": str(source_service or ""),
+            "route": str(route or ""),
+            "requested_mode": str(requested_mode or ""),
+            "actual_mode": str(actual_mode or ""),
+            "idempotency_key": str(idempotency_key or ""),
+            "terminal_event": copy.deepcopy(terminal_event or {}),
+            "processing_started_at": None,
+            "materialized_message_id": "",
+            "last_error": "",
+        }
+        self.assistant_tasks[int(task_id)] = {
+            "id": int(task_id),
+            "conversation_id": int(conversation_id),
+            "user_id": int(user_id),
+            "content": str((terminal_event or {}).get("answer_text") or ""),
+            "metadata": metadata,
+        }
+        return {"task_id": int(task_id), "deduped": False, "metadata": copy.deepcopy(metadata)}
+
     def claim_pending_authority_assistant_tasks(self, *, limit: int) -> list[dict]:
         claimed: list[dict] = []
         for task_id in sorted(self.assistant_tasks):
@@ -289,6 +411,8 @@ class _MemoryConversationRepo:
             return 0
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         metadata["assistant_async_state"] = "done"
+        if metadata.get("authority_assistant_terminal_async") is True:
+            metadata["terminal_async_state"] = "materialized"
         metadata["materialized_message_id"] = str(materialized_message_id or "")
         metadata["processing_started_at"] = None
         metadata["last_error"] = str(note or "")
@@ -300,6 +424,8 @@ class _MemoryConversationRepo:
             return 0
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         metadata["assistant_async_state"] = "failed"
+        if metadata.get("authority_assistant_terminal_async") is True:
+            metadata["terminal_async_state"] = "retryable"
         metadata["processing_started_at"] = None
         metadata["last_error"] = str(last_error or "")
         return 1
@@ -385,6 +511,182 @@ class _MemoryConversationRepo:
             kept.append(item)
         self.files[int(conversation_id)] = kept
         return removed
+
+
+def test_normalize_json_messages_skips_authority_placeholders():
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    service = ConversationService(
+        repo=_MemoryConversationRepo(),
+        json_store=ConversationJsonStore(project_root="/tmp"),
+        outbox_repo=_OutboxRecorder(),
+        workspace_root="/tmp",
+        redis_service=redis_service,
+    )
+
+    now = datetime.now(timezone.utc)
+    rows = [
+        {
+            "id": 1,
+            "role": "assistant",
+            "content": "",
+            "created_at": now,
+            "metadata": {"authority_assistant_async": True, "assistant_async_state": "pending"},
+        },
+        {
+            "id": 2,
+            "role": "assistant",
+            "content": "",
+            "created_at": now,
+            "metadata": {"authority_assistant_terminal_async": True, "terminal_async_state": "accepted"},
+        },
+        {
+            "id": 3,
+            "role": "assistant",
+            "content": "materialized answer",
+            "created_at": now,
+            "metadata": {"done_seen": True},
+        },
+    ]
+
+    normalized = service._normalize_json_messages(rows)
+
+    assert len(normalized) == 1
+    assert normalized[0]["content"] == "materialized answer"
+
+
+def test_build_document_from_cached_detail_preserves_terminal_metadata():
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    service = ConversationService(
+        repo=_MemoryConversationRepo(),
+        json_store=ConversationJsonStore(project_root="/tmp", redis_service=redis_service),
+        outbox_repo=_OutboxRecorder(),
+        workspace_root="/tmp",
+        redis_service=redis_service,
+    )
+    row = {
+        "id": 12,
+        "user_id": 7,
+        "title": "Cached Terminal",
+        "message_count": 1,
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc),
+        "chat_json_version": 1,
+    }
+    payload = {
+        "success": True,
+        "data": {
+            "conversation_id": 12,
+            "user_id": 7,
+            "title": "Cached Terminal",
+            "message_count": 1,
+            "created_at": service._to_iso(row["created_at"], fallback=service._now_iso()),
+            "updated_at": service._to_iso(row["updated_at"], fallback=service._now_iso()),
+            "messages": [
+                {
+                    "message_id": "m_000001",
+                    "role": "assistant",
+                    "content": "partial answer",
+                    "created_at": service._to_iso(row["updated_at"], fallback=service._now_iso()),
+                    "status": "failed",
+                    "terminal_status": "failed",
+                    "failure_stage": "llm_stream",
+                    "failure_code": "LLM_TIMEOUT",
+                    "failure_message": "timeout",
+                    "retriable": True,
+                    "done_seen": False,
+                    "metadata": {
+                        "trace_id": "trace-cached-terminal",
+                        "route": "kb_qa",
+                    },
+                }
+            ],
+            "uploaded_files_all": [],
+        },
+        "cache_meta": {"cached_at": service._now_iso()},
+    }
+    cache_conversation_detail(
+        redis_service=redis_service,
+        user_id=7,
+        conversation_id=12,
+        payload=payload,
+    )
+
+    document = service._build_document_from_cached_detail(row=row, conversation_id=12, user_id=7)
+
+    assert isinstance(document, dict)
+    message = document["messages"][0]
+    metadata = message["metadata"]
+    assert message["status"] == "failed"
+    assert metadata["terminal_status"] == "failed"
+    assert metadata["failure_stage"] == "llm_stream"
+    assert metadata["failure_code"] == "LLM_TIMEOUT"
+    assert metadata["failure_message"] == "timeout"
+    assert metadata["retriable"] is True
+
+
+def test_build_document_from_cached_detail_prefers_explicit_terminal_status():
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    service = ConversationService(
+        repo=_MemoryConversationRepo(),
+        json_store=ConversationJsonStore(project_root="/tmp", redis_service=redis_service),
+        outbox_repo=_OutboxRecorder(),
+        workspace_root="/tmp",
+        redis_service=redis_service,
+    )
+    row = {
+        "id": 13,
+        "user_id": 7,
+        "title": "Cached Terminal Explicit Status",
+        "message_count": 1,
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc),
+        "chat_json_version": 1,
+    }
+    payload = {
+        "success": True,
+        "data": {
+            "conversation_id": 13,
+            "user_id": 7,
+            "title": "Cached Terminal Explicit Status",
+            "message_count": 1,
+            "created_at": service._to_iso(row["created_at"], fallback=service._now_iso()),
+            "updated_at": service._to_iso(row["updated_at"], fallback=service._now_iso()),
+            "messages": [
+                {
+                    "message_id": "m_000001",
+                    "role": "assistant",
+                    "content": "partial answer",
+                    "created_at": service._to_iso(row["updated_at"], fallback=service._now_iso()),
+                    "status": "done",
+                    "terminal_status": "failed",
+                    "failure_stage": "llm_stream",
+                    "failure_message": "timeout",
+                    "retriable": True,
+                    "done_seen": False,
+                    "metadata": {
+                        "trace_id": "trace-cached-explicit-terminal",
+                        "route": "kb_qa",
+                    },
+                }
+            ],
+            "uploaded_files_all": [],
+        },
+        "cache_meta": {"cached_at": service._now_iso()},
+    }
+    cache_conversation_detail(
+        redis_service=redis_service,
+        user_id=7,
+        conversation_id=13,
+        payload=payload,
+    )
+
+    document = service._build_document_from_cached_detail(row=row, conversation_id=13, user_id=7)
+
+    assert isinstance(document, dict)
+    message = document["messages"][0]
+    metadata = message["metadata"]
+    assert message["status"] == "done"
+    assert metadata["terminal_status"] == "failed"
 
 
 class _TrackingConversationRepo(_MemoryConversationRepo):
@@ -924,6 +1226,8 @@ def test_authority_user_write_is_immediately_visible_to_context_snapshot():
                 "content": "hello authority",
                 "created_at": written["created_at"],
                 "trace_id": "trace-1",
+                "status": "done",
+                "terminal_status": "done",
             }
         ]
         assert snapshot["data"]["conversation_state"] == {
@@ -1054,6 +1358,88 @@ def test_authority_context_snapshot_uses_last_assistant_state():
             "last_focus_file_ids": [5, 9],
             "last_assistant_trace_id": "trace-3-assistant",
         }
+
+
+def test_authority_context_snapshot_keeps_failed_turn_truth_but_summary_stays_open():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Authority Failed Truth")
+        conversation_id = int(created["data"]["conversation_id"])
+        user_added = service.add_authority_user_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-failed-user",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key=f"{conversation_id}:trace-failed-user:user",
+            content="why did this fail?",
+            context_hints={},
+        )
+        assert user_added["success"] is True
+
+        assistant_added = service.add_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            role="assistant",
+            content="partial answer",
+            metadata={
+                "trace_id": "trace-failed-assistant",
+                "route": "kb_qa",
+                "terminal_status": "failed",
+                "failure_stage": "llm_stream",
+                "failure_message": "timeout",
+                "retriable": True,
+                "done_seen": False,
+            },
+        )
+        assert assistant_added["success"] is True
+
+        snapshot = service.get_conversation_context_snapshot(user_id=7, conversation_id=conversation_id)
+
+        assert snapshot["success"] is True
+        assert snapshot["data"]["recent_turns"] == [
+            {
+                "message_id": "m_000001",
+                "role": "user",
+                "content": "why did this fail?",
+                "created_at": user_added["created_at"],
+                "trace_id": "trace-failed-user",
+                "status": "done",
+                "terminal_status": "done",
+            },
+            {
+                "message_id": "m_000002",
+                "role": "assistant",
+                "content": "partial answer",
+                "created_at": snapshot["data"]["recent_turns"][1]["created_at"],
+                "trace_id": "trace-failed-assistant",
+                "status": "failed",
+                "terminal_status": "failed",
+                "failure_stage": "llm_stream",
+                "failure_message": "timeout",
+                "retriable": True,
+            },
+        ]
+        assert snapshot["data"]["summary"]["memory_facts"] == []
+        assert snapshot["data"]["summary"]["open_threads"] == ["why did this fail?"]
 
 
 def test_authority_context_snapshot_filters_non_final_messages():
@@ -1459,8 +1845,11 @@ def test_conversation_detail_does_not_fallback_to_legacy_tables_by_default(monke
     monkeypatch.delenv("PUBLIC_SERVICE_ENABLE_LEGACY_CONVERSATION_FALLBACK", raising=False)
     get_settings.cache_clear()
     repo = _TrackingConversationRepo()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
 
     with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(project_root=tempdir, storage_backend=storage_backend, redis_service=redis_service)
         conversation_id = repo.create_conversation(user_id=7, title="Legacy Only")
         repo.messages[conversation_id].append(
             {
@@ -1487,7 +1876,7 @@ def test_conversation_detail_does_not_fallback_to_legacy_tables_by_default(monke
                 "created_at": datetime.now(),
             }
         )
-        service = ConversationService(repo=repo, workspace_root=tempdir)
+        service = ConversationService(repo=repo, json_store=json_store, workspace_root=tempdir, redis_service=redis_service)
 
         detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
         files = service.list_uploaded_files(user_id=7, conversation_id=conversation_id, include_deleted=False)
@@ -1510,8 +1899,11 @@ def test_conversation_detail_can_fallback_to_legacy_tables_when_enabled(monkeypa
     monkeypatch.setenv("PUBLIC_SERVICE_ENABLE_LEGACY_CONVERSATION_FALLBACK", "1")
     get_settings.cache_clear()
     repo = _TrackingConversationRepo()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
 
     with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(project_root=tempdir, storage_backend=storage_backend, redis_service=redis_service)
         legacy_file_path = Path(tempdir) / "legacy.pdf"
         legacy_file_path.write_bytes(b"pdf")
         conversation_id = repo.create_conversation(user_id=7, title="Legacy Only")
@@ -1540,7 +1932,7 @@ def test_conversation_detail_can_fallback_to_legacy_tables_when_enabled(monkeypa
                 "created_at": datetime.now(),
             }
         )
-        service = ConversationService(repo=repo, workspace_root=tempdir)
+        service = ConversationService(repo=repo, json_store=json_store, workspace_root=tempdir, redis_service=redis_service)
 
         detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
         files = service.list_uploaded_files(user_id=7, conversation_id=conversation_id, include_deleted=False)

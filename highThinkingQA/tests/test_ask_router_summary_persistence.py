@@ -302,3 +302,225 @@ def test_stream_without_done_frame_still_persists_final_summary_via_completion_c
     assert assistant_calls[0]["summary"]["done_seen"] is True
     assert assistant_calls[0]["summary"]["reference_objects"] == [{"doi": "10.1000/demo", "section_name": "Results", "chunk_index": 2}]
     assert assistant_calls[0]["summary"]["doi_locations"] == {"10.1000/demo": [{"section": "Results", "chunk_index": 2}]}
+
+
+def test_stream_error_persists_failed_terminal_before_error_frame(monkeypatch):
+    assistant_calls: list[dict] = []
+
+    monkeypatch.setattr(
+        "server_fastapi.routers.ask.chat_persistence",
+        type(
+            "FakeChatPersistence",
+            (),
+            {
+                "persist_user_message": staticmethod(lambda **kwargs: None),
+                "persist_assistant_terminal": staticmethod(lambda **kwargs: assistant_calls.append(dict(kwargs))),
+            },
+        )(),
+        raising=False,
+    )
+
+    def fake_stream_ask_events(**kwargs):
+        yield {"type": "metadata", "query_mode": "thinking", "trace_id": kwargs["trace_id"]}
+        yield {"type": "content", "content": "partial "}
+        yield {
+            "type": "error",
+            "code": "UPSTREAM_ERROR",
+            "error": "upstream_error",
+            "message": "boom",
+            "retriable": True,
+            "trace_id": kwargs["trace_id"],
+        }
+
+    original_to_sse = ask_router._to_sse_line
+
+    def _asserting_to_sse(payload: dict, *, seq: int) -> str:
+        if payload.get("type") == "error":
+            assert len(assistant_calls) == 1
+            assert assistant_calls[0]["terminal_status"] == "failed"
+            assert assistant_calls[0]["summary"]["assistant_content"] == "partial"
+        return original_to_sse(payload, seq=seq)
+
+    monkeypatch.setattr("server_fastapi.routers.ask.stream_ask_events", fake_stream_ask_events)
+    monkeypatch.setattr("server_fastapi.routers.ask._to_sse_line", _asserting_to_sse)
+
+    app = create_app()
+    app.dependency_overrides[require_auth_context] = lambda: AuthContext(user_id=7, role="user", username="demo")
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/ask_stream",
+        json={"question": "demo", "requested_mode": "thinking", "conversation_id": 11},
+    )
+
+    assert response.status_code == 200
+    frames = [
+        json.loads(chunk[6:])
+        for chunk in response.text.split("\n\n")
+        if chunk.startswith("data: ")
+    ]
+    assert [frame["type"] for frame in frames] == ["metadata", "content", "error"]
+    assert assistant_calls[0]["failure"]["message"] == "boom"
+    assert assistant_calls[0]["async_enabled"] is False
+
+
+def test_stream_cancel_error_persists_canceled_terminal(monkeypatch):
+    assistant_calls: list[dict] = []
+
+    monkeypatch.setattr(
+        "server_fastapi.routers.ask.chat_persistence",
+        type(
+            "FakeChatPersistence",
+            (),
+            {
+                "persist_user_message": staticmethod(lambda **kwargs: None),
+                "persist_assistant_terminal": staticmethod(lambda **kwargs: assistant_calls.append(dict(kwargs))),
+            },
+        )(),
+        raising=False,
+    )
+
+    def fake_stream_ask_events(**kwargs):
+        yield {"type": "metadata", "query_mode": "thinking", "trace_id": kwargs["trace_id"]}
+        yield {"type": "content", "content": "partial "}
+        yield {
+            "type": "error",
+            "code": "ASK_CANCELLED",
+            "error": "cancelled",
+            "message": "cancelled",
+            "retriable": False,
+            "trace_id": kwargs["trace_id"],
+        }
+
+    monkeypatch.setattr("server_fastapi.routers.ask.stream_ask_events", fake_stream_ask_events)
+
+    app = create_app()
+    app.dependency_overrides[require_auth_context] = lambda: AuthContext(user_id=7, role="user", username="demo")
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/ask_stream",
+        json={"question": "demo", "requested_mode": "thinking", "conversation_id": 11},
+    )
+
+    assert response.status_code == 200
+    assert assistant_calls[0]["terminal_status"] == "canceled"
+    assert assistant_calls[0]["failure"]["retriable"] is False
+    assert assistant_calls[0]["async_enabled"] is False
+
+
+def test_sync_error_persists_failed_terminal_before_error_response(monkeypatch):
+    assistant_calls: list[dict] = []
+
+    monkeypatch.setattr(
+        "server_fastapi.routers.ask.chat_persistence",
+        type(
+            "FakeChatPersistence",
+            (),
+            {
+                "persist_user_message": staticmethod(lambda **kwargs: None),
+                "persist_assistant_terminal": staticmethod(lambda **kwargs: assistant_calls.append(dict(kwargs))),
+            },
+        )(),
+        raising=False,
+    )
+    monkeypatch.setattr("server_fastapi.routers.ask.execute_ask", lambda **kwargs: (_ for _ in ()).throw(ask_router.AskServiceError("boom")))
+
+    app = create_app()
+    app.dependency_overrides[require_auth_context] = lambda: AuthContext(user_id=7, role="user", username="demo")
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/ask",
+        json={"question": "demo", "requested_mode": "thinking", "conversation_id": 11},
+    )
+
+    assert response.status_code == 502
+    assert assistant_calls[0]["terminal_status"] == "failed"
+    assert assistant_calls[0]["failure"]["message"] == "boom"
+    assert assistant_calls[0]["async_enabled"] is False
+
+
+def test_sync_error_persists_mapped_failure_contract(monkeypatch):
+    assistant_calls: list[dict] = []
+
+    monkeypatch.setattr(
+        "server_fastapi.routers.ask.chat_persistence",
+        type(
+            "FakeChatPersistence",
+            (),
+            {
+                "persist_user_message": staticmethod(lambda **kwargs: None),
+                "persist_assistant_terminal": staticmethod(lambda **kwargs: assistant_calls.append(dict(kwargs))),
+            },
+        )(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "server_fastapi.routers.ask.execute_ask",
+        lambda **kwargs: (_ for _ in ()).throw(ask_router.ModeNotSupportedError("not supported")),
+    )
+
+    app = create_app()
+    app.dependency_overrides[require_auth_context] = lambda: AuthContext(user_id=7, role="user", username="demo")
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/ask",
+        json={"question": "demo", "requested_mode": "thinking", "conversation_id": 11},
+    )
+
+    assert response.status_code == 400
+    assert assistant_calls[0]["terminal_status"] == "failed"
+    assert assistant_calls[0]["failure"] == {
+        "stage": "unknown",
+        "code": "MODE_NOT_SUPPORTED",
+        "message": "not supported",
+        "retriable": False,
+    }
+
+
+def test_stream_error_still_emits_error_frame_when_terminal_persistence_fails(monkeypatch):
+    monkeypatch.setattr(
+        "server_fastapi.routers.ask.chat_persistence",
+        type(
+            "FakeChatPersistence",
+            (),
+            {
+                "persist_user_message": staticmethod(lambda **kwargs: None),
+                "persist_assistant_terminal": staticmethod(lambda **kwargs: (_ for _ in ()).throw(RuntimeError("persist failed"))),
+            },
+        )(),
+        raising=False,
+    )
+
+    def fake_stream_ask_events(**kwargs):
+        yield {"type": "content", "content": "partial "}
+        yield {
+            "type": "error",
+            "code": "UPSTREAM_ERROR",
+            "error": "upstream_error",
+            "message": "boom",
+            "retriable": True,
+            "trace_id": kwargs["trace_id"],
+        }
+
+    monkeypatch.setattr("server_fastapi.routers.ask.stream_ask_events", fake_stream_ask_events)
+
+    app = create_app()
+    app.dependency_overrides[require_auth_context] = lambda: AuthContext(user_id=7, role="user", username="demo")
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/ask_stream",
+        json={"question": "demo", "requested_mode": "thinking", "conversation_id": 11},
+    )
+
+    assert response.status_code == 200
+    frames = [
+        json.loads(chunk[6:])
+        for chunk in response.text.split("\n\n")
+        if chunk.startswith("data: ")
+    ]
+    assert [frame["type"] for frame in frames] == ["content", "error"]
+    assert frames[-1]["message"] == "boom"

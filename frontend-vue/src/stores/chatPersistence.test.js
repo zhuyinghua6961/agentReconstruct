@@ -38,6 +38,25 @@ function buildPersistedChatPayload() {
           },
           steps: [{ step: 'retrieve', status: 'success', title: '检索', detail: 'done' }],
         },
+        {
+          role: 'assistant',
+          content: '',
+          timestamp: '2026-03-31T10:00:08.000Z',
+          terminalStatus: 'failed',
+          status: 'failed',
+          failureMessage: '模型超时',
+          failureCode: 'UPSTREAM_TIMEOUT',
+          retriable: true,
+          doneSeen: false,
+          isComplete: true,
+          metadata: {
+            terminal_status: 'failed',
+            failure_message: '模型超时',
+            failure_code: 'UPSTREAM_TIMEOUT',
+            retriable: true,
+            done_seen: false,
+          },
+        },
       ],
     },
   ]
@@ -51,7 +70,7 @@ test('restorePersistedChats removes runtime-only streaming fields while preservi
   const restored = restorePersistedChats(buildPersistedChatPayload())
 
   assert.equal(restored.length, 1)
-  assert.equal(restored[0].messages.length, 2)
+  assert.equal(restored[0].messages.length, 3)
   assert.equal(restored[0].messages[0].content, '第一个问题')
   assert.equal(restored[0].messages[1].content, '未完成回答片段')
   assert.equal(restored[0].messages[1].isComplete, false)
@@ -63,6 +82,11 @@ test('restorePersistedChats removes runtime-only streaming fields while preservi
   })
   assert.deepEqual(restored[0].messages[1].steps, [{ step: 'retrieve', status: 'success', title: '检索', detail: 'done' }])
   assert.equal('streamRequestId' in restored[0].messages[1], false)
+  assert.equal(restored[0].messages[2].terminalStatus, 'failed')
+  assert.equal(restored[0].messages[2].failureMessage, '模型超时')
+  assert.equal(restored[0].messages[2].metadata.terminal_status, 'failed')
+  assert.equal(restored[0].messages[2].metadata.failure_message, '模型超时')
+  assert.equal(restored[0].messages[2].doneSeen, false)
 })
 
 test('prepareChatsForPersistence keeps message order and durable fields but strips runtime-only state', async () => {
@@ -73,7 +97,7 @@ test('prepareChatsForPersistence keeps message order and durable fields but stri
   const prepared = prepareChatsForPersistence(buildPersistedChatPayload())
 
   assert.equal(prepared.length, 1)
-  assert.equal(prepared[0].messages.length, 2)
+  assert.equal(prepared[0].messages.length, 3)
   assert.equal(prepared[0].messages[0].content, '第一个问题')
   assert.equal(prepared[0].messages[1].content, '未完成回答片段')
   assert.equal(prepared[0].messages[1].stepsCollapsed, true)
@@ -85,6 +109,11 @@ test('prepareChatsForPersistence keeps message order and durable fields but stri
   })
   assert.deepEqual(prepared[0].messages[1].steps, [{ step: 'retrieve', status: 'success', title: '检索', detail: 'done' }])
   assert.equal('streamRequestId' in prepared[0].messages[1], false)
+  assert.equal(prepared[0].messages[2].terminalStatus, 'failed')
+  assert.equal(prepared[0].messages[2].failureCode, 'UPSTREAM_TIMEOUT')
+  assert.equal(prepared[0].messages[2].metadata.failure_code, 'UPSTREAM_TIMEOUT')
+  assert.equal(prepared[0].messages[2].retriable, true)
+  assert.equal(prepared[0].messages[2].doneSeen, false)
 })
 
 test('prepareChatsForPersistence serializes Date timestamps into durable ISO strings', async () => {
@@ -141,17 +170,21 @@ test('chat store reload path restores durable content and does not revive stale 
   await store.loadChats()
 
   assert.equal(store.isStreaming, false)
-  assert.equal(store.currentMessages.length, 2)
+  assert.equal(store.currentMessages.length, 3)
   assert.equal(store.currentMessages[1].content, '未完成回答片段')
   assert.equal(store.currentMessages[1].isComplete, false)
   assert.equal(store.currentMessages[1].stepsCollapsed, true)
   assert.equal('streamRequestId' in store.currentMessages[1], false)
+  assert.equal(store.currentMessages[2].terminalStatus, 'failed')
+  assert.equal(store.currentMessages[2].failureMessage, '模型超时')
+  assert.equal(store.currentMessages[2].isComplete, true)
 
   store.persistLocalState()
   const persistedChats = JSON.parse(storage.get('lfp_chats'))
   assert.equal('streamRequestId' in persistedChats[0].messages[1], false)
   assert.equal(persistedChats[0].messages[0].content, '第一个问题')
   assert.equal(persistedChats[0].messages[1].content, '未完成回答片段')
+  assert.equal(persistedChats[0].messages[2].metadata.terminal_status, 'failed')
 })
 
 test('synced chat reload lets explicit server completion state override stale local recovery state', async () => {

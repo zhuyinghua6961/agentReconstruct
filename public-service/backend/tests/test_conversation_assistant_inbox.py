@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from tempfile import TemporaryDirectory
 
 from app.integrations.redis import RedisService
@@ -127,6 +128,579 @@ def test_accept_authority_assistant_async_dedupes_and_materializes_once():
         assert detail["success"] is True
         assert [item["content"] for item in detail["data"]["messages"]] == ["answer once"]
         assert detail["data"]["message_count"] == 1
+
+
+def test_accept_authority_assistant_terminal_async_materializes_failed_turn():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(project_root=tempdir, storage_backend=storage_backend)
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Assistant Terminal Inbox")
+        conversation_id = int(created["data"]["conversation_id"])
+        accepted = service.accept_authority_assistant_terminal_async(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-terminal-a1",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key=f"{conversation_id}:trace-terminal-a1:assistant",
+            terminal_event={
+                "terminal_status": "failed",
+                "done_seen": False,
+                "answer_text": "",
+                "failure": {
+                    "stage": "llm_stream",
+                    "message": "timeout",
+                    "code": "LLM_TIMEOUT",
+                    "retriable": True,
+                },
+            },
+        )
+
+        assert accepted["success"] is True
+        assert accepted["accepted"] is True
+        assert accepted["status"] == "accepted"
+
+        worker = AuthorityAssistantInboxWorker(repository=repo, conversation_service=service)
+        summary = worker.run_once(limit=10)
+
+        assert summary["claimed"] == 1
+        assert summary["done"] == 1
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+        assert detail["success"] is True
+        assistant = detail["data"]["messages"][-1]
+        assert assistant["status"] == "failed"
+        assert assistant["done_seen"] is False
+        assert assistant["metadata"]["terminal_status"] == "failed"
+        assert assistant["metadata"]["failure_stage"] == "llm_stream"
+        assert assistant["metadata"]["failure_code"] == "LLM_TIMEOUT"
+        assert assistant["metadata"]["failure_message"] == "timeout"
+        assert assistant["metadata"]["retriable"] is True
+
+
+def test_accept_authority_assistant_terminal_async_materializes_canceled_turn_with_minimal_failure_message():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(project_root=tempdir, storage_backend=storage_backend)
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Assistant Terminal Cancel")
+        conversation_id = int(created["data"]["conversation_id"])
+        accepted = service.accept_authority_assistant_terminal_async(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-terminal-cancel-a1",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key=f"{conversation_id}:trace-terminal-cancel-a1:assistant",
+            terminal_event={
+                "terminal_status": "canceled",
+                "done_seen": False,
+                "answer_text": "",
+            },
+        )
+
+        assert accepted["success"] is True
+        worker = AuthorityAssistantInboxWorker(repository=repo, conversation_service=service)
+        summary = worker.run_once(limit=10)
+
+        assert summary["claimed"] == 1
+        assert summary["done"] == 1
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+        assistant = detail["data"]["messages"][-1]
+        assert assistant["status"] == "canceled"
+        assert assistant["done_seen"] is False
+        assert assistant["metadata"]["terminal_status"] == "canceled"
+        assert assistant["metadata"]["failure_stage"] == "unknown"
+        assert assistant["metadata"]["failure_message"] == "已取消"
+        assert assistant["metadata"]["retriable"] is False
+
+
+def test_terminal_then_legacy_accept_with_same_key_dedupes_across_endpoints():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(project_root=tempdir, storage_backend=storage_backend)
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Assistant Terminal Dedupe")
+        conversation_id = int(created["data"]["conversation_id"])
+        key = f"{conversation_id}:trace-terminal-dedupe:assistant"
+        terminal_result = service.accept_authority_assistant_terminal_async(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-terminal-dedupe",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key=key,
+            terminal_event={
+                "terminal_status": "failed",
+                "done_seen": False,
+                "answer_text": "",
+                "failure": {
+                    "stage": "llm_stream",
+                    "message": "timeout",
+                    "code": "LLM_TIMEOUT",
+                    "retriable": True,
+                },
+            },
+        )
+        legacy_result = service.accept_authority_assistant_async(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-terminal-dedupe",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key=key,
+            final_event={
+                "done_seen": True,
+                "answer_text": "should not enqueue",
+                "steps": [],
+                "references": [],
+                "used_files": [],
+                "timings": {},
+            },
+        )
+
+        assert terminal_result["success"] is True
+        assert legacy_result["success"] is True
+        assert legacy_result["deduped"] is False
+
+        worker = AuthorityAssistantInboxWorker(repository=repo, conversation_service=service)
+        summary = worker.run_once(limit=10)
+
+        assert summary["claimed"] == 1
+        assert summary["done"] == 1
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+        assistant = detail["data"]["messages"][-1]
+        assert assistant["status"] == "done"
+        assert assistant["content"] == "should not enqueue"
+
+
+def test_legacy_then_terminal_accept_with_same_key_dedupes_across_endpoints():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(project_root=tempdir, storage_backend=storage_backend)
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Assistant Legacy Dedupe")
+        conversation_id = int(created["data"]["conversation_id"])
+        key = f"{conversation_id}:trace-legacy-dedupe:assistant"
+        legacy_result = service.accept_authority_assistant_async(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-legacy-dedupe",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key=key,
+            final_event={
+                "done_seen": True,
+                "answer_text": "final answer",
+                "steps": [],
+                "references": [],
+                "used_files": [],
+                "timings": {},
+            },
+        )
+        terminal_result = service.accept_authority_assistant_terminal_async(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-legacy-dedupe",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key=key,
+            terminal_event={
+                "terminal_status": "failed",
+                "done_seen": False,
+                "answer_text": "",
+                "failure": {
+                    "stage": "llm_stream",
+                    "message": "timeout",
+                    "code": "LLM_TIMEOUT",
+                    "retriable": True,
+                },
+            },
+        )
+
+        assert legacy_result["success"] is True
+        assert terminal_result["success"] is True
+        assert terminal_result["deduped"] is True
+
+        worker = AuthorityAssistantInboxWorker(repository=repo, conversation_service=service)
+        summary = worker.run_once(limit=10)
+
+        assert summary["claimed"] == 1
+        assert summary["done"] == 1
+
+
+def test_cross_endpoint_accepts_share_one_placeholder_under_concurrent_calls():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(project_root=tempdir, storage_backend=storage_backend, redis_service=redis_service)
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Assistant Concurrent Dedupe")
+        conversation_id = int(created["data"]["conversation_id"])
+        key = f"{conversation_id}:trace-concurrent-dedupe:assistant"
+
+        def _accept_legacy():
+            return service.accept_authority_assistant_async(
+                user_id=7,
+                conversation_id=conversation_id,
+                trace_id="trace-concurrent-dedupe",
+                source_service="fastQA",
+                route="kb_qa",
+                requested_mode="fast",
+                actual_mode="fast",
+                idempotency_key=key,
+                final_event={
+                    "done_seen": True,
+                    "answer_text": "final answer",
+                    "steps": [],
+                    "references": [],
+                    "used_files": [],
+                    "timings": {},
+                },
+            )
+
+        def _accept_terminal():
+            return service.accept_authority_assistant_terminal_async(
+                user_id=7,
+                conversation_id=conversation_id,
+                trace_id="trace-concurrent-dedupe",
+                source_service="fastQA",
+                route="kb_qa",
+                requested_mode="fast",
+                actual_mode="fast",
+                idempotency_key=key,
+                terminal_event={
+                    "terminal_status": "failed",
+                    "done_seen": False,
+                    "answer_text": "",
+                    "failure": {
+                        "stage": "llm_stream",
+                        "message": "timeout",
+                        "code": "LLM_TIMEOUT",
+                        "retriable": True,
+                    },
+                },
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            legacy_future = executor.submit(_accept_legacy)
+            terminal_future = executor.submit(_accept_terminal)
+            legacy_result = legacy_future.result()
+            terminal_result = terminal_future.result()
+
+        assert legacy_result["success"] is True
+        assert terminal_result["success"] is True
+        assert len(repo.assistant_tasks) == 1
+
+
+def test_failed_terminal_turn_can_upgrade_to_done_with_same_idempotency_key():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(project_root=tempdir, storage_backend=storage_backend)
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Assistant Terminal Upgrade")
+        conversation_id = int(created["data"]["conversation_id"])
+        key = f"{conversation_id}:trace-terminal-upgrade:assistant"
+
+        failed_accept = service.accept_authority_assistant_terminal_async(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-terminal-upgrade",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key=key,
+            terminal_event={
+                "terminal_status": "failed",
+                "done_seen": False,
+                "answer_text": "partial",
+                "failure": {
+                    "stage": "llm_stream",
+                    "message": "timeout",
+                    "code": "LLM_TIMEOUT",
+                    "retriable": True,
+                },
+            },
+        )
+        assert failed_accept["success"] is True
+
+        worker = AuthorityAssistantInboxWorker(repository=repo, conversation_service=service)
+        first_run = worker.run_once(limit=10)
+        assert first_run["done"] == 1
+
+        done_accept = service.accept_authority_assistant_terminal_async(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-terminal-upgrade",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key=key,
+            terminal_event={
+                "terminal_status": "done",
+                "done_seen": True,
+                "answer_text": "final answer",
+                "steps": [],
+                "references": [],
+                "reference_objects": [],
+                "reference_links": [],
+                "pdf_links": [],
+                "doi_locations": {},
+                "used_files": [],
+                "timings": {},
+            },
+        )
+        assert done_accept["success"] is True
+
+        second_run = worker.run_once(limit=10)
+        assert second_run["done"] == 1
+
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+        messages = detail["data"]["messages"]
+        assert len(messages) == 1
+        assistant = messages[0]
+        assert assistant["status"] == "done"
+        assert assistant["done_seen"] is True
+        assert assistant["content"] == "final answer"
+
+
+def test_failed_terminal_placeholder_can_upgrade_to_done_before_worker_runs():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(project_root=tempdir, storage_backend=storage_backend)
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Assistant Placeholder Upgrade")
+        conversation_id = int(created["data"]["conversation_id"])
+        key = f"{conversation_id}:trace-terminal-preupgrade:assistant"
+
+        first_accept = service.accept_authority_assistant_terminal_async(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-terminal-preupgrade",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key=key,
+            terminal_event={
+                "terminal_status": "failed",
+                "done_seen": False,
+                "answer_text": "partial",
+                "failure": {
+                    "stage": "llm_stream",
+                    "message": "timeout",
+                    "code": "LLM_TIMEOUT",
+                    "retriable": True,
+                },
+            },
+        )
+        second_accept = service.accept_authority_assistant_terminal_async(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-terminal-preupgrade",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key=key,
+            terminal_event={
+                "terminal_status": "done",
+                "done_seen": True,
+                "answer_text": "final answer",
+                "steps": [],
+                "references": [],
+                "reference_objects": [],
+                "reference_links": [],
+                "pdf_links": [],
+                "doi_locations": {},
+                "used_files": [],
+                "timings": {},
+            },
+        )
+
+        assert first_accept["success"] is True
+        assert second_accept["success"] is True
+        assert second_accept["deduped"] is False
+
+        worker = AuthorityAssistantInboxWorker(repository=repo, conversation_service=service)
+        summary = worker.run_once(limit=10)
+        assert summary["done"] == 1
+
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+        assistant = detail["data"]["messages"][-1]
+        assert assistant["status"] == "done"
+        assert assistant["content"] == "final answer"
+
+
+def test_claimed_failed_placeholder_reloads_latest_done_payload_before_materialize():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(project_root=tempdir, storage_backend=storage_backend)
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Assistant Claimed Upgrade")
+        conversation_id = int(created["data"]["conversation_id"])
+        key = f"{conversation_id}:trace-terminal-claimed-upgrade:assistant"
+
+        failed_accept = service.accept_authority_assistant_terminal_async(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-terminal-claimed-upgrade",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key=key,
+            terminal_event={
+                "terminal_status": "failed",
+                "done_seen": False,
+                "answer_text": "partial",
+                "failure": {
+                    "stage": "llm_stream",
+                    "message": "timeout",
+                    "code": "LLM_TIMEOUT",
+                    "retriable": True,
+                },
+            },
+        )
+        assert failed_accept["success"] is True
+
+        claimed = repo.claim_pending_authority_assistant_tasks(limit=10)
+        assert len(claimed) == 1
+
+        done_accept = service.accept_authority_assistant_terminal_async(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-terminal-claimed-upgrade",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key=key,
+            terminal_event={
+                "terminal_status": "done",
+                "done_seen": True,
+                "answer_text": "final answer",
+                "steps": [],
+                "references": [],
+                "reference_objects": [],
+                "reference_links": [],
+                "pdf_links": [],
+                "doi_locations": {},
+                "used_files": [],
+                "timings": {},
+            },
+        )
+        assert done_accept["success"] is True
+
+        materialized = service.materialize_authority_assistant_task(task=claimed[0])
+        assert materialized["success"] is True
+        repo.mark_authority_assistant_task_done(task_id=claimed[0]["id"], materialized_message_id=materialized["message_id"])
+
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+        assistant = detail["data"]["messages"][-1]
+        assert assistant["status"] == "done"
+        assert assistant["content"] == "final answer"
 
 
 class _RetryRepo:

@@ -847,6 +847,47 @@ def test_stream_with_quota_counts_success_when_client_closes_after_done_is_seen(
     anyio.run(_run)
 
 
+def test_stream_with_quota_preserves_cancel_error_envelope():
+    async def _run():
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/thinking/ask_stream",
+            "headers": [],
+            "app": app,
+        }
+        quota_proxy = _RecordingQuotaProxy()
+        handle = _SimpleStreamingHandle(
+            [
+                (
+                    b'data: {"type":"metadata","query_mode":"thinking"}\n\n'
+                    b'data: {"type":"error","code":"ASK_CANCELLED","error":"cancelled","message":"cancelled","retriable":false,"trace_id":"trace-cancel"}\n\n'
+                ),
+            ]
+        )
+        stream = _stream_with_quota(
+            handle=handle,
+            request=Request(scope),
+            quota_proxy=quota_proxy,
+            grant_id="grant-stream-cancel",
+            quota_type="ask_query",
+            trace_id="trace-cancel",
+            backend="thinking",
+        )
+        chunks = [chunk async for chunk in stream]
+        body = b"".join(chunks)
+        assert body.index(b'"type":"metadata"') < body.index(b'"type":"error"')
+        assert b'"code":"ASK_CANCELLED"' in body
+        assert b'"error":"cancelled"' in body
+        assert b'"type":"error"' in body
+        assert b'"type":"canceled"' not in body
+        assert len(quota_proxy.calls) == 1
+        assert quota_proxy.calls[0]["grant_id"] == "grant-stream-cancel"
+        assert quota_proxy.calls[0]["success"] is False
+
+    anyio.run(_run)
+
+
 def test_mode_ask_routes_plain_question_to_requested_backend():
     captured = {}
 

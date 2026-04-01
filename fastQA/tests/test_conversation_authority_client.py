@@ -211,6 +211,94 @@ def test_accept_assistant_turn_async_uses_canonical_final_event():
     assert response["status"] == "accepted"
 
 
+def test_accept_assistant_turn_terminal_async_uses_terminal_contract():
+    observed = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed["method"] = request.method
+        observed["url"] = str(request.url)
+        observed["headers"] = dict(request.headers)
+        observed["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            202,
+            json={
+                "accepted": True,
+                "event_id": "assistant-async:12:trace-1",
+                "trace_id": "trace-1",
+                "idempotency_key": "12:trace-1:assistant",
+                "status": "accepted",
+            },
+        )
+
+    client = ConversationAuthorityClient(
+        base_url="http://public-service",
+        service_token="secret-token",
+        transport=httpx.MockTransport(handler),
+    )
+
+    response = client.accept_assistant_turn_terminal_async(
+        user_id=7,
+        conversation_id=12,
+        trace_id="trace-1",
+        route="kb_qa",
+        requested_mode="fast",
+        actual_mode="fast",
+        terminal_status="failed",
+        answer_text="partial answer",
+        steps=[{"step": "stage4"}],
+        references=[{"doi": "10.1/a"}],
+        reference_objects=[{"doi": "10.1/a", "section_name": "Results", "chunk_index": 3}],
+        reference_links=[{"doi": "10.1/a", "pdf_url": "/api/v1/view_pdf/10.1%2Fa"}],
+        pdf_links=[{"doi": "10.1/a", "pdf_url": "/api/v1/view_pdf/10.1%2Fa"}],
+        doi_locations={"10.1/a": [{"section": "Results", "chunk_index": 3}]},
+        used_files=[{"file_id": 8}],
+        timings={"latency_ms": 321},
+        failure={
+            "stage": "citation_validation",
+            "message": "validation timeout",
+            "code": "VALIDATION_TIMEOUT",
+            "retriable": True,
+        },
+    )
+
+    assert observed["method"] == "POST"
+    assert observed["url"] == "http://public-service/internal/conversations/12/messages/assistant-terminal-async"
+    assert observed["headers"]["x-internal-service-name"] == "fastQA"
+    assert observed["headers"]["x-internal-service-token"] == "secret-token"
+    assert observed["headers"]["x-trace-id"] == "trace-1"
+    assert observed["body"] == {
+        "conversation_id": 12,
+        "user_id": 7,
+        "trace_id": "trace-1",
+        "source_service": "fastQA",
+        "route": "kb_qa",
+        "requested_mode": "fast",
+        "actual_mode": "fast",
+        "idempotency_key": "12:trace-1:assistant",
+        "terminal_event": {
+            "terminal_status": "failed",
+            "done_seen": False,
+            "answer_text": "partial answer",
+            "steps": [{"step": "stage4"}],
+            "references": [{"doi": "10.1/a"}],
+            "reference_objects": [{"doi": "10.1/a", "section_name": "Results", "chunk_index": 3}],
+            "reference_links": [{"doi": "10.1/a", "pdf_url": "/api/v1/view_pdf/10.1%2Fa"}],
+            "pdf_links": [{"doi": "10.1/a", "pdf_url": "/api/v1/view_pdf/10.1%2Fa"}],
+            "doi_locations": {"10.1/a": [{"section": "Results", "chunk_index": 3}]},
+            "used_files": [{"file_id": 8}],
+            "timings": {"latency_ms": 321},
+            "failure": {
+                "stage": "citation_validation",
+                "message": "validation timeout",
+                "code": "VALIDATION_TIMEOUT",
+                "retriable": True,
+            },
+        },
+    }
+    assert response["accepted"] is True
+    assert response["status"] == "accepted"
+
+
 @pytest.mark.parametrize(
     ("response_json", "call_name"),
     [
@@ -245,6 +333,15 @@ def test_accept_assistant_turn_async_uses_canonical_final_event():
             },
             "accept_assistant_turn_async",
         ),
+        (
+            {
+                "event_id": "assistant-async:12:trace-1",
+                "trace_id": "trace-1",
+                "idempotency_key": "12:trace-1:assistant",
+                "status": "accepted",
+            },
+            "accept_assistant_turn_terminal_async",
+        ),
     ],
 )
 def test_client_rejects_malformed_contract_responses(response_json, call_name):
@@ -270,6 +367,8 @@ def test_client_rejects_malformed_contract_responses(response_json, call_name):
                 if call_name == "write_user_turn"
                 else {"answer_text": "final answer"}
                 if call_name == "accept_assistant_turn_async"
+                else {"terminal_status": "done", "answer_text": "final answer"}
+                if call_name == "accept_assistant_turn_terminal_async"
                 else {}
             ),
         )

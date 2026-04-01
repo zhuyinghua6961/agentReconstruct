@@ -206,6 +206,104 @@ def _persist_assistant_message_if_needed(*, request: Request, ask_request, summa
     )
 
 
+def _summary_payload(*, summary: dict, route: str, trace_id: str) -> dict:
+    safe_summary = dict(summary or {})
+    return {
+        "assistant_content": str(safe_summary.get("assistant_content") or "").strip(),
+        "query_mode": str(safe_summary.get("query_mode") or route or "").strip(),
+        "references": list(safe_summary.get("references") or []),
+        "reference_objects": list(safe_summary.get("reference_objects") or []),
+        "reference_links": list(safe_summary.get("reference_links") or []),
+        "pdf_links": list(safe_summary.get("pdf_links") or []),
+        "doi_locations": dict(safe_summary.get("doi_locations") or {}),
+        "steps": list(safe_summary.get("steps") or []),
+        "route": str(safe_summary.get("route") or route or "").strip(),
+        "used_files": list(safe_summary.get("used_files") or []),
+        "timings": dict(safe_summary.get("timings") or {}),
+        "trace_id": str(safe_summary.get("trace_id") or trace_id or "").strip(),
+        "file_selection": dict(safe_summary.get("file_selection") or {}),
+        "done_seen": bool(safe_summary.get("done_seen")),
+    }
+
+
+def _is_cancel_error(error_payload: dict) -> bool:
+    code = str(error_payload.get("code") or "").strip().upper()
+    error_text = str(error_payload.get("error") or error_payload.get("message") or "").strip().lower()
+    return code in {"ASK_CANCELLED", "CLIENT_CANCELLED"} or error_text == "cancelled"
+
+
+def _failure_from_error_payload(*, error_payload: dict, terminal_status: str) -> dict:
+    detail = error_payload.get("detail") if isinstance(error_payload.get("detail"), dict) else {}
+    failure_stage = str(error_payload.get("failure_stage") or detail.get("failure_stage") or "").strip()
+    if not failure_stage:
+        failure_stage = "cancelled" if terminal_status == "canceled" else "unknown"
+    failure_code = str(error_payload.get("code") or detail.get("failure_code") or "").strip()
+    failure_message = str(error_payload.get("message") or error_payload.get("error") or "").strip()
+    if not failure_message:
+        failure_message = "已取消" if terminal_status == "canceled" else "处理失败"
+    retriable_raw = error_payload.get("retriable")
+    if retriable_raw is None:
+        retriable_raw = detail.get("retriable")
+    retriable = False if terminal_status == "canceled" else bool(retriable_raw if retriable_raw is not None else True)
+    return {
+        "stage": failure_stage,
+        "code": failure_code,
+        "message": failure_message,
+        "retriable": retriable,
+    }
+
+
+def _mapped_error_payload(*, exc: Exception, trace_id: str) -> tuple[APIError, dict]:
+    mapped = _handle_service_error(exc)
+    return mapped, {
+        "code": mapped.code,
+        "error": mapped.error,
+        "message": mapped.message,
+        "retriable": mapped.retriable,
+        "trace_id": trace_id,
+    }
+
+
+def _persist_assistant_terminal_if_needed(
+    *,
+    request: Request,
+    ask_request,
+    summary: dict,
+    terminal_status: str,
+    error_payload: dict | None = None,
+) -> None:
+    if not _chat_persist_enabled(request):
+        return
+    user_id = int(ask_request.user_id) if ask_request.user_id else None
+    conversation_id = _conversation_id_int(ask_request.conversation_id)
+    if not user_id or not conversation_id:
+        return
+    summary_payload = _summary_payload(
+        summary=summary,
+        route=str(getattr(ask_request, "route", "thinking_qa") or "thinking_qa"),
+        trace_id=str(getattr(ask_request, "trace_id", "") or ""),
+    )
+    try:
+        chat_persistence.persist_assistant_terminal(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            trace_id=str(summary_payload.get("trace_id") or ""),
+            route=str(summary_payload.get("route") or ""),
+            requested_mode=str(getattr(ask_request, "requested_mode", getattr(ask_request, "mode", "thinking")) or "thinking"),
+            actual_mode=str(getattr(ask_request, "actual_mode", getattr(ask_request, "mode", "thinking")) or "thinking"),
+            terminal_status=terminal_status,
+            assistant_content=str(summary_payload.get("assistant_content") or ""),
+            summary=summary_payload,
+            failure=None if terminal_status == "done" else _failure_from_error_payload(
+                error_payload=error_payload or {},
+                terminal_status=terminal_status,
+            ),
+            async_enabled=False,
+        )
+    except Exception as exc:  # pragma: no cover - defensive isolation
+        request.app.logger.warning("assistant terminal persistence failed: %s", exc, exc_info=True)
+
+
 def _build_stream_response(*, request: Request, ask_request, trace_id: str, slot) -> StreamingResponse:
     def _generate():
         seq = 0
@@ -280,6 +378,19 @@ def _build_stream_response(*, request: Request, ask_request, trace_id: str, slot
             _persist_assistant_message_if_needed(request=request, ask_request=ask_request, summary=dict(summary))
             assistant_persisted = True
 
+        def _persist_terminal_once(*, terminal_status: str, error_payload: dict | None = None) -> None:
+            nonlocal assistant_persisted
+            if assistant_persisted:
+                return
+            _persist_assistant_terminal_if_needed(
+                request=request,
+                ask_request=ask_request,
+                summary=dict(summary),
+                terminal_status=terminal_status,
+                error_payload=error_payload,
+            )
+            assistant_persisted = True
+
         def _completion_callback(payload: dict) -> None:
             with summary_lock:
                 _ingest_done_payload(payload)
@@ -315,19 +426,19 @@ def _build_stream_response(*, request: Request, ask_request, trace_id: str, slot
                 elif event_type == "done":
                     with summary_lock:
                         _ingest_done_payload(payload)
+                elif event_type == "error":
+                    with summary_lock:
+                        terminal_status = "canceled" if _is_cancel_error(payload) else "failed"
+                        _persist_terminal_once(terminal_status=terminal_status, error_payload=payload)
                 seq += 1
                 yield _to_sse_line(payload, seq=seq)
         except Exception as exc:  # pragma: no cover - defensive
-            mapped = _handle_service_error(exc)
+            mapped, error_payload = _mapped_error_payload(exc=exc, trace_id=trace_id)
+            with summary_lock:
+                terminal_status = "canceled" if _is_cancel_error(error_payload) else "failed"
+                _persist_terminal_once(terminal_status=terminal_status, error_payload=error_payload)
             yield _to_sse_line(
-                {
-                    "type": "error",
-                    "code": mapped.code,
-                    "error": mapped.error,
-                    "message": mapped.message,
-                    "retriable": mapped.retriable,
-                    "trace_id": trace_id,
-                },
+                {"type": "error", **error_payload},
                 seq=seq + 1,
             )
         finally:
@@ -364,7 +475,20 @@ async def ask_v1(request: Request, context: AuthContext = Depends(require_auth_c
                 trace_id=trace_id,
             )
         except Exception as exc:  # pragma: no cover - transport-level mapping
-            raise _handle_service_error(exc)
+            mapped, error_payload = _mapped_error_payload(exc=exc, trace_id=trace_id)
+            _persist_assistant_terminal_if_needed(
+                request=request,
+                ask_request=ask_request,
+                summary={
+                    "assistant_content": "",
+                    "route": str(getattr(ask_request, "route", "thinking_qa") or "thinking_qa"),
+                    "trace_id": trace_id,
+                    "done_seen": False,
+                },
+                terminal_status="canceled" if _is_cancel_error(error_payload) else "failed",
+                error_payload=error_payload,
+            )
+            raise mapped
         try:
             _persist_assistant_message_if_needed(
                 request=request,
@@ -402,7 +526,20 @@ async def ask_v1_mode(
                 trace_id=trace_id,
             )
         except Exception as exc:  # pragma: no cover - transport-level mapping
-            raise _handle_service_error(exc)
+            mapped, error_payload = _mapped_error_payload(exc=exc, trace_id=trace_id)
+            _persist_assistant_terminal_if_needed(
+                request=request,
+                ask_request=ask_request,
+                summary={
+                    "assistant_content": "",
+                    "route": str(getattr(ask_request, "route", "thinking_qa") or "thinking_qa"),
+                    "trace_id": trace_id,
+                    "done_seen": False,
+                },
+                terminal_status="canceled" if _is_cancel_error(error_payload) else "failed",
+                error_payload=error_payload,
+            )
+            raise mapped
         try:
             _persist_assistant_message_if_needed(
                 request=request,

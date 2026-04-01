@@ -144,5 +144,7 @@ def test_create_app_registers_authority_hooks_when_enabled(monkeypatch):
     assert app.state.persist_user_message_hook is not None
     assert app.state.load_conversation_context_hook is not None
     assert app.state.persist_assistant_summary_hook is not None
+    assert app.state.persist_assistant_terminal_hook is not None
     assert app.state.persist_user_message_hook.keywords["async_enabled"] is False
     assert app.state.persist_assistant_summary_hook.keywords["async_enabled"] is True
+    assert app.state.persist_assistant_terminal_hook.keywords["async_enabled"] is True

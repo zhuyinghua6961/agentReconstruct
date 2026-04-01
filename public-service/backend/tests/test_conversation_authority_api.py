@@ -92,6 +92,40 @@ def _assistant_body(**overrides):
     return payload
 
 
+def _assistant_terminal_body(**overrides):
+    payload = {
+        "conversation_id": 12,
+        "user_id": 7,
+        "trace_id": "trc_fast_001",
+        "source_service": "fastQA",
+        "route": "kb_qa",
+        "requested_mode": "fast",
+        "actual_mode": "fast",
+        "idempotency_key": "12:trc_fast_001:assistant",
+        "terminal_event": {
+            "terminal_status": "failed",
+            "done_seen": False,
+            "answer_text": "",
+            "steps": [],
+            "references": [],
+            "reference_objects": [],
+            "reference_links": [],
+            "pdf_links": [],
+            "doi_locations": {},
+            "used_files": [],
+            "timings": {"latency_ms": 321},
+            "failure": {
+                "stage": "llm_stream",
+                "message": "timeout",
+                "code": "LLM_TIMEOUT",
+                "retriable": True,
+            },
+        },
+    }
+    payload.update(overrides)
+    return payload
+
+
 @contextmanager
 def _authority_harness(client: TestClient):
     repo = _MemoryConversationRepo()
@@ -123,18 +157,22 @@ def test_internal_authority_routes_registered_and_isolated_from_browser_auth():
     assert "/internal/conversations/{conversation_id}/messages/user" in paths
     assert "/internal/conversations/{conversation_id}/context-snapshot" in paths
     assert "/internal/conversations/{conversation_id}/messages/assistant-async" in paths
+    assert "/internal/conversations/{conversation_id}/messages/assistant-terminal-async" in paths
 
     user_write_route = _route_for("/internal/conversations/{conversation_id}/messages/user", "POST")
     snapshot_route = _route_for("/internal/conversations/{conversation_id}/context-snapshot", "GET")
     assistant_route = _route_for("/internal/conversations/{conversation_id}/messages/assistant-async", "POST")
+    assistant_terminal_route = _route_for("/internal/conversations/{conversation_id}/messages/assistant-terminal-async", "POST")
 
     assert require_auth_context not in {dep.call for dep in user_write_route.dependant.dependencies}
     assert require_auth_context not in {dep.call for dep in snapshot_route.dependant.dependencies}
     assert require_auth_context not in {dep.call for dep in assistant_route.dependant.dependencies}
+    assert require_auth_context not in {dep.call for dep in assistant_terminal_route.dependant.dependencies}
 
     assert require_internal_authority in {dep.call for dep in user_write_route.dependant.dependencies}
     assert require_internal_authority in {dep.call for dep in snapshot_route.dependant.dependencies}
     assert require_internal_authority in {dep.call for dep in assistant_route.dependant.dependencies}
+    assert require_internal_authority in {dep.call for dep in assistant_terminal_route.dependant.dependencies}
 
 
 def test_internal_context_snapshot_requires_trusted_headers(monkeypatch):
@@ -386,6 +424,55 @@ def test_internal_context_snapshot_generates_minimal_summary(monkeypatch):
     }
 
 
+def test_internal_context_snapshot_preserves_terminal_status_fields(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="authority snapshot terminal status")
+        conversation_id = int(created["data"]["conversation_id"])
+        user_written = service.add_authority_user_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-snapshot-user",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key=f"{conversation_id}:trace-snapshot-user:user",
+            content="why failed?",
+            context_hints={},
+        )
+        assert user_written["success"] is True
+        assistant_added = service.add_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            role="assistant",
+            content="partial answer",
+            metadata={
+                "trace_id": "trace-snapshot-assistant",
+                "route": "kb_qa",
+                "terminal_status": "failed",
+                "failure_stage": "llm_stream",
+                "failure_message": "timeout",
+                "retriable": True,
+                "done_seen": False,
+            },
+        )
+        assert assistant_added["success"] is True
+
+        response = client.get(
+            f"/internal/conversations/{conversation_id}/context-snapshot",
+            params=_snapshot_query(conversation_id=conversation_id, trace_id="trace-snapshot-user"),
+            headers=_internal_headers("fastQA"),
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["recent_turns"][-1]["status"] == "failed"
+    assert payload["recent_turns"][-1]["terminal_status"] == "failed"
+    assert payload["recent_turns"][-1]["failure_message"] == "timeout"
+
+
 def test_internal_user_write_rejects_missing_idempotency_key(monkeypatch):
     monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
 
@@ -482,3 +569,201 @@ def test_internal_assistant_async_accepts_valid_contract(monkeypatch):
         "idempotency_key": f"{conversation_id}:trc_fast_001:assistant",
         "status": "accepted",
     }
+
+
+def test_internal_assistant_terminal_async_accepts_failed_contract(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="authority assistant terminal failed")
+        conversation_id = int(created["data"]["conversation_id"])
+        response = client.post(
+            f"/internal/conversations/{conversation_id}/messages/assistant-terminal-async",
+            json=_assistant_terminal_body(
+                conversation_id=conversation_id,
+                idempotency_key=f"{conversation_id}:trc_fast_001:assistant",
+            ),
+            headers=_internal_headers("fastQA"),
+        )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["accepted"] is True
+    assert payload["trace_id"] == "trc_fast_001"
+    assert payload["idempotency_key"] == f"{conversation_id}:trc_fast_001:assistant"
+
+
+def test_internal_assistant_terminal_async_accepts_partial_failed_contract(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="authority assistant terminal partial failed")
+        conversation_id = int(created["data"]["conversation_id"])
+        response = client.post(
+            f"/internal/conversations/{conversation_id}/messages/assistant-terminal-async",
+            json=_assistant_terminal_body(
+                conversation_id=conversation_id,
+                idempotency_key=f"{conversation_id}:trc_fast_001:assistant",
+                terminal_event={
+                    "terminal_status": "failed",
+                    "done_seen": False,
+                    "answer_text": "partial answer",
+                    "failure": {
+                        "stage": "citation_validation",
+                        "message": "validation timeout",
+                        "code": "VALIDATION_TIMEOUT",
+                        "retriable": True,
+                    },
+                },
+            ),
+            headers=_internal_headers("fastQA"),
+        )
+
+    assert response.status_code == 202
+    assert response.json()["accepted"] is True
+
+
+def test_internal_assistant_terminal_async_accepts_done_contract(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="authority assistant terminal done")
+        conversation_id = int(created["data"]["conversation_id"])
+        response = client.post(
+            f"/internal/conversations/{conversation_id}/messages/assistant-terminal-async",
+            json=_assistant_terminal_body(
+                conversation_id=conversation_id,
+                idempotency_key=f"{conversation_id}:trc_fast_001:assistant",
+                terminal_event={
+                    "terminal_status": "done",
+                    "done_seen": True,
+                    "answer_text": "final answer",
+                    "steps": [],
+                    "references": [],
+                    "reference_objects": [],
+                    "reference_links": [],
+                    "pdf_links": [],
+                    "doi_locations": {},
+                    "used_files": [],
+                    "timings": {"latency_ms": 321},
+                },
+            ),
+            headers=_internal_headers("fastQA"),
+        )
+
+    assert response.status_code == 202
+    assert response.json()["accepted"] is True
+
+
+def test_internal_assistant_terminal_async_rejects_done_contract_with_failure(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="authority assistant terminal invalid done")
+        conversation_id = int(created["data"]["conversation_id"])
+        response = client.post(
+            f"/internal/conversations/{conversation_id}/messages/assistant-terminal-async",
+            json=_assistant_terminal_body(
+                conversation_id=conversation_id,
+                idempotency_key=f"{conversation_id}:trc_fast_001:assistant",
+                terminal_event={
+                    "terminal_status": "done",
+                    "done_seen": True,
+                    "answer_text": "final answer",
+                    "failure": {
+                        "stage": "citation_validation",
+                        "message": "should not coexist",
+                        "code": "CONTRADICTORY_TERMINAL",
+                        "retriable": False,
+                    },
+                }
+            ),
+            headers=_internal_headers("fastQA"),
+        )
+
+    assert response.status_code == 422
+    errors = response.json()["details"]["errors"]
+    assert any(error["loc"][-1] == "terminal_event" for error in errors)
+
+
+def test_internal_assistant_terminal_async_accepts_canceled_without_failure(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="authority assistant terminal canceled")
+        conversation_id = int(created["data"]["conversation_id"])
+        response = client.post(
+            f"/internal/conversations/{conversation_id}/messages/assistant-terminal-async",
+            json=_assistant_terminal_body(
+                conversation_id=conversation_id,
+                idempotency_key=f"{conversation_id}:trc_fast_001:assistant",
+                terminal_event={
+                    "terminal_status": "canceled",
+                    "done_seen": False,
+                    "answer_text": "",
+                    "steps": [],
+                    "references": [],
+                    "reference_objects": [],
+                    "reference_links": [],
+                    "pdf_links": [],
+                    "doi_locations": {},
+                    "used_files": [],
+                    "timings": {"latency_ms": 321},
+                },
+            ),
+            headers=_internal_headers("fastQA"),
+        )
+
+    assert response.status_code == 202
+    assert response.json()["accepted"] is True
+
+
+def test_internal_assistant_terminal_async_rejects_canceled_failure_without_message(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/internal/conversations/12/messages/assistant-terminal-async",
+            json=_assistant_terminal_body(
+                terminal_event={
+                    "terminal_status": "canceled",
+                    "done_seen": False,
+                    "answer_text": "",
+                    "failure": {
+                        "stage": "user_stop",
+                        "message": "",
+                        "retriable": False,
+                    },
+                },
+            ),
+            headers=_internal_headers("fastQA"),
+        )
+
+    assert response.status_code == 422
+    errors = response.json()["details"]["errors"]
+    assert any(error["loc"][-1] == "terminal_event" for error in errors)
+
+
+def test_internal_assistant_terminal_async_rejects_canceled_failure_without_explicit_false_retriable(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/internal/conversations/12/messages/assistant-terminal-async",
+            json=_assistant_terminal_body(
+                terminal_event={
+                    "terminal_status": "canceled",
+                    "done_seen": False,
+                    "answer_text": "",
+                    "failure": {
+                        "stage": "user_stop",
+                        "message": "user canceled",
+                    },
+                },
+            ),
+            headers=_internal_headers("fastQA"),
+        )
+
+    assert response.status_code == 422
+    errors = response.json()["details"]["errors"]
+    assert any(error["loc"][-1] == "terminal_event" for error in errors)

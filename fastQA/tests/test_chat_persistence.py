@@ -65,8 +65,8 @@ def test_persist_assistant_summary_delegates_to_authority_client(monkeypatch):
     calls = {}
 
     class _Client:
-        def accept_assistant_turn_async(self, **kwargs):
-            calls["accept_assistant_turn_async"] = kwargs
+        def accept_assistant_turn_terminal_async(self, **kwargs):
+            calls["accept_assistant_turn_terminal_async"] = kwargs
             return {"accepted": True}
 
     monkeypatch.setattr(chat_persistence, "_get_authority_client", lambda: _Client())
@@ -99,13 +99,14 @@ def test_persist_assistant_summary_delegates_to_authority_client(monkeypatch):
         payload=None,
     )
 
-    assert calls["accept_assistant_turn_async"] == {
+    assert calls["accept_assistant_turn_terminal_async"] == {
         "user_id": 7,
         "conversation_id": 12,
         "trace_id": "trace-1",
         "route": "kb_qa",
         "requested_mode": "fast",
         "actual_mode": "fast",
+        "terminal_status": "done",
         "answer_text": "final",
         "steps": [{"step": "stage1"}],
         "references": [{"doi": "10.1/a", "chunk_count": 2}],
@@ -115,12 +116,119 @@ def test_persist_assistant_summary_delegates_to_authority_client(monkeypatch):
         "doi_locations": {},
         "used_files": [{"file_id": 8}],
         "timings": {"stage1": 1.0},
+        "failure": None,
+    }
+
+
+def test_persist_assistant_terminal_delegates_done_to_terminal_authority_client(monkeypatch):
+    calls = {}
+
+    class _Client:
+        def accept_assistant_turn_terminal_async(self, **kwargs):
+            calls["accept_assistant_turn_terminal_async"] = kwargs
+            return {"accepted": True}
+
+    monkeypatch.setattr(chat_persistence, "_get_authority_client", lambda: _Client())
+
+    chat_persistence.persist_assistant_terminal(
+        user_id=7,
+        conversation_id=12,
+        trace_id="trace-1",
+        route="kb_qa",
+        requested_mode="fast",
+        actual_mode="fast",
+        terminal_status="done",
+        assistant_content="final",
+        summary={
+            "assistant_content": "final",
+            "query_mode": "generated",
+            "references": ["10.1/a"],
+            "reference_objects": [{"doi": "10.1/a", "chunk_count": 2}],
+            "steps": [{"step": "stage1"}],
+            "route": "kb_qa",
+            "used_files": [{"file_id": 8}],
+            "timings": {"stage1": 1.0},
+            "trace_id": "trace-1",
+            "done_seen": True,
+        },
+        payload=None,
+    )
+
+    assert calls["accept_assistant_turn_terminal_async"] == {
+        "user_id": 7,
+        "conversation_id": 12,
+        "trace_id": "trace-1",
+        "route": "kb_qa",
+        "requested_mode": "fast",
+        "actual_mode": "fast",
+        "terminal_status": "done",
+        "answer_text": "final",
+        "steps": [{"step": "stage1"}],
+        "references": [{"doi": "10.1/a", "chunk_count": 2}],
+        "reference_objects": [{"doi": "10.1/a", "chunk_count": 2}],
+        "reference_links": [],
+        "pdf_links": [],
+        "doi_locations": {},
+        "used_files": [{"file_id": 8}],
+        "timings": {"stage1": 1.0},
+        "failure": None,
+    }
+
+
+def test_persist_assistant_terminal_delegates_failed_to_terminal_authority_client(monkeypatch):
+    calls = {}
+
+    class _Client:
+        def accept_assistant_turn_terminal_async(self, **kwargs):
+            calls["accept_assistant_turn_terminal_async"] = kwargs
+            return {"accepted": True}
+
+    monkeypatch.setattr(chat_persistence, "_get_authority_client", lambda: _Client())
+
+    chat_persistence.persist_assistant_terminal(
+        user_id=7,
+        conversation_id=12,
+        trace_id="trace-1",
+        route="kb_qa",
+        requested_mode="fast",
+        actual_mode="fast",
+        terminal_status="failed",
+        assistant_content="partial",
+        summary={
+            "assistant_content": "partial",
+            "query_mode": "generated",
+            "steps": [{"step": "stage4"}],
+            "route": "kb_qa",
+            "used_files": [{"file_id": 8}],
+            "timings": {"stage4": 1.0},
+            "trace_id": "trace-1",
+            "done_seen": False,
+        },
+        failure={
+            "stage": "citation_validation",
+            "message": "validation timeout",
+            "code": "VALIDATION_TIMEOUT",
+            "retriable": True,
+        },
+        payload=None,
+    )
+
+    assert calls["accept_assistant_turn_terminal_async"]["terminal_status"] == "failed"
+    assert calls["accept_assistant_turn_terminal_async"]["answer_text"] == "partial"
+    assert calls["accept_assistant_turn_terminal_async"]["failure"] == {
+        "stage": "citation_validation",
+        "message": "validation timeout",
+        "code": "VALIDATION_TIMEOUT",
+        "retriable": True,
     }
 
 
 def test_persist_assistant_summary_skips_without_done(monkeypatch):
+    calls = {"count": 0}
+
     class _Client:
-        def accept_assistant_turn_async(self, **kwargs):
+        def accept_assistant_turn_terminal_async(self, **kwargs):
+            calls["count"] += 1
             raise AssertionError("should not accept assistant summary without done")
 
     monkeypatch.setattr(chat_persistence, "_get_authority_client", lambda: _Client())
@@ -136,6 +244,42 @@ def test_persist_assistant_summary_skips_without_done(monkeypatch):
         summary={"done_seen": False},
         payload=None,
     )
+
+    assert calls["count"] == 0
+
+
+def test_persist_assistant_terminal_records_unconfirmed_when_authority_accept_fails(monkeypatch):
+    calls = {}
+
+    class _Client:
+        def accept_assistant_turn_terminal_async(self, **kwargs):
+            raise RuntimeError("authority down")
+
+    monkeypatch.setattr(chat_persistence, "_get_authority_client", lambda: _Client())
+    monkeypatch.setattr(
+        chat_persistence,
+        "_report_terminal_persistence_unconfirmed",
+        lambda **kwargs: calls.setdefault("report", kwargs),
+        raising=False,
+    )
+
+    chat_persistence.persist_assistant_terminal(
+        user_id=7,
+        conversation_id=12,
+        trace_id="trace-1",
+        route="kb_qa",
+        requested_mode="fast",
+        actual_mode="fast",
+        terminal_status="failed",
+        assistant_content="partial",
+        summary={"trace_id": "trace-1", "route": "kb_qa", "done_seen": False},
+        failure={"stage": "llm_stream", "message": "timeout", "retriable": True},
+        payload=None,
+    )
+
+    assert calls["report"]["terminal_status"] == "failed"
+    assert calls["report"]["trace_id"] == "trace-1"
+    assert calls["report"]["error"] == "authority down"
 
 
 def test_persist_user_message_submits_background_task_when_async_enabled(monkeypatch):
@@ -189,7 +333,7 @@ def test_persist_assistant_summary_submits_background_task_when_async_enabled(mo
     )
 
     assert calls["submit"]["key"] == "conversation:7:12"
-    assert calls["submit"]["fn"] is chat_persistence._persist_assistant_summary_sync
+    assert calls["submit"]["fn"] is chat_persistence._persist_assistant_terminal_dispatch
     assert calls["submit"]["kwargs"]["assistant_content"] == "final"
 
 
@@ -393,7 +537,7 @@ def test_persist_assistant_summary_stores_minimal_pending_overlay(monkeypatch):
     calls = {}
 
     class _Client:
-        def accept_assistant_turn_async(self, **kwargs):
+        def accept_assistant_turn_terminal_async(self, **kwargs):
             raise RuntimeError("authority down")
 
     monkeypatch.setattr(chat_persistence, "_get_authority_client", lambda: _Client())

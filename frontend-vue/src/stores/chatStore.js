@@ -202,6 +202,30 @@ export const useChatStore = defineStore('chat', () => {
       ?? metadata?.doiLocations
       ?? metadata?.doi_locations
     )
+    const terminalStatus = String(
+      message?.terminalStatus
+      ?? message?.terminal_status
+      ?? message?.status
+      ?? metadata?.terminal_status
+      ?? metadata?.status
+      ?? ''
+    ).trim()
+    const failureMessage = String(
+      message?.failureMessage
+      ?? message?.failure_message
+      ?? metadata?.failure_message
+      ?? ''
+    ).trim()
+    const failureCode = String(
+      message?.failureCode
+      ?? message?.failure_code
+      ?? metadata?.failure_code
+      ?? ''
+    ).trim()
+    const doneSeen = message?.doneSeen ?? message?.done_seen ?? metadata?.done_seen
+    const retriable = message?.retriable ?? metadata?.retriable
+    const normalizedTerminalStatus = terminalStatus.toLowerCase()
+    const terminalCompleted = ['done', 'failed', 'canceled'].includes(normalizedTerminalStatus)
 
     if (references.length > 0) {
       metadata.references = references
@@ -220,6 +244,25 @@ export const useChatStore = defineStore('chat', () => {
     if (Object.keys(doiLocations).length > 0) {
       metadata.doi_locations = doiLocations
     }
+    if (terminalStatus) {
+      metadata.status = terminalStatus
+      metadata.terminal_status = terminalStatus
+    }
+    if (failureMessage) {
+      metadata.failure_message = failureMessage
+    }
+    if (failureCode) {
+      metadata.failure_code = failureCode
+    }
+    if (doneSeen !== undefined) {
+      metadata.done_seen = Boolean(doneSeen)
+    }
+    if (retriable !== undefined) {
+      metadata.retriable = Boolean(retriable)
+    }
+
+    const hasExplicitComplete = Object.prototype.hasOwnProperty.call(message || {}, 'isComplete')
+    const resolvedIsComplete = hasExplicitComplete ? message?.isComplete !== false : (terminalCompleted ? true : true)
 
     return {
       ...message,
@@ -232,8 +275,13 @@ export const useChatStore = defineStore('chat', () => {
       referenceLinks,
       doiLocations,
       steps,
+      ...(terminalStatus ? { status: terminalStatus, terminalStatus } : {}),
+      ...(failureMessage ? { failureMessage } : {}),
+      ...(failureCode ? { failureCode } : {}),
+      ...(doneSeen !== undefined ? { doneSeen: Boolean(doneSeen) } : {}),
+      ...(retriable !== undefined ? { retriable: Boolean(retriable) } : {}),
       stepsCollapsed: Boolean(message?.stepsCollapsed),
-      isComplete: message?.isComplete !== false,
+      isComplete: resolvedIsComplete,
     }
   }
 

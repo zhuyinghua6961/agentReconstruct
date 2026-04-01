@@ -40,6 +40,8 @@ def test_v1_ask_alias_uses_json_aggregation(monkeypatch):
             question="总结这篇文献",
             requested_mode="fast",
             route="pdf_qa",
+            source_scope="pdf",
+            turn_mode="file_only",
             execution_files=[{"file_id": 1, "file_type": "pdf", "local_path": "/tmp/demo.pdf"}],
         ),
         _FakeRequest("/api/v1/ask"),

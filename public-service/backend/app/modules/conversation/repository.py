@@ -322,9 +322,34 @@ class ConversationRepository:
 
     def _assistant_inbox_metadata(self, row: dict[str, Any]) -> dict[str, Any] | None:
         metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-        if metadata.get("authority_assistant_async") is not True:
+        if metadata.get("authority_assistant_async") is not True and metadata.get("authority_assistant_terminal_async") is not True:
             return None
         return metadata
+
+    def _assistant_terminal_metadata(self, row: dict[str, Any]) -> dict[str, Any] | None:
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        if metadata.get("authority_assistant_terminal_async") is not True:
+            return None
+        return metadata
+
+    def _assistant_placeholder_terminal_status(self, metadata: dict[str, Any]) -> str:
+        terminal_event = metadata.get("terminal_event") if isinstance(metadata.get("terminal_event"), dict) else {}
+        if terminal_event:
+            status = str(terminal_event.get("terminal_status") or "").strip().lower()
+            return status if status in {"done", "failed", "canceled"} else "done"
+        final_event = metadata.get("final_event") if isinstance(metadata.get("final_event"), dict) else {}
+        if final_event:
+            return "done"
+        return "done"
+
+    @staticmethod
+    def _assistant_terminal_rank(status: str) -> int:
+        normalized = str(status or "").strip().lower()
+        if normalized == "done":
+            return 3
+        if normalized == "failed":
+            return 2
+        return 1
 
     def _assistant_inbox_datetime(self, value: Any) -> datetime | None:
         raw = str(value or "").strip()
@@ -337,6 +362,10 @@ class ConversationRepository:
 
     def _assistant_inbox_is_due(self, metadata: dict[str, Any], *, now: datetime) -> bool:
         state = str(metadata.get("assistant_async_state") or "").strip()
+        if not state and metadata.get("authority_assistant_terminal_async") is True:
+            terminal_state = str(metadata.get("terminal_async_state") or "").strip().lower()
+            if terminal_state == "accepted":
+                state = "pending"
         if state == "pending":
             return True
         if state != "failed":
@@ -385,6 +414,108 @@ class ConversationRepository:
                 return row
         return None
 
+    def _list_assistant_terminal_rows(self, *, conversation_id: int | None = None, user_id: int | None = None) -> list[dict[str, Any]]:
+        clauses = ["role = %s"]
+        params: list[Any] = ["assistant"]
+        if conversation_id is not None:
+            clauses.append("conversation_id = %s")
+            params.append(int(conversation_id))
+        if user_id is not None:
+            clauses.append("user_id = %s")
+            params.append(int(user_id))
+        rows = self._execute_query(
+            f"""
+            SELECT id, conversation_id, user_id, role, content, metadata_json, created_at
+            FROM conversation_messages
+            WHERE {' AND '.join(clauses)}
+            ORDER BY created_at ASC, id ASC
+            """,
+            tuple(params),
+        )
+        normalized: list[dict[str, Any]] = []
+        for row in rows:
+            metadata_raw = row.get("metadata_json")
+            if isinstance(metadata_raw, str):
+                try:
+                    row["metadata"] = json.loads(metadata_raw)
+                except Exception:
+                    row["metadata"] = {}
+            else:
+                row["metadata"] = metadata_raw or {}
+            row.pop("metadata_json", None)
+            if self._assistant_terminal_metadata(row) is None:
+                continue
+            normalized.append(row)
+        return normalized
+
+    def find_authority_assistant_placeholder_by_idempotency_key(
+        self,
+        *,
+        conversation_id: int,
+        user_id: int,
+        idempotency_key: str,
+    ) -> dict[str, Any] | None:
+        lookup = str(idempotency_key or "").strip()
+        if not lookup:
+            return None
+        for row in self._list_assistant_inbox_rows(conversation_id=conversation_id, user_id=user_id):
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            if str(metadata.get("assistant_async_state") or "").strip().lower() in {"done", "dead"}:
+                continue
+            if str(metadata.get("idempotency_key") or "").strip() == lookup:
+                return row
+        for row in self._list_assistant_terminal_rows(conversation_id=conversation_id, user_id=user_id):
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            if str(metadata.get("assistant_async_state") or "").strip().lower() in {"done", "dead"}:
+                continue
+            if str(metadata.get("idempotency_key") or "").strip() == lookup:
+                return row
+        return None
+
+    def _update_authority_assistant_placeholder(
+        self,
+        *,
+        row: dict[str, Any],
+        final_event: dict[str, Any] | None = None,
+        terminal_event: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        metadata = dict(row.get("metadata") or {})
+        if metadata.get("authority_assistant_terminal_async") is True:
+            next_terminal_event = dict(terminal_event or {})
+            if not next_terminal_event and isinstance(final_event, dict):
+                next_terminal_event = {
+                    "terminal_status": "done",
+                    **dict(final_event or {}),
+                }
+            metadata["terminal_event"] = next_terminal_event
+            metadata["assistant_async_state"] = "pending"
+            metadata["terminal_async_state"] = "accepted"
+        else:
+            next_final_event = dict(final_event or {})
+            if not next_final_event and isinstance(terminal_event, dict):
+                next_final_event = {
+                    key: value
+                    for key, value in dict(terminal_event or {}).items()
+                    if key != "terminal_status" and key != "failure"
+                }
+                next_final_event["done_seen"] = True
+            metadata["final_event"] = next_final_event
+            metadata["assistant_async_state"] = "pending"
+        metadata["processing_started_at"] = None
+        metadata["next_retry_at"] = None
+        metadata["last_error"] = ""
+        metadata_json = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+        content = ""
+        if isinstance(terminal_event, dict):
+            content = str((terminal_event or {}).get("answer_text") or "")
+        elif isinstance(final_event, dict):
+            content = str((final_event or {}).get("answer_text") or "")
+        self._execute_update(
+            "UPDATE conversation_messages SET content = %s, metadata_json = %s WHERE id = %s",
+            (content, metadata_json, int(row.get("id") or 0)),
+        )
+        return {"task_id": int(row.get("id") or 0), "deduped": False, "metadata": metadata}
+
     def enqueue_authority_assistant_task(
         self,
         *,
@@ -398,10 +529,20 @@ class ConversationRepository:
         idempotency_key: str,
         final_event: dict[str, Any],
     ) -> dict[str, Any]:
-        for row in self._list_assistant_inbox_rows(conversation_id=conversation_id, user_id=user_id):
-            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-            if str(metadata.get("idempotency_key") or "").strip() == str(idempotency_key or "").strip():
-                return {"task_id": int(row.get("id") or 0), "deduped": True, "metadata": metadata}
+        existing = self.find_authority_assistant_placeholder_by_idempotency_key(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            idempotency_key=idempotency_key,
+        )
+        if isinstance(existing, dict):
+            metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+            current_status = self._assistant_placeholder_terminal_status(metadata)
+            if self._assistant_terminal_rank("done") > self._assistant_terminal_rank(current_status):
+                return self._update_authority_assistant_placeholder(
+                    row=existing,
+                    final_event=final_event,
+                )
+            return {"task_id": int(existing.get("id") or 0), "deduped": True, "metadata": metadata}
         created_at = now_beijing()
         metadata = {
             "authority_assistant_async": True,
@@ -433,6 +574,72 @@ class ConversationRepository:
                 int(user_id),
                 "assistant",
                 str((final_event or {}).get("answer_text") or ""),
+                metadata_json,
+                created_at,
+            ),
+        )
+        return {"task_id": int(task_id), "deduped": False, "metadata": metadata}
+
+    def enqueue_authority_assistant_terminal_task(
+        self,
+        *,
+        conversation_id: int,
+        user_id: int,
+        trace_id: str,
+        source_service: str,
+        route: str,
+        requested_mode: str,
+        actual_mode: str,
+        idempotency_key: str,
+        terminal_event: dict[str, Any],
+    ) -> dict[str, Any]:
+        existing = self.find_authority_assistant_placeholder_by_idempotency_key(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            idempotency_key=idempotency_key,
+        )
+        if isinstance(existing, dict):
+            metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+            current_status = self._assistant_placeholder_terminal_status(metadata)
+            incoming_status = self._assistant_placeholder_terminal_status({"terminal_event": terminal_event})
+            if self._assistant_terminal_rank(incoming_status) > self._assistant_terminal_rank(current_status):
+                return self._update_authority_assistant_placeholder(
+                    row=existing,
+                    terminal_event=terminal_event,
+                )
+            return {"task_id": int(existing.get("id") or 0), "deduped": True, "metadata": metadata}
+        created_at = now_beijing()
+        metadata = {
+            "authority_assistant_terminal_async": True,
+            "assistant_async_state": "pending",
+            "terminal_async_state": "accepted",
+            "trace_id": str(trace_id or "").strip(),
+            "source_service": str(source_service or "").strip(),
+            "route": str(route or "").strip(),
+            "requested_mode": str(requested_mode or "").strip(),
+            "actual_mode": str(actual_mode or "").strip(),
+            "idempotency_key": str(idempotency_key or "").strip(),
+            "terminal_event": dict(terminal_event or {}),
+            "accepted_at": created_at.isoformat(timespec="seconds"),
+            "processing_started_at": None,
+            "materialized_message_id": "",
+            "last_error": "",
+            "attempt_count": 0,
+            "next_retry_at": None,
+            "failed_at": None,
+            "dead_at": None,
+        }
+        metadata_json = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+        task_id = self._execute_update(
+            """
+            INSERT INTO conversation_messages (conversation_id, user_id, role, content, metadata_json, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (
+                int(conversation_id),
+                int(user_id),
+                "assistant",
+                str((terminal_event or {}).get("answer_text") or ""),
                 metadata_json,
                 created_at,
             ),
@@ -497,6 +704,8 @@ class ConversationRepository:
             return 0
         metadata = dict(row.get("metadata") or {})
         metadata["assistant_async_state"] = "done"
+        if metadata.get("authority_assistant_terminal_async") is True:
+            metadata["terminal_async_state"] = "materialized"
         metadata["materialized_message_id"] = str(materialized_message_id or "")
         metadata["processing_started_at"] = None
         metadata["last_error"] = str(note or "")
@@ -510,6 +719,8 @@ class ConversationRepository:
         metadata = dict(row.get("metadata") or {})
         now = now_beijing().isoformat(timespec="seconds")
         metadata["assistant_async_state"] = "failed"
+        if metadata.get("authority_assistant_terminal_async") is True:
+            metadata["terminal_async_state"] = "retryable"
         metadata["processing_started_at"] = None
         metadata["last_error"] = str(last_error or "")
         metadata["failed_at"] = now
@@ -522,6 +733,8 @@ class ConversationRepository:
             return 0
         metadata = dict(row.get("metadata") or {})
         metadata["assistant_async_state"] = "failed"
+        if metadata.get("authority_assistant_terminal_async") is True:
+            metadata["terminal_async_state"] = "retryable"
         metadata["processing_started_at"] = None
         metadata["last_error"] = str(last_error or "")
         metadata["attempt_count"] = int(metadata.get("attempt_count") or 0) + 1
@@ -536,6 +749,8 @@ class ConversationRepository:
             return 0
         metadata = dict(row.get("metadata") or {})
         metadata["assistant_async_state"] = "dead"
+        if metadata.get("authority_assistant_terminal_async") is True:
+            metadata["terminal_async_state"] = "dead"
         metadata["processing_started_at"] = None
         metadata["last_error"] = str(last_error or "")
         metadata["attempt_count"] = int(metadata.get("attempt_count") or 0) + 1

@@ -370,3 +370,95 @@ def test_highthinking_authority_client_closed_loop_materializes_assistant_turn(m
         finally:
             set_conversation_service(original_service)
             client.app.dependency_overrides.clear()
+
+
+def test_internal_terminal_authority_route_materializes_failed_turn(monkeypatch):
+    monkeypatch.setenv(_INTERNAL_TOKEN_ENV, "authority-test-token")
+
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir, TestClient(app) as client:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(project_root=tempdir, storage_backend=storage_backend)
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+        original_service = conversation_service
+        set_conversation_service(service)
+        client.app.state.runtime.conversation_service = service
+        client.app.state.runtime.conversation_repository = repo
+        client.app.state.runtime.redis_service = redis_service
+        client.app.dependency_overrides[require_auth_context] = lambda: AuthContext(user_id=7, role="user", username="user7")
+
+        try:
+            created = service.create_conversation(user_id=7, title="authority terminal integration")
+            conversation_id = int(created["data"]["conversation_id"])
+
+            user_written = service.add_authority_user_message(
+                user_id=7,
+                conversation_id=conversation_id,
+                trace_id="trace-it-user-terminal",
+                source_service="fastQA",
+                route="kb_qa",
+                requested_mode="fast",
+                actual_mode="fast",
+                idempotency_key=f"{conversation_id}:trace-it-user-terminal:user",
+                content="why failed?",
+                context_hints={},
+            )
+            assert user_written["success"] is True
+
+            response = client.post(
+                f"/internal/conversations/{conversation_id}/messages/assistant-terminal-async",
+                json={
+                    "conversation_id": conversation_id,
+                    "user_id": 7,
+                    "trace_id": "trace-it-assistant-terminal",
+                    "source_service": "fastQA",
+                    "route": "kb_qa",
+                    "requested_mode": "fast",
+                    "actual_mode": "fast",
+                    "idempotency_key": f"{conversation_id}:trace-it-assistant-terminal:assistant",
+                    "terminal_event": {
+                        "terminal_status": "failed",
+                        "done_seen": False,
+                        "answer_text": "partial answer",
+                        "failure": {
+                            "stage": "llm_stream",
+                            "message": "timeout",
+                            "code": "LLM_TIMEOUT",
+                            "retriable": True,
+                        },
+                    },
+                },
+                headers={
+                    "X-Internal-Service-Name": "fastQA",
+                    "X-Internal-Service-Token": "authority-test-token",
+                },
+            )
+            assert response.status_code == 202
+
+            worker = AuthorityAssistantInboxWorker(repository=repo, conversation_service=service)
+            summary = worker.run_once(limit=10)
+            assert summary["done"] == 1
+
+            snapshot = service.get_conversation_context_snapshot(user_id=7, conversation_id=conversation_id)
+            assert snapshot["success"] is True
+            assert snapshot["data"]["recent_turns"][-1]["status"] == "failed"
+            assert snapshot["data"]["recent_turns"][-1]["terminal_status"] == "failed"
+
+            detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+            assert detail["success"] is True
+            assistant_message = detail["data"]["messages"][-1]
+            assert assistant_message["status"] == "failed"
+            assert assistant_message["metadata"]["terminal_status"] == "failed"
+            assert assistant_message["metadata"]["failure_message"] == "timeout"
+        finally:
+            set_conversation_service(original_service)
+            client.app.dependency_overrides.clear()

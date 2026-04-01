@@ -44,6 +44,12 @@ class AuthorityRecentTurn(BaseModel):
     content: str
     created_at: datetime
     trace_id: str = Field(default="", description="Trace identifier for the final turn; execution traces themselves are excluded.")
+    status: Literal["done", "failed", "canceled"] = "done"
+    terminal_status: Literal["done", "failed", "canceled"] = "done"
+    failure_stage: str | None = None
+    failure_code: str | None = None
+    failure_message: str | None = None
+    retriable: bool | None = None
 
 
 class AuthorityConversationState(BaseModel):
@@ -88,3 +94,60 @@ class AuthorityAssistantFinalEvent(BaseModel):
 class AuthorityAssistantAsyncRequest(AuthorityRequestBase):
     idempotency_key: str = Field(min_length=1)
     final_event: AuthorityAssistantFinalEvent
+
+
+class AuthorityAssistantTerminalFailure(BaseModel):
+    stage: str | None = None
+    message: str | None = None
+    code: str | None = None
+    retriable: bool | None = None
+
+
+class AuthorityAssistantTerminalEvent(BaseModel):
+    terminal_status: Literal["done", "failed", "canceled"]
+    done_seen: bool
+    answer_text: str = ""
+    steps: list[dict[str, Any]] = Field(default_factory=list)
+    references: list[dict[str, Any]] = Field(default_factory=list)
+    reference_objects: list[dict[str, Any]] = Field(default_factory=list)
+    reference_links: list[dict[str, Any]] = Field(default_factory=list)
+    pdf_links: list[dict[str, Any]] = Field(default_factory=list)
+    doi_locations: dict[str, Any] = Field(default_factory=dict)
+    used_files: list[dict[str, Any]] = Field(default_factory=list)
+    timings: dict[str, Any] = Field(default_factory=dict)
+    failure: AuthorityAssistantTerminalFailure | None = None
+
+    @model_validator(mode="after")
+    def validate_terminal_contract(self) -> "AuthorityAssistantTerminalEvent":
+        status = str(self.terminal_status or "").strip().lower()
+        answer_text = str(self.answer_text or "").strip()
+        failure = self.failure
+        if status == "done":
+            if self.done_seen is not True:
+                raise ValueError("done terminal event must represent a completed assistant turn")
+            if not answer_text:
+                raise ValueError("done terminal event requires non-empty answer_text")
+            if failure is not None:
+                raise ValueError("done terminal event must not include failure metadata")
+            return self
+        if self.done_seen is not False:
+            raise ValueError("failed/canceled terminal event must not mark done_seen")
+        if status == "failed":
+            if failure is None:
+                raise ValueError("failed terminal event requires failure metadata")
+            if not str(failure.message or "").strip():
+                raise ValueError("failed terminal event requires failure.message")
+            if failure.retriable is None:
+                raise ValueError("failed terminal event requires failure.retriable")
+            return self
+        if failure is not None:
+            if not str(failure.message or "").strip():
+                raise ValueError("canceled terminal event requires failure.message when failure is provided")
+            if failure.retriable is not False:
+                raise ValueError("canceled terminal event requires failure.retriable=False when provided")
+        return self
+
+
+class AuthorityAssistantTerminalAsyncRequest(AuthorityRequestBase):
+    idempotency_key: str = Field(min_length=1)
+    terminal_event: AuthorityAssistantTerminalEvent

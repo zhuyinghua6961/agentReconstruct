@@ -69,7 +69,7 @@ def test_fast_mode_stream_placeholder_returns_sse_error_for_kb_only():
     assert response.status_code == 200
     assert '"type": "metadata"' in body
     assert '"code": "FASTQA_NOT_READY"' in body
-    assert '"type": "done"' in body
+    assert '"type": "done"' not in body
 
 
 def test_fast_mode_stream_can_disable_placeholder_fallback():
@@ -94,6 +94,8 @@ def test_fast_mode_stream_dispatches_pdf_route(monkeypatch):
             question="总结这篇文献",
             requested_mode="fast",
             route="pdf_qa",
+            source_scope="pdf",
+            turn_mode="file_only",
             execution_files=[{"file_id": 1, "file_type": "pdf", "local_path": "/tmp/a.pdf"}],
         ),
         _FakeRequest(app, "/api/ask_stream"),
@@ -119,6 +121,8 @@ def test_fast_mode_stream_dispatches_tabular_route(monkeypatch):
             question="统计这个表格",
             requested_mode="fast",
             route="tabular_qa",
+            source_scope="table",
+            turn_mode="file_only",
             execution_files=[{"file_id": 1, "file_type": "excel", "local_path": "/tmp/a.xlsx"}],
         ),
         _FakeRequest(app, "/api/ask_stream"),
@@ -150,18 +154,39 @@ def test_fast_mode_stream_returns_http_429_when_slot_exhausted():
 
 
 def test_fast_mode_stream_runtime_exception_becomes_error_done(monkeypatch):
+    calls = {}
+
     def _raise(**_kwargs):
         raise RuntimeError("boom")
         yield  # pragma: no cover
 
+    def _persist_assistant_terminal_hook(**kwargs):
+        calls["assistant"] = kwargs
+
+    def _persist_user_message_hook(**_kwargs):
+        return {"success": True}
+
+    def _load_conversation_context_hook(**_kwargs):
+        return None
+
     monkeypatch.setattr("app.routers.qa.qa_kb_service.iter_answer_events", _raise)
+    monkeypatch.setattr(app.state, "persist_assistant_terminal_hook", _persist_assistant_terminal_hook, raising=False)
+    monkeypatch.setattr(app.state, "persist_user_message_hook", _persist_user_message_hook, raising=False)
+    monkeypatch.setattr(app.state, "load_conversation_context_hook", _load_conversation_context_hook, raising=False)
     with _runtime_state(object(), "ok"):
-        response = ask_stream(AskRequest(question="hello", requested_mode="fast"), _FakeRequest(app, "/api/ask_stream"))
+        response = ask_stream(
+            AskRequest(question="hello", requested_mode="fast", conversation_id=12, user_id=7),
+            _FakeRequest(app, "/api/ask_stream"),
+        )
         body = asyncio.run(_collect_streaming_body(response))
 
     assert response.status_code == 200
     assert '"code": "FASTQA_RUNTIME_ERROR"' in body
-    assert '"type": "done"' in body
+    assert '"type": "done"' not in body
+    assert calls["assistant"]["terminal_status"] == "failed"
+    assert calls["assistant"]["assistant_content"] == ""
+    assert calls["assistant"]["failure"]["stage"] == "runtime_prepare"
+    assert calls["assistant"]["failure"]["retriable"] is True
 
 
 def test_fast_mode_stream_uses_generation_runtime_when_available(monkeypatch):
@@ -321,13 +346,13 @@ def test_fast_mode_sync_ask_logs_summary_via_ask_stream_tap(monkeypatch):
     assert logged["args"][2] is True
 
 
-def test_fast_mode_stream_invokes_optional_persistence_hooks(monkeypatch):
+def test_fast_mode_stream_invokes_terminal_persistence_hook(monkeypatch):
     calls = {}
 
     def _persist_user_message_hook(**kwargs):
         calls["user"] = kwargs
 
-    def _persist_assistant_summary_hook(**kwargs):
+    def _persist_assistant_terminal_hook(**kwargs):
         calls["assistant"] = kwargs
 
     def _events(**_kwargs):
@@ -337,7 +362,8 @@ def test_fast_mode_stream_invokes_optional_persistence_hooks(monkeypatch):
 
     monkeypatch.setattr("app.routers.qa.qa_kb_service.iter_answer_events", _events)
     monkeypatch.setattr(app.state, "persist_user_message_hook", _persist_user_message_hook, raising=False)
-    monkeypatch.setattr(app.state, "persist_assistant_summary_hook", _persist_assistant_summary_hook, raising=False)
+    monkeypatch.setattr(app.state, "load_conversation_context_hook", lambda **_kwargs: None, raising=False)
+    monkeypatch.setattr(app.state, "persist_assistant_terminal_hook", _persist_assistant_terminal_hook, raising=False)
     with _runtime_state(object(), "ok"):
         response = ask_stream(
             AskRequest(question="hello", requested_mode="fast", conversation_id=12),
@@ -350,6 +376,7 @@ def test_fast_mode_stream_invokes_optional_persistence_hooks(monkeypatch):
     assert calls["user"]["conversation_id"] == 12
     assert calls["user"]["question"] == "hello"
     assert calls["assistant"]["conversation_id"] == 12
+    assert calls["assistant"]["terminal_status"] == "done"
     assert calls["assistant"]["assistant_content"] == "hello"
     assert calls["assistant"]["summary"]["done_seen"] is True
     assert calls["assistant"]["summary"]["references"] == ["10.1/a"]
@@ -358,22 +385,58 @@ def test_fast_mode_stream_invokes_optional_persistence_hooks(monkeypatch):
     assert calls["assistant"]["summary"]["source_usage"] == {"pdf_used": True, "table_used": False, "kb_used": True}
 
 
-def test_fast_mode_stream_skips_assistant_persistence_without_done(monkeypatch):
+def test_fast_mode_stream_done_does_not_fallback_to_legacy_summary_hook_when_terminal_hook_exists(monkeypatch):
+    calls = {"terminal": 0, "legacy": 0}
+
+    def _persist_user_message_hook(**_kwargs):
+        return {"success": True}
+
+    def _persist_assistant_terminal_hook(**_kwargs):
+        calls["terminal"] += 1
+
+    def _persist_assistant_summary_hook(**_kwargs):
+        calls["legacy"] += 1
+
+    def _events(**_kwargs):
+        yield {"type": "metadata", "query_mode": "kb_qa", "route": "kb_qa", "trace_id": "trace-done"}
+        yield {"type": "content", "content": "hello"}
+        yield {"type": "done", "route": "kb_qa", "references": [], "trace_id": "trace-done"}
+
+    monkeypatch.setattr("app.routers.qa.qa_kb_service.iter_answer_events", _events)
+    monkeypatch.setattr(app.state, "persist_user_message_hook", _persist_user_message_hook, raising=False)
+    monkeypatch.setattr(app.state, "load_conversation_context_hook", lambda **_kwargs: None, raising=False)
+    monkeypatch.setattr(app.state, "persist_assistant_terminal_hook", _persist_assistant_terminal_hook, raising=False)
+    monkeypatch.setattr(app.state, "persist_assistant_summary_hook", _persist_assistant_summary_hook, raising=False)
+    with _runtime_state(object(), "ok"):
+        response = ask_stream(
+            AskRequest(question="hello", requested_mode="fast", conversation_id=12, user_id=7),
+            _FakeRequest(app, "/api/ask_stream"),
+        )
+        body = asyncio.run(_collect_streaming_body(response))
+
+    assert response.status_code == 200
+    assert '"type": "done"' in body
+    assert calls == {"terminal": 1, "legacy": 0}
+
+
+def test_fast_mode_stream_persists_failed_terminal_without_done(monkeypatch):
     calls = {}
 
     def _persist_user_message_hook(**kwargs):
         calls["user"] = kwargs
 
-    def _persist_assistant_summary_hook(**kwargs):
+    def _persist_assistant_terminal_hook(**kwargs):
         calls["assistant"] = kwargs
 
     def _events(**_kwargs):
         yield {"type": "metadata", "query_mode": "kb_qa", "route": "kb_qa", "trace_id": "trace-hook"}
         yield {"type": "content", "content": "partial"}
+        yield {"type": "error", "code": "FASTQA_RUNTIME_ERROR", "error": "boom", "message": "boom", "trace_id": "trace-hook"}
 
     monkeypatch.setattr("app.routers.qa.qa_kb_service.iter_answer_events", _events)
     monkeypatch.setattr(app.state, "persist_user_message_hook", _persist_user_message_hook, raising=False)
-    monkeypatch.setattr(app.state, "persist_assistant_summary_hook", _persist_assistant_summary_hook, raising=False)
+    monkeypatch.setattr(app.state, "load_conversation_context_hook", lambda **_kwargs: None, raising=False)
+    monkeypatch.setattr(app.state, "persist_assistant_terminal_hook", _persist_assistant_terminal_hook, raising=False)
     with _runtime_state(object(), "ok"):
         response = ask_stream(
             AskRequest(question="hello", requested_mode="fast", conversation_id=12),
@@ -382,9 +445,13 @@ def test_fast_mode_stream_skips_assistant_persistence_without_done(monkeypatch):
         body = asyncio.run(_collect_streaming_body(response))
 
     assert response.status_code == 200
-    assert '"type": "done"' in body
+    assert '"type": "done"' not in body
+    assert '"type": "error"' in body
     assert calls["user"]["conversation_id"] == 12
-    assert calls["assistant"]["summary"]["done_seen"] is True
+    assert calls["assistant"]["terminal_status"] == "failed"
+    assert calls["assistant"]["assistant_content"] == "partial"
+    assert calls["assistant"]["summary"]["done_seen"] is False
+    assert calls["assistant"]["failure"]["message"] == "boom"
 
 
 def test_fast_mode_stream_persistence_hook_receives_user_id_from_body(monkeypatch):
@@ -393,7 +460,7 @@ def test_fast_mode_stream_persistence_hook_receives_user_id_from_body(monkeypatc
     def _persist_user_message_hook(**kwargs):
         calls["user"] = kwargs
 
-    def _persist_assistant_summary_hook(**kwargs):
+    def _persist_assistant_terminal_hook(**kwargs):
         calls["assistant"] = kwargs
 
     def _events(**_kwargs):
@@ -403,7 +470,8 @@ def test_fast_mode_stream_persistence_hook_receives_user_id_from_body(monkeypatc
 
     monkeypatch.setattr("app.routers.qa.qa_kb_service.iter_answer_events", _events)
     monkeypatch.setattr(app.state, "persist_user_message_hook", _persist_user_message_hook, raising=False)
-    monkeypatch.setattr(app.state, "persist_assistant_summary_hook", _persist_assistant_summary_hook, raising=False)
+    monkeypatch.setattr(app.state, "load_conversation_context_hook", lambda **_kwargs: None, raising=False)
+    monkeypatch.setattr(app.state, "persist_assistant_terminal_hook", _persist_assistant_terminal_hook, raising=False)
     with _runtime_state(object(), "ok"):
         response = ask_stream(
             AskRequest(question="hello", requested_mode="fast", conversation_id=12, user_id=7),
@@ -415,6 +483,80 @@ def test_fast_mode_stream_persistence_hook_receives_user_id_from_body(monkeypatc
     assert '"type": "done"' in body
     assert calls["user"]["user_id"] == 7
     assert calls["assistant"]["user_id"] == 7
+
+
+def test_fast_mode_sync_ask_persists_failed_terminal_before_returning_error(monkeypatch):
+    calls = {}
+
+    def _persist_user_message_hook(**kwargs):
+        calls["user"] = kwargs
+
+    def _persist_assistant_terminal_hook(**kwargs):
+        calls["assistant"] = kwargs
+
+    monkeypatch.setattr(app.state, "persist_user_message_hook", _persist_user_message_hook, raising=False)
+    monkeypatch.setattr(app.state, "load_conversation_context_hook", lambda **_kwargs: None, raising=False)
+    monkeypatch.setattr(app.state, "persist_assistant_terminal_hook", _persist_assistant_terminal_hook, raising=False)
+    monkeypatch.setattr(
+        "app.routers.qa._iter_route_frames",
+        lambda **_kwargs: iter(
+            [
+                {"type": "metadata", "route": "kb_qa", "query_mode": "kb_qa", "trace_id": "trace-sync-fail"},
+                {"type": "content", "content": "partial"},
+                {"type": "error", "route": "kb_qa", "trace_id": "trace-sync-fail", "code": "FASTQA_RUNTIME_ERROR", "error": "boom", "message": "boom"},
+            ]
+        ),
+    )
+
+    with _runtime_state(object(), "ok"):
+        response = ask(
+            AskRequest(question="hello", requested_mode="fast", conversation_id=12, user_id=7),
+            _FakeRequest(app, "/api/ask"),
+        )
+        payload = _decode_json_response(response)
+
+    assert response.status_code == 500
+    assert payload["success"] is False
+    assert payload["code"] == "FASTQA_RUNTIME_ERROR"
+    assert payload["final_answer"] == "partial"
+    assert calls["assistant"]["terminal_status"] == "failed"
+    assert calls["assistant"]["assistant_content"] == "partial"
+    assert calls["assistant"]["failure"]["message"] == "boom"
+
+
+def test_fast_mode_stream_persists_canceled_terminal_when_cancel_error_arrives(monkeypatch):
+    calls = {}
+
+    def _persist_assistant_terminal_hook(**kwargs):
+        calls["assistant"] = kwargs
+
+    def _events(**_kwargs):
+        yield {"type": "metadata", "query_mode": "kb_qa", "route": "kb_qa", "trace_id": "trace-cancel"}
+        yield {"type": "content", "content": "partial"}
+        yield {
+            "type": "error",
+            "code": "ASK_CANCELLED",
+            "error": "cancelled",
+            "message": "cancelled",
+            "trace_id": "trace-cancel",
+        }
+
+    monkeypatch.setattr("app.routers.qa.qa_kb_service.iter_answer_events", _events)
+    monkeypatch.setattr(app.state, "persist_user_message_hook", lambda **_kwargs: {"success": True}, raising=False)
+    monkeypatch.setattr(app.state, "load_conversation_context_hook", lambda **_kwargs: None, raising=False)
+    monkeypatch.setattr(app.state, "persist_assistant_terminal_hook", _persist_assistant_terminal_hook, raising=False)
+    with _runtime_state(object(), "ok"):
+        response = ask_stream(
+            AskRequest(question="hello", requested_mode="fast", conversation_id=12, user_id=7),
+            _FakeRequest(app, "/api/ask_stream"),
+        )
+        body = asyncio.run(_collect_streaming_body(response))
+
+    assert response.status_code == 200
+    assert '"code": "ASK_CANCELLED"' in body
+    assert calls["assistant"]["terminal_status"] == "canceled"
+    assert calls["assistant"]["assistant_content"] == "partial"
+    assert calls["assistant"]["failure"]["retriable"] is False
 
 
 def test_fast_mode_stream_rejects_user_id_mismatch_between_header_and_body():
