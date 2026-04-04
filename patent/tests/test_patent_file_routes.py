@@ -4,6 +4,7 @@ import sys
 import pytest
 from pathlib import Path
 
+import server.patent.pdf_service as pdf_service_module
 from server.patent.file_contract import build_patent_file_contract
 from server.patent.file_routes import dispatch_patent_file_route, plan_patent_file_route
 from server.patent.pdf_service import PatentPdfService
@@ -447,6 +448,568 @@ def test_dispatch_pdf_route_returns_explicit_compare_failure_when_model_returns_
     assert "无法完成完整比较" in result["answer_text"]
     assert "模型未返回可用的比较结果" in result["answer_text"]
     assert "文档要点如下" not in result["answer_text"]
+
+
+def test_dispatch_pdf_route_preserves_tail_evidence_from_each_large_pdf_in_compare_mode(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12]},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    front_matter = "作者信息与版权页。 " * 1200
+    captured: dict[str, str] = {}
+    texts = {
+        str(pdf_path_a): f"{front_matter}\n\nAbstract A.\n\nResults A show 15% improvement.\n\nConclusion A supports route A.",
+        str(pdf_path_b): f"{front_matter}\n\nAbstract B.\n\nResults B show 5% decline.\n\nConclusion B rejects route A.",
+    }
+
+    service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: texts[path],
+        answer_question_fn=lambda **kwargs: captured.update({"pdf_text": str(kwargs["pdf_text"])}) or "对比结果",
+    )
+
+    dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=service,
+        tabular_service=PatentTabularService(),
+    )
+
+    assert "Conclusion A supports route A." in captured["pdf_text"]
+    assert "Conclusion B rejects route A." in captured["pdf_text"]
+
+
+def test_dispatch_pdf_route_preserves_per_document_abstract_for_four_doc_compare(tmp_path):
+    pdf_paths = []
+    execution_files = []
+    selected_ids = []
+    for index in range(4):
+        pdf_path = tmp_path / f"paper-{index + 1}.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+        pdf_paths.append(pdf_path)
+        execution_files.append(
+            {
+                "file_id": 100 + index,
+                "file_type": "pdf",
+                "file_name": f"paper-{index + 1}.pdf",
+                "local_path": str(pdf_path),
+            }
+        )
+        selected_ids.append(100 + index)
+    contract = build_patent_file_contract(
+        question="对比一下这四篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=selected_ids,
+        primary_file_id=selected_ids[0],
+        execution_files=execution_files,
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": selected_ids},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    front_matter = "作者信息与版权页。 " * 200
+    captured: dict[str, str] = {}
+    texts = {
+        str(path): (
+            f"{front_matter}\n\n"
+            f"Abstract {index} short.\n\n"
+            f"Method {index} uses condition {index}.\n\n"
+            f"Results {index} observed.\n\n"
+            f"Conclusion {index} final."
+        )
+        for index, path in enumerate(pdf_paths, start=1)
+    }
+    service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: texts[path],
+        answer_question_fn=lambda **kwargs: captured.update({"pdf_text": str(kwargs["pdf_text"])}) or "对比结果",
+        max_pdf_chars=1000,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=service,
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_text_compare"
+    for index in range(1, 5):
+        assert f"Abstract {index} short." in captured["pdf_text"]
+        assert f"Results {index} observed." in captured["pdf_text"] or f"Conclusion {index} final." in captured["pdf_text"]
+
+
+def test_dispatch_pdf_route_drops_reference_tail_from_compare_context(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12]},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    front_matter = "作者信息与版权页。 " * 120
+    references = "参考文献\n[1] filler citation block. " * 80
+    captured: dict[str, str] = {}
+    texts = {
+        str(pdf_path_a): (
+            f"{front_matter}\n\nAbstract A short.\n\nMethod A.\n\n"
+            f"Results A observed.\n\nConclusion A final.\n\n{references}"
+        ),
+        str(pdf_path_b): (
+            f"{front_matter}\n\nAbstract B short.\n\nMethod B.\n\n"
+            f"Results B observed.\n\nConclusion B final.\n\n{references}"
+        ),
+    }
+    service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: texts[path],
+        answer_question_fn=lambda **kwargs: captured.update({"pdf_text": str(kwargs["pdf_text"])}) or "对比结果",
+        max_pdf_chars=560,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=service,
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_text_compare"
+    assert "参考文献" not in captured["pdf_text"]
+    assert "Results A observed." in captured["pdf_text"] or "Conclusion A final." in captured["pdf_text"]
+    assert "Results B observed." in captured["pdf_text"] or "Conclusion B final." in captured["pdf_text"]
+
+
+def test_dispatch_pdf_route_rejects_invalid_compare_excerpt_after_truncation(tmp_path, monkeypatch):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12]},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: (
+            "Abstract A short.\n\nResults A observed.\n\nConclusion A final."
+            if path == str(pdf_path_a)
+            else "Abstract B short.\n\nResults B observed.\n\nConclusion B final."
+        ),
+        answer_question_fn=lambda **kwargs: "不应该进入生成阶段",
+    )
+
+    monkeypatch.setattr(
+        pdf_service_module,
+        "smart_truncate_pdf_content",
+        lambda *args, **kwargs: (
+            "==== 文献 1: paper-a.pdf ====\n作者信息与版权页。\n\n"
+            "==== 文献 2: paper-b.pdf ====\n作者信息与版权页。"
+        ),
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=service,
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+    assert "最小比较上下文" in result["answer_text"]
+
+
+def test_dispatch_pdf_route_allows_appendix_word_inside_body_content(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12]},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    captured: dict[str, str] = {}
+    service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: (
+            "Abstract A mentions appendix-based evaluation setup.\n\n"
+            "Results A observed.\n\nConclusion A final."
+            if path == str(pdf_path_a)
+            else "Abstract B mentions appendix-based evaluation setup.\n\n"
+            "Results B observed.\n\nConclusion B final."
+        ),
+        answer_question_fn=lambda **kwargs: captured.update({"pdf_text": str(kwargs["pdf_text"])}) or "对比结果",
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=service,
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_text_compare"
+    assert "appendix-based evaluation setup" in captured["pdf_text"]
+
+
+def test_dispatch_pdf_route_rejects_compare_excerpt_when_only_other_document_keeps_shared_targets(tmp_path, monkeypatch):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12]},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: (
+            "Abstract shared compare anchor.\n\nResults shared compare anchor.\n\nConclusion shared compare anchor."
+            if path == str(pdf_path_a)
+            else "Abstract shared compare anchor.\n\nResults shared compare anchor.\n\nConclusion shared compare anchor."
+        ),
+        answer_question_fn=lambda **kwargs: "不应该进入生成阶段",
+    )
+
+    monkeypatch.setattr(
+        pdf_service_module,
+        "smart_truncate_pdf_content",
+        lambda *args, **kwargs: (
+            "==== 文献 1: paper-a.pdf ====\n"
+            "Abstract shared compare anchor.\n\nResults shared compare anchor.\n\nConclusion shared compare anchor.\n\n"
+            "==== 文献 2: paper-b.pdf ====\n作者信息与版权页。"
+        ),
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=service,
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+
+
+def test_dispatch_pdf_route_accepts_long_compare_paragraphs_when_required_slices_are_preserved(tmp_path):
+    pdf_paths = []
+    execution_files = []
+    selected_ids = []
+    for index in range(4):
+        pdf_path = tmp_path / f"paper-{index + 1}.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+        pdf_paths.append(pdf_path)
+        execution_files.append(
+            {
+                "file_id": 200 + index,
+                "file_type": "pdf",
+                "file_name": f"paper-{index + 1}.pdf",
+                "local_path": str(pdf_path),
+            }
+        )
+        selected_ids.append(200 + index)
+    contract = build_patent_file_contract(
+        question="对比一下这四篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=selected_ids,
+        primary_file_id=selected_ids[0],
+        execution_files=execution_files,
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": selected_ids},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    long_abstract = "Abstract section with detailed compare evidence. " * 12
+    long_conclusion = "Conclusion section with detailed tail evidence. " * 12
+    service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: (
+            f"{long_abstract}\n\nMethod {Path(path).stem}.\n\nResults {Path(path).stem} observed.\n\n{long_conclusion}"
+        ),
+        answer_question_fn=lambda **kwargs: "对比结果",
+        max_pdf_chars=1000,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=service,
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_text_compare"
+
+
+def test_dispatch_pdf_route_preserves_compare_slices_for_flattened_single_newline_pdf_text(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12]},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    flat_front_matter = "作者信息与版权页。 " * 220
+    captured: dict[str, str] = {}
+    service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: (
+            f"{flat_front_matter}\nAbstract A short.\nMethod A.\nResults A observed.\nConclusion A final."
+            if path == str(pdf_path_a)
+            else f"{flat_front_matter}\nAbstract B short.\nMethod B.\nResults B observed.\nConclusion B final."
+        ),
+        answer_question_fn=lambda **kwargs: captured.update({"pdf_text": str(kwargs["pdf_text"])}) or "对比结果",
+        max_pdf_chars=560,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=service,
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_text_compare"
+    assert "Abstract A short." in captured["pdf_text"]
+    assert "Results A observed." in captured["pdf_text"] or "Conclusion A final." in captured["pdf_text"]
+    assert "Abstract B short." in captured["pdf_text"]
+    assert "Results B observed." in captured["pdf_text"] or "Conclusion B final." in captured["pdf_text"]
+
+
+def test_dispatch_pdf_route_allows_late_appendix_based_body_paragraph(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12]},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: (
+            "Abstract A short.\n\nMethod A.\n\nAppendix-based evaluation setup improved recall.\n\nConclusion A final."
+            if path == str(pdf_path_a)
+            else "Abstract B short.\n\nMethod B.\n\nAppendix-based evaluation setup improved precision.\n\nConclusion B final."
+        ),
+        answer_question_fn=lambda **kwargs: "对比结果",
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=service,
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_text_compare"
+
+
+def test_dispatch_pdf_route_matches_compare_sections_by_exact_file_label(tmp_path, monkeypatch):
+    pdf_path_short = tmp_path / "foo.pdf"
+    pdf_path_long = tmp_path / "my-foo.pdf"
+    pdf_path_short.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_long.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[21, 22],
+        primary_file_id=21,
+        execution_files=[
+            {"file_id": 21, "file_type": "pdf", "file_name": "foo.pdf", "local_path": str(pdf_path_short)},
+            {"file_id": 22, "file_type": "pdf", "file_name": "my-foo.pdf", "local_path": str(pdf_path_long)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [21, 22]},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: (
+            "Abstract foo exact.\n\nResults foo exact.\n\nConclusion foo exact."
+            if path == str(pdf_path_short)
+            else "Abstract myfoo exact.\n\nResults myfoo exact.\n\nConclusion myfoo exact."
+        ),
+        answer_question_fn=lambda **kwargs: "对比结果",
+    )
+
+    monkeypatch.setattr(
+        pdf_service_module,
+        "smart_truncate_pdf_content",
+        lambda *args, **kwargs: (
+            "==== 文献 1: my-foo.pdf ====\n"
+            "Abstract myfoo exact.\n\nResults myfoo exact.\n\nConclusion myfoo exact.\n\n"
+            "==== 文献 2: foo.pdf ====\n"
+            "Abstract foo exact.\n\nResults foo exact.\n\nConclusion foo exact."
+        ),
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=service,
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_text_compare"
+
+
+def test_dispatch_pdf_route_preserves_section_body_when_headings_are_standalone_lines(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12]},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    front_matter = "作者信息与版权页。 " * 200
+    captured: dict[str, str] = {}
+    service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: (
+            (
+                f"{front_matter}\n\nAbstract\n\nAbstract body A keeps the real summary evidence.\n\n"
+                "Methods\n\nMethod body A.\n\nResults\n\nResults body A keeps the real compare evidence.\n\n"
+                "Conclusion\n\nConclusion body A keeps the real tail evidence."
+            )
+            if path == str(pdf_path_a)
+            else (
+                f"{front_matter}\n\nAbstract\n\nAbstract body B keeps the real summary evidence.\n\n"
+                "Methods\n\nMethod body B.\n\nResults\n\nResults body B keeps the real compare evidence.\n\n"
+                "Conclusion\n\nConclusion body B keeps the real tail evidence."
+            )
+        ),
+        answer_question_fn=lambda **kwargs: captured.update({"pdf_text": str(kwargs["pdf_text"])}) or "对比结果",
+        max_pdf_chars=560,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=service,
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_text_compare"
+    assert "Abstract body A keeps the real" in captured["pdf_text"]
+    assert "Abstract body B keeps the real" in captured["pdf_text"]
+    assert "Results body A keeps the real" in captured["pdf_text"] or "Conclusion body A keeps the real" in captured["pdf_text"]
+    assert "Results body B keeps the real" in captured["pdf_text"] or "Conclusion body B keeps the real" in captured["pdf_text"]
+
+
+def test_dispatch_pdf_route_fails_explicitly_when_compare_budget_is_too_small(tmp_path):
+    pdf_paths = []
+    execution_files = []
+    selected_ids = []
+    for index in range(5):
+        pdf_path = tmp_path / f"paper-{index + 1}.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+        pdf_paths.append(pdf_path)
+        execution_files.append(
+            {
+                "file_id": 100 + index,
+                "file_type": "pdf",
+                "file_name": f"paper-{index + 1}.pdf",
+                "local_path": str(pdf_path),
+            }
+        )
+        selected_ids.append(100 + index)
+    contract = build_patent_file_contract(
+        question="对比一下这五篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=selected_ids,
+        primary_file_id=selected_ids[0],
+        execution_files=execution_files,
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": selected_ids},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: (
+            ("前置背景信息。 " * 120)
+            + "\n\nAbstract.\n\nResults show measurable variation.\n\nConclusion contains unique tail evidence for "
+            + Path(path).name
+        ),
+        answer_question_fn=lambda **kwargs: "",
+        max_pdf_chars=120,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=service,
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "compare 截断预算不足" in result["answer_text"]
 
 
 def test_dispatch_tabular_route_uses_patent_tabular_service():

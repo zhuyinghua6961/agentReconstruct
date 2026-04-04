@@ -19,6 +19,7 @@ from server.patent.pdf_contract import (
     is_compare_question,
     is_summary_question,
     smart_truncate_pdf_content,
+    validate_compare_context,
 )
 from server.patent.file_models import PatentFileContract
 from server.patent.streaming import emit_text_chunks, iter_text_output
@@ -309,6 +310,7 @@ class PatentPdfService:
             answer_text, answer_mode = self._build_answer(
                 question=contract.question,
                 pdf_text=pdf_text,
+                pdf_documents=pdf_documents,
                 file_name=", ".join(selected_labels) if len(selected_labels) > 1 else (selected_labels[0] if selected_labels else "unknown.pdf"),
                 selected_file_labels=selected_labels,
                 available_file_labels=available_labels,
@@ -429,7 +431,7 @@ class PatentPdfService:
             if not extracted:
                 continue
             label = str(item.file_name or resolved.name or f"file:{item.file_id}")
-            sections.append({"label": label, "text": _truncate(extracted, self._max_pdf_chars)})
+            sections.append({"label": label, "text": extracted})
         return sections
 
     def _build_answer(
@@ -437,6 +439,7 @@ class PatentPdfService:
         *,
         question: str,
         pdf_text: str,
+        pdf_documents: list[dict[str, str]],
         file_name: str,
         selected_file_labels: list[str],
         available_file_labels: list[str],
@@ -490,6 +493,18 @@ class PatentPdfService:
                 reason=str(exc),
             )
             return _emit_buffered_text(message), "pdf_compare_unavailable"
+
+        if compare_mode:
+            try:
+                validate_compare_context(prepared_pdf_text, pdf_documents)
+            except CompareBudgetError as exc:
+                message = build_compare_failure_message(
+                    question=question,
+                    available_docs=available_file_labels,
+                    missing_docs=missing_labels,
+                    reason=str(exc),
+                )
+                return _emit_buffered_text(message), "pdf_compare_unavailable"
 
         if callable(self._answer_question_fn):
             output = self._answer_question_fn(

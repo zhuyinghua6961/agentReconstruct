@@ -216,6 +216,179 @@ def test_multi_pdf_compare_truncation_keeps_both_document_labels_and_compare_evi
     assert "Results B" in truncated or "Conclusion B" in truncated
 
 
+def test_non_compare_multi_doc_truncation_matches_fastqa_contract():
+    formatted = format_multi_pdf_sections(
+        [
+            {"label": "paper-a.pdf", "text": "Abstract A.\n\nResults A show improvement.\n\nConclusion A."},
+            {"label": "paper-b.pdf", "text": "Abstract B.\n\nResults B show decline.\n\nConclusion B."},
+        ]
+    )
+
+    patent_truncated = smart_truncate_pdf_content(
+        formatted,
+        max_chars=240,
+        logger=_Logger(),
+        is_summary=False,
+        question="请总结这些文献",
+        is_compare=False,
+    )
+    fastqa_truncated = FASTQA_TRUNCATION.smart_truncate_pdf_content(
+        formatted,
+        max_chars=240,
+        logger=_Logger(),
+        is_summary=False,
+        question="请总结这些文献",
+    )
+
+    assert patent_truncated == fastqa_truncated
+
+
+def test_compare_truncation_keeps_tail_evidence_even_with_long_front_matter():
+    front_matter = "作者信息与版权页。 " * 80
+    formatted = format_multi_pdf_sections(
+        [
+            {
+                "label": "paper-a.pdf",
+                "text": f"{front_matter}\n\nAbstract A.\n\nResults A show 15% improvement.\n\nConclusion A supports route A.",
+            },
+            {
+                "label": "paper-b.pdf",
+                "text": f"{front_matter}\n\nAbstract B.\n\nResults B show 5% decline.\n\nConclusion B rejects route A.",
+            },
+        ]
+    )
+
+    truncated = smart_truncate_pdf_content(
+        formatted,
+        max_chars=560,
+        logger=_Logger(),
+        is_summary=False,
+        question="对比一下这两篇文献的内容",
+        is_compare=True,
+    )
+
+    assert "Conclusion A supports route A." in truncated
+    assert "Conclusion B rejects route A." in truncated
+
+
+def test_compare_truncation_keeps_per_document_abstract_and_tail_evidence_with_long_front_matter():
+    front_matter = "作者信息与版权页。 " * 200
+    formatted = format_multi_pdf_sections(
+        [
+            {
+                "label": f"paper-{index}.pdf",
+                "text": (
+                    f"{front_matter}\n\n"
+                    f"Abstract {index} short.\n\n"
+                    f"Method {index} uses condition {index}.\n\n"
+                    f"Results {index} observed.\n\n"
+                    f"Conclusion {index} final."
+                ),
+            }
+            for index in range(1, 5)
+        ]
+    )
+
+    truncated = smart_truncate_pdf_content(
+        formatted,
+        max_chars=1000,
+        logger=_Logger(),
+        is_summary=False,
+        question="对比一下这四篇文献的内容",
+        is_compare=True,
+    )
+
+    for index in range(1, 5):
+        assert f"Abstract {index} short." in truncated
+        assert f"Results {index} observed." in truncated or f"Conclusion {index} final." in truncated
+
+
+def test_compare_truncation_drops_reference_tail_and_keeps_results_or_conclusion():
+    front_matter = "作者信息与版权页。 " * 120
+    references = "参考文献\n[1] filler citation block. " * 80
+    formatted = format_multi_pdf_sections(
+        [
+            {
+                "label": "paper-a.pdf",
+                "text": (
+                    f"{front_matter}\n\nAbstract A short.\n\nMethod A.\n\n"
+                    f"Results A observed.\n\nConclusion A final.\n\n{references}"
+                ),
+            },
+            {
+                "label": "paper-b.pdf",
+                "text": (
+                    f"{front_matter}\n\nAbstract B short.\n\nMethod B.\n\n"
+                    f"Results B observed.\n\nConclusion B final.\n\n{references}"
+                ),
+            },
+        ]
+    )
+
+    truncated = smart_truncate_pdf_content(
+        formatted,
+        max_chars=560,
+        logger=_Logger(),
+        is_summary=False,
+        question="对比一下这两篇文献的内容",
+        is_compare=True,
+    )
+
+    assert "参考文献" not in truncated
+    assert "Results A observed." in truncated or "Conclusion A final." in truncated
+    assert "Results B observed." in truncated or "Conclusion B final." in truncated
+
+
+def test_compare_truncation_prefers_section_body_over_heading_only_lines():
+    front_matter = "作者信息与版权页。 " * 200
+    formatted = format_multi_pdf_sections(
+        [
+            {
+                "label": "paper-a.pdf",
+                "text": (
+                    f"{front_matter}\n\n"
+                    "Abstract\n\n"
+                    "Abstract body A keeps the real summary evidence.\n\n"
+                    "Methods\n\n"
+                    "Method body A.\n\n"
+                    "Results\n\n"
+                    "Results body A keeps the real compare evidence.\n\n"
+                    "Conclusion\n\n"
+                    "Conclusion body A keeps the real tail evidence."
+                ),
+            },
+            {
+                "label": "paper-b.pdf",
+                "text": (
+                    f"{front_matter}\n\n"
+                    "Abstract\n\n"
+                    "Abstract body B keeps the real summary evidence.\n\n"
+                    "Methods\n\n"
+                    "Method body B.\n\n"
+                    "Results\n\n"
+                    "Results body B keeps the real compare evidence.\n\n"
+                    "Conclusion\n\n"
+                    "Conclusion body B keeps the real tail evidence."
+                ),
+            },
+        ]
+    )
+
+    truncated = smart_truncate_pdf_content(
+        formatted,
+        max_chars=560,
+        logger=_Logger(),
+        is_summary=False,
+        question="对比一下这两篇文献的内容",
+        is_compare=True,
+    )
+
+    assert "Abstract body A keeps the real" in truncated
+    assert "Abstract body B keeps the real" in truncated
+    assert "Results body A keeps the real" in truncated or "Conclusion body A keeps the real" in truncated
+    assert "Results body B keeps the real" in truncated or "Conclusion body B keeps the real" in truncated
+
+
 def test_multi_pdf_compare_truncation_raises_when_budget_cannot_preserve_all_documents():
     formatted = format_multi_pdf_sections(
         [

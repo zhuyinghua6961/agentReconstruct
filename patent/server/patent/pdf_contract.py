@@ -43,6 +43,26 @@ IMPORTANT_SECTIONS = {
 }
 
 MULTI_DOC_HEADER_PATTERN = re.compile(r"^\s*=+\s*文献\s*[^=\n]*=+\s*$", re.MULTILINE)
+REFERENCE_SECTION_MARKERS = ("参考文献", "references", "bibliography", "appendix", "附录", "acknowledg")
+SECTION_SPLIT_MARKERS = (
+    "abstract",
+    "introduction",
+    "methods",
+    "method",
+    "results",
+    "discussion",
+    "conclusion",
+    "summary",
+    "摘要",
+    "引言",
+    "背景",
+    "方法",
+    "结果",
+    "讨论",
+    "结论",
+    "参考文献",
+    "附录",
+)
 EXPLICIT_COMPARE_MARKERS = ("对比", "比较", "compare", "versus", "vs", "异同")
 IMPLICIT_COMPARE_MARKERS = (
     "有什么不同",
@@ -375,6 +395,72 @@ def _clip_text_from_end_with_boundary(text: str, limit: int) -> str:
     return clipped
 
 
+def _split_paragraphs(text: str) -> list[str]:
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized:
+        return []
+    normalized = re.sub(r"\n+", "\n\n", normalized)
+    for marker in SECTION_SPLIT_MARKERS:
+        normalized = re.sub(
+            rf"(?<!^)(?<!\n\n)(?=\s*{re.escape(marker)}(?:\b|[：:\s]))",
+            "\n\n",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+    return [item.strip() for item in re.split(r"\n{2,}", normalized) if item.strip()]
+
+
+def _is_reference_like_paragraph(paragraph: str) -> bool:
+    normalized = re.sub(r"^[\s#>*\-\d\.\)\(【】\[\]:：]+", "", str(paragraph or "")).strip().lower()
+    if not normalized:
+        return False
+    if normalized.startswith("参考文献") or normalized.startswith("附录"):
+        return True
+    english_heading_prefixes = (
+        "references",
+        "bibliography",
+        "appendix",
+        "acknowledgment",
+        "acknowledgements",
+        "acknowledgment",
+        "acknowledgements",
+    )
+    for marker in english_heading_prefixes:
+        if normalized == marker:
+            return True
+        if normalized.startswith(f"{marker} "):
+            return True
+        if normalized.startswith(f"{marker}:") or normalized.startswith(f"{marker}："):
+            return True
+        if marker == "appendix" and re.match(r"^appendix\s+[a-z0-9]+", normalized):
+            return True
+    return False
+
+
+def _has_reference_like_tail(text: str) -> bool:
+    paragraphs = _split_paragraphs(text)
+    cutoff = max(1, len(paragraphs) // 2)
+    for index, paragraph in enumerate(paragraphs):
+        if index < cutoff:
+            continue
+        if _is_reference_like_paragraph(paragraph):
+            return True
+    return False
+
+
+def _strip_reference_like_tail(text: str) -> str:
+    paragraphs = _split_paragraphs(text)
+    if len(paragraphs) < 2:
+        return str(text or "").strip()
+    cutoff = max(1, len(paragraphs) // 2)
+    for index, paragraph in enumerate(paragraphs):
+        if index < cutoff:
+            continue
+        if _is_reference_like_paragraph(paragraph):
+            return "\n\n".join(paragraphs[:index]).strip()
+    return "\n\n".join(paragraphs).strip()
+
+
 def _split_multi_doc_sections(pdf_content: str) -> list[tuple[str, str]]:
     matches = list(MULTI_DOC_HEADER_PATTERN.finditer(pdf_content))
     if len(matches) < 2:
@@ -391,10 +477,107 @@ def _split_multi_doc_sections(pdf_content: str) -> list[tuple[str, str]]:
     return sections
 
 
+def _find_first_matching_paragraph(paragraphs: list[str], section_names: tuple[str, ...]) -> int | None:
+    for section_name in section_names:
+        for keyword in IMPORTANT_SECTIONS.get(section_name, []):
+            keyword_lower = keyword.lower()
+            for index, paragraph in enumerate(paragraphs):
+                lowered = paragraph.lower()
+                if keyword_lower in lowered:
+                    return index
+    return None
+
+
+def _find_last_matching_paragraph(paragraphs: list[str], section_names: tuple[str, ...]) -> int | None:
+    for section_name in section_names:
+        for keyword in IMPORTANT_SECTIONS.get(section_name, []):
+            keyword_lower = keyword.lower()
+            for index in range(len(paragraphs) - 1, -1, -1):
+                lowered = paragraphs[index].lower()
+                if keyword_lower in lowered:
+                    return index
+    return None
+
+
+def _is_heading_only_paragraph(paragraph: str, section_names: tuple[str, ...]) -> bool:
+    normalized = re.sub(r"^[\s#>*\-\d\.\)\(【】\[\]:：]+", "", str(paragraph or "")).strip().lower()
+    if not normalized:
+        return False
+    for section_name in section_names:
+        for keyword in IMPORTANT_SECTIONS.get(section_name, []):
+            keyword_lower = keyword.lower()
+            if normalized == keyword_lower:
+                return True
+    return False
+
+
+def _resolve_content_paragraph_index(paragraphs: list[str], index: int | None, section_names: tuple[str, ...]) -> int | None:
+    if index is None or index < 0 or index >= len(paragraphs):
+        return index
+    if not _is_heading_only_paragraph(paragraphs[index], section_names):
+        return index
+    for candidate in range(index + 1, len(paragraphs)):
+        if not _is_heading_only_paragraph(paragraphs[candidate], tuple(IMPORTANT_SECTIONS.keys())):
+            return candidate
+    return index
+
+
+def _build_compare_paragraph_selection(body: str) -> tuple[list[str], list[str]]:
+    normalized = _strip_reference_like_tail(body)
+    paragraphs = _split_paragraphs(normalized)
+    if not paragraphs:
+        return [], []
+
+    front_index = _find_first_matching_paragraph(paragraphs, ("abstract", "introduction"))
+    methods_index = _find_first_matching_paragraph(paragraphs, ("methods",))
+    tail_index = _find_last_matching_paragraph(paragraphs, ("conclusion", "discussion", "results"))
+    front_index = _resolve_content_paragraph_index(paragraphs, front_index, ("abstract", "introduction"))
+    methods_index = _resolve_content_paragraph_index(paragraphs, methods_index, ("methods",))
+    tail_index = _resolve_content_paragraph_index(paragraphs, tail_index, ("conclusion", "discussion", "results"))
+
+    if front_index is None:
+        front_index = 0
+    if tail_index is None:
+        tail_index = len(paragraphs) - 1
+
+    selected_indices: list[int] = []
+    for index in (front_index, methods_index, tail_index):
+        if index is None or index < 0 or index >= len(paragraphs):
+            continue
+        if index not in selected_indices:
+            selected_indices.append(index)
+
+    selected_paragraphs = [paragraphs[index] for index in selected_indices]
+    required_targets: list[str] = []
+    for index in (front_index, tail_index):
+        if index is None or index < 0 or index >= len(paragraphs):
+            continue
+        target = _clip_text_with_boundary(paragraphs[index], min(48, len(paragraphs[index])))
+        target = target.replace("...", "").strip()
+        if target and target not in required_targets:
+            required_targets.append(target)
+    return selected_paragraphs, required_targets
+
+
 def _extract_compare_excerpt(body: str, budget: int) -> str:
-    normalized = str(body or "").strip()
+    normalized = _strip_reference_like_tail(body)
     if len(normalized) <= budget:
         return normalized
+    selected_paragraphs, _required_targets = _build_compare_paragraph_selection(normalized)
+    if selected_paragraphs:
+        joined = "\n\n".join(selected_paragraphs).strip()
+        if len(joined) <= budget:
+            return joined
+        separator_cost = max(0, 2 * (len(selected_paragraphs) - 1))
+        available = max(1, budget - separator_cost)
+        base = max(60, available // len(selected_paragraphs))
+        remainder = max(0, available - base * len(selected_paragraphs))
+        clipped_parts: list[str] = []
+        for index, paragraph in enumerate(selected_paragraphs):
+            limit = base + (1 if index < remainder else 0)
+            clipped_parts.append(_clip_text_with_boundary(paragraph, limit))
+        return "\n\n".join(part for part in clipped_parts if part).strip()
+
     front_budget = max(80, int(budget * 0.48))
     back_budget = max(80, budget - front_budget - 12)
     front = _clip_text_with_boundary(normalized, front_budget)
@@ -402,6 +585,39 @@ def _extract_compare_excerpt(body: str, budget: int) -> str:
     if not back or back == front or len(front) + len(back) + 12 >= len(normalized):
         return _clip_text_with_boundary(normalized, budget)
     return f"{front}\n...\n{back}"
+
+
+def validate_compare_context(prepared_pdf_text: str, documents: list[dict[str, str]]) -> None:
+    sections = _split_multi_doc_sections(prepared_pdf_text)
+    if len(sections) < len(documents):
+        raise CompareBudgetError("compare 截断后未保留全部文献的最小比较上下文")
+
+    for document in documents:
+        label = str(document.get("label") or "").strip()
+        original_text = str(document.get("text") or "").strip()
+        matched_body = ""
+        for header, body in sections:
+            header_label = ""
+            cleaned_header = str(header or "").strip().strip("=")
+            if ":" in cleaned_header:
+                header_label = cleaned_header.split(":", 1)[1].strip()
+            if label and header_label == label:
+                matched_body = body
+                break
+        if not matched_body:
+            raise CompareBudgetError("compare 截断后缺少文献分段，无法完成逐篇比较")
+
+        _, required_targets = _build_compare_paragraph_selection(original_text)
+        normalized_body = re.sub(r"\s+", " ", _strip_reference_like_tail(matched_body)).strip()
+        if not normalized_body:
+            raise CompareBudgetError("compare 截断后存在空文献分段，无法完成逐篇比较")
+        if _has_reference_like_tail(matched_body):
+            raise CompareBudgetError("compare 截断后混入了参考文献尾部，无法保留最小比较上下文")
+
+        for target in required_targets:
+            normalized_target = re.sub(r"\s+", " ", str(target or "")).strip()
+            if normalized_target and normalized_target not in normalized_body:
+                raise CompareBudgetError("compare 截断后未保留每篇文献的最小比较上下文")
 
 
 def _truncate_multi_pdf_content(pdf_content: str, *, max_chars: int, logger: Any, compare_mode: bool) -> str:
@@ -568,4 +784,5 @@ __all__ = [
     "is_compare_question",
     "is_summary_question",
     "smart_truncate_pdf_content",
+    "validate_compare_context",
 ]
