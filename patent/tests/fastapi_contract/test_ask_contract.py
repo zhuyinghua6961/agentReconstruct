@@ -2154,6 +2154,32 @@ def test_http_stream_pdf_route_summarizes_readable_local_pdf_instead_of_stub(mon
     assert events[-1]["metadata"]["answer_mode"] == "pdf_text_summary"
 
 
+def test_http_stream_pdf_route_emits_incremental_content_before_done(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    pdf_path = tmp_path / "spec.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    app.state.ask_service._patent_executor._pdf_service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: "This paper proposes a silicon anode coating method and reports improved cycle life.",
+        answer_question_fn=lambda **kwargs: "真实总结：本文提出硅负极包覆方法，并报告循环寿命改善与倍率性能提升。",
+    )
+    payload = _pdf_payload()
+    payload["execution_files"][0]["local_path"] = str(pdf_path)
+    payload["used_files"][0]["local_path"] = str(pdf_path)
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask_stream", json=payload)
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    content_events = [event for event in events if event["type"] == "content"]
+
+    assert len(content_events) >= 2
+    assert "".join(event["content"] for event in content_events) == events[-1]["final_answer"]
+    assert events.index(content_events[0]) < len(events) - 1
+    assert events[-1]["type"] == "done"
+
+
 def test_http_stream_pdf_route_emits_live_step_events_before_done(monkeypatch, tmp_path):
     monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
     app = create_app()
@@ -2338,6 +2364,54 @@ def test_http_stream_hybrid_route_emits_file_progress_steps_before_done(monkeypa
         "hybrid_answer",
         "hybrid_answer",
     ]
+    assert events[-1]["type"] == "done"
+
+
+def test_http_stream_hybrid_pdf_kb_route_emits_incremental_content_before_done(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    pdf_path = tmp_path / "spec.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    app.state.ask_service._patent_executor._pdf_service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: "This paper proposes a silicon anode coating method and reports improved cycle life.",
+        answer_question_fn=lambda **kwargs: "真实 PDF 总结：本文提出硅负极包覆方法，并报告循环寿命改善。",
+    )
+
+    class _StreamingKbService:
+        def run(self, *, request, runtime=None, conversation_context=None, progress_callback=None, content_callback=None):
+            answer_text = "这是知识库补充：该方向在专利布局上集中于包覆材料和热稳定性。"
+            if callable(content_callback):
+                content_callback(answer_text[:14])
+                content_callback(answer_text[14:])
+            return {
+                "answer_text": answer_text,
+                "route": request.route,
+                "query_mode": "patent_hybrid_qa",
+                "steps": [{"title": "Patent KB", "message": "KB participated."}],
+                "references": ["CN123456789A"],
+                "reference_objects": [{"canonical_patent_id": "CN123456789A"}],
+                "reference_links": [],
+                "original_links": [],
+                "metadata": {"retrieval_backend": "patent-local-kb"},
+                "timings": {"kb_ms": 7},
+            }
+
+    app.state.ask_service._patent_executor._kb_service = _StreamingKbService()
+    payload = _hybrid_payload("pdf+kb")
+    payload["execution_files"][0]["local_path"] = str(pdf_path)
+    payload["used_files"][0]["local_path"] = str(pdf_path)
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask_stream", json=payload)
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    content_events = [event for event in events if event["type"] == "content"]
+
+    assert len(content_events) >= 3
+    assert "".join(event["content"] for event in content_events) == events[-1]["final_answer"]
+    assert "Patent KB participation:" in "".join(event["content"] for event in content_events)
+    assert events.index(content_events[0]) < len(events) - 1
     assert events[-1]["type"] == "done"
 
 

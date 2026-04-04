@@ -9,6 +9,7 @@ from typing import Any, Callable
 from xml.etree import ElementTree as ET
 
 from server.patent.file_models import PatentFileContract
+from server.patent.streaming import emit_text_chunks, iter_text_output
 from server.services.mode_profiles import get_patent_mode_profile
 
 _XML_NS = {
@@ -112,6 +113,7 @@ class PatentTabularService:
         contract: PatentFileContract,
         include_kb: bool,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        content_callback: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         used_files = [item.as_payload() for item in contract.selected_execution_files if item.family == "table"]
         profile = get_patent_mode_profile(contract.route)
@@ -146,6 +148,7 @@ class PatentTabularService:
                 question=contract.question,
                 table_text=table_text,
                 include_kb=include_kb,
+                content_callback=content_callback,
             )
             answer_mode = "table_text_summary"
         else:
@@ -259,19 +262,40 @@ class PatentTabularService:
             sections.append(f"文件: {label}\n{_truncate(extracted, self._max_table_chars)}")
         return "\n\n".join(sections).strip()
 
-    def _build_answer(self, *, question: str, table_text: str, include_kb: bool) -> str:
+    def _build_answer(
+        self,
+        *,
+        question: str,
+        table_text: str,
+        include_kb: bool,
+        content_callback: Callable[[str], None] | None = None,
+    ) -> str:
         if callable(self._answer_question_fn):
-            answer = str(
-                self._answer_question_fn(
-                    question=question,
-                    table_text=table_text,
-                    include_kb=include_kb,
-                )
-                or ""
-            ).strip()
-            if answer:
-                return answer
-        return _table_fallback_answer(question=question, table_text=table_text)
+            output = self._answer_question_fn(
+                question=question,
+                table_text=table_text,
+                include_kb=include_kb,
+            )
+            if isinstance(output, (str, bytes)):
+                answer = str(output or "").strip()
+                emit_text_chunks(answer, content_callback=content_callback)
+                if answer:
+                    return answer
+            else:
+                answer_parts: list[str] = []
+                for piece in iter_text_output(output):
+                    text = str(piece or "")
+                    if not text:
+                        continue
+                    answer_parts.append(text)
+                    if callable(content_callback):
+                        content_callback(text)
+                answer = "".join(answer_parts).strip()
+                if answer:
+                    return answer
+        fallback = _table_fallback_answer(question=question, table_text=table_text)
+        emit_text_chunks(fallback, content_callback=content_callback)
+        return fallback
 
     @staticmethod
     def _extract_table_text(

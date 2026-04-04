@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import os
 import re
+import json
 from pathlib import Path
 from typing import Any, Callable
 
 import httpx
 
 from server.patent.file_models import PatentFileContract
+from server.patent.streaming import emit_text_chunks, iter_text_output
 from server.services.mode_profiles import get_patent_mode_profile
 
 try:
@@ -120,7 +122,7 @@ class PatentPdfAnswerClient:
     def close(self) -> None:
         self._client.close()
 
-    def answer(self, *, question: str, pdf_text: str, file_name: str, include_kb: bool) -> str:
+    def _build_request_payload(self, *, question: str, pdf_text: str, file_name: str, include_kb: bool, stream: bool) -> dict[str, Any]:
         kb_instruction = (
             "可以结合专利领域背景做简短补充，但结论必须优先依据 PDF 原文。"
             if include_kb
@@ -139,26 +141,91 @@ class PatentPdfAnswerClient:
                 pdf_text,
             ]
         )
+        return {
+            "model": self._model,
+            "temperature": 0.2,
+            "stream": bool(stream),
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是专利模式下的文件问答助手。必须以给定 PDF 正文为主回答，"
+                        "不允许虚构未出现的事实。输出中文。"
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+        }
+
+    @staticmethod
+    def _extract_delta_text(payload: dict[str, Any]) -> str:
+        choices = list(payload.get("choices") or [])
+        pieces: list[str] = []
+        for choice in choices:
+            delta = dict((choice or {}).get("delta") or {})
+            content = delta.get("content")
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict):
+                        text = str(item.get("text") or "")
+                        if text:
+                            pieces.append(text)
+                continue
+            text = str(content or "")
+            if text:
+                pieces.append(text)
+        return "".join(pieces)
+
+    def stream_answer(self, *, question: str, pdf_text: str, file_name: str, include_kb: bool) -> Any:
+        request_payload = self._build_request_payload(
+            question=question,
+            pdf_text=pdf_text,
+            file_name=file_name,
+            include_kb=include_kb,
+            stream=True,
+        )
+        with self._client.stream(
+            "POST",
+            f"{self._base_url.rstrip('/')}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            },
+            json=request_payload,
+        ) as response:
+            response.raise_for_status()
+            for raw_line in response.iter_lines():
+                line = str(raw_line or "").strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                body = line[5:].strip()
+                if not body or body == "[DONE]":
+                    continue
+                payload = json.loads(body)
+                if isinstance(payload, dict) and payload.get("error"):
+                    message = str(dict(payload.get("error") or {}).get("message") or "patent_pdf_stream_error").strip()
+                    raise RuntimeError(message)
+                if not isinstance(payload, dict):
+                    continue
+                text = self._extract_delta_text(payload)
+                if text:
+                    yield text
+
+    def answer(self, *, question: str, pdf_text: str, file_name: str, include_kb: bool) -> str:
         response = self._client.post(
             f"{self._base_url.rstrip('/')}/chat/completions",
             headers={
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
             },
-            json={
-                "model": self._model,
-                "temperature": 0.2,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "你是专利模式下的文件问答助手。必须以给定 PDF 正文为主回答，"
-                            "不允许虚构未出现的事实。输出中文。"
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-            },
+            json=self._build_request_payload(
+                question=question,
+                pdf_text=pdf_text,
+                file_name=file_name,
+                include_kb=include_kb,
+                stream=False,
+            ),
         )
         response.raise_for_status()
         payload = response.json()
@@ -193,6 +260,7 @@ class PatentPdfService:
         contract: PatentFileContract,
         include_kb: bool,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        content_callback: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         used_files = [item.as_payload() for item in contract.selected_execution_files if item.family == "pdf"]
         profile = get_patent_mode_profile(contract.route)
@@ -240,6 +308,7 @@ class PatentPdfService:
                 pdf_text=pdf_text,
                 file_name=primary_label,
                 include_kb=include_kb,
+                content_callback=content_callback,
             )
             self._record_step(
                 steps,
@@ -348,34 +417,85 @@ class PatentPdfService:
             sections.append(f"文件: {label}\n{_truncate(extracted, self._max_pdf_chars)}")
         return "\n\n".join(section for section in sections if section).strip()
 
-    def _build_answer(self, *, question: str, pdf_text: str, file_name: str, include_kb: bool) -> str:
-        answer = ""
+    def _build_answer(
+        self,
+        *,
+        question: str,
+        pdf_text: str,
+        file_name: str,
+        include_kb: bool,
+        content_callback: Callable[[str], None] | None = None,
+    ) -> str:
+        answer_parts: list[str] = []
+        
+        def _emit_stream_piece(piece: str) -> None:
+            text = str(piece or "")
+            if not text:
+                return
+            answer_parts.append(text)
+            if callable(content_callback):
+                content_callback(text)
+
+        def _emit_buffered_text(text: str) -> str:
+            normalized = str(text or "").strip()
+            if not normalized:
+                return ""
+            if callable(content_callback):
+                emit_text_chunks(normalized, content_callback=content_callback)
+            return normalized
+
+        truncated_pdf_text = _truncate(pdf_text, self._max_pdf_chars)
         if callable(self._answer_question_fn):
-            answer = str(
-                self._answer_question_fn(
-                    question=question,
-                    pdf_text=pdf_text,
-                    file_name=file_name,
-                    include_kb=include_kb,
-                )
-                or ""
-            ).strip()
+            output = self._answer_question_fn(
+                question=question,
+                pdf_text=pdf_text,
+                file_name=file_name,
+                include_kb=include_kb,
+            )
+            if isinstance(output, (str, bytes)):
+                answer = _emit_buffered_text(str(output or ""))
+                if answer:
+                    return answer
+            else:
+                for piece in iter_text_output(output):
+                    _emit_stream_piece(piece)
         elif self._client is not None:
             try:
-                answer = str(
-                    self._client.answer(
-                        question=question,
-                        pdf_text=_truncate(pdf_text, self._max_pdf_chars),
-                        file_name=file_name,
-                        include_kb=include_kb,
-                    )
-                    or ""
-                ).strip()
+                stream_builder = getattr(self._client, "stream_answer", None)
+                if callable(stream_builder):
+                    for piece in iter_text_output(
+                        stream_builder(
+                            question=question,
+                            pdf_text=truncated_pdf_text,
+                            file_name=file_name,
+                            include_kb=include_kb,
+                        )
+                    ):
+                        _emit_stream_piece(piece)
             except Exception:
-                answer = ""
+                answer_parts = []
+            if not "".join(answer_parts).strip():
+                try:
+                    answer = _emit_buffered_text(
+                        self._client.answer(
+                            question=question,
+                            pdf_text=truncated_pdf_text,
+                            file_name=file_name,
+                            include_kb=include_kb,
+                        )
+                    )
+                    if answer:
+                        return answer
+                except Exception:
+                    answer_parts = []
+
+        answer = "".join(answer_parts).strip()
         if answer:
             return answer
-        return _extractive_fallback_summary(question=question, pdf_text=pdf_text)
+
+        fallback = _extractive_fallback_summary(question=question, pdf_text=pdf_text)
+        emit_text_chunks(fallback, content_callback=content_callback)
+        return fallback
 
     @staticmethod
     def _extract_pdf_text(pdf_path: str, *, max_pages: int = 10) -> str:

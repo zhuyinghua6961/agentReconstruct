@@ -11,6 +11,7 @@ from server.patent.file_routes import dispatch_patent_file_route
 from server.patent.kb_service import PatentKbService
 from server.patent.pdf_service import PatentPdfService
 from server.patent.retrieval_service import PatentRetrievalService
+from server.patent.streaming import emit_text_chunks
 from server.patent.tabular_service import PatentTabularService
 from server.schemas.request_models import PatentAskRequest
 from server.services.conversation_context_builder import (
@@ -116,17 +117,37 @@ class PatentExecutor:
             pdf_service=self._pdf_service,
             tabular_service=self._tabular_service,
             progress_callback=progress_callback,
+            content_callback=content_callback,
         )
         if not contract.includes_kb:
             return file_result
+        file_answer = str(file_result.get("answer_text") or "").strip()
+        kb_stream_state = {"count": 0, "prefix": False}
+
+        def _kb_content_callback(chunk: str) -> None:
+            text = str(chunk or "")
+            if not text or not callable(content_callback):
+                return
+            if file_answer and not kb_stream_state["prefix"]:
+                emit_text_chunks("\n\nPatent KB participation: ", content_callback=content_callback)
+                kb_stream_state["prefix"] = True
+            content_callback(text)
+            kb_stream_state["count"] += 1
+
         kb_result = _call_with_supported_kwargs(
             self._kb_service.run,
             request=request,
             runtime=self._runtime,
             conversation_context=context,
             progress_callback=progress_callback,
-            content_callback=content_callback,
+            content_callback=_kb_content_callback if callable(content_callback) else content_callback,
         )
+        kb_answer = str(kb_result.get("answer_text") or "").strip()
+        if callable(content_callback) and kb_answer and kb_stream_state["count"] == 0:
+            if file_answer and not kb_stream_state["prefix"]:
+                emit_text_chunks("\n\nPatent KB participation: ", content_callback=content_callback)
+                kb_stream_state["prefix"] = True
+            emit_text_chunks(kb_answer, content_callback=content_callback)
         return self._merge_file_and_kb_results(file_result=file_result, kb_result=kb_result)
 
     @staticmethod

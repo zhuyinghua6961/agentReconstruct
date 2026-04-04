@@ -553,6 +553,36 @@ def test_executor_file_routes_emit_progress_steps_before_returning_result(tmp_pa
     assert result["steps"][-1]["step"] == "pdf_answer"
 
 
+def test_executor_file_routes_stream_pdf_answer_content_before_returning_result(tmp_path):
+    pdf_path = tmp_path / "spec.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    answer_text = "真实总结：本文研究硅负极包覆方案，并报告循环寿命改善与倍率性能提升。"
+    executor = PatentExecutor(
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "This paper studies silicon anode coating for lithium batteries.",
+            answer_question_fn=lambda **kwargs: answer_text,
+        )
+    )
+    streamed_chunks: list[str] = []
+
+    result = executor.execute_with_progress(
+        request=_make_file_request(
+            route="pdf_qa",
+            source_scope="pdf",
+            turn_mode="file_only",
+            execution_files=[{"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf", "local_path": str(pdf_path)}],
+            selected_file_ids=[11],
+            trace_id="req_stream_pdf",
+        ),
+        context={"recent_turns_for_llm": []},
+        progress_callback=None,
+        content_callback=streamed_chunks.append,
+    )
+
+    assert len(streamed_chunks) >= 2
+    assert "".join(streamed_chunks) == result["answer_text"]
+
+
 def test_executor_dispatches_tabular_route_to_patent_tabular_service():
     class _FailingKbService(PatentKbService):
         def run(self, *, request, runtime=None, conversation_context=None):
@@ -884,6 +914,58 @@ def test_executor_kb_enabled_hybrid_routes_merge_file_and_kb_evidence():
     ]
 
 
+def test_executor_pdf_kb_hybrid_route_streams_file_and_kb_answer_in_final_order(tmp_path):
+    pdf_path = tmp_path / "spec.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_answer = "真实 PDF 总结：本文提出硅负极包覆方法，并报告循环寿命改善。"
+    kb_answer = "这是知识库补充：该方向在专利布局上集中于包覆材料和热稳定性。"
+
+    class _StreamingKbService(PatentKbService):
+        def run(self, *, request, runtime=None, conversation_context=None, progress_callback=None, content_callback=None):
+            if callable(content_callback):
+                content_callback(kb_answer[:14])
+                content_callback(kb_answer[14:])
+            return {
+                "answer_text": kb_answer,
+                "route": request.route,
+                "query_mode": "patent_hybrid_qa",
+                "steps": [{"title": "Patent KB", "message": "KB participated."}],
+                "references": ["CN123456789A"],
+                "reference_objects": [{"canonical_patent_id": "CN123456789A"}],
+                "reference_links": [],
+                "original_links": [],
+                "metadata": {"retrieval_backend": "patent-local-kb"},
+                "timings": {"kb_ms": 7},
+            }
+
+    executor = PatentExecutor(
+        kb_service=_StreamingKbService(),
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "This paper studies silicon anode coating for lithium batteries.",
+            answer_question_fn=lambda **kwargs: pdf_answer,
+        ),
+    )
+    streamed_chunks: list[str] = []
+
+    result = executor.execute_with_progress(
+        request=_make_file_request(
+            route="hybrid_qa",
+            source_scope="pdf+kb",
+            turn_mode="mixed",
+            execution_files=[{"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf", "local_path": str(pdf_path)}],
+            selected_file_ids=[11],
+            trace_id="req_stream_pdf_kb",
+        ),
+        context={"recent_turns_for_llm": []},
+        progress_callback=None,
+        content_callback=streamed_chunks.append,
+    )
+
+    assert len(streamed_chunks) >= 3
+    assert "".join(streamed_chunks) == result["answer_text"]
+    assert "Patent KB participation:" in "".join(streamed_chunks)
+
+
 def test_executor_dispatches_file_only_hybrid_route_to_patent_file_scaffold():
     class _FailingKbService(PatentKbService):
         def run(self, *, request, runtime=None, conversation_context=None):
@@ -950,3 +1032,44 @@ def test_executor_hybrid_route_uses_real_pdf_and_table_content_when_local_paths_
     assert "真实 PDF 总结" in result["answer_text"]
     assert "真实表格总结" in result["answer_text"]
     assert "Patent hybrid route combined selected PDF and table files" not in result["answer_text"]
+
+
+def test_executor_hybrid_file_route_streams_composed_pdf_and_table_answer(tmp_path):
+    pdf_path = tmp_path / "spec.pdf"
+    csv_path = tmp_path / "claims.csv"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    _write_csv(csv_path)
+    pdf_answer = "真实 PDF 总结：LMFP/LFP 复配改善了充电安全性。"
+    table_answer = "真实表格总结：LMFP 120mAh，LFP 115mAh，NCM 140mAh。"
+    executor = PatentExecutor(
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "This paper studies LMFP/LFP blending and reports safer charging behavior.",
+            answer_question_fn=lambda **kwargs: pdf_answer,
+        ),
+        tabular_service=PatentTabularService(
+            answer_question_fn=lambda **kwargs: table_answer,
+        ),
+    )
+    streamed_chunks: list[str] = []
+
+    result = executor.execute_with_progress(
+        request=_make_file_request(
+            route="hybrid_qa",
+            source_scope="pdf+table",
+            turn_mode="file_only",
+            execution_files=[
+                {"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf", "local_path": str(pdf_path)},
+                {"file_id": 33, "file_type": "csv", "file_name": "claims.csv", "local_path": str(csv_path)},
+            ],
+            selected_file_ids=[11, 33],
+            trace_id="req_stream_hybrid_file",
+        ),
+        context={"recent_turns_for_llm": []},
+        progress_callback=None,
+        content_callback=streamed_chunks.append,
+    )
+
+    assert len(streamed_chunks) >= 3
+    assert "".join(streamed_chunks) == result["answer_text"]
+    assert "PDF 部分：" in "".join(streamed_chunks)
+    assert "表格部分：" in "".join(streamed_chunks)
