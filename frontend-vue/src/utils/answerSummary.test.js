@@ -23,3 +23,18 @@ test('summary block stays rendered in both streaming and final markdown paths', 
   assert.match(finalHtml, /<li>传质路径更长。<\/li>/)
   assert.match(finalHtml, /<li>盐浓度梯度更陡。<\/li>/)
 })
+
+test('inline markdown heading marker after sentence is normalized into a real heading', () => {
+  const markdown = [
+    '围绕磷酸铁锂的标称平台电压，通常可概括如下。### 核心电压参数',
+    '- 标称电压通常约为 3.2V。',
+  ].join('\n')
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  assert.doesNotMatch(streamingHtml, /### 核心电压参数/)
+  assert.doesNotMatch(finalHtml, /### 核心电压参数/)
+  assert.match(streamingHtml, /<h3>核心电压参数<\/h3>/)
+  assert.match(finalHtml, /<h3>核心电压参数<\/h3>/)
+})

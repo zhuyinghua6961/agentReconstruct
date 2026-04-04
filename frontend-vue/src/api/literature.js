@@ -23,6 +23,17 @@ function encodeDoiPath(doi) {
     .join('/');
 }
 
+function resolveDocumentUrl(pathOrUrl) {
+  const value = String(pathOrUrl || '').trim();
+  if (!value) {
+    return '';
+  }
+  if (value.startsWith('http://') || value.startsWith('https://')) {
+    return value;
+  }
+  return buildUrl(value);
+}
+
 export async function getLiteratureContent(doi) {
   const encoded = encodeURIComponent(String(doi || '').trim());
   return await getJson(`${API_PREFIX}/literature_content?doi=${encoded}`);
@@ -54,8 +65,13 @@ async function readErrorPayload(response) {
 
 export async function fetchPdfDocument(doi) {
   const encodedPath = encodeDoiPath(doi);
+  return await fetchPdfDocumentByUrl(`${API_PREFIX}/view_pdf/${encodedPath}`);
+}
+
+export async function fetchPdfDocumentByUrl(pathOrUrl) {
+  const resolvedUrl = resolveDocumentUrl(pathOrUrl);
   const token = readPdfAuthToken();
-  const response = await fetch(buildUrl(`${API_PREFIX}/view_pdf/${encodedPath}`), {
+  const response = await fetch(resolvedUrl, {
     method: 'GET',
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });

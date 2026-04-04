@@ -10,6 +10,7 @@ from server_fastapi.http import read_bool_query
 
 
 router = APIRouter()
+_FILE_ROUTES = {"pdf_qa", "tabular_qa", "hybrid_qa"}
 
 
 
@@ -37,6 +38,23 @@ def _durable_dependencies_ready(components: dict) -> bool:
     return all(bool(dict(components.get(name) or {}).get("ready", False)) for name in ("runtime", "redis", "authority"))
 
 
+def _route_requires_runtime(*, route: str, source_scope: str) -> bool:
+    normalized_route = str(route or "").strip()
+    normalized_scope = str(source_scope or "").strip()
+    if not normalized_route and not normalized_scope:
+        return True
+    if normalized_route == "kb_qa":
+        return True
+    return "kb" in normalized_scope.split("+")
+
+
+def _file_route_gate_enabled(*, route: str, settings) -> bool:
+    normalized_route = str(route or "").strip()
+    if normalized_route not in _FILE_ROUTES:
+        return True
+    return bool(getattr(settings, "patent_file_routes_enabled", False))
+
+
 @router.get("/api/v1/health")
 @router.get("/api/health")
 async def health_check(
@@ -44,9 +62,14 @@ async def health_check(
     authorization: str | None = Header(default=None, alias="Authorization"),
 ):
     durable_requested = read_bool_query(request, "durable", default=False)
+    route = str(request.query_params.get("route") or "").strip()
+    source_scope = str(request.query_params.get("source_scope") or "").strip()
     components = _copy_components(request)
     settings = request.app.state.settings
-    durable_ready = _durable_dependencies_ready(components)
+    durable_required_components = ["redis", "authority"]
+    if _route_requires_runtime(route=route, source_scope=source_scope):
+        durable_required_components.append("runtime")
+    durable_ready = all(bool(dict(components.get(name) or {}).get("ready", False)) for name in durable_required_components)
 
     if durable_requested:
         require_auth_context(authorization)
@@ -57,6 +80,19 @@ async def health_check(
                 status_code=503,
                 error="durable_mode_disabled",
                 retriable=False,
+                extra={
+                    "status": "degraded",
+                    "components": components,
+                    "durable_requested": True,
+                },
+            )
+        if not _file_route_gate_enabled(route=route, settings=settings):
+            raise APIError(
+                code=codes.SERVICE_NOT_READY,
+                message="durable patent dependencies are not ready",
+                status_code=503,
+                error="service_not_ready",
+                retriable=True,
                 extra={
                     "status": "degraded",
                     "components": components,
@@ -79,7 +115,10 @@ async def health_check(
 
     status_code = 200
     status = "ok"
-    if not _runtime_ready(components) or (settings.durable_mode_enabled and not durable_ready):
+    runtime_degraded = not _runtime_ready(components)
+    if durable_requested:
+        runtime_degraded = _route_requires_runtime(route=route, source_scope=source_scope) and runtime_degraded
+    if runtime_degraded or (settings.durable_mode_enabled and not durable_ready):
         status_code = 503
         status = "degraded"
 

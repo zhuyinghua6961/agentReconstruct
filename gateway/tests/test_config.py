@@ -47,6 +47,30 @@ def test_gateway_settings_can_enable_strict_backend_validation(monkeypatch):
     assert settings.strict_backend_config is True
 
 
+def test_gateway_settings_keep_patent_file_routes_enabled_by_default(monkeypatch):
+    monkeypatch.delenv("GATEWAY_PATENT_FILE_ROUTES_ENABLED", raising=False)
+
+    settings = GatewaySettings.from_env()
+
+    assert settings.patent_file_routes_enabled is True
+
+
+def test_gateway_settings_can_enable_patent_file_routes(monkeypatch):
+    monkeypatch.setenv("GATEWAY_PATENT_FILE_ROUTES_ENABLED", "true")
+
+    settings = GatewaySettings.from_env()
+
+    assert settings.patent_file_routes_enabled is True
+
+
+def test_gateway_settings_can_disable_patent_file_routes(monkeypatch):
+    monkeypatch.setenv("GATEWAY_PATENT_FILE_ROUTES_ENABLED", "false")
+
+    settings = GatewaySettings.from_env()
+
+    assert settings.patent_file_routes_enabled is False
+
+
 def test_gateway_settings_expose_admission_defaults(monkeypatch):
     monkeypatch.delenv("INTERACTIVE_EXECUTION_MAX_CONCURRENT", raising=False)
     monkeypatch.delenv("INTERACTIVE_EXECUTION_FAST_OR_PATENT_MAX_CONCURRENT", raising=False)

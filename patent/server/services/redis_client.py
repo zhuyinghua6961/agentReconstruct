@@ -26,6 +26,22 @@ end
 return 0
 """.strip()
 
+_COMPARE_SET_SCRIPT = """
+local current = redis.call('GET', KEYS[1])
+if not current then
+    if ARGV[1] ~= '' then
+        return 0
+    end
+    redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+    return 1
+end
+if current == ARGV[1] then
+    redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+    return 1
+end
+return 0
+""".strip()
+
 
 
 def redact_redis_url(url: str) -> str:
@@ -56,13 +72,15 @@ class RedisBindings:
 def _register_compare_helpers(client: Any) -> bool:
     compare_delete = getattr(client, "compare_delete", None)
     compare_expire = getattr(client, "compare_expire", None)
-    if callable(compare_delete) and callable(compare_expire):
+    compare_set = getattr(client, "compare_set", None)
+    if callable(compare_delete) and callable(compare_expire) and callable(compare_set):
         return True
 
     register_script = getattr(client, "register_script", None)
     if callable(register_script):
         delete_script = register_script(_COMPARE_DELETE_SCRIPT)
         expire_script = register_script(_COMPARE_EXPIRE_SCRIPT)
+        set_script = register_script(_COMPARE_SET_SCRIPT)
 
         def compare_delete_impl(key: str, token: str) -> int:
             return int(delete_script(keys=[str(key)], args=[str(token)]))
@@ -71,8 +89,13 @@ def _register_compare_helpers(client: Any) -> bool:
             ttl = max(1, int(ttl_seconds))
             return int(expire_script(keys=[str(key)], args=[str(token), ttl]))
 
+        def compare_set_impl(key: str, expected: str, replacement: str, ttl_seconds: int) -> int:
+            ttl = max(1, int(ttl_seconds))
+            return int(set_script(keys=[str(key)], args=[str(expected or ""), str(replacement), ttl]))
+
         setattr(client, "compare_delete", compare_delete_impl)
         setattr(client, "compare_expire", compare_expire_impl)
+        setattr(client, "compare_set", compare_set_impl)
         return True
 
     eval_fn = getattr(client, "eval", None)
@@ -85,8 +108,13 @@ def _register_compare_helpers(client: Any) -> bool:
             ttl = max(1, int(ttl_seconds))
             return int(eval_fn(_COMPARE_EXPIRE_SCRIPT, 1, str(key), str(token), ttl))
 
+        def compare_set_impl(key: str, expected: str, replacement: str, ttl_seconds: int) -> int:
+            ttl = max(1, int(ttl_seconds))
+            return int(eval_fn(_COMPARE_SET_SCRIPT, 1, str(key), str(expected or ""), str(replacement), ttl))
+
         setattr(client, "compare_delete", compare_delete_impl)
         setattr(client, "compare_expire", compare_expire_impl)
+        setattr(client, "compare_set", compare_set_impl)
         return True
 
     return False

@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 from app.core.deps import AuthContext
 from app.core.errors import AppError
@@ -41,9 +41,12 @@ def _patent_original_response(*, result: dict[str, object], head_only: bool) -> 
     status_code = int(result.get("status_code") or 200)
     headers = {str(key): str(value) for key, value in dict(result.get("headers") or {}).items()}
     media_type = str(result.get("media_type") or "application/json")
+    body_iter = result.get("body_iter")
     body = result.get("body")
     if head_only:
         return Response(status_code=status_code, headers=headers, media_type=media_type)
+    if body_iter is not None:
+        return StreamingResponse(body_iter, status_code=status_code, headers=headers, media_type=media_type)
     if isinstance(body, (bytes, bytearray)):
         return Response(content=bytes(body), status_code=status_code, headers=headers, media_type=media_type)
     if isinstance(body, str):

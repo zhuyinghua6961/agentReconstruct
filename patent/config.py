@@ -129,6 +129,7 @@ class AuthSettings:
 class Settings:
     service_name: str
     durable_mode_enabled: bool
+    patent_file_routes_enabled: bool
     runtime_env: str
     http: HttpSettings
     gunicorn: GunicornSettings
@@ -147,6 +148,7 @@ def get_settings() -> Settings:
     return Settings(
         service_name="patent",
         durable_mode_enabled=_read_bool("PATENT_DURABLE_MODE_ENABLED", False),
+        patent_file_routes_enabled=_read_bool("PATENT_FILE_ROUTES_ENABLED", True),
         runtime_env=runtime_env,
         http=HttpSettings(
             host=os.getenv("PATENT_HOST", "0.0.0.0"),

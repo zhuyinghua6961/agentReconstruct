@@ -3,7 +3,7 @@ from __future__ import annotations
 import mimetypes
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from app.integrations.storage.base import StorageBackend
 
@@ -35,6 +35,20 @@ class LocalStorageBackend(StorageBackend):
         if not path.exists() or not path.is_file():
             return None
         return path.read_bytes()
+
+    def iter_object_bytes(self, *, object_name: str, bucket: str | None = None, chunk_size: int = 65536) -> Iterator[bytes]:
+        _ = bucket
+        path = Path(object_name)
+        if not path.is_absolute():
+            path = (self.root_dir / path).resolve()
+        if not path.exists() or not path.is_file():
+            return
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(max(1, int(chunk_size)))
+                if not chunk:
+                    break
+                yield chunk
 
     def object_exists(self, *, object_name: str, bucket: str | None = None) -> bool:
         _ = bucket

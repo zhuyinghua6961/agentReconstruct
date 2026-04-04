@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from functools import partial
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
+import anyio
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -15,6 +18,8 @@ from server.runtime.request_context import get_trace_id
 from server_fastapi.auth.deps import require_auth_context
 
 router = APIRouter()
+logger = logging.getLogger("patent.server_fastapi.ask")
+_FILE_ROUTES = {"pdf_qa", "tabular_qa", "hybrid_qa"}
 
 
 
@@ -141,11 +146,29 @@ def _ensure_durable_mode_enabled(*, request: Request, ask_request) -> None:
     )
 
 
+def _ensure_patent_file_routes_enabled(*, request: Request, ask_request) -> None:
+    if str(getattr(ask_request, "route", "") or "") not in _FILE_ROUTES:
+        return
+    settings = getattr(request.app.state, "settings", None)
+    if bool(getattr(settings, "patent_file_routes_enabled", False)):
+        return
+    raise APIError(
+        code=codes.PATENT_FILE_ROUTE_DISABLED,
+        message="patent file routes are disabled",
+        status_code=503,
+        error="patent_file_route_disabled",
+        retriable=False,
+    )
+
+
 def _ensure_durable_dependencies_ready(*, request: Request, ask_request) -> None:
     if not ask_request.is_durable:
         return
     components = _copy_components(request)
-    ready = all(bool(dict(components.get(name) or {}).get("ready", False)) for name in ("runtime", "redis", "authority"))
+    required_components = ["redis", "authority"]
+    if _request_requires_runtime(ask_request):
+        required_components.append("runtime")
+    ready = all(bool(dict(components.get(name) or {}).get("ready", False)) for name in required_components)
     if ready:
         return
     raise APIError(
@@ -156,6 +179,14 @@ def _ensure_durable_dependencies_ready(*, request: Request, ask_request) -> None
         retriable=True,
         extra={"components": components},
     )
+
+
+def _request_requires_runtime(ask_request) -> bool:
+    route = str(getattr(ask_request, "route", "") or "")
+    if route == "kb_qa":
+        return True
+    source_scope = str(getattr(ask_request, "source_scope", "") or "")
+    return "kb" in source_scope.split("+")
 
 
 def _resolve_user_id(*, ask_request, authorization: str | None) -> int | None:
@@ -181,18 +212,30 @@ def _acquire_stream_slot(request: Request):
     return lease
 
 
+async def _run_in_ask_executor(request: Request, fn, /, *args, **kwargs):
+    dispatcher = getattr(request.app.state, "runtime_dispatcher", None)
+    limiter = getattr(dispatcher, "ask_limiter", None)
+    return await anyio.to_thread.run_sync(
+        partial(fn, *args, **kwargs),
+        limiter=limiter,
+    )
+
+
 
 def _build_streaming_response(*, request: Request, ask_request, user_id: int | None) -> StreamingResponse:
     service = _get_ask_service(request)
     lease = _acquire_stream_slot(request)
     trace_id = str(ask_request.trace_id)
 
-    def _generate() -> Iterator[str]:
+    async def _generate() -> Iterator[str]:
         seq = 0
         current_trace_id = trace_id or get_trace_id()
         try:
-            stream = service.stream_ask(ask_request, user_id=user_id)
-            for payload in stream:
+            stream = await _run_in_ask_executor(request, service.stream_ask, ask_request, user_id=user_id)
+            while True:
+                payload = await _run_in_ask_executor(request, _next_stream_payload, stream)
+                if payload is None:
+                    break
                 seq = int(payload.get("seq", seq))
                 trace = str(payload.get("trace_id") or current_trace_id)
                 if trace:
@@ -217,6 +260,13 @@ def _build_streaming_response(*, request: Request, ask_request, user_id: int | N
     )
 
 
+def _next_stream_payload(stream: Iterator[dict[str, Any]]) -> dict[str, Any] | None:
+    try:
+        return next(stream)
+    except StopIteration:
+        return None
+
+
 @router.post("/api/ask")
 @router.post("/api/v1/ask")
 @router.post("/api/patent/ask")
@@ -225,11 +275,15 @@ async def patent_ask(
     request: Request,
     authorization: str | None = Header(default=None, alias="Authorization"),
 ):
+    logger.info("patent_ask received path=%s trace=%s", request.url.path, request.headers.get("x-trace-id") or request.headers.get("x-request-id"))
     ask_request = await _parse_patent_request_or_raise(request)
+    _ensure_patent_file_routes_enabled(request=request, ask_request=ask_request)
     _ensure_durable_mode_enabled(request=request, ask_request=ask_request)
     user_id = _resolve_user_id(ask_request=ask_request, authorization=authorization)
     _ensure_durable_dependencies_ready(request=request, ask_request=ask_request)
-    payload = _get_ask_service(request).sync_ask(ask_request, user_id=user_id)
+    logger.info("patent_ask dispatching sync trace=%s durable=%s", ask_request.trace_id, ask_request.is_durable)
+    payload = await _run_in_ask_executor(request, _get_ask_service(request).sync_ask, ask_request, user_id=user_id)
+    logger.info("patent_ask completed sync trace=%s answer_chars=%s", ask_request.trace_id, len(str(payload.get("final_answer") or "")))
     return JSONResponse(content=payload)
 
 
@@ -242,6 +296,7 @@ async def patent_ask_stream(
     authorization: str | None = Header(default=None, alias="Authorization"),
 ):
     ask_request = await _parse_patent_request_or_raise(request)
+    _ensure_patent_file_routes_enabled(request=request, ask_request=ask_request)
     _ensure_durable_mode_enabled(request=request, ask_request=ask_request)
     user_id = _resolve_user_id(ask_request=ask_request, authorization=authorization)
     _ensure_durable_dependencies_ready(request=request, ask_request=ask_request)

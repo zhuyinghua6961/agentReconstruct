@@ -44,10 +44,15 @@ def test_user_write_uses_patent_mode_contract(monkeypatch):
         user_id=42,
         conversation_id=123,
         trace_id="req_123",
-        route="kb_qa",
+        route="hybrid_qa",
+        source_scope="pdf+kb",
         requested_mode="patent",
         actual_mode="patent",
         content="Explain the patent novelty.",
+        selected_file_ids=[11],
+        mode_origin_requested_mode="patent",
+        mode_origin_execution_backend="patentQA",
+        compatibility_route=False,
     )
 
     assert result["conversation_id"] == 123
@@ -60,6 +65,12 @@ def test_user_write_uses_patent_mode_contract(monkeypatch):
     assert captured["json"]["requested_mode"] == "patent"
     assert captured["json"]["actual_mode"] == "patent"
     assert captured["json"]["idempotency_key"] == "123:req_123:user"
+    assert captured["json"]["context_hints"]["mode_origin_requested_mode"] == "patent"
+    assert captured["json"]["route"] == "hybrid_qa"
+    assert captured["json"]["source_scope"] == "pdf+kb"
+    assert captured["json"]["context_hints"]["selected_file_ids"] == [11]
+    assert captured["json"]["context_hints"]["mode_origin_execution_backend"] == "patentQA"
+    assert captured["json"]["context_hints"]["compatibility_route"] is False
 
 
 
@@ -131,11 +142,20 @@ def test_assistant_accept_uses_patent_idempotency_key(monkeypatch):
         requested_mode="patent",
         actual_mode="patent",
         answer_text="Patent answer",
+        metadata={"mode_origin": {"requested_mode": "patent", "execution_backend": "fastQA", "compatibility_route": True}},
+        references=[{"source_type": "patent", "canonical_patent_id": "CN123456789A"}],
+        reference_objects=[{"source_type": "patent", "canonical_patent_id": "CN123456789A", "section_type": "claim"}],
+        reference_links=[{"type": "original_view", "canonical_patent_id": "CN123456789A", "viewer_uri": "/api/patent/original/CN123456789A"}],
+        original_links=[{"type": "original_view", "canonical_patent_id": "CN123456789A", "section": "claim", "viewer_uri": "/api/patent/original/CN123456789A"}],
     )
 
     assert result["accepted"] is True
     assert captured["json"]["idempotency_key"] == "123:req_123:assistant"
     assert captured["json"]["final_event"]["done_seen"] is True
+    assert captured["json"]["final_event"]["metadata"]["mode_origin"]["execution_backend"] == "fastQA"
+    assert captured["json"]["final_event"]["reference_objects"][0]["section_type"] == "claim"
+    assert captured["json"]["final_event"]["reference_links"][0]["type"] == "original_view"
+    assert captured["json"]["final_event"]["original_links"][0]["section"] == "claim"
 
 
 

@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from server_fastapi.app import create_app
@@ -43,6 +46,7 @@ def test_health_exposes_configured_concurrency_state(monkeypatch):
     assert runtime["stream_slots_capacity"] == 2
     assert runtime["stream_slots_available"] == 2
     assert runtime["ask_executor_max_workers"] == 3
+    assert app.state.runtime_dispatcher.ask_limiter.total_tokens == 3
 
 
 
@@ -74,3 +78,143 @@ def test_trace_context_generates_header_when_missing():
     generated = response.headers["X-Trace-ID"]
     assert generated.startswith("req_")
     assert len(generated) == 16
+
+
+def test_app_bootstrap_wires_patent_runtime_into_executor_kb_boundary(monkeypatch):
+    fake_runtime = type("_FakeRuntime", (), {"retrieval_service": object(), "close": lambda self: None})()
+    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda: fake_runtime)
+
+    app = create_app()
+
+    executor = app.state.ask_service._patent_executor
+    assert executor._runtime is fake_runtime
+    assert executor._kb_service is not None
+
+
+def test_build_default_patent_runtime_degrades_to_no_vector_when_vector_bootstrap_fails(monkeypatch, tmp_path: Path):
+    from server.patent.resource_registry import PatentResourceRegistry
+    from server.patent.runtime import build_default_patent_runtime
+
+    resource_root = tmp_path / "resource" / "patentQA"
+    archive_dir = resource_root / "__archive__"
+    patent_dir = archive_dir / "CN115132975B"
+    patent_dir.mkdir(parents=True)
+    for vector_dir in ("vector_db_patent_abstracts", "vector_db_patent_chunks"):
+        db_dir = resource_root / vector_dir
+        db_dir.mkdir(parents=True)
+        (db_dir / "chroma.sqlite3").write_text("", encoding="utf-8")
+    (patent_dir / "著录项目.json").write_text(
+        json.dumps(
+            {
+                "data": [
+                    {
+                        "pn": "CN115132975B",
+                        "bibliographic_data": {
+                            "publication_reference": {"country": "CN", "kind": "B", "doc_number": "115132975", "date": "2022-10-01"},
+                            "application_reference": {"doc_number": "CN202110320984.1"},
+                            "invention_title": [{"text": "一种锂离子电池及动力车辆"}],
+                            "abstracts": [{"text": "通过 LMFP/LFP/三元复配改善充电安全与低 SOC 放电功率。"}],
+                        },
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (patent_dir / "权利要求.json").write_text(
+        json.dumps({"data": [{"claims": [{"claim_text": '<div num="1">一种锂离子电池。</div>'}]}]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (patent_dir / "说明书.json").write_text(
+        json.dumps({"data": [{"description": [{"text": '<b class="d_n">[0001]</b>该电池能够改善高 SOC 充电安全性。'}]}]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    class _AnswerBuilder:
+        def close(self):
+            return None
+
+    class _EmbeddingClient:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "server.patent.runtime.PatentResourceRegistry.discover",
+        lambda: PatentResourceRegistry(
+            repo_root=tmp_path,
+            abstract_db_path=resource_root / "vector_db_patent_abstracts",
+            chunk_db_path=resource_root / "vector_db_patent_chunks",
+            archive_root=archive_dir,
+        ),
+    )
+    monkeypatch.setattr("server.patent.runtime.PatentAnswerBuilder.from_env", lambda: _AnswerBuilder())
+    monkeypatch.setattr("server.patent.runtime.PatentEmbeddingClient", _EmbeddingClient)
+
+    def _raise_on_vector_init(*args, **kwargs):
+        raise RuntimeError("vector init boom")
+
+    monkeypatch.setattr("server.patent.runtime.ChromaPatentSearch", _raise_on_vector_init)
+
+    runtime = build_default_patent_runtime()
+
+    assert runtime is not None
+    assert runtime.retrieval_service._vector_search_enabled() is False
+
+
+def test_build_default_patent_runtime_wires_stage1_planner_from_env(monkeypatch, tmp_path: Path):
+    from server.patent.resource_registry import PatentResourceRegistry
+    from server.patent.runtime import build_default_patent_runtime
+
+    resource_root = tmp_path / "resource" / "patentQA"
+    archive_dir = resource_root / "__archive__"
+    patent_dir = archive_dir / "CN115132975B"
+    patent_dir.mkdir(parents=True)
+    (patent_dir / "著录项目.json").write_text(
+        json.dumps(
+            {
+                "data": [
+                    {
+                        "pn": "CN115132975B",
+                        "bibliographic_data": {
+                            "publication_reference": {"country": "CN", "kind": "B", "doc_number": "115132975", "date": "2022-10-01"},
+                            "application_reference": {"doc_number": "CN202110320984.1"},
+                            "invention_title": [{"text": "一种锂离子电池及动力车辆"}],
+                            "abstracts": [{"text": "通过 LMFP/LFP/三元复配改善充电安全与低 SOC 放电功率。"}],
+                        },
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    class _AnswerBuilder:
+        def close(self):
+            return None
+
+    class _PlannerClient:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "server.patent.runtime.PatentResourceRegistry.discover",
+        lambda: PatentResourceRegistry(
+            repo_root=tmp_path,
+            abstract_db_path=resource_root / "vector_db_patent_abstracts",
+            chunk_db_path=resource_root / "vector_db_patent_chunks",
+            archive_root=archive_dir,
+        ),
+    )
+    monkeypatch.setattr("server.patent.runtime.PatentAnswerBuilder.from_env", lambda: _AnswerBuilder())
+    monkeypatch.setattr(
+        "server.patent.runtime._build_patent_planning_runtime_inputs",
+        lambda: (_PlannerClient(), "planner-model"),
+    )
+
+    runtime = build_default_patent_runtime()
+
+    assert runtime is not None
+    assert runtime.planning_model == "planner-model"
+    assert runtime.planning_client is not None

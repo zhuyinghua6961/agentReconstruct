@@ -1,10 +1,16 @@
 import asyncio
+import concurrent.futures
+import threading
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from itsdangerous import URLSafeTimedSerializer
 from pydantic import ValidationError
 
+from server.patent.models import PatentRetrievalClaim, PatentRetrievalPlan
+from server.patent.pdf_service import PatentPdfService
+from server.patent.tabular_service import PatentTabularService
 from server.schemas.authority_models import (
     AuthorityAssistantAsyncRequest,
     AuthorityContextSnapshotQuery,
@@ -12,6 +18,7 @@ from server.schemas.authority_models import (
 )
 from server.schemas.request_models import ProtocolMismatchRequestError, parse_patent_request
 from server.schemas.response_models import ContentEvent, DoneEvent, MetadataEvent, PatentSyncSuccess
+from server.services.mode_profiles import get_patent_mode_profile
 
 
 
@@ -37,12 +44,240 @@ def _base_payload() -> dict:
     }
 
 
+def _file_payload() -> dict:
+    payload = _base_payload()
+    payload.update(
+        {
+            "route": "hybrid_qa",
+            "turn_mode": "mixed",
+            "source_scope": "pdf+kb",
+            "kb_enabled": True,
+            "allow_kb_verification": True,
+            "used_files": [{"file_id": 11, "file_type": "pdf"}],
+            "execution_files": [{"file_id": 11, "file_type": "pdf"}],
+            "selected_file_ids": [11],
+            "primary_file_id": 11,
+            "file_selection": {"strategy": "explicit_selection", "selected_file_ids": [11], "source_scope": "pdf+kb"},
+        }
+    )
+    return payload
+
+
+def _pdf_payload() -> dict:
+    payload = _base_payload()
+    payload.update(
+        {
+            "conversation_id": None,
+            "route": "pdf_qa",
+            "turn_mode": "file_only",
+            "source_scope": "pdf",
+            "kb_enabled": False,
+            "allow_kb_verification": False,
+            "used_files": [{"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"}],
+            "execution_files": [{"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"}],
+            "selected_file_ids": [11],
+            "primary_file_id": 11,
+            "file_selection": {"strategy": "explicit_selection", "selected_file_ids": [11], "source_scope": "pdf"},
+        }
+    )
+    return payload
+
+
+def _tabular_payload() -> dict:
+    payload = _base_payload()
+    payload.update(
+        {
+            "conversation_id": None,
+            "route": "tabular_qa",
+            "turn_mode": "file_only",
+            "source_scope": "table",
+            "kb_enabled": False,
+            "allow_kb_verification": False,
+            "used_files": [{"file_id": 33, "file_type": "xlsx", "file_name": "claims.xlsx"}],
+            "execution_files": [{"file_id": 33, "file_type": "xlsx", "file_name": "claims.xlsx"}],
+            "selected_file_ids": [33],
+            "primary_file_id": 33,
+            "file_selection": {"strategy": "explicit_selection", "selected_file_ids": [33], "source_scope": "table"},
+        }
+    )
+    return payload
+
+
+def _write_csv(path: Path) -> None:
+    path.write_text(
+        "material,capacity_mAh,note\n"
+        "LMFP,120,stable\n"
+        "LFP,115,safe\n"
+        "NCM,140,higher energy\n",
+        encoding="utf-8",
+    )
+
+
+def _hybrid_payload(source_scope: str = "pdf+table+kb") -> dict:
+    payload = _base_payload()
+    execution_files = [
+        {"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"},
+        {"file_id": 33, "file_type": "xlsx", "file_name": "claims.xlsx"},
+    ]
+    selected_file_ids = [11, 33]
+    if source_scope == "pdf+kb":
+        execution_files = [execution_files[0]]
+        selected_file_ids = [11]
+    elif source_scope == "table+kb":
+        execution_files = [execution_files[1]]
+        selected_file_ids = [33]
+    payload.update(
+        {
+            "conversation_id": None,
+            "route": "hybrid_qa",
+            "turn_mode": "mixed" if "kb" in source_scope else "file_only",
+            "source_scope": source_scope,
+            "kb_enabled": "kb" in source_scope.split("+"),
+            "allow_kb_verification": "kb" in source_scope.split("+"),
+            "used_files": list(execution_files),
+            "execution_files": list(execution_files),
+            "selected_file_ids": list(selected_file_ids),
+            "primary_file_id": selected_file_ids[0],
+            "file_selection": {"strategy": "explicit_selection", "selected_file_ids": list(selected_file_ids), "source_scope": source_scope},
+        }
+    )
+    return payload
+
+
+def _sample_reference_object() -> dict:
+    return {
+        "source_type": "patent",
+        "canonical_patent_id": "CN123456789A",
+        "publication_number": "CN123456789A",
+        "application_number": None,
+        "country": "CN",
+        "kind_code": "A",
+        "title": "A patent title",
+        "section_type": "claim",
+        "section_label": "Claim 1",
+        "anchor": {"claim_number": 1, "paragraph_id": None},
+        "snippet": "A patent snippet",
+        "provider": "patent_source_x",
+        "original_available": True,
+        "viewer_uri": "/api/patent/original/CN123456789A?section=claim&claim_number=1&format=html",
+    }
+
+
+def _sample_reference_link() -> dict:
+    return {
+        "type": "original_view",
+        "label": "View claim 1",
+        "canonical_patent_id": "CN123456789A",
+        "viewer_uri": "/api/patent/original/CN123456789A?section=claim&claim_number=1&format=html",
+        "redirect_url": None,
+    }
+
+
+def _sample_original_link() -> dict:
+    return {
+        "type": "original_view",
+        "label": "View claim 1",
+        "canonical_patent_id": "CN123456789A",
+        "section": "claim",
+        "claim_number": 1,
+        "paragraph_id": None,
+        "viewer_uri": "/api/patent/original/CN123456789A?section=claim&claim_number=1&format=html",
+        "redirect_url": None,
+    }
+
+
 
 def test_patent_request_rejects_non_kb_only_payload():
     payload = _base_payload()
     payload["turn_mode"] = "file_only"
 
     with pytest.raises(ProtocolMismatchRequestError, match="turn_mode"):
+        parse_patent_request(payload)
+
+
+@pytest.mark.parametrize(
+    ("route", "turn_mode", "source_scope", "execution_files", "selected_file_ids", "kb_enabled", "allow_kb_verification"),
+    [
+        ("pdf_qa", "file_only", "pdf", [{"file_id": 11, "file_type": "pdf"}], [11], False, False),
+        ("tabular_qa", "file_only", "table", [{"file_id": 33, "file_type": "xlsx"}], [33], False, False),
+        ("hybrid_qa", "mixed", "pdf+kb", [{"file_id": 11, "file_type": "pdf"}], [11], True, True),
+        ("hybrid_qa", "file_only", "pdf+table", [{"file_id": 11, "file_type": "pdf"}, {"file_id": 33, "file_type": "xlsx"}], [11, 33], False, False),
+    ],
+)
+def test_patent_request_accepts_file_aware_routes(
+    route,
+    turn_mode,
+    source_scope,
+    execution_files,
+    selected_file_ids,
+    kb_enabled,
+    allow_kb_verification,
+):
+    payload = _base_payload()
+    payload.update(
+        {
+            "route": route,
+            "turn_mode": turn_mode,
+            "source_scope": source_scope,
+            "kb_enabled": kb_enabled,
+            "allow_kb_verification": allow_kb_verification,
+            "used_files": list(execution_files),
+            "execution_files": list(execution_files),
+            "selected_file_ids": list(selected_file_ids),
+            "primary_file_id": selected_file_ids[0],
+            "file_selection": {
+                "strategy": "explicit_selection",
+                "selected_file_ids": list(selected_file_ids),
+                "source_scope": source_scope,
+            },
+        }
+    )
+
+    request = parse_patent_request(payload)
+
+    assert request.route == route
+    assert request.turn_mode == turn_mode
+    assert request.source_scope == source_scope
+    assert request.execution_files == execution_files
+    assert request.selected_file_ids == selected_file_ids
+    assert request.primary_file_id == selected_file_ids[0]
+
+
+@pytest.mark.parametrize(
+    ("route", "turn_mode", "source_scope", "execution_files", "selected_file_ids", "message"),
+    [
+        ("pdf_qa", "file_only", "table", [{"file_id": 11, "file_type": "pdf"}], [11], "source_scope"),
+        ("hybrid_qa", "mixed", "kb", [{"file_id": 11, "file_type": "pdf"}], [11], "source_scope"),
+        ("pdf_qa", "file_only", "pdf", [], [], "execution_files"),
+        ("hybrid_qa", "mixed", "pdf+kb", [{"file_id": 11, "file_type": "pdf"}], [11], "allow_kb_verification"),
+        ("pdf_qa", "file_only", "pdf", [{"file_id": 11, "file_type": "pdf"}, {"file_id": 33, "file_type": "xlsx"}], [11, 33], "selected_file_ids"),
+    ],
+)
+def test_patent_request_rejects_invalid_file_route_combinations(
+    route,
+    turn_mode,
+    source_scope,
+    execution_files,
+    selected_file_ids,
+    message,
+):
+    payload = _base_payload()
+    payload.update(
+        {
+            "route": route,
+            "turn_mode": turn_mode,
+            "source_scope": source_scope,
+            "kb_enabled": "kb" in source_scope.split("+"),
+            "allow_kb_verification": False,
+            "used_files": list(execution_files),
+            "execution_files": list(execution_files),
+            "selected_file_ids": list(selected_file_ids),
+            "primary_file_id": selected_file_ids[0] if selected_file_ids else None,
+            "file_selection": {"strategy": "explicit_selection"},
+        }
+    )
+
+    with pytest.raises((ProtocolMismatchRequestError, ValueError), match=message):
         parse_patent_request(payload)
 
 
@@ -65,14 +300,53 @@ def test_patent_request_requires_exact_protocol_literals():
 def test_patent_request_normalizes_conversation_id_and_mode_classification():
     durable_request = parse_patent_request(_base_payload())
 
-    ephemeral_payload = _base_payload()
-    ephemeral_payload["conversation_id"] = "opaque-id"
-    ephemeral_request = parse_patent_request(ephemeral_payload)
-
     assert durable_request.conversation_id == 123
     assert durable_request.persistence_mode == "durable"
+    assert durable_request.source_scope == "kb"
+
+    ephemeral_payload = _base_payload()
+    ephemeral_payload["conversation_id"] = None
+    ephemeral_request = parse_patent_request(ephemeral_payload)
+
     assert ephemeral_request.conversation_id is None
     assert ephemeral_request.persistence_mode == "ephemeral"
+    assert ephemeral_request.source_scope == "kb"
+
+
+@pytest.mark.parametrize("conversation_id", ["opaque-id", "opaque-ephemeral", "", "0", "-1", False, True])
+def test_patent_request_rejects_invalid_conversation_id_instead_of_downgrading_to_ephemeral(conversation_id):
+    payload = _base_payload()
+    payload["conversation_id"] = conversation_id
+
+    with pytest.raises(ValueError, match="conversation_id"):
+        parse_patent_request(payload)
+
+
+@pytest.mark.parametrize("selected_file_ids", [[True], [1.2], ["1"], [1, False]])
+def test_patent_request_rejects_non_integer_selected_file_ids(selected_file_ids):
+    payload = _pdf_payload()
+    payload["selected_file_ids"] = selected_file_ids
+    payload["primary_file_id"] = 11
+
+    with pytest.raises(ValueError, match="selected_file_ids"):
+        parse_patent_request(payload)
+
+
+@pytest.mark.parametrize("primary_file_id", [True, 1.2, "11"])
+def test_patent_request_rejects_non_integer_primary_file_id(primary_file_id):
+    payload = _pdf_payload()
+    payload["primary_file_id"] = primary_file_id
+
+    with pytest.raises(ValueError, match="primary_file_id"):
+        parse_patent_request(payload)
+
+
+def test_patent_request_requires_empty_file_selection_in_phase1():
+    payload = _base_payload()
+    payload["file_selection"] = {"selected": [1]}
+
+    with pytest.raises(ProtocolMismatchRequestError, match="file_selection must be empty"):
+        parse_patent_request(payload)
 
 
 
@@ -96,23 +370,40 @@ def test_patent_request_requires_string_question_and_trace_id():
 def test_schema_models_reject_extra_fields_and_enforce_object_item_shapes():
     with pytest.raises(ValidationError):
         PatentSyncSuccess(
-            data={
-                "final_answer": "Patent answer",
-                "timings": {},
-                "metadata": {
-                    "requested_mode": "patent",
-                    "actual_mode": "patent",
-                    "route": "kb_qa",
-                    "mode": "patent",
-                    "query_mode": "patent",
-                    "conversation_id": 123,
-                    "unexpected": True,
-                },
-                "references": [],
-                "pdf_links": [],
-                "reference_links": [],
-                "trace_id": "req_123",
-            },
+            final_answer="Patent answer",
+            query_mode="patent_kb_qa",
+            route="kb_qa",
+            requested_mode="patent",
+            actual_mode="patent",
+            source_scope="kb",
+            timings={},
+            metadata={},
+            references=[],
+            reference_objects=[],
+            reference_links=[],
+            original_links=[],
+            used_files=[],
+            file_selection={},
+            trace_id="req_123",
+            unexpected=True,
+        )
+
+    with pytest.raises(ValidationError):
+        PatentSyncSuccess(
+            final_answer="Patent answer",
+            query_mode="patent_kb_qa",
+            route="kb_qa",
+            requested_mode="patent",
+            actual_mode="patent",
+            source_scope="kb",
+            timings={},
+            metadata={},
+            references=[],
+            reference_objects=["not-an-object"],
+            reference_links=[],
+            original_links=[],
+            used_files=[],
+            file_selection={},
             trace_id="req_123",
         )
 
@@ -133,31 +424,76 @@ def test_schema_models_reject_extra_fields_and_enforce_object_item_shapes():
 
 def test_sync_success_shape_matches_patent_contract():
     response = PatentSyncSuccess(
-        data={
-            "final_answer": "Patent answer",
-            "timings": {},
-            "metadata": {
-                "requested_mode": "patent",
-                "actual_mode": "patent",
-                "route": "kb_qa",
-                "mode": "patent",
-                "query_mode": "patent",
-                "conversation_id": 123,
-            },
-            "references": [],
-            "pdf_links": [],
-            "reference_links": [],
-            "trace_id": "req_123",
-        },
+        final_answer="Patent answer",
+        query_mode="patent_kb_qa",
+        route="kb_qa",
+        requested_mode="patent",
+        actual_mode="patent",
+        source_scope="kb",
+        timings={},
+        metadata={},
+        references=["CN123456789A"],
+        reference_objects=[_sample_reference_object()],
+        reference_links=[_sample_reference_link()],
+        original_links=[_sample_original_link()],
+        used_files=[],
+        file_selection={},
         trace_id="req_123",
     )
 
     payload = response.model_dump()
     assert payload["success"] is True
-    assert payload["data"]["metadata"]["requested_mode"] == "patent"
-    assert payload["data"]["metadata"]["actual_mode"] == "patent"
-    assert payload["data"]["metadata"]["route"] == "kb_qa"
-    assert payload["data"]["trace_id"] == "req_123"
+    assert payload["requested_mode"] == "patent"
+    assert payload["actual_mode"] == "patent"
+    assert payload["route"] == "kb_qa"
+    assert payload["source_scope"] == "kb"
+    assert payload["references"] == ["CN123456789A"]
+    assert payload["reference_objects"][0]["canonical_patent_id"] == "CN123456789A"
+    assert payload["original_links"][0]["section"] == "claim"
+    assert payload["trace_id"] == "req_123"
+
+
+def test_file_aware_sync_and_done_models_accept_non_kb_route_metadata():
+    response = PatentSyncSuccess(
+        final_answer="Patent file answer",
+        query_mode="patent_hybrid_qa",
+        route="hybrid_qa",
+        requested_mode="patent",
+        actual_mode="patent",
+        source_scope="pdf+kb",
+        timings={},
+        metadata={},
+        references=["CN123456789A"],
+        reference_objects=[_sample_reference_object()],
+        reference_links=[_sample_reference_link()],
+        original_links=[_sample_original_link()],
+        used_files=[{"file_id": 11, "file_type": "pdf"}],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11]},
+        trace_id="req_file_123",
+    )
+    done = DoneEvent(
+        final_answer="Patent file answer",
+        query_mode="patent_hybrid_qa",
+        route="hybrid_qa",
+        requested_mode="patent",
+        actual_mode="patent",
+        source_scope="pdf+kb",
+        timings={},
+        references=["CN123456789A"],
+        reference_objects=[_sample_reference_object()],
+        reference_links=[_sample_reference_link()],
+        original_links=[_sample_original_link()],
+        metadata={},
+        trace_id="req_file_123",
+        used_files=[{"file_id": 11, "file_type": "pdf"}],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11]},
+        seq=3,
+        ts="2026-03-25T12:00:00Z",
+    )
+
+    assert response.model_dump()["route"] == "hybrid_qa"
+    assert response.model_dump()["source_scope"] == "pdf+kb"
+    assert done.model_dump()["used_files"][0]["file_id"] == 11
 
 
 
@@ -167,16 +503,29 @@ def test_stream_events_require_seq_and_ts():
             requested_mode="patent",
             actual_mode="patent",
             route="kb_qa",
-            query_mode="patent",
+            query_mode="patent_kb_qa",
+            source_scope="kb",
+            metadata={},
             trace_id="req_123",
         )
 
     with pytest.raises(ValidationError):
         DoneEvent(
             final_answer="done",
+            query_mode="patent_kb_qa",
+            route="kb_qa",
+            requested_mode="patent",
+            actual_mode="patent",
+            source_scope="kb",
             timings={},
             references=[],
+            reference_objects=[],
+            reference_links=[],
+            original_links=[],
+            metadata={},
             trace_id="req_123",
+            used_files=[],
+            file_selection={},
             seq=1,
         )
 
@@ -185,47 +534,108 @@ def test_stream_events_require_seq_and_ts():
     assert event.ts == "2026-03-25T12:00:00Z"
 
 
+def test_done_event_shape_matches_patent_contract():
+    event = DoneEvent(
+        final_answer="Patent answer",
+        query_mode="patent_kb_qa",
+        route="kb_qa",
+        requested_mode="patent",
+        actual_mode="patent",
+        source_scope="kb",
+        timings={},
+        references=["CN123456789A"],
+        reference_objects=[_sample_reference_object()],
+        reference_links=[_sample_reference_link()],
+        original_links=[_sample_original_link()],
+        metadata={},
+        trace_id="req_123",
+        used_files=[],
+        file_selection={},
+        seq=3,
+        ts="2026-03-25T12:00:00Z",
+    )
+
+    payload = event.model_dump()
+    assert payload["references"] == ["CN123456789A"]
+    assert payload["reference_objects"][0]["canonical_patent_id"] == "CN123456789A"
+    assert payload["reference_links"][0]["type"] == "original_view"
+    assert payload["original_links"][0]["section"] == "claim"
+    assert payload["metadata"] == {}
+
+
 
 def test_authority_models_match_patent_contract():
     user_write = AuthorityUserWriteRequest(
         conversation_id=123,
         user_id=42,
         trace_id="req_123",
+        route="hybrid_qa",
+        source_scope="pdf+kb",
         idempotency_key="123:req_123:user",
         message={"role": "user", "content": "Explain the patent novelty."},
-        context_hints={"selected_file_ids": [], "last_turn_route_hint": "kb_qa"},
+        context_hints={
+            "selected_file_ids": [11],
+            "last_turn_route_hint": "hybrid_qa",
+            "mode_origin_requested_mode": "patent",
+            "mode_origin_execution_backend": "patentQA",
+            "compatibility_route": False,
+        },
     )
     snapshot_query = AuthorityContextSnapshotQuery(
         user_id=42,
         trace_id="req_123",
+        route="hybrid_qa",
+        source_scope="pdf+kb",
     )
     assistant_async = AuthorityAssistantAsyncRequest(
         conversation_id=123,
         user_id=42,
         trace_id="req_123",
+        route="hybrid_qa",
+        source_scope="pdf+kb",
         idempotency_key="123:req_123:assistant",
         final_event={
             "done_seen": True,
             "answer_text": "Patent answer",
             "steps": [],
-            "references": [],
-            "used_files": [],
+            "metadata": {
+                "mode_origin": {
+                    "requested_mode": "patent",
+                    "execution_backend": "patentQA",
+                    "compatibility_route": False,
+                }
+            },
+            "references": [{"source_type": "patent", "canonical_patent_id": "CN123456789A"}],
+            "reference_objects": [_sample_reference_object()],
+            "reference_links": [_sample_reference_link()],
+            "original_links": [_sample_original_link()],
+            "used_files": [{"file_id": 11, "file_type": "pdf"}],
             "timings": {},
         },
     )
 
     assert user_write.source_service == "patentQA"
-    assert user_write.route == "kb_qa"
+    assert user_write.route == "hybrid_qa"
+    assert user_write.source_scope == "pdf+kb"
+    assert user_write.context_hints.mode_origin_execution_backend == "patentQA"
     assert snapshot_query.actual_mode == "patent"
+    assert snapshot_query.source_scope == "pdf+kb"
     assert assistant_async.final_event.done_seen is True
+    assert assistant_async.route == "hybrid_qa"
+    assert assistant_async.source_scope == "pdf+kb"
+    assert assistant_async.final_event.metadata["mode_origin"]["compatibility_route"] is False
+    assert assistant_async.final_event.original_links[0]["section"] == "claim"
 
 from dataclasses import replace
 
 from server.errors import codes
 from server.errors.core import APIError
+from server.patent.executor import PatentExecutor
+from server.patent.models import PatentRetrievalPlan
+from server.patent.retrieval_models import PatentCatalogRecord, PatentClaim, PatentDescriptionSnippet
+from server.patent.retrieval_service import PatentRetrievalService
 from server.schemas.response_models import ErrorEvent
 from server.services.ask_service import AskService
-from server.patent.executor import PatentExecutor
 from server.runtime.request_context import clear_trace_id, set_trace_id
 from server_fastapi.app import create_app
 from server_fastapi.routers.ask import _build_streaming_response
@@ -279,6 +689,157 @@ class _FakePersistenceService:
         self.calls.append({"op": "abort", "trace_id": prepared_turn.get("trace_id"), "user_id": None})
 
 
+class _StageRuntime:
+    def __init__(self) -> None:
+        self.stage1_contexts: list[dict[str, object] | None] = []
+
+    def stage1_pre_answer_and_planning(self, user_question: str, conversation_context=None) -> dict[str, object]:
+        self.stage1_contexts.append(conversation_context)
+        return {
+            "deep_answer": f"draft:{user_question}",
+            "retrieval_claims": [
+                PatentRetrievalClaim(
+                    claim="compare replacement risk",
+                    keywords=["battery safety"],
+                    preferred_sections=["claims", "description"],
+                    filters={},
+                )
+            ],
+            "retrieval_plan": PatentRetrievalPlan(
+                question_type="comparison",
+                candidate_recall_queries=["battery safety"],
+            ),
+        }
+
+    def stage2_targeted_retrieval(self, retrieval_plan, *, user_question: str, should_cancel=None, active_stream_count=None) -> dict[str, object]:
+        return {
+            "references": ["CN115132975B"],
+            "reference_objects": [{"canonical_patent_id": "CN115132975B"}],
+            "reference_links": [],
+            "original_links": [],
+            "metadata": {"retrieval_backend": "vector_hybrid"},
+        }
+
+    def _extract_patent_ids_from_results(self, retrieval_results: dict[str, object]) -> list[str]:
+        return list(retrieval_results.get("references") or [])
+
+    def stage25_patent_evidence_expansion(self, *, retrieval_results: dict[str, object], user_question: str, source_ids: list[str]) -> dict[str, object]:
+        return {
+            "skipped": True,
+            "skip_reason": "patent_mode_no_md_expansion",
+            "retrieval_results": retrieval_results,
+        }
+
+    def stage3_load_patent_evidence(self, *, retrieval_results: dict[str, object], source_ids: list[str], should_cancel=None) -> dict[str, object]:
+        return {
+            "source_ids": list(source_ids),
+            "evidence_by_patent_id": {
+                "CN115132975B": [
+                    {
+                        "kind": "patent_metadata",
+                        "title": "一种锂离子电池及动力车辆",
+                        "abstract_text": "通过 LMFP/LFP/三元复配改善充电安全与低 SOC 放电功率。",
+                        "publication_number": "CN115132975B",
+                    },
+                    {
+                        "kind": "matched_snippet",
+                        "section_type": "claim",
+                        "section_label": "Claim 1",
+                        "text": "一种锂离子电池，其正极活性材料包括 LMFP、LFP 与三元材料。",
+                        "anchor": {"claim_number": 1, "paragraph_id": None},
+                        "scores": {"chunk_score": 0.91},
+                    },
+                ]
+            },
+        }
+
+    def stage4_synthesis_with_patent_evidence(
+        self,
+        *,
+        user_question: str,
+        deep_answer: str,
+        patent_evidence_bundle: dict[str, object],
+        retrieval_results: dict[str, object] | None = None,
+        should_cancel=None,
+        conversation_context=None,
+    ) -> dict[str, object]:
+        return {
+            "success": True,
+            "final_answer": "staged ask answer",
+            "references": ["CN115132975B"],
+            "reference_objects": [{"canonical_patent_id": "CN115132975B"}],
+            "reference_links": [],
+            "original_links": [],
+            "metadata": {"retrieval_backend": "vector_hybrid"},
+        }
+
+
+class _Stage1OnlyRuntime:
+    def __init__(self) -> None:
+        self.stage1_contexts: list[dict[str, object] | None] = []
+
+    def stage1_pre_answer_and_planning(self, user_question: str, conversation_context=None) -> dict[str, object]:
+        self.stage1_contexts.append(conversation_context)
+        return {
+            "deep_answer": f"stage1 only:{user_question}",
+            "retrieval_claims": [],
+            "retrieval_plan": PatentRetrievalPlan(),
+            "fallback": "json_parse_failed",
+        }
+
+    def stage2_targeted_retrieval(self, retrieval_plan, *, user_question: str, should_cancel=None, active_stream_count=None) -> dict[str, object]:
+        raise AssertionError("stage2 should not run when stage1 produced no retrieval claims")
+
+    def _extract_patent_ids_from_results(self, retrieval_results: dict[str, object]) -> list[str]:
+        raise AssertionError("source extraction should not run when stage1 produced no retrieval claims")
+
+    def stage25_patent_evidence_expansion(self, *, retrieval_results: dict[str, object], user_question: str, source_ids: list[str]) -> dict[str, object]:
+        raise AssertionError("stage25 should not run when stage1 produced no retrieval claims")
+
+    def stage3_load_patent_evidence(self, *, retrieval_results: dict[str, object], source_ids: list[str], should_cancel=None) -> dict[str, object]:
+        raise AssertionError("stage3 should not run when stage1 produced no retrieval claims")
+
+    def stage4_synthesis_with_patent_evidence(
+        self,
+        *,
+        user_question: str,
+        deep_answer: str,
+        patent_evidence_bundle: dict[str, object],
+        retrieval_results: dict[str, object] | None = None,
+        should_cancel=None,
+        conversation_context=None,
+    ) -> dict[str, object]:
+        raise AssertionError("stage4 should not run when stage1 produced no retrieval claims")
+
+
+
+def _make_retrieval_service() -> PatentRetrievalService:
+    return PatentRetrievalService(
+        identity_registry={"CN123456789A": "CN123456789A"},
+        catalog_records=[
+            PatentCatalogRecord(
+                canonical_patent_id="CN123456789A",
+                publication_number="CN123456789A",
+                application_number="CN202410001234X",
+                title="Battery thermal management system for electric vehicles",
+                abstract_text="A thermal control system for electric vehicle battery packs.",
+                applicant_names=["Example Battery Co"],
+                inventor_names=["Alice Inventor"],
+                ipc_codes=["H01M10/613"],
+                cpc_codes=["H01M10/613"],
+                claims=[PatentClaim(claim_number=1, text="A battery thermal management system configured for electric vehicles.")],
+                description_snippets=[PatentDescriptionSnippet(paragraph_id="p-001", text="Battery temperature control.")],
+                country="CN",
+                kind_code="A",
+                publication_date="2024-01-01",
+                provider="patent_source_x",
+                original_available=True,
+            )
+        ],
+        retrieval_version="retrieval-v1",
+        catalog_index_version="catalog-v1",
+    )
+
 
 def test_ask_service_sync_payload_matches_contract():
     service = AskService(
@@ -290,9 +851,11 @@ def test_ask_service_sync_payload_matches_contract():
     payload = service.sync_ask(parse_patent_request(_base_payload()), user_id=42)
 
     validated = PatentSyncSuccess.model_validate(payload)
-    assert validated.data.final_answer == "Patent Phase 1 stub answer: Explain the patent novelty."
-    assert validated.data.metadata.requested_mode == "patent"
-    assert validated.data.metadata.route == "kb_qa"
+    assert validated.final_answer == "Patent Phase 1 stub answer: Explain the patent novelty."
+    assert validated.requested_mode == "patent"
+    assert validated.route == "kb_qa"
+    assert validated.query_mode == "patent_kb_qa"
+    assert validated.metadata == {}
     assert validated.trace_id == "req_123"
 
 
@@ -307,7 +870,11 @@ def test_stream_done_is_emitted_only_after_accept_success():
     success_events = list(success_service.stream_ask(request, user_id=42))
 
     assert success_events[0]["type"] == "metadata"
+    assert success_events[0]["query_mode"] == "patent_kb_qa"
+    assert success_events[0]["metadata"] == {}
     assert success_events[-1]["type"] == "done"
+    assert success_events[-1]["query_mode"] == "patent_kb_qa"
+    assert success_events[-1]["metadata"] == {}
     assert all(event["seq"] == index for index, event in enumerate(success_events))
 
     failure_service = AskService(
@@ -321,6 +888,129 @@ def test_stream_done_is_emitted_only_after_accept_success():
     assert failure_events[-1]["type"] == "error"
     ErrorEvent.model_validate(failure_events[-1])
     assert all(event["type"] != "done" for event in failure_events)
+
+
+def test_stream_ask_with_staged_runtime_preserves_shell_contract_and_normalizes_context():
+    runtime = _StageRuntime()
+    service = AskService(
+        patent_executor=PatentExecutor(runtime=runtime),
+        persistence_service=_FakePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    events = list(service.stream_ask(parse_patent_request(_base_payload()), user_id=42))
+
+    assert events[0]["type"] == "metadata"
+    assert events[1]["type"] == "step"
+    assert events[-1]["type"] == "done"
+    assert events[-1]["final_answer"] == "staged ask answer"
+    assert events[-1]["references"] == ["CN115132975B"]
+    assert runtime.stage1_contexts == [
+        {
+            "recent_turns_for_llm": [],
+            "summary_for_llm": {},
+            "conversation_state": {},
+            "source_selection": {"source_scope": "kb", "selected_file_ids": []},
+        }
+    ]
+
+
+def test_stream_ask_emits_stage_progress_before_later_stage_completion():
+    stage2_entered = threading.Event()
+    allow_stage2_finish = threading.Event()
+
+    class _SlowStageRuntime(_StageRuntime):
+        def stage2_targeted_retrieval(self, retrieval_plan, *, user_question: str, should_cancel=None, active_stream_count=None) -> dict[str, object]:
+            stage2_entered.set()
+            assert allow_stage2_finish.wait(timeout=2), "stage2 finish gate was not released"
+            return super().stage2_targeted_retrieval(
+                retrieval_plan,
+                user_question=user_question,
+                should_cancel=should_cancel,
+                active_stream_count=active_stream_count,
+            )
+
+    service = AskService(
+        patent_executor=PatentExecutor(runtime=_SlowStageRuntime()),
+        persistence_service=_FakePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    stream = service.stream_ask(parse_patent_request(_base_payload()), user_id=42)
+    assert next(stream)["type"] == "metadata"
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(next, stream)
+        progress_event = future.result(timeout=0.5)
+        assert progress_event["type"] == "step"
+        assert progress_event["step"] == "stage1"
+        assert progress_event["status"] == "processing"
+        allow_stage2_finish.set()
+
+    remaining_events = list(stream)
+    assert stage2_entered.is_set() is True
+    assert any(event["type"] == "step" and event.get("step") == "stage4" for event in remaining_events)
+    assert remaining_events[-1]["type"] == "done"
+
+
+def test_stream_ask_emits_streaming_content_before_done_when_stage4_streams():
+    class _StreamingStageRuntime(_StageRuntime):
+        def stage4_synthesis_with_patent_evidence(
+            self,
+            *,
+            user_question: str,
+            deep_answer: str,
+            patent_evidence_bundle: dict[str, object],
+            retrieval_results: dict[str, object] | None = None,
+            should_cancel=None,
+            content_callback=None,
+            conversation_context=None,
+        ) -> dict[str, object]:
+            if callable(content_callback):
+                content_callback("streamed ")
+                content_callback("answer")
+            return {
+                "success": True,
+                "final_answer": "streamed answer",
+                "references": ["CN115132975B"],
+                "reference_objects": [{"canonical_patent_id": "CN115132975B"}],
+                "reference_links": [],
+                "original_links": [],
+                "metadata": {"retrieval_backend": "vector_hybrid"},
+            }
+
+    service = AskService(
+        patent_executor=PatentExecutor(runtime=_StreamingStageRuntime()),
+        persistence_service=_FakePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    events = list(service.stream_ask(parse_patent_request(_base_payload()), user_id=42))
+
+    content_events = [event for event in events if event["type"] == "content"]
+    assert [event["content"] for event in content_events] == ["streamed ", "answer"]
+    assert events.index(content_events[0]) < len(events) - 1
+    assert events[-1]["type"] == "done", events
+    assert events[-1]["final_answer"] == "streamed answer"
+
+
+def test_stream_ask_short_circuits_after_stage1_when_no_retrieval_claims_are_available():
+    runtime = _Stage1OnlyRuntime()
+    service = AskService(
+        patent_executor=PatentExecutor(runtime=runtime),
+        persistence_service=_FakePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    events = list(service.stream_ask(parse_patent_request(_base_payload()), user_id=42))
+
+    assert [event["type"] for event in events] == ["metadata", "step", "content", "done"]
+    assert events[1]["step"] == "stage1"
+    assert events[1]["status"] == "processing"
+    assert events[1]["message"] == "Stage 1 planning in progress."
+    assert events[2]["content"] == "stage1 only:Explain the patent novelty."
+    assert events[-1]["final_answer"] == "stage1 only:Explain the patent novelty."
+    assert events[-1]["metadata"]["stage1_short_circuit"] is True
 
 
 class _SplitPhasePersistenceService:
@@ -427,6 +1117,343 @@ def test_stream_refuses_done_when_assistant_accept_signal_is_missing():
     assert all(event["type"] != "done" for event in events)
 
 
+def test_sync_ask_rejects_failed_execution_payload():
+    class _FailedExecutor:
+        def execute(self, *, request, context):
+            return {
+                "answer_text": "",
+                "route": "kb_qa",
+                "metadata": {"success": False, "failed_stage": "stage4"},
+                "steps": [{"step": "stage4", "title": "Stage 4", "message": "Stage 4 synthesis failed.", "status": "failed"}],
+                "timings": {},
+            }
+
+    persistence = _SplitPhasePersistenceService()
+    service = AskService(
+        patent_executor=_FailedExecutor(),
+        persistence_service=persistence,
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    with pytest.raises(APIError) as exc_info:
+        service.sync_ask(parse_patent_request(_base_payload()), user_id=42)
+
+    assert exc_info.value.code == codes.INTERNAL_ERROR
+    assert [call["op"] for call in persistence.calls] == ["prepare"]
+    assert len(persistence.aborted) == 1
+
+
+def test_stream_rejects_failed_execution_payload_with_terminal_error():
+    class _FailedExecutor:
+        def execute(self, *, request, context):
+            return {
+                "answer_text": "",
+                "route": "kb_qa",
+                "metadata": {"success": False, "failed_stage": "stage4"},
+                "steps": [{"step": "stage4", "title": "Stage 4", "message": "Stage 4 synthesis failed.", "status": "failed"}],
+                "timings": {},
+            }
+
+    persistence = _SplitPhasePersistenceService()
+    service = AskService(
+        patent_executor=_FailedExecutor(),
+        persistence_service=persistence,
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    events = list(service.stream_ask(parse_patent_request(_base_payload()), user_id=42))
+
+    assert [event["type"] for event in events] == ["metadata", "error"]
+    assert events[-1]["error"] == "internal_error"
+    assert [call["op"] for call in persistence.calls] == ["prepare"]
+    assert len(persistence.aborted) == 1
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("references", "CN123456789A"),
+        ("reference_objects", {"canonical_patent_id": "CN123456789A"}),
+        ("reference_links", {"viewer_uri": "/api/patent/original/CN123456789A"}),
+        ("original_links", {"viewer_uri": "/api/patent/original/CN123456789A"}),
+        ("used_files", {"file_id": 1}),
+    ],
+)
+def test_sync_ask_rejects_non_list_result_containers(field_name, field_value):
+    class _BrokenExecutor:
+        def execute(self, *, request, context):
+            return {
+                "answer_text": "Patent answer",
+                "route": "kb_qa",
+                field_name: field_value,
+                "timings": {},
+            }
+
+    service = AskService(
+        patent_executor=_BrokenExecutor(),
+        persistence_service=_SplitPhasePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    with pytest.raises(APIError) as exc_info:
+        service.sync_ask(parse_patent_request(_base_payload()), user_id=42)
+
+    assert exc_info.value.code == codes.INTERNAL_ERROR
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("references", "CN123456789A"),
+        ("reference_objects", {"canonical_patent_id": "CN123456789A"}),
+        ("reference_links", {"viewer_uri": "/api/patent/original/CN123456789A"}),
+        ("original_links", {"viewer_uri": "/api/patent/original/CN123456789A"}),
+        ("used_files", {"file_id": 1}),
+    ],
+)
+def test_stream_rejects_non_list_result_containers(field_name, field_value):
+    class _BrokenExecutor:
+        def execute(self, *, request, context):
+            return {
+                "answer_text": "Patent answer",
+                "route": "kb_qa",
+                field_name: field_value,
+                "timings": {},
+            }
+
+    service = AskService(
+        patent_executor=_BrokenExecutor(),
+        persistence_service=_SplitPhasePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    events = list(service.stream_ask(parse_patent_request(_base_payload()), user_id=42))
+
+    assert events[0]["type"] == "metadata"
+    assert events[-1]["type"] == "error"
+    assert all(event["type"] != "done" for event in events)
+
+
+def test_sync_ask_normalizes_legacy_query_mode_to_patent_kb_qa():
+    class _LegacyExecutor:
+        def execute(self, *, request, context):
+            return {
+                "answer_text": "Patent answer",
+                "route": "kb_qa",
+                "query_mode": "patent",
+                "timings": {},
+            }
+
+    service = AskService(
+        patent_executor=_LegacyExecutor(),
+        persistence_service=_SplitPhasePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    payload = service.sync_ask(parse_patent_request(_base_payload()), user_id=42)
+
+    assert payload["query_mode"] == "patent_kb_qa"
+
+
+def test_stream_done_normalizes_legacy_query_mode_to_patent_kb_qa():
+    class _LegacyExecutor:
+        def execute(self, *, request, context):
+            return {
+                "answer_text": "Patent answer",
+                "route": "kb_qa",
+                "query_mode": "patent",
+                "timings": {},
+            }
+
+    service = AskService(
+        patent_executor=_LegacyExecutor(),
+        persistence_service=_SplitPhasePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    events = list(service.stream_ask(parse_patent_request(_base_payload()), user_id=42))
+
+    assert events[0]["type"] == "metadata"
+    assert events[0]["query_mode"] == "patent_kb_qa"
+    assert events[-1]["type"] == "done", events
+    assert events[-1]["query_mode"] == "patent_kb_qa"
+
+
+def test_sync_ask_normalizes_legacy_query_mode_to_route_specific_file_mode():
+    class _LegacyFileExecutor:
+        def execute(self, *, request, context):
+            return {
+                "answer_text": "Patent file answer",
+                "route": "hybrid_qa",
+                "source_scope": "pdf+kb",
+                "query_mode": "patent",
+                "used_files": [{"file_id": 11, "file_type": "pdf"}],
+                "file_selection": {"strategy": "explicit_selection", "selected_file_ids": [11], "source_scope": "pdf+kb"},
+                "timings": {},
+            }
+
+    service = AskService(
+        patent_executor=_LegacyFileExecutor(),
+        persistence_service=_SplitPhasePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    payload = service.sync_ask(parse_patent_request(_file_payload()), user_id=42)
+
+    assert payload["query_mode"] == "patent_hybrid_qa"
+    assert payload["route"] == "hybrid_qa"
+    assert payload["source_scope"] == "pdf+kb"
+
+
+def test_stream_metadata_and_done_preserve_file_aware_route_metadata():
+    class _FileExecutor:
+        def execute(self, *, request, context):
+            return {
+                "answer_text": "Patent file answer",
+                "route": "hybrid_qa",
+                "source_scope": "pdf+kb",
+                "query_mode": "patent",
+                "used_files": [{"file_id": 11, "file_type": "pdf"}],
+                "file_selection": {"strategy": "explicit_selection", "selected_file_ids": [11], "source_scope": "pdf+kb"},
+                "timings": {},
+            }
+
+    service = AskService(
+        patent_executor=_FileExecutor(),
+        persistence_service=_SplitPhasePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    events = list(service.stream_ask(parse_patent_request(_file_payload()), user_id=42))
+
+    assert events[0]["type"] == "metadata"
+    assert events[0]["route"] == "hybrid_qa"
+    assert events[0]["source_scope"] == "pdf+kb"
+    assert events[0]["query_mode"] == "patent_hybrid_qa"
+    assert events[-1]["type"] == "done"
+    assert events[-1]["route"] == "hybrid_qa"
+    assert events[-1]["source_scope"] == "pdf+kb"
+    assert events[-1]["query_mode"] == "patent_hybrid_qa"
+
+
+def test_sync_ask_file_kb_merge_keeps_shell_reference_contract():
+    class _EvidencePdfService:
+        def execute(self, *, contract, include_kb: bool, progress_callback=None):
+            return {
+                "answer_text": "file contribution",
+                "route": contract.route,
+                "query_mode": "patent_hybrid_qa",
+                "source_scope": contract.source_scope,
+                "references": ["FILE-REF-1"],
+                "reference_objects": [{"source_type": "pdf", "file_id": 11}],
+                "reference_links": [{"type": "pdf_view", "file_id": 11}],
+                "original_links": [{"type": "pdf_original", "file_id": 11}],
+                "used_files": [item.as_payload() for item in contract.selected_execution_files],
+                "file_selection": dict(contract.file_selection),
+                "timings": {},
+            }
+
+    class _EvidenceKbService:
+        def run(self, *, request, runtime=None, conversation_context=None):
+            return {
+                "answer_text": "kb contribution",
+                "route": request.route,
+                "query_mode": "patent_hybrid_qa",
+                "source_scope": request.source_scope,
+                "references": ["CN123456789A"],
+                "reference_objects": [{"canonical_patent_id": "CN123456789A"}],
+                "reference_links": [{"type": "original_view", "canonical_patent_id": "CN123456789A"}],
+                "original_links": [{"type": "original_view", "canonical_patent_id": "CN123456789A"}],
+                "timings": {},
+            }
+
+    service = AskService(
+        patent_executor=PatentExecutor(
+            kb_service=_EvidenceKbService(),
+            pdf_service=_EvidencePdfService(),
+        ),
+        persistence_service=_SplitPhasePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    payload = service.sync_ask(parse_patent_request(_file_payload()), user_id=42)
+
+    assert payload["references"] == ["CN123456789A"]
+    assert payload["reference_objects"] == [{"canonical_patent_id": "CN123456789A"}]
+    assert payload["reference_links"] == [
+        {"type": "pdf_view", "file_id": 11},
+        {"type": "original_view", "canonical_patent_id": "CN123456789A"},
+    ]
+
+
+def test_sync_ask_derives_references_from_reference_objects_when_missing():
+    class _ReferenceObjectExecutor:
+        def execute(self, *, request, context):
+            return {
+                "answer_text": "Patent answer",
+                "route": "kb_qa",
+                "reference_objects": [_sample_reference_object()],
+                "timings": {},
+            }
+
+    service = AskService(
+        patent_executor=_ReferenceObjectExecutor(),
+        persistence_service=_SplitPhasePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    payload = service.sync_ask(parse_patent_request(_base_payload()), user_id=42)
+
+    assert payload["references"] == ["CN123456789A"]
+    assert payload["reference_objects"][0]["canonical_patent_id"] == "CN123456789A"
+
+
+def test_stream_done_derives_references_from_reference_objects_when_missing():
+    class _ReferenceObjectExecutor:
+        def execute(self, *, request, context):
+            return {
+                "answer_text": "Patent answer",
+                "route": "kb_qa",
+                "reference_objects": [_sample_reference_object()],
+                "timings": {},
+            }
+
+    service = AskService(
+        patent_executor=_ReferenceObjectExecutor(),
+        persistence_service=_SplitPhasePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    events = list(service.stream_ask(parse_patent_request(_base_payload()), user_id=42))
+
+    assert events[-1]["type"] == "done"
+    assert events[-1]["references"] == ["CN123456789A"]
+    assert events[-1]["reference_objects"][0]["canonical_patent_id"] == "CN123456789A"
+
+
+def test_sync_ask_rejects_mismatched_references_and_reference_objects():
+    class _BrokenExecutor:
+        def execute(self, *, request, context):
+            return {
+                "answer_text": "Patent answer",
+                "route": "kb_qa",
+                "references": ["US20240001234A1"],
+                "reference_objects": [_sample_reference_object()],
+                "timings": {},
+            }
+
+    service = AskService(
+        patent_executor=_BrokenExecutor(),
+        persistence_service=_SplitPhasePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    with pytest.raises(APIError) as exc_info:
+        service.sync_ask(parse_patent_request(_base_payload()), user_id=42)
+
+    assert exc_info.value.code == codes.INTERNAL_ERROR
+
+
 def test_sync_ask_maps_result_builder_validation_errors_to_api_error():
     class _BrokenExecutor:
         def execute(self, *, request, context):
@@ -472,6 +1499,44 @@ def test_stream_maps_result_builder_validation_errors_to_terminal_error():
     assert events[0]["type"] == "metadata"
     assert events[-1]["type"] == "error"
     assert all(event["type"] != "done" for event in events)
+
+
+def test_sync_ask_maps_timeout_to_retriable_504():
+    class _TimeoutExecutor:
+        def execute(self, *, request, context):
+            raise TimeoutError("singleflight wait timed out for stage1")
+
+    service = AskService(
+        patent_executor=_TimeoutExecutor(),
+        persistence_service=_SplitPhasePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    with pytest.raises(APIError) as exc_info:
+        service.sync_ask(parse_patent_request(_base_payload()), user_id=42)
+
+    assert exc_info.value.status_code == 504
+    assert exc_info.value.error == "timeout"
+    assert exc_info.value.retriable is True
+
+
+def test_stream_maps_timeout_to_terminal_timeout_error():
+    class _TimeoutExecutor:
+        def execute(self, *, request, context):
+            raise TimeoutError("singleflight wait timed out for stage1")
+
+    service = AskService(
+        patent_executor=_TimeoutExecutor(),
+        persistence_service=_SplitPhasePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    events = list(service.stream_ask(parse_patent_request(_base_payload()), user_id=42))
+
+    assert events[-1]["type"] == "error"
+    assert events[-1]["error"] == "timeout"
+    assert events[-1]["code"] == codes.INTERNAL_ERROR
+    assert events[-1]["message"] == "patent execution timed out"
 
 
 
@@ -561,38 +1626,52 @@ class _RouteFakeAskService:
         self.stream_calls = []
 
     def sync_ask(self, request, *, user_id):
-        self.sync_calls.append({"trace_id": request.trace_id, "user_id": user_id})
+        self.sync_calls.append(
+            {
+                "trace_id": request.trace_id,
+                "user_id": user_id,
+                "route": request.route,
+                "source_scope": request.source_scope,
+            }
+        )
         return {
             "success": True,
-            "data": {
-                "final_answer": "route stub",
-                "timings": {},
-                "metadata": {
-                    "requested_mode": "patent",
-                    "actual_mode": "patent",
-                    "route": "kb_qa",
-                    "mode": "patent",
-                    "query_mode": "patent",
-                    "conversation_id": request.conversation_id,
-                },
-                "references": [],
-                "pdf_links": [],
-                "reference_links": [],
-                "trace_id": request.trace_id,
-            },
+            "final_answer": "route stub",
+            "query_mode": get_patent_mode_profile(request.route).query_mode,
+            "route": request.route,
+            "requested_mode": "patent",
+            "actual_mode": "patent",
+            "source_scope": request.source_scope,
+            "timings": {},
+            "metadata": {"conversation_id": request.conversation_id},
+            "references": [],
+            "reference_objects": [],
+            "reference_links": [],
+            "original_links": [],
+            "used_files": list(request.used_files),
+            "file_selection": dict(request.file_selection),
             "trace_id": request.trace_id,
         }
 
     def stream_ask(self, request, *, user_id):
-        self.stream_calls.append({"trace_id": request.trace_id, "user_id": user_id})
+        self.stream_calls.append(
+            {
+                "trace_id": request.trace_id,
+                "user_id": user_id,
+                "route": request.route,
+                "source_scope": request.source_scope,
+            }
+        )
         return iter(
             [
                 {
                     "type": "metadata",
                     "requested_mode": "patent",
                     "actual_mode": "patent",
-                    "route": "kb_qa",
-                    "query_mode": "patent",
+                    "route": request.route,
+                    "query_mode": get_patent_mode_profile(request.route).query_mode,
+                    "source_scope": request.source_scope,
+                    "metadata": {},
                     "trace_id": request.trace_id,
                     "seq": 0,
                     "ts": "2026-03-26T00:00:00Z",
@@ -600,13 +1679,20 @@ class _RouteFakeAskService:
                 {
                     "type": "done",
                     "final_answer": "route stub",
+                    "query_mode": get_patent_mode_profile(request.route).query_mode,
+                    "route": request.route,
+                    "requested_mode": "patent",
+                    "actual_mode": "patent",
+                    "source_scope": request.source_scope,
                     "timings": {},
                     "references": [],
+                    "reference_objects": [],
                     "trace_id": request.trace_id,
-                    "used_files": [],
+                    "used_files": list(request.used_files),
                     "reference_links": [],
-                    "pdf_links": [],
-                    "file_selection": {},
+                    "original_links": [],
+                    "metadata": {},
+                    "file_selection": dict(request.file_selection),
                     "seq": 1,
                     "ts": "2026-03-26T00:00:00Z",
                 },
@@ -631,7 +1717,9 @@ class _RaisingStreamAskService:
                     "requested_mode": "patent",
                     "actual_mode": "patent",
                     "route": "kb_qa",
-                    "query_mode": "patent",
+                    "query_mode": "patent_kb_qa",
+                    "source_scope": "kb",
+                    "metadata": {},
                     "trace_id": self.metadata_trace_id or request.trace_id,
                     "seq": 0,
                     "ts": "2026-03-26T00:00:00Z",
@@ -653,7 +1741,9 @@ class _ResolvedTraceStreamAskService:
                     "requested_mode": "patent",
                     "actual_mode": "patent",
                     "route": "kb_qa",
-                    "query_mode": "patent",
+                    "query_mode": "patent_kb_qa",
+                    "source_scope": "kb",
+                    "metadata": {},
                     "trace_id": "req_resolved",
                     "seq": 0,
                     "ts": "2026-03-26T00:00:00Z",
@@ -667,11 +1757,18 @@ class _ResolvedTraceStreamAskService:
                 {
                     "type": "done",
                     "final_answer": "route stub",
+                    "query_mode": "patent_kb_qa",
+                    "route": "kb_qa",
+                    "requested_mode": "patent",
+                    "actual_mode": "patent",
+                    "source_scope": "kb",
                     "timings": {},
                     "references": [],
+                    "reference_objects": [],
                     "used_files": [],
                     "reference_links": [],
-                    "pdf_links": [],
+                    "original_links": [],
+                    "metadata": {},
                     "file_selection": {},
                     "seq": 2,
                     "ts": "2026-03-26T00:00:00Z",
@@ -686,7 +1783,7 @@ def test_patent_route_aliases_all_dispatch_to_patent_ask():
     fake = _RouteFakeAskService()
     app.state.ask_service = fake
     payload = _base_payload()
-    payload["conversation_id"] = "opaque-ephemeral"
+    payload["conversation_id"] = None
 
     sync_paths = ["/api/ask", "/api/v1/ask", "/api/patent/ask", "/api/v1/patent/ask"]
     stream_paths = ["/api/ask_stream", "/api/v1/ask_stream", "/api/patent/ask_stream", "/api/v1/patent/ask_stream"]
@@ -695,7 +1792,7 @@ def test_patent_route_aliases_all_dispatch_to_patent_ask():
         for route in sync_paths:
             response = client.post(route, json=payload)
             assert response.status_code == 200
-            assert response.json()["data"]["final_answer"] == "route stub"
+            assert response.json()["final_answer"] == "route stub"
         for route in stream_paths:
             response = client.post(route, json=payload)
             assert response.status_code == 200
@@ -708,10 +1805,20 @@ def test_patent_route_aliases_all_dispatch_to_patent_ask():
     assert all(call["user_id"] is None for call in fake.sync_calls + fake.stream_calls)
 
 
+def test_create_app_bootstraps_patent_executor_with_staged_runtime(monkeypatch):
+    runtime = _StageRuntime()
+    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda: runtime)
+
+    app = create_app()
+
+    assert app.state.patent_runtime is runtime
+    assert app.state.ask_service._patent_executor._runtime is runtime
+
+
 def test_ephemeral_sync_ask_returns_success_without_authority_calls():
     app = create_app()
     payload = _base_payload()
-    payload["conversation_id"] = "opaque-ephemeral"
+    payload["conversation_id"] = None
     payload["kb_enabled"] = True
 
     with TestClient(app) as client:
@@ -720,7 +1827,84 @@ def test_ephemeral_sync_ask_returns_success_without_authority_calls():
     assert response.status_code == 200
     body = response.json()
     assert body["success"] is True
-    assert body["data"]["final_answer"] == "Patent Phase 1 stub answer: Explain the patent novelty."
+    assert body["final_answer"]
+    assert "Patent Phase 1 stub answer" not in body["final_answer"]
+    assert body["requested_mode"] == "patent"
+    assert body["actual_mode"] == "patent"
+
+
+def test_ephemeral_sync_ask_returns_service_not_ready_when_runtime_bootstrap_missing(monkeypatch):
+    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda: None)
+    app = create_app()
+    payload = _base_payload()
+    payload["conversation_id"] = None
+    payload["kb_enabled"] = True
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask", json=payload)
+
+    assert response.status_code == 503
+    assert response.json()["code"] == codes.SERVICE_NOT_READY
+
+
+def test_ephemeral_file_only_routes_still_work_when_runtime_bootstrap_missing(monkeypatch):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda: None)
+    app = create_app()
+
+    with TestClient(app) as client:
+        pdf_response = client.post("/api/ask", json=_pdf_payload())
+        table_response = client.post("/api/ask", json=_tabular_payload())
+        hybrid_response = client.post("/api/ask", json=_hybrid_payload("pdf+table"))
+
+    assert pdf_response.status_code == 200
+    assert table_response.status_code == 200
+    assert hybrid_response.status_code == 200
+
+
+def test_http_sync_ask_with_real_retrieval_service_preserves_viewer_uri_contract():
+    app = create_app()
+    payload = _base_payload()
+    payload["conversation_id"] = None
+    payload["question"] = "Please summarize CN123456789A"
+    app.state.ask_service = AskService(
+        patent_executor=PatentExecutor(retrieval_service=_make_retrieval_service()),
+        persistence_service=_FakePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert body["references"] == ["CN123456789A"]
+    assert body["reference_objects"][0]["viewer_uri"] == "/api/patent/original/CN123456789A?section=claim&claim_number=1&format=html"
+    assert body["original_links"][0]["viewer_uri"] == "/api/patent/original/CN123456789A?section=claim&claim_number=1&format=html"
+
+
+def test_http_stream_ask_with_real_retrieval_service_preserves_viewer_uri_contract():
+    app = create_app()
+    payload = _base_payload()
+    payload["conversation_id"] = None
+    payload["question"] = "Please summarize CN123456789A"
+    app.state.ask_service = AskService(
+        patent_executor=PatentExecutor(retrieval_service=_make_retrieval_service()),
+        persistence_service=_FakePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask_stream", json=payload)
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    assert events[0]["type"] == "metadata"
+    assert events[-1]["type"] == "done"
+    assert events[-1]["references"] == ["CN123456789A"]
+    assert events[-1]["reference_objects"][0]["viewer_uri"] == "/api/patent/original/CN123456789A?section=claim&claim_number=1&format=html"
+    assert events[-1]["original_links"][0]["viewer_uri"] == "/api/patent/original/CN123456789A?section=claim&claim_number=1&format=html"
 
 
 def test_durable_stream_busy_conversation_returns_busy_error(monkeypatch):
@@ -755,6 +1939,406 @@ def test_durable_stream_busy_conversation_returns_busy_error(monkeypatch):
     assert events[-1]["type"] == "error"
     assert events[-1]["code"] == codes.PATENT_BUSY
     assert all(event["type"] != "done" for event in events)
+
+
+def test_ephemeral_file_sync_request_dispatches_by_default_after_rollout_open(monkeypatch):
+    monkeypatch.delenv("PATENT_FILE_ROUTES_ENABLED", raising=False)
+    app = create_app()
+    fake = _RouteFakeAskService()
+    app.state.ask_service = fake
+    payload = _file_payload()
+    payload["conversation_id"] = None
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["route"] == "hybrid_qa"
+    assert fake.sync_calls == [
+        {
+            "trace_id": "req_123",
+            "user_id": None,
+            "route": "hybrid_qa",
+            "source_scope": "pdf+kb",
+        }
+    ]
+
+
+def test_ephemeral_file_sync_request_is_blocked_when_patent_file_route_gate_is_off(monkeypatch):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "false")
+    app = create_app()
+    fake = _RouteFakeAskService()
+    app.state.ask_service = fake
+    payload = _file_payload()
+    payload["conversation_id"] = None
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask", json=payload)
+
+    assert response.status_code == 503
+    assert response.json()["code"] == codes.PATENT_FILE_ROUTE_DISABLED
+    assert response.json()["retriable"] is False
+    assert fake.sync_calls == []
+
+
+def test_ephemeral_file_sync_request_dispatches_when_patent_file_route_gate_is_enabled(monkeypatch):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    fake = _RouteFakeAskService()
+    app.state.ask_service = fake
+    payload = _file_payload()
+    payload["conversation_id"] = None
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["route"] == "hybrid_qa"
+    assert body["source_scope"] == "pdf+kb"
+    assert body["query_mode"] == "patent_hybrid_qa"
+    assert fake.sync_calls == [
+        {
+            "trace_id": "req_123",
+            "user_id": None,
+            "route": "hybrid_qa",
+            "source_scope": "pdf+kb",
+        }
+    ]
+
+
+def test_durable_file_stream_request_dispatches_when_patent_file_route_gate_is_enabled(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", TEST_JWT_SECRET)
+    monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_REDIS_ENABLED", "true")
+    monkeypatch.setenv("PATENT_DURABLE_AUTHORITY_ENABLED", "true")
+    monkeypatch.setenv("PATENT_AUTHORITY_INTERNAL_TOKEN", "secret-token")
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    app.state.component_status["redis"]["ready"] = True
+    app.state.component_status["authority"]["ready"] = True
+    fake = _RouteFakeAskService()
+    app.state.ask_service = fake
+    token = _make_auth_token(42)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/ask_stream",
+            json=_file_payload(),
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    assert events[0]["type"] == "metadata"
+    assert events[0]["route"] == "hybrid_qa"
+    assert events[0]["source_scope"] == "pdf+kb"
+
+
+def test_durable_file_only_request_skips_runtime_readiness_when_runtime_bootstrap_missing(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", TEST_JWT_SECRET)
+    monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_REDIS_ENABLED", "true")
+    monkeypatch.setenv("PATENT_DURABLE_AUTHORITY_ENABLED", "true")
+    monkeypatch.setenv("PATENT_AUTHORITY_INTERNAL_TOKEN", "secret-token")
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda: None)
+    app = create_app()
+    app.state.component_status["redis"]["ready"] = True
+    app.state.component_status["authority"]["ready"] = True
+    fake = _RouteFakeAskService()
+    app.state.ask_service = fake
+    token = _make_auth_token(42)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/ask",
+            json=_pdf_payload() | {"conversation_id": "123"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert fake.sync_calls == [
+        {
+            "trace_id": "req_123",
+            "user_id": 42,
+            "route": "pdf_qa",
+            "source_scope": "pdf",
+        }
+    ]
+
+
+def test_http_sync_pdf_route_uses_real_patent_pdf_handler_when_gate_is_enabled(monkeypatch):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask", json=_pdf_payload())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["route"] == "pdf_qa"
+    assert body["source_scope"] == "pdf"
+    assert body["query_mode"] == "patent_pdf_qa"
+    assert body["final_answer"]
+    assert body["used_files"] == [{"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"}]
+    assert body["file_selection"] == {"strategy": "explicit_selection", "selected_file_ids": [11], "source_scope": "pdf"}
+
+
+def test_http_sync_pdf_route_summarizes_readable_local_pdf_instead_of_stub(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    pdf_path = tmp_path / "spec.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    app.state.ask_service._patent_executor._pdf_service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: "This paper proposes a silicon anode coating method and reports improved cycle life.",
+        answer_question_fn=lambda **kwargs: "真实总结：本文提出硅负极包覆方法，并报告循环寿命改善。",
+    )
+    payload = _pdf_payload()
+    payload["execution_files"][0]["local_path"] = str(pdf_path)
+    payload["used_files"][0]["local_path"] = str(pdf_path)
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "真实总结" in body["final_answer"]
+    assert "Patent PDF route answered from selected PDF content" not in body["final_answer"]
+    assert body["metadata"]["answer_mode"] == "pdf_text_summary"
+    assert "local_path" not in body["used_files"][0]
+
+
+def test_http_stream_pdf_route_uses_real_patent_pdf_handler_when_gate_is_enabled(monkeypatch):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask_stream", json=_pdf_payload())
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    assert events[0]["type"] == "metadata"
+    assert events[0]["route"] == "pdf_qa"
+    assert events[0]["source_scope"] == "pdf"
+    assert events[0]["query_mode"] == "patent_pdf_qa"
+    assert events[-1]["type"] == "done"
+    assert events[-1]["route"] == "pdf_qa"
+    assert events[-1]["source_scope"] == "pdf"
+    assert events[-1]["query_mode"] == "patent_pdf_qa"
+    assert events[-1]["final_answer"]
+    assert events[-1]["used_files"] == [{"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"}]
+    assert events[-1]["file_selection"] == {"strategy": "explicit_selection", "selected_file_ids": [11], "source_scope": "pdf"}
+
+
+def test_http_stream_pdf_route_summarizes_readable_local_pdf_instead_of_stub(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    pdf_path = tmp_path / "spec.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    app.state.ask_service._patent_executor._pdf_service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: "This paper proposes a silicon anode coating method and reports improved cycle life.",
+        answer_question_fn=lambda **kwargs: "真实总结：本文提出硅负极包覆方法，并报告循环寿命改善。",
+    )
+    payload = _pdf_payload()
+    payload["execution_files"][0]["local_path"] = str(pdf_path)
+    payload["used_files"][0]["local_path"] = str(pdf_path)
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask_stream", json=payload)
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    assert "真实总结" in events[-1]["final_answer"]
+    assert "Patent PDF route answered from selected PDF content" not in events[-1]["final_answer"]
+    assert events[-1]["metadata"]["answer_mode"] == "pdf_text_summary"
+
+
+def test_http_stream_pdf_route_emits_live_step_events_before_done(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    pdf_path = tmp_path / "spec.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    app.state.ask_service._patent_executor._pdf_service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: "This paper proposes a silicon anode coating method and reports improved cycle life.",
+        answer_question_fn=lambda **kwargs: "真实总结：本文提出硅负极包覆方法，并报告循环寿命改善。",
+    )
+    payload = _pdf_payload()
+    payload["execution_files"][0]["local_path"] = str(pdf_path)
+    payload["used_files"][0]["local_path"] = str(pdf_path)
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask_stream", json=payload)
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    step_events = [event for event in events if event["type"] == "step"]
+
+    assert [event["step"] for event in step_events] == [
+        "dispatch",
+        "pdf_extract",
+        "pdf_extract",
+        "pdf_answer",
+        "pdf_answer",
+    ]
+    assert events[-1]["type"] == "done", events[-1]
+
+
+def test_http_sync_tabular_route_uses_real_patent_tabular_handler_when_gate_is_enabled(monkeypatch):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask", json=_tabular_payload())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["route"] == "tabular_qa"
+    assert body["source_scope"] == "table"
+    assert body["query_mode"] == "patent_tabular_qa"
+    assert body["final_answer"]
+    assert body["used_files"] == [{"file_id": 33, "file_type": "xlsx", "file_name": "claims.xlsx"}]
+    assert body["file_selection"] == {"strategy": "explicit_selection", "selected_file_ids": [33], "source_scope": "table"}
+
+
+def test_http_sync_tabular_route_summarizes_readable_local_table_instead_of_stub(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    csv_path = tmp_path / "claims.csv"
+    _write_csv(csv_path)
+    app.state.ask_service._patent_executor._tabular_service = PatentTabularService(
+        answer_question_fn=lambda **kwargs: "真实表格总结：LMFP 120mAh，LFP 更安全，NCM 能量更高。",
+    )
+    payload = _tabular_payload()
+    payload["execution_files"][0].update({"file_type": "csv", "file_name": "claims.csv", "local_path": str(csv_path)})
+    payload["used_files"][0].update({"file_type": "csv", "file_name": "claims.csv", "local_path": str(csv_path)})
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "真实表格总结" in body["final_answer"]
+    assert "Patent tabular route answered from selected table content" not in body["final_answer"]
+    assert body["metadata"]["answer_mode"] == "table_text_summary"
+    assert "local_path" not in body["used_files"][0]
+
+
+@pytest.mark.parametrize(
+    ("source_scope", "expected_used_files"),
+    [
+        ("pdf+kb", [{"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"}]),
+        ("table+kb", [{"file_id": 33, "file_type": "xlsx", "file_name": "claims.xlsx"}]),
+        (
+            "pdf+table",
+            [
+                {"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"},
+                {"file_id": 33, "file_type": "xlsx", "file_name": "claims.xlsx"},
+            ],
+        ),
+        (
+            "pdf+table+kb",
+            [
+                {"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"},
+                {"file_id": 33, "file_type": "xlsx", "file_name": "claims.xlsx"},
+            ],
+        ),
+    ],
+)
+def test_http_stream_hybrid_routes_use_real_patent_handlers_when_gate_is_enabled(monkeypatch, source_scope, expected_used_files):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask_stream", json=_hybrid_payload(source_scope))
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    assert events[0]["type"] == "metadata"
+    assert events[0]["route"] == "hybrid_qa"
+    assert events[0]["source_scope"] == source_scope
+    assert events[0]["query_mode"] == "patent_hybrid_qa"
+    assert events[-1]["type"] == "done"
+    assert events[-1]["route"] == "hybrid_qa"
+    assert events[-1]["source_scope"] == source_scope
+    assert events[-1]["query_mode"] == "patent_hybrid_qa"
+    assert events[-1]["final_answer"]
+    assert events[-1]["used_files"] == expected_used_files
+    assert events[-1]["file_selection"]["source_scope"] == source_scope
+
+
+def test_http_sync_hybrid_route_uses_real_pdf_and_table_content_instead_of_stub(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    pdf_path = tmp_path / "spec.pdf"
+    csv_path = tmp_path / "claims.csv"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    _write_csv(csv_path)
+    app.state.ask_service._patent_executor._pdf_service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: "This paper studies LMFP/LFP blending and reports safer charging behavior.",
+        answer_question_fn=lambda **kwargs: "真实 PDF 总结：LMFP/LFP 复配改善了充电安全性。",
+    )
+    app.state.ask_service._patent_executor._tabular_service = PatentTabularService(
+        answer_question_fn=lambda **kwargs: "真实表格总结：LMFP 120mAh，LFP 115mAh，NCM 140mAh。",
+    )
+    payload = _hybrid_payload("pdf+table")
+    payload["execution_files"][0]["local_path"] = str(pdf_path)
+    payload["used_files"][0]["local_path"] = str(pdf_path)
+    payload["execution_files"][1].update({"file_type": "csv", "file_name": "claims.csv", "local_path": str(csv_path)})
+    payload["used_files"][1].update({"file_type": "csv", "file_name": "claims.csv", "local_path": str(csv_path)})
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "真实 PDF 总结" in body["final_answer"]
+    assert "真实表格总结" in body["final_answer"]
+    assert "Patent hybrid route combined selected PDF and table files" not in body["final_answer"]
+    assert body["metadata"]["answer_mode"] == "hybrid_file_synthesis"
+
+
+def test_http_stream_hybrid_route_emits_file_progress_steps_before_done(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    pdf_path = tmp_path / "spec.pdf"
+    csv_path = tmp_path / "claims.csv"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    _write_csv(csv_path)
+    app.state.ask_service._patent_executor._pdf_service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: "This paper studies LMFP/LFP blending and reports safer charging behavior.",
+        answer_question_fn=lambda **kwargs: "真实 PDF 总结：LMFP/LFP 复配改善了充电安全性。",
+    )
+    app.state.ask_service._patent_executor._tabular_service = PatentTabularService(
+        answer_question_fn=lambda **kwargs: "真实表格总结：LMFP 120mAh，LFP 115mAh，NCM 140mAh。",
+    )
+    payload = _hybrid_payload("pdf+table")
+    payload["execution_files"][0]["local_path"] = str(pdf_path)
+    payload["used_files"][0]["local_path"] = str(pdf_path)
+    payload["execution_files"][1].update({"file_type": "csv", "file_name": "claims.csv", "local_path": str(csv_path)})
+    payload["used_files"][1].update({"file_type": "csv", "file_name": "claims.csv", "local_path": str(csv_path)})
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask_stream", json=payload)
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    step_events = [event for event in events if event["type"] == "step"]
+
+    assert [event["step"] for event in step_events] == [
+        "dispatch",
+        "pdf_extract",
+        "pdf_extract",
+        "pdf_answer",
+        "pdf_answer",
+        "tabular_load",
+        "tabular_load",
+        "tabular_answer",
+        "tabular_answer",
+        "hybrid_answer",
+        "hybrid_answer",
+    ]
+    assert events[-1]["type"] == "done"
 
 
 def test_durable_sync_request_is_blocked_by_route_gate_before_auth_or_service(monkeypatch):
@@ -994,7 +2578,7 @@ def test_stream_terminal_error_uses_middleware_trace_before_first_frame():
 def test_success_stream_carries_resolved_trace_id_to_later_frames():
     app = create_app()
     payload = _base_payload()
-    payload["conversation_id"] = "opaque-ephemeral"
+    payload["conversation_id"] = None
     app.state.ask_service = _ResolvedTraceStreamAskService()
 
     with TestClient(app) as client:
@@ -1010,7 +2594,7 @@ def test_ephemeral_request_still_runs_when_durable_redis_path_is_unavailable(mon
     monkeypatch.setenv("PATENT_REDIS_ENABLED", "false")
     app = create_app()
     payload = _base_payload()
-    payload["conversation_id"] = "opaque-ephemeral"
+    payload["conversation_id"] = None
     payload["kb_enabled"] = True
 
     with TestClient(app) as client:
@@ -1018,4 +2602,31 @@ def test_ephemeral_request_still_runs_when_durable_redis_path_is_unavailable(mon
 
     assert response.status_code == 200
     assert response.json()["success"] is True
-    assert response.json()["data"]["final_answer"] == "Patent Phase 1 stub answer: Explain the patent novelty."
+    assert response.json()["final_answer"]
+    assert "Patent Phase 1 stub answer" not in response.json()["final_answer"]
+
+
+def test_http_request_rejects_invalid_conversation_id_instead_of_downgrading_to_ephemeral():
+    app = create_app()
+    payload = _base_payload()
+    payload["conversation_id"] = "opaque-ephemeral"
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask", json=payload)
+
+    assert response.status_code == 400
+    assert response.json()["code"] == codes.INVALID_REQUEST
+    assert "conversation_id" in response.json()["message"]
+
+
+def test_http_request_rejects_non_empty_file_selection_in_phase1():
+    app = create_app()
+    payload = _base_payload()
+    payload["file_selection"] = {"selected": [1]}
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask", json=payload)
+
+    assert response.status_code == 400
+    assert response.json()["code"] == codes.PROTOCOL_MISMATCH
+    assert "file_selection" in response.json()["message"]

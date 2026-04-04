@@ -75,9 +75,13 @@ class ConversationAuthorityClient:
         route: str,
         requested_mode: str,
         actual_mode: str,
+        source_scope: str = "kb",
         content: str,
         selected_file_ids: list[int] | None = None,
         last_turn_route_hint: str | None = None,
+        mode_origin_requested_mode: str | None = None,
+        mode_origin_execution_backend: str | None = None,
+        compatibility_route: bool | None = None,
     ) -> dict[str, Any]:
         self._ensure_durable_authority_enabled()
         payload = AuthorityUserWriteRequest(
@@ -85,6 +89,7 @@ class ConversationAuthorityClient:
             user_id=int(user_id),
             trace_id=str(trace_id),
             route=str(route),
+            source_scope=str(source_scope),
             requested_mode=str(requested_mode),
             actual_mode=str(actual_mode),
             idempotency_key=self._idempotency_key(conversation_id=conversation_id, trace_id=trace_id, operation="user"),
@@ -92,6 +97,9 @@ class ConversationAuthorityClient:
             context_hints={
                 "selected_file_ids": list(selected_file_ids or []),
                 "last_turn_route_hint": str(last_turn_route_hint or "").strip() or None,
+                "mode_origin_requested_mode": str(mode_origin_requested_mode or "").strip() or None,
+                "mode_origin_execution_backend": str(mode_origin_execution_backend or "").strip() or None,
+                "compatibility_route": compatibility_route if isinstance(compatibility_route, bool) else None,
             },
         )
         response = self._request(
@@ -111,12 +119,14 @@ class ConversationAuthorityClient:
         route: str,
         requested_mode: str,
         actual_mode: str,
+        source_scope: str = "kb",
     ) -> dict[str, Any]:
         self._ensure_durable_authority_enabled()
         query = AuthorityContextSnapshotQuery(
             user_id=int(user_id),
             trace_id=str(trace_id),
             route=str(route),
+            source_scope=str(source_scope),
             requested_mode=str(requested_mode),
             actual_mode=str(actual_mode),
         )
@@ -137,9 +147,14 @@ class ConversationAuthorityClient:
         route: str,
         requested_mode: str,
         actual_mode: str,
+        source_scope: str = "kb",
         answer_text: str,
+        metadata: dict[str, Any] | None = None,
         steps: list[dict[str, Any]] | None = None,
         references: list[dict[str, Any]] | None = None,
+        reference_objects: list[dict[str, Any]] | None = None,
+        reference_links: list[dict[str, Any]] | None = None,
+        original_links: list[dict[str, Any]] | None = None,
         used_files: list[dict[str, Any]] | None = None,
         timings: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -149,6 +164,7 @@ class ConversationAuthorityClient:
             user_id=int(user_id),
             trace_id=str(trace_id),
             route=str(route),
+            source_scope=str(source_scope),
             requested_mode=str(requested_mode),
             actual_mode=str(actual_mode),
             idempotency_key=self._idempotency_key(conversation_id=conversation_id, trace_id=trace_id, operation="assistant"),
@@ -156,7 +172,11 @@ class ConversationAuthorityClient:
                 "done_seen": True,
                 "answer_text": str(answer_text),
                 "steps": list(steps or []),
+                "metadata": dict(metadata or {}),
                 "references": list(references or []),
+                "reference_objects": list(reference_objects or []),
+                "reference_links": list(reference_links or []),
+                "original_links": list(original_links or []),
                 "used_files": list(used_files or []),
                 "timings": dict(timings or {}),
             },

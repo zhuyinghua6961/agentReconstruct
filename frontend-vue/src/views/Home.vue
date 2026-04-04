@@ -10,6 +10,7 @@ import { resolveStreamingTarget } from '../utils/streamingTarget'
 import { buildQuestionOutlineItems, buildQuestionOutlineSignature, getQuestionAnchorId } from '../utils/questionOutline'
 import { DEFAULT_NEAR_BOTTOM_THRESHOLD_PX, isNearBottom, shouldAutoScroll } from '../utils/scrollFollow'
 import { mergeSelectedFileIdsAfterUpload, resolveUploadedFileDisplayNumber } from '../utils/fileSelection'
+import { shouldIgnoreLateStreamError } from '../utils/streamingLifecycle'
 import PdfReader from '../components/PdfReader.vue'
 import QuotaLimitCard from '../components/QuotaLimitCard.vue'
 import { buildCitationLocationsForDoi } from '../utils/citationEvidence'
@@ -925,6 +926,18 @@ onMounted(async () => {
 
   documentClickHandler = (e) => {
     const target = e.target
+    if (target.classList && target.classList.contains('patent-link')) {
+      e.preventDefault()
+      const patentId = String(target.getAttribute('data-patent-id') || '').trim()
+      if (patentId && pdfReader.value) {
+        pdfReader.value.openUrlReader(
+          patentId,
+          `/api/patent/original/${encodeURIComponent(patentId)}`,
+          []
+        )
+      }
+      return
+    }
     if (target.classList && target.classList.contains('doi-link')) {
       e.preventDefault()
       const doi = target.getAttribute('data-doi')
@@ -1222,6 +1235,8 @@ async function sendMessage() {
         if (data.doi_locations) updates.doiLocations = data.doi_locations
         updates.metadata = {
           ...mergedMeta,
+          done_seen: true,
+          streaming_terminal_event: 'done',
           used_files: Array.isArray(data.used_files) ? data.used_files : (existingMeta.used_files || []),
           timings: (data.timings && typeof data.timings === 'object') ? data.timings : (existingMeta.timings || {}),
         }
@@ -1233,6 +1248,9 @@ async function sendMessage() {
       } else if (data.type === 'error') {
         flushPendingStreamContent()
         const targetMessage = getStreamingTargetMessage()?.message || {}
+        if (shouldIgnoreLateStreamError(targetMessage)) {
+          continue
+        }
         const existingMeta = (targetMessage.metadata && typeof targetMessage.metadata === 'object') ? targetMessage.metadata : {}
         const mergedMeta = mergeRoutingMetadata(existingMeta, data)
         const errorText = String(data.message || data.error || '处理失败')
@@ -1269,7 +1287,10 @@ async function sendMessage() {
         updateStreamingTargetMessage({
           content: existingContent ? `${existingContent}\n\n${renderedError}` : renderedError,
           queryMode: getFallbackQueryModeLabel(data, mergedMeta) || targetMessage.queryMode || '',
-          metadata: mergedMeta,
+          metadata: {
+            ...mergedMeta,
+            streaming_terminal_event: 'error',
+          },
           isComplete: true
         })
       }
@@ -1280,6 +1301,9 @@ async function sendMessage() {
       return
     }
     const targetMessage = getStreamingTargetMessage()?.message || {}
+    if (shouldIgnoreLateStreamError(targetMessage)) {
+      return
+    }
     const existingMeta = (targetMessage.metadata && typeof targetMessage.metadata === 'object') ? targetMessage.metadata : {}
     const payload = (e?.payload && typeof e.payload === 'object') ? e.payload : {}
     const mergedMeta = mergeRoutingMetadata(existingMeta, payload)
@@ -1301,7 +1325,10 @@ async function sendMessage() {
     updateStreamingTargetMessage({
       content: renderedError,
       queryMode: getFallbackQueryModeLabel(payload, mergedMeta) || targetMessage.queryMode || '',
-      metadata: mergedMeta,
+      metadata: {
+        ...mergedMeta,
+        streaming_terminal_event: 'error',
+      },
       isComplete: true
     })
   } finally {

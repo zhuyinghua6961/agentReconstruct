@@ -33,6 +33,10 @@ _SOURCE_SERVICE_POLICY: dict[str, dict[str, set[str]]] = {
         "requested_modes": {"thinking"},
         "actual_modes": {"thinking"},
     },
+    "patentQA": {
+        "requested_modes": {"patent"},
+        "actual_modes": {"patent"},
+    },
 }
 
 

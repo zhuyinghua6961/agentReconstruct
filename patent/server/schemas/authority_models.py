@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+from server.schemas.request_models import PatentRouteName, PatentSourceScope
 
 
 class _StrictAuthorityModel(BaseModel):
@@ -12,6 +13,9 @@ class _StrictAuthorityModel(BaseModel):
 class AuthorityContextHints(_StrictAuthorityModel):
     selected_file_ids: list[int] = Field(default_factory=list)
     last_turn_route_hint: str | None = None
+    mode_origin_requested_mode: str | None = None
+    mode_origin_execution_backend: str | None = None
+    compatibility_route: bool | None = None
 
 
 class AuthorityMessage(_StrictAuthorityModel):
@@ -24,7 +28,8 @@ class AuthorityUserWriteRequest(_StrictAuthorityModel):
     user_id: int = Field(gt=0)
     trace_id: str
     source_service: Literal["patentQA"] = "patentQA"
-    route: Literal["kb_qa"] = "kb_qa"
+    route: PatentRouteName = "kb_qa"
+    source_scope: PatentSourceScope = "kb"
     requested_mode: Literal["patent"] = "patent"
     actual_mode: Literal["patent"] = "patent"
     idempotency_key: str
@@ -36,7 +41,8 @@ class AuthorityContextSnapshotQuery(_StrictAuthorityModel):
     user_id: int = Field(gt=0)
     trace_id: str
     source_service: Literal["patentQA"] = "patentQA"
-    route: Literal["kb_qa"] = "kb_qa"
+    route: PatentRouteName = "kb_qa"
+    source_scope: PatentSourceScope = "kb"
     requested_mode: Literal["patent"] = "patent"
     actual_mode: Literal["patent"] = "patent"
 
@@ -55,7 +61,11 @@ class AuthorityAssistantFinalEvent(_StrictAuthorityModel):
     done_seen: Literal[True] = True
     answer_text: str
     steps: list[dict[str, Any]] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
     references: list[dict[str, Any]] = Field(default_factory=list)
+    reference_objects: list[dict[str, Any]] = Field(default_factory=list)
+    reference_links: list[dict[str, Any]] = Field(default_factory=list)
+    original_links: list[dict[str, Any]] = Field(default_factory=list)
     used_files: list[dict[str, Any]] = Field(default_factory=list)
     timings: dict[str, Any] = Field(default_factory=dict)
 
@@ -65,7 +75,8 @@ class AuthorityAssistantAsyncRequest(_StrictAuthorityModel):
     user_id: int = Field(gt=0)
     trace_id: str
     source_service: Literal["patentQA"] = "patentQA"
-    route: Literal["kb_qa"] = "kb_qa"
+    route: PatentRouteName = "kb_qa"
+    source_scope: PatentSourceScope = "kb"
     requested_mode: Literal["patent"] = "patent"
     actual_mode: Literal["patent"] = "patent"
     idempotency_key: str

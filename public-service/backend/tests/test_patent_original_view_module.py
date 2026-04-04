@@ -283,9 +283,10 @@ def test_patent_original_store_prefers_summary_figure_then_fulltext():
 def test_patent_original_store_raises_when_summary_primary_object_drifts():
     store_module = _load_store_module()
     store = store_module.PatentOriginalStore(backend=_backend(summary_primary_drift=True))
+    figure = store.resolve_section(canonical_patent_id=CANONICAL_PATENT_ID, section="figure")
 
-    with pytest.raises(store_module.PatentOriginalUnavailableError):
-        store.resolve_section(canonical_patent_id=CANONICAL_PATENT_ID, section="figure")
+    assert figure.figure_source == "summary"
+    assert figure.served_object_key == "patent/originals/CN123456789A/figures/summary/figure-backup.png"
 
 
 def test_patent_original_store_keeps_local_backend_figure_media_type(tmp_path):
@@ -446,7 +447,12 @@ def test_documents_service_renders_patent_original_fulltext_pdf(monkeypatch):
     monkeypatch.setattr(
         storage_service,
         "read_object_bytes",
-        lambda **kwargs: b"%PDF-1.4\n",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("fulltext should stream instead of reading full bytes")),
+    )
+    monkeypatch.setattr(
+        storage_service,
+        "iter_object_bytes",
+        lambda **kwargs: iter([b"%PDF-1.4\n", b"tail"]),
     )
 
     result = documents_service.patent_original_view(
@@ -461,7 +467,7 @@ def test_documents_service_renders_patent_original_fulltext_pdf(monkeypatch):
 
     assert result["status_code"] == 200
     assert result["media_type"] == "application/pdf"
-    assert result["body"] == b"%PDF-1.4\n"
+    assert b"".join(result["body_iter"]) == b"%PDF-1.4\ntail"
     assert result["headers"]["etag"] == '"patent-original:version-2"'
 
 
@@ -553,7 +559,7 @@ def test_documents_service_maps_fulltext_read_failures_to_object_store_unavailab
     )
     monkeypatch.setattr(
         storage_service,
-        "read_object_bytes",
+        "iter_object_bytes",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("minio unavailable")),
     )
 
@@ -569,6 +575,52 @@ def test_documents_service_maps_fulltext_read_failures_to_object_store_unavailab
         )
 
     assert exc.value.code == "OBJECT_STORE_UNAVAILABLE"
+
+
+def test_documents_service_maps_empty_fulltext_stream_to_not_found(monkeypatch):
+    manifest = _FakeManifest(
+        canonical_patent_id=CANONICAL_PATENT_ID,
+        title="一种电池热管理系统",
+        provider="patent_source_x",
+        original_version="version-4",
+    )
+    resolved = _FakeResolved(
+        canonical_patent_id=CANONICAL_PATENT_ID,
+        section="fulltext",
+        section_label="全文",
+        original_version="version-4",
+        content=None,
+        anchor_hit=False,
+        claim_number=None,
+        paragraph_id=None,
+        figure_source=None,
+        served_object_key=None,
+        object_key="patent/originals/CN123456789A/fulltext/original.pdf",
+        media_type="application/pdf",
+    )
+    monkeypatch.setattr(
+        documents_service,
+        "_get_patent_original_store",
+        lambda: _FakeStore(manifest=manifest, resolved=resolved),
+    )
+    monkeypatch.setattr(
+        storage_service,
+        "iter_object_bytes",
+        lambda **kwargs: iter(()),
+    )
+
+    with pytest.raises(AppError) as exc:
+        documents_service.patent_original_view(
+            canonical_patent_id=CANONICAL_PATENT_ID,
+            section="fulltext",
+            claim_number=None,
+            paragraph_id=None,
+            response_format=None,
+            head_only=False,
+            logger=None,
+        )
+
+    assert exc.value.code == "ORIGINAL_NOT_AVAILABLE"
 
 
 def test_patent_original_store_resolves_fulltext_pdf_reference():

@@ -1433,7 +1433,7 @@ class ConversationService:
             return {"success": False, "error": "empty_content", "code": "VALIDATION_ERROR"}
         if not idempotency_text:
             return {"success": False, "error": "idempotency_key_required", "code": "VALIDATION_ERROR"}
-        if source_service_text not in {"fastQA", "highThinkingQA"}:
+        if source_service_text not in {"fastQA", "highThinkingQA", "patentQA"}:
             return {"success": False, "error": "invalid_source_service", "code": "VALIDATION_ERROR"}
         try:
             row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id)
@@ -1538,7 +1538,7 @@ class ConversationService:
             return {"success": False, "error": "idempotency_key_required", "code": "VALIDATION_ERROR"}
         if not answer_text:
             return {"success": False, "error": "empty_answer_text", "code": "VALIDATION_ERROR"}
-        if source_service_text not in {"fastQA", "highThinkingQA"}:
+        if source_service_text not in {"fastQA", "highThinkingQA", "patentQA"}:
             return {"success": False, "error": "invalid_source_service", "code": "VALIDATION_ERROR"}
         try:
             with self._json_store.conversation_lock(user_id=user_id, conversation_id=conversation_id):
@@ -1617,7 +1617,7 @@ class ConversationService:
         source_service_text = str(source_service or "").strip()
         if not idempotency_text:
             return {"success": False, "error": "idempotency_key_required", "code": "VALIDATION_ERROR"}
-        if source_service_text not in {"fastQA", "highThinkingQA"}:
+        if source_service_text not in {"fastQA", "highThinkingQA", "patentQA"}:
             return {"success": False, "error": "invalid_source_service", "code": "VALIDATION_ERROR"}
         try:
             with self._json_store.conversation_lock(user_id=user_id, conversation_id=conversation_id):

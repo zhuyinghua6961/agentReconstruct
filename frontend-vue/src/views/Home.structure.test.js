@@ -76,3 +76,11 @@ test('Home renders failed terminal assistant messages as terminal cards instead 
   assert.match(source, /\.terminal-message-canceled \{/)
   assert.match(source, /<div v-else class="loading-animation"><span>思考中\.\.\.<\/span><\/div>/)
 })
+
+test('Home ignores late stream errors after a done event has already completed the message', () => {
+  assert.match(source, /import \{ shouldIgnoreLateStreamError \} from '\.\.\/utils\/streamingLifecycle'/)
+  assert.match(source, /streaming_terminal_event:\s*'done'/)
+  assert.match(source, /done_seen:\s*true/)
+  assert.match(source, /if \(shouldIgnoreLateStreamError\(targetMessage\)\) \{\s*continue\s*\}/)
+  assert.match(source, /if \(shouldIgnoreLateStreamError\(targetMessage\)\) \{\s*return\s*\}/)
+})

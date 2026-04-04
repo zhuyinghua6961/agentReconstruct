@@ -1,37 +1,53 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from server.schemas.request_models import PatentRouteName, PatentSourceScope
 
 
 class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class PatentResponseMetadata(_StrictModel):
-    requested_mode: Literal["patent"]
-    actual_mode: Literal["patent"]
-    route: Literal["kb_qa"]
-    mode: Literal["patent"]
-    query_mode: Literal["patent"]
-    conversation_id: int | None = None
+_CANONICAL_PATENT_ID_RE = re.compile(r"^[A-Z][A-Z0-9]+$")
 
 
-class PatentSyncData(_StrictModel):
-    final_answer: str
-    timings: dict[str, Any]
-    metadata: PatentResponseMetadata
-    references: list[dict[str, Any]] = Field(default_factory=list)
-    pdf_links: list[str] = Field(default_factory=list)
-    reference_links: list[str] = Field(default_factory=list)
-    trace_id: str
+def _validate_references(value: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if not text:
+            raise ValueError("references items must be non-empty strings")
+        if text != text.upper() or _CANONICAL_PATENT_ID_RE.fullmatch(text) is None:
+            raise ValueError("references items must be canonical patent identifiers")
+        normalized.append(text)
+    return normalized
 
 
 class PatentSyncSuccess(_StrictModel):
     success: Literal[True] = True
-    data: PatentSyncData
+    final_answer: str
+    query_mode: str
+    route: PatentRouteName
+    requested_mode: Literal["patent"]
+    actual_mode: Literal["patent"]
+    source_scope: PatentSourceScope
+    timings: dict[str, Any]
+    references: list[str] = Field(default_factory=list)
+    reference_objects: list[dict[str, Any]] = Field(default_factory=list)
+    reference_links: list[dict[str, Any]] = Field(default_factory=list)
+    original_links: list[dict[str, Any]] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
     trace_id: str
+    used_files: list[dict[str, Any]] = Field(default_factory=list)
+    file_selection: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("references")
+    @classmethod
+    def validate_references(cls, value: list[str]) -> list[str]:
+        return _validate_references(value)
 
 
 class _BaseEvent(_StrictModel):
@@ -43,8 +59,10 @@ class MetadataEvent(_BaseEvent):
     type: Literal["metadata"] = "metadata"
     requested_mode: Literal["patent"]
     actual_mode: Literal["patent"]
-    route: Literal["kb_qa"]
-    query_mode: Literal["patent"]
+    route: PatentRouteName
+    query_mode: str
+    source_scope: PatentSourceScope
+    metadata: dict[str, Any] = Field(default_factory=dict)
     trace_id: str
 
 
@@ -55,8 +73,13 @@ class ContentEvent(_BaseEvent):
 
 class StepEvent(_BaseEvent):
     type: Literal["step"] = "step"
+    step: str | None = None
     title: str | None = None
     message: str | None = None
+    detail: str | None = None
+    status: str | None = None
+    error: str | None = None
+    data: dict[str, Any] | None = None
 
 
 class HeartbeatEvent(_BaseEvent):
@@ -66,13 +89,25 @@ class HeartbeatEvent(_BaseEvent):
 class DoneEvent(_BaseEvent):
     type: Literal["done"] = "done"
     final_answer: str
+    query_mode: str
+    route: PatentRouteName
+    requested_mode: Literal["patent"]
+    actual_mode: Literal["patent"]
+    source_scope: PatentSourceScope
     timings: dict[str, Any]
-    references: list[dict[str, Any]] = Field(default_factory=list)
+    references: list[str] = Field(default_factory=list)
+    reference_objects: list[dict[str, Any]] = Field(default_factory=list)
+    reference_links: list[dict[str, Any]] = Field(default_factory=list)
+    original_links: list[dict[str, Any]] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
     trace_id: str
     used_files: list[dict[str, Any]] = Field(default_factory=list)
-    reference_links: list[str] = Field(default_factory=list)
-    pdf_links: list[str] = Field(default_factory=list)
     file_selection: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("references")
+    @classmethod
+    def validate_references(cls, value: list[str]) -> list[str]:
+        return _validate_references(value)
 
 
 class ErrorEvent(_BaseEvent):

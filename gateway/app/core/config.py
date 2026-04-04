@@ -97,6 +97,7 @@ class GatewaySettings:
     redis: RedisSettings
     admission: AdmissionSettings
     route_classifier: RouteClassifierSettings
+    patent_file_routes_enabled: bool = True
     strict_backend_config: bool = False
     backend_config_warnings: tuple[str, ...] = field(default_factory=tuple)
 
@@ -161,6 +162,7 @@ class GatewaySettings:
                 high_confidence_threshold=float(str(os.getenv("GATEWAY_ROUTE_CLASSIFIER_HIGH_CONFIDENCE", "0.8") or "0.8")),
                 medium_confidence_threshold=float(str(os.getenv("GATEWAY_ROUTE_CLASSIFIER_MEDIUM_CONFIDENCE", "0.6") or "0.6")),
             ),
+            patent_file_routes_enabled=_env_bool("GATEWAY_PATENT_FILE_ROUTES_ENABLED", True),
             strict_backend_config=strict_backend_config,
             backend_config_warnings=backend_warnings,
         )

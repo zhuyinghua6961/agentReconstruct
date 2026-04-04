@@ -6,7 +6,7 @@
       <div class="pdf-reader-header">
         <div>
           <h2>📄 原文阅读器（增强版）</h2>
-          <p class="doi-text">DOI: {{ currentDoi }}</p>
+          <p class="doi-text">文档标识: {{ currentDocumentLabel }}</p>
         </div>
         <div class="header-actions">
           <button class="pdf-action-btn" @click="toggleSidePanel" title="显示/隐藏侧边栏">
@@ -177,6 +177,9 @@
 
               <div class="translation-panel-content">
                 <QuotaLimitCard v-if="translationQuotaCard" :card="translationQuotaCard" />
+                <p v-if="clipboardFeedback && !translationQuotaCard" class="translation-feedback">
+                  {{ clipboardFeedback }}
+                </p>
                 <!-- 欢迎页 -->
                 <div v-if="!translationQuotaCard && translations.length === 0" class="translation-welcome">
                   <div class="welcome-icon">📖</div>
@@ -213,13 +216,23 @@
                   placeholder="在此粘贴要翻译的英文文本..."
                   rows="3"
                 ></textarea>
-                <button
-                  class="translate-btn"
-                  :disabled="!manualText || isTranslating"
-                  @click="translateSelected"
-                >
-                  {{ isTranslating ? '⏳ 翻译中...' : '🌐 翻译文本' }}
-                </button>
+                <p class="translation-hint">读取系统剪贴板内容，不是当前 PDF 划选内容</p>
+                <div class="translation-button-row">
+                  <button
+                    class="translate-btn"
+                    :disabled="!hasManualTranslateText || isTranslating"
+                    @click="translateSelected"
+                  >
+                    {{ isTranslating ? '⏳ 翻译中...' : '🌐 翻译文本' }}
+                  </button>
+                  <button
+                    class="translate-btn secondary"
+                    :disabled="isTranslating"
+                    @click="pasteAndTranslate"
+                  >
+                    {{ isTranslating ? '⏳ 翻译中...' : '📋 粘贴并翻译' }}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -230,11 +243,17 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import QuotaLimitCard from './QuotaLimitCard.vue'
-import { fetchPdfDocument } from '../api/literature'
+import { fetchPdfDocument, fetchPdfDocumentByUrl } from '../api/literature'
 import { api } from '../services/api'
 import { buildQuotaErrorCardModel } from '../services/quota-error-formatting.js'
+import {
+  buildTranslatePayload,
+  classifyClipboardFailure,
+  getClipboardFeedbackMessage,
+  normalizeClipboardText,
+} from '../utils/pdfReaderClipboardTranslate.js'
 import { resolvePdfReaderInitialPanelMode, isPdfReaderPanelActive } from '../utils/pdfReaderPanelMode'
 import { buildPdfReaderOpenState, releasePdfBlobUrl } from '../utils/pdfReaderOpenFlow'
 import { resolveLocationBadge, resolveLocationSentence, resolveLocationSource, resolveLocationTitle } from '../utils/referenceLocation'
@@ -245,6 +264,7 @@ const emit = defineEmits(['close'])
 // State
 const isOpen = ref(false)
 const currentDoi = ref('')
+const currentDocumentLabel = ref('')
 const pdfUrl = ref('')
 const pdfError = ref(null)
 const showSidePanel = ref(true)
@@ -262,14 +282,17 @@ const summaryText = ref('')
 const summaryError = ref('')
 const summaryQuotaCard = ref(null)
 const translationQuotaCard = ref(null)
+const clipboardFeedback = ref('')
 const isSummarizing = ref(false)
 const activeBlobUrl = ref('')
+const translationSessionId = ref(0)
 
 const MIN_SIDEBAR_WIDTH = 260
 const MIN_LEFT_WIDTH = 420
 const isCitationsVisible = computed(() => isPdfReaderPanelActive(panelMode.value, 'citations'))
 const isSummaryVisible = computed(() => isPdfReaderPanelActive(panelMode.value, 'summary'))
 const isTranslationVisible = computed(() => isPdfReaderPanelActive(panelMode.value, 'translation'))
+const hasManualTranslateText = computed(() => normalizeClipboardText(manualText.value).length > 0)
 
 function withPdfPageAnchor(url, page = null) {
   if (!url || !page) return url
@@ -285,15 +308,27 @@ function buildDocAssistQuotaCard(error, featureTitle) {
   })
 }
 
+function resetTranslationInteractionSession() {
+  translationSessionId.value += 1
+  isTranslating.value = false
+}
+
+function isActiveTranslationSession(sessionId) {
+  return sessionId === translationSessionId.value
+}
+
 // Methods
 async function openReader(doi, locations = []) {
+  resetTranslationInteractionSession()
   currentDoi.value = doi
+  currentDocumentLabel.value = doi
   locationHints.value = locations
   isPdfLoading.value = true
   summaryText.value = ''
   summaryError.value = ''
   summaryQuotaCard.value = null
   translationQuotaCard.value = null
+  clipboardFeedback.value = ''
   isSummarizing.value = false
   panelMode.value = resolvePdfReaderInitialPanelMode(locations)
   
@@ -327,6 +362,68 @@ async function openReader(doi, locations = []) {
   } catch (error) {
     const nextState = buildPdfReaderOpenState({
       doi: currentDoi.value,
+      loadResult: {
+        ok: false,
+        errorPayload: {
+          message: error?.message || 'PDF加载失败',
+          code: error?.code || '',
+          data: error?.payload?.data,
+          status: Number(error?.status || 0),
+        },
+      },
+      previousBlobUrl: activeBlobUrl.value,
+      revokeObjectURL: (value) => releasePdfBlobUrl(value),
+    })
+    activeBlobUrl.value = nextState.activeBlobUrl || ''
+    pdfUrl.value = ''
+    pdfError.value = nextState.pdfError
+    isPdfLoading.value = false
+  }
+}
+
+async function openUrlReader(label, documentUrl, locations = []) {
+  resetTranslationInteractionSession()
+  currentDoi.value = ''
+  currentDocumentLabel.value = String(label || '')
+  locationHints.value = locations
+  isPdfLoading.value = true
+  summaryText.value = ''
+  summaryError.value = ''
+  summaryQuotaCard.value = null
+  translationQuotaCard.value = null
+  clipboardFeedback.value = ''
+  isSummarizing.value = false
+  panelMode.value = resolvePdfReaderInitialPanelMode(locations)
+
+  if (locations.length > 0) {
+    targetPage.value = locations[0].page || 1
+  } else {
+    targetPage.value = 1
+  }
+
+  pdfUrl.value = ''
+  pdfError.value = null
+  isOpen.value = true
+  translations.value = []
+  manualText.value = ''
+
+  try {
+    const loadResult = await fetchPdfDocumentByUrl(documentUrl)
+    const nextState = buildPdfReaderOpenState({
+      doi: currentDocumentLabel.value,
+      loadResult,
+      previousBlobUrl: activeBlobUrl.value,
+      revokeObjectURL: (value) => releasePdfBlobUrl(value),
+    })
+    activeBlobUrl.value = nextState.activeBlobUrl || ''
+    pdfError.value = nextState.pdfError
+    pdfUrl.value = nextState.pdfUrl ? withPdfPageAnchor(nextState.pdfUrl, targetPage.value) : ''
+    if (!nextState.pdfUrl) {
+      isPdfLoading.value = false
+    }
+  } catch (error) {
+    const nextState = buildPdfReaderOpenState({
+      doi: currentDocumentLabel.value,
       loadResult: {
         ok: false,
         errorPayload: {
@@ -390,10 +487,12 @@ function stopResize() {
 }
 
 function closeReader() {
+  resetTranslationInteractionSession()
   releasePdfBlobUrl(activeBlobUrl.value)
   activeBlobUrl.value = ''
   isOpen.value = false
   currentDoi.value = ''
+  currentDocumentLabel.value = ''
   pdfUrl.value = ''
   pdfError.value = null
   stopResize()
@@ -402,6 +501,7 @@ function closeReader() {
   summaryError.value = ''
   summaryQuotaCard.value = null
   translationQuotaCard.value = null
+  clipboardFeedback.value = ''
   isSummarizing.value = false
   emit('close')
 }
@@ -440,23 +540,28 @@ async function generateSummary(force = false) {
   }
 }
 
-async function translateSelected() {
-  if (!manualText.value || isTranslating.value) return
+async function runTranslation(text, sessionId = translationSessionId.value) {
+  if (!text || !isActiveTranslationSession(sessionId)) return
 
-  isTranslating.value = true
+  const ownsBusyState = !isTranslating.value
+  if (ownsBusyState) {
+    isTranslating.value = true
+  }
+
   translationQuotaCard.value = null
 
-  // 添加翻译项
   const item = {
     time: new Date().toLocaleTimeString(),
-    source: manualText.value,
+    source: text,
     translation: '',
     loading: true
   }
   translations.value.unshift(item)
 
   try {
-    const result = await api.translate([manualText.value])
+    const result = await api.translate(buildTranslatePayload(text))
+    if (!isActiveTranslationSession(sessionId)) return
+
     const payload = result?.data && typeof result.data === 'object' ? result.data : result
     const translations = Array.isArray(payload?.translations) ? payload.translations : []
     if (result.success && translations.length > 0) {
@@ -466,6 +571,8 @@ async function translateSelected() {
       item.translation = String(result?.error || payload?.error || '翻译失败')
     }
   } catch (error) {
+    if (!isActiveTranslationSession(sessionId)) return
+
     console.error('翻译错误:', error)
     const quotaCard = buildDocAssistQuotaCard(error, '翻译')
     if (quotaCard) {
@@ -475,15 +582,82 @@ async function translateSelected() {
       item.translation = '翻译失败: ' + (error.message || '未知错误')
     }
   } finally {
+    if (!isActiveTranslationSession(sessionId)) return
+
     item.loading = false
     isTranslating.value = false
-    manualText.value = '' // 清空输入框
   }
 }
+
+async function pasteAndTranslate() {
+  if (isTranslating.value) return
+
+  const sessionId = translationSessionId.value
+  isTranslating.value = true
+  translationQuotaCard.value = null
+
+  const hasNavigator = typeof navigator !== 'undefined'
+  const clipboardApi = hasNavigator ? navigator.clipboard : null
+  const runtimeContext = {
+    hasNavigator,
+    hasClipboardApi: Boolean(clipboardApi),
+    hasReadText: typeof clipboardApi?.readText === 'function',
+    isSecureContext: typeof window !== 'undefined' ? Boolean(window.isSecureContext) : false,
+  }
+
+  if (classifyClipboardFailure(null, runtimeContext) === 'unsupported') {
+    if (!isActiveTranslationSession(sessionId)) return
+    clipboardFeedback.value = getClipboardFeedbackMessage('unsupported')
+    isTranslating.value = false
+    return
+  }
+
+  try {
+    const rawText = await clipboardApi.readText()
+    if (!isActiveTranslationSession(sessionId)) return
+
+    const text = normalizeClipboardText(rawText)
+    if (!text) {
+      clipboardFeedback.value = getClipboardFeedbackMessage('empty')
+      isTranslating.value = false
+      return
+    }
+
+    manualText.value = text
+    clipboardFeedback.value = ''
+    await runTranslation(text, sessionId)
+  } catch (error) {
+    if (!isActiveTranslationSession(sessionId)) return
+
+    clipboardFeedback.value = getClipboardFeedbackMessage(
+      classifyClipboardFailure(error, runtimeContext),
+    )
+    isTranslating.value = false
+  }
+}
+
+async function translateSelected() {
+  if (isTranslating.value) return
+
+  const sessionId = translationSessionId.value
+  const text = normalizeClipboardText(manualText.value)
+  if (!text) return
+
+  manualText.value = text
+  clipboardFeedback.value = ''
+  await runTranslation(text, sessionId)
+}
+
+watch(manualText, () => {
+  if (clipboardFeedback.value) {
+    clipboardFeedback.value = ''
+  }
+})
 
 // Expose methods
 defineExpose({
   openReader,
+  openUrlReader,
   closeReader
 })
 

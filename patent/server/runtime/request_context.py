@@ -22,7 +22,10 @@ def clear_trace_id(token: Token | None = None) -> None:
     if token is None:
         _TRACE_ID.set("req_unknown")
         return
-    _TRACE_ID.reset(token)
+    try:
+        _TRACE_ID.reset(token)
+    except (LookupError, RuntimeError, ValueError):
+        _TRACE_ID.set("req_unknown")
 
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Any
+from typing import Any, Iterator
 
 from app.integrations.storage.base import StorageBackend
 
@@ -81,6 +81,30 @@ class MinIOStorageBackend(StorageBackend):
             raise
         try:
             return response.read()
+        finally:
+            try:
+                response.close()
+            except Exception:
+                pass
+            try:
+                response.release_conn()
+            except Exception:
+                pass
+
+    def iter_object_bytes(self, *, object_name: str, bucket: str | None = None, chunk_size: int = 65536) -> Iterator[bytes]:
+        target_bucket = str(bucket or "").strip() or self._bucket
+        try:
+            response = self._client.get_object(target_bucket, object_name)
+        except self._s3_error_cls as exc:
+            if self._is_not_found_error(exc):
+                return
+            raise
+        try:
+            while True:
+                chunk = response.read(max(1, int(chunk_size)))
+                if not chunk:
+                    break
+                yield chunk
         finally:
             try:
                 response.close()

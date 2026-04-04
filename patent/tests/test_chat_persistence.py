@@ -9,7 +9,10 @@ import pytest
 from server.errors import codes
 from server.errors.core import APIError
 from server.patent.cache_keys import PatentKeyFactory
+from server.patent.executor import PatentExecutor
+from server.patent.models import PatentRetrievalClaim
 from server.schemas.request_models import PatentAskRequest
+from server.services.ask_service import AskService
 from server.services.chat_persistence import ChatPersistenceService
 from server.services.execution_cache import ExecutionCache
 from server.services.execution_lock import ExecutionLockManager
@@ -42,6 +45,18 @@ class _FakeRedis:
             return 0
         self.store.pop(key, None)
         self.expiry.pop(key, None)
+        return 1
+
+    def compare_set(self, key, expected, replacement, ttl):
+        current = self.store.get(key)
+        normalized_expected = str(expected or "")
+        if current is None:
+            if normalized_expected:
+                return 0
+        elif current != normalized_expected:
+            return 0
+        self.store[key] = replacement
+        self.expiry[key] = ttl
         return 1
 
     def compare_expire(self, key, token, ttl):
@@ -118,6 +133,17 @@ def _make_request(
     conversation_id: int | None = 123,
     trace_id: str = "req_123",
     chat_history: list[dict[str, Any]] | None = None,
+    options: dict[str, Any] | None = None,
+    route: str = "kb_qa",
+    source_scope: str | None = None,
+    turn_mode: str = "kb_only",
+    kb_enabled: bool = True,
+    allow_kb_verification: bool = False,
+    used_files: list[dict[str, Any]] | None = None,
+    execution_files: list[dict[str, Any]] | None = None,
+    selected_file_ids: list[int] | None = None,
+    primary_file_id: int | None = None,
+    file_selection: dict[str, Any] | None = None,
 ) -> PatentAskRequest:
     return PatentAskRequest(
         question="Explain the novelty.",
@@ -125,18 +151,18 @@ def _make_request(
         chat_history=list(chat_history or []),
         requested_mode="patent",
         actual_mode="patent",
-        route="kb_qa",
-        source_scope=None,
-        turn_mode="kb_only",
-        kb_enabled=True,
-        allow_kb_verification=False,
-        used_files=[],
-        execution_files=[],
-        selected_file_ids=[],
-        primary_file_id=None,
-        file_selection={},
+        route=route,
+        source_scope=source_scope,
+        turn_mode=turn_mode,
+        kb_enabled=kb_enabled,
+        allow_kb_verification=allow_kb_verification,
+        used_files=list(used_files or []),
+        execution_files=list(execution_files or []),
+        selected_file_ids=list(selected_file_ids or []),
+        primary_file_id=primary_file_id,
+        file_selection=dict(file_selection or {}),
         trace_id=trace_id,
-        options={},
+        options=dict(options or {}),
     )
 
 
@@ -195,6 +221,29 @@ def test_durable_flow_orders_user_write_snapshot_execute_accept():
     assert redis.get("patent:test:exec:conversation-lock:123") is None
 
 
+def test_prepare_turn_keeps_patent_raw_context_boundary_for_executor_normalization():
+    authority = _FakeAuthorityClient(
+        snapshot_payload={
+            "summary": {"short_summary": "Earlier patent context"},
+            "recent_turns": [{"role": "assistant", "content": "Earlier turn", "trace_id": "req_old"}],
+            "conversation_state": {"last_turn_route": "kb_qa"},
+        }
+    )
+    service, _, _ = _build_service(authority_client=authority)
+
+    prepared = service.prepare_turn(
+        request=_make_request(),
+        user_id=42,
+    )
+
+    context = prepared["context"]
+    assert context["chat_history"] == [{"role": "assistant", "content": "Earlier turn", "trace_id": "req_old", "created_at": "", "message_id": ""}]
+    assert context["summary"] == {"short_summary": "Earlier patent context"}
+    assert context["conversation_state"] == {"last_turn_route": "kb_qa"}
+    assert "recent_turns_for_llm" not in context
+    assert "summary_for_llm" not in context
+
+
 def test_assistant_accept_failure_blocks_success():
     authority = _FakeAuthorityClient(snapshot_payload={}, fail_accept=True)
     service, authority, redis = _build_service(authority_client=authority)
@@ -209,6 +258,323 @@ def test_assistant_accept_failure_blocks_success():
     assert exc_info.value.code == codes.AUTHORITY_UNAVAILABLE
     assert authority.calls == ["user_write", "snapshot", "assistant_accept"]
     assert redis.get("patent:test:overlay:assistant:42:123") is None
+    assert redis.get("patent:test:coord:inflight:123:req_123") is None
+    assert redis.get("patent:test:exec:conversation-lock:123") is None
+
+
+def test_assistant_accept_translates_reference_strings_into_authority_objects():
+    service, authority, _ = _build_service()
+
+    result = service.run_turn(
+        request=_make_request(),
+        user_id=42,
+        execute_turn=lambda context: {
+            "answer_text": "Patent answer",
+            "references": ["CN123456789A", "US20240001234A1"],
+            "timings": {"total_ms": 12},
+        },
+    )
+
+    assert result["assistant_accept"]["accepted"] is True
+    assert authority.assistant_accepts[0]["references"] == [
+        {"source_type": "patent", "canonical_patent_id": "CN123456789A"},
+        {"source_type": "patent", "canonical_patent_id": "US20240001234A1"},
+    ]
+
+
+def test_durable_flow_maps_mode_origin_and_patent_final_event_fields_to_authority():
+    service, authority, _ = _build_service()
+
+    result = service.run_turn(
+        request=_make_request(
+            options={
+                "mode_origin": {
+                    "requested_mode": "patent",
+                    "execution_backend": "fastQA",
+                    "compatibility_route": True,
+                }
+            }
+        ),
+        user_id=42,
+        execute_turn=lambda context: {
+            "answer_text": "Patent answer",
+            "metadata": {
+                "retrieval_backend": "metadata_lexical",
+                "mode_origin": {
+                    "requested_mode": "patent",
+                    "execution_backend": "fastQA",
+                    "compatibility_route": True,
+                },
+            },
+            "references": ["CN123456789A"],
+            "reference_objects": [
+                {
+                    "source_type": "patent",
+                    "canonical_patent_id": "CN123456789A",
+                    "section_type": "claim",
+                }
+            ],
+            "reference_links": [
+                {
+                    "type": "original_view",
+                    "canonical_patent_id": "CN123456789A",
+                    "viewer_uri": "/api/patent/original/CN123456789A?section=claim&claim_number=1",
+                }
+            ],
+            "original_links": [
+                {
+                    "type": "original_view",
+                    "canonical_patent_id": "CN123456789A",
+                    "section": "claim",
+                    "claim_number": 1,
+                    "viewer_uri": "/api/patent/original/CN123456789A?section=claim&claim_number=1",
+                }
+            ],
+            "timings": {"total_ms": 12},
+        },
+    )
+
+    assert result["assistant_accept"]["accepted"] is True
+    assert authority.user_writes[0]["mode_origin_requested_mode"] == "patent"
+    assert authority.user_writes[0]["mode_origin_execution_backend"] == "fastQA"
+    assert authority.user_writes[0]["compatibility_route"] is True
+    assert authority.assistant_accepts[0]["metadata"]["mode_origin"]["execution_backend"] == "fastQA"
+    assert authority.assistant_accepts[0]["reference_objects"][0]["section_type"] == "claim"
+    assert authority.assistant_accepts[0]["reference_links"][0]["type"] == "original_view"
+    assert authority.assistant_accepts[0]["original_links"][0]["section"] == "claim"
+
+
+def test_durable_flow_preserves_file_aware_route_contract_for_authority():
+    service, authority, _ = _build_service()
+
+    result = service.run_turn(
+        request=_make_request(
+            route="hybrid_qa",
+            source_scope="pdf+kb",
+            turn_mode="mixed",
+            kb_enabled=True,
+            allow_kb_verification=True,
+            used_files=[{"file_id": 11, "file_type": "pdf"}],
+            execution_files=[{"file_id": 11, "file_type": "pdf"}],
+            selected_file_ids=[11],
+            primary_file_id=11,
+            file_selection={"strategy": "explicit_selection", "selected_file_ids": [11], "source_scope": "pdf+kb"},
+        ),
+        user_id=42,
+        execute_turn=lambda context: {
+            "answer_text": "Patent file answer",
+            "route": "hybrid_qa",
+            "source_scope": "pdf+kb",
+            "used_files": [{"file_id": 11, "file_type": "pdf"}],
+            "file_selection": {"strategy": "explicit_selection", "selected_file_ids": [11], "source_scope": "pdf+kb"},
+            "timings": {"total_ms": 12},
+        },
+    )
+
+    assert result["assistant_accept"]["accepted"] is True
+    assert authority.user_writes[0]["route"] == "hybrid_qa"
+    assert authority.user_writes[0]["source_scope"] == "pdf+kb"
+    assert authority.user_writes[0]["selected_file_ids"] == [11]
+    assert authority.snapshot_reads[0]["route"] == "hybrid_qa"
+    assert authority.snapshot_reads[0]["source_scope"] == "pdf+kb"
+    assert authority.assistant_accepts[0]["route"] == "hybrid_qa"
+    assert authority.assistant_accepts[0]["source_scope"] == "pdf+kb"
+    assert authority.assistant_accepts[0]["used_files"] == [{"file_id": 11, "file_type": "pdf"}]
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("references", ["bad-reference"]),
+        ("reference_objects", {"canonical_patent_id": "CN123456789A"}),
+        ("reference_links", {"viewer_uri": "/api/patent/original/CN123456789A"}),
+        ("original_links", {"viewer_uri": "/api/patent/original/CN123456789A"}),
+        ("used_files", {"file_id": 1}),
+    ],
+)
+def test_durable_sync_rejects_invalid_result_payload_before_assistant_accept(field_name, field_value):
+    class _BrokenExecutor:
+        def execute(self, *, request, context):
+            return {
+                "answer_text": "Patent answer",
+                "route": "kb_qa",
+                field_name: field_value,
+                "timings": {"total_ms": 12},
+            }
+
+    persistence_service, authority, redis = _build_service()
+    ask_service = AskService(
+        patent_executor=_BrokenExecutor(),
+        persistence_service=persistence_service,
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    with pytest.raises(APIError) as exc_info:
+        ask_service.sync_ask(_make_request(), user_id=42)
+
+    assert exc_info.value.code == codes.INTERNAL_ERROR
+    assert authority.assistant_accepts == []
+    assert persistence_service.execution_cache.get_turn_result(conversation_id=123, trace_id="req_123") is None
+    assert redis.get("patent:test:coord:inflight:123:req_123") is None
+    assert redis.get("patent:test:exec:conversation-lock:123") is None
+
+
+def test_durable_stream_rejects_invalid_result_payload_before_assistant_accept():
+    class _BrokenExecutor:
+        def execute(self, *, request, context):
+            return {
+                "answer_text": "Patent answer",
+                "route": "kb_qa",
+                "used_files": {"file_id": 1},
+                "timings": {"total_ms": 12},
+            }
+
+    persistence_service, authority, redis = _build_service()
+    ask_service = AskService(
+        patent_executor=_BrokenExecutor(),
+        persistence_service=persistence_service,
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    events = list(ask_service.stream_ask(_make_request(), user_id=42))
+
+    assert [event["type"] for event in events] == ["metadata", "error"]
+    assert authority.assistant_accepts == []
+    assert persistence_service.execution_cache.get_turn_result(conversation_id=123, trace_id="req_123") is None
+    assert redis.get("patent:test:coord:inflight:123:req_123") is None
+    assert redis.get("patent:test:exec:conversation-lock:123") is None
+
+
+def test_durable_sync_rejects_failed_execution_result_before_assistant_accept():
+    class _FailedExecutor:
+        def execute(self, *, request, context):
+            return {
+                "answer_text": "",
+                "route": "kb_qa",
+                "metadata": {
+                    "success": False,
+                    "failed_stage": "stage4",
+                },
+                "steps": [
+                    {
+                        "step": "stage4",
+                        "title": "Stage 4",
+                        "message": "Stage 4 synthesis failed.",
+                        "status": "failed",
+                    }
+                ],
+                "timings": {"stage4": 21},
+            }
+
+    persistence_service, authority, redis = _build_service()
+    ask_service = AskService(
+        patent_executor=_FailedExecutor(),
+        persistence_service=persistence_service,
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    with pytest.raises(APIError) as exc_info:
+        ask_service.sync_ask(_make_request(), user_id=42)
+
+    assert exc_info.value.code == codes.INTERNAL_ERROR
+    assert authority.assistant_accepts == []
+    assert persistence_service.execution_cache.get_turn_result(conversation_id=123, trace_id="req_123") is None
+    assert redis.get("patent:test:coord:inflight:123:req_123") is None
+    assert redis.get("patent:test:exec:conversation-lock:123") is None
+
+
+def test_durable_sync_aborts_persistence_for_real_staged_runtime_failure():
+    class _FailingStagedRuntime:
+        def stage1_pre_answer_and_planning(self, user_question: str, conversation_context=None):
+            return {
+                "deep_answer": "draft",
+                "retrieval_claims": [
+                    PatentRetrievalClaim(
+                        claim="compare replacement risk",
+                        keywords=["battery safety"],
+                        preferred_sections=["claims"],
+                        filters={},
+                    )
+                ],
+                "retrieval_plan": {},
+            }
+
+        def stage2_targeted_retrieval(self, retrieval_plan, *, user_question: str, should_cancel=None, active_stream_count=None):
+            return {
+                "references": ["CN115132975B"],
+                "reference_objects": [{"canonical_patent_id": "CN115132975B"}],
+                "reference_links": [],
+                "original_links": [],
+                "metadata": {"retrieval_backend": "vector_hybrid"},
+            }
+
+        def _extract_patent_ids_from_results(self, retrieval_results):
+            return ["CN115132975B"]
+
+        def stage25_patent_evidence_expansion(self, *, retrieval_results, user_question: str, source_ids: list[str]):
+            return {"skipped": True, "skip_reason": "patent_mode_no_md_expansion", "retrieval_results": retrieval_results}
+
+        def stage3_load_patent_evidence(self, *, retrieval_results, source_ids: list[str], should_cancel=None):
+            return {"source_ids": list(source_ids), "evidences": []}
+
+        def stage4_synthesis_with_patent_evidence(
+            self,
+            *,
+            user_question: str,
+            deep_answer: str,
+            patent_evidence_bundle,
+            retrieval_results=None,
+            should_cancel=None,
+            conversation_context=None,
+        ):
+            return {"success": False, "final_answer": "", "metadata": {"failed_stage": "stage4"}}
+
+    persistence_service, authority, redis = _build_service()
+    ask_service = AskService(
+        patent_executor=PatentExecutor(runtime=_FailingStagedRuntime()),
+        persistence_service=persistence_service,
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    with pytest.raises(APIError) as exc_info:
+        ask_service.sync_ask(_make_request(), user_id=42)
+
+    assert exc_info.value.code == codes.INTERNAL_ERROR
+    assert authority.assistant_accepts == []
+    assert persistence_service.execution_cache.get_turn_result(conversation_id=123, trace_id="req_123") is None
+    assert redis.get("patent:test:coord:inflight:123:req_123") is None
+    assert redis.get("patent:test:exec:conversation-lock:123") is None
+
+
+def test_durable_sync_rejects_mismatched_references_and_reference_objects_before_assistant_accept():
+    class _BrokenExecutor:
+        def execute(self, *, request, context):
+            return {
+                "answer_text": "Patent answer",
+                "route": "kb_qa",
+                "references": ["US20240001234A1"],
+                "reference_objects": [
+                    {
+                        "source_type": "patent",
+                        "canonical_patent_id": "CN123456789A",
+                    }
+                ],
+                "timings": {"total_ms": 12},
+            }
+
+    persistence_service, authority, redis = _build_service()
+    ask_service = AskService(
+        patent_executor=_BrokenExecutor(),
+        persistence_service=persistence_service,
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    with pytest.raises(APIError) as exc_info:
+        ask_service.sync_ask(_make_request(), user_id=42)
+
+    assert exc_info.value.code == codes.INTERNAL_ERROR
+    assert authority.assistant_accepts == []
+    assert persistence_service.execution_cache.get_turn_result(conversation_id=123, trace_id="req_123") is None
     assert redis.get("patent:test:coord:inflight:123:req_123") is None
     assert redis.get("patent:test:exec:conversation-lock:123") is None
 
@@ -256,6 +622,79 @@ def test_duplicate_finalization_is_not_reported_twice_for_same_turn():
     assert len(authority.assistant_accepts) == 1
 
 
+def test_cached_replay_preserves_evidence_fields_for_assistant_accept_skipped_turn():
+    authority = _FakeAuthorityClient(snapshot_payload={})
+    persistence_service, authority, _ = _build_service(authority_client=authority)
+
+    class _EvidenceExecutor:
+        def execute(self, *, request, context):
+            return {
+                "answer_text": "Patent answer",
+                "references": ["CN123456789A"],
+                "reference_objects": [
+                    {
+                        "source_type": "patent",
+                        "canonical_patent_id": "CN123456789A",
+                        "section_type": "claim",
+                    }
+                ],
+                "reference_links": [
+                    {
+                        "type": "original_view",
+                        "canonical_patent_id": "CN123456789A",
+                        "viewer_uri": "/api/patent/original/CN123456789A?section=claim&claim_number=1",
+                    }
+                ],
+                "original_links": [
+                    {
+                        "type": "original_view",
+                        "canonical_patent_id": "CN123456789A",
+                        "section": "claim",
+                        "claim_number": 1,
+                        "viewer_uri": "/api/patent/original/CN123456789A?section=claim&claim_number=1",
+                    }
+                ],
+                "timings": {"total_ms": 12},
+            }
+
+    ask_service = AskService(
+        patent_executor=_EvidenceExecutor(),
+        persistence_service=persistence_service,
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    first = ask_service.sync_ask(_make_request(), user_id=42)
+    second_events = list(ask_service.stream_ask(_make_request(), user_id=42))
+
+    assert first["references"] == ["CN123456789A"]
+    assert len(authority.assistant_accepts) == 1
+    assert second_events[-1]["type"] == "done"
+    assert second_events[-1]["references"] == ["CN123456789A"]
+    assert second_events[-1]["reference_objects"] == [
+        {
+            "source_type": "patent",
+            "canonical_patent_id": "CN123456789A",
+            "section_type": "claim",
+        }
+    ]
+    assert second_events[-1]["reference_links"] == [
+        {
+            "type": "original_view",
+            "canonical_patent_id": "CN123456789A",
+            "viewer_uri": "/api/patent/original/CN123456789A?section=claim&claim_number=1",
+        }
+    ]
+    assert second_events[-1]["original_links"] == [
+        {
+            "type": "original_view",
+            "canonical_patent_id": "CN123456789A",
+            "section": "claim",
+            "claim_number": 1,
+            "viewer_uri": "/api/patent/original/CN123456789A?section=claim&claim_number=1",
+        }
+    ]
+
+
 def test_overlay_cleanup_runs_after_authority_converges():
     authority = _FakeAuthorityClient(
         snapshot_payload={
@@ -275,6 +714,70 @@ def test_overlay_cleanup_runs_after_authority_converges():
 
     assert context["pending_overlay"] is None
     assert service.execution_cache.get_overlay_assistant(user_id=42, conversation_id=123) is None
+
+
+def test_overlay_merge_keeps_multiple_unconverged_assistant_turns():
+    authority = _FakeAuthorityClient(
+        snapshot_payload={
+            "recent_turns": [{"role": "user", "content": "Prior question", "trace_id": "req_prev_user"}],
+            "conversation_state": {"last_assistant_trace_id": "req_prev_user"},
+        }
+    )
+    service, _, _ = _build_service(authority_client=authority)
+    service.execution_cache.set_overlay_assistant(
+        user_id=42,
+        conversation_id=123,
+        payload={"trace_id": "req_prev_assistant_1", "route": "kb_qa", "assistant_content": "Pending answer 1"},
+        ttl_seconds=60,
+    )
+    service.execution_cache.set_overlay_assistant(
+        user_id=42,
+        conversation_id=123,
+        payload={"trace_id": "req_prev_assistant_2", "route": "kb_qa", "assistant_content": "Pending answer 2"},
+        ttl_seconds=60,
+    )
+
+    context = service.load_conversation_context(request=_make_request(), user_id=42, trace_id="req_123")
+
+    assert [item["trace_id"] for item in context["chat_history"][-2:]] == [
+        "req_prev_assistant_1",
+        "req_prev_assistant_2",
+    ]
+    assert context["pending_overlay"]["trace_id"] == "req_prev_assistant_2"
+
+
+def test_overlay_cleanup_does_not_delete_newer_overlay_written_after_snapshot_read():
+    authority = _FakeAuthorityClient(
+        snapshot_payload={
+            "recent_turns": [{"role": "assistant", "content": "Stored answer", "trace_id": "req_prev"}],
+            "conversation_state": {"last_assistant_trace_id": "req_prev"},
+        }
+    )
+    service, _, _ = _build_service(authority_client=authority)
+    original_delete_overlay = service.execution_cache.delete_overlay_assistant_if_unchanged
+
+    service.execution_cache.set_overlay_assistant(
+        user_id=42,
+        conversation_id=123,
+        payload={"trace_id": "req_prev", "route": "kb_qa", "assistant_content": "Pending answer"},
+        ttl_seconds=60,
+    )
+
+    def deleting_with_race(**kwargs):
+        service.execution_cache.set_overlay_assistant(
+            user_id=42,
+            conversation_id=123,
+            payload={"trace_id": "req_new", "route": "kb_qa", "assistant_content": "New pending answer"},
+            ttl_seconds=60,
+        )
+        return original_delete_overlay(**kwargs)
+
+    service.execution_cache.delete_overlay_assistant_if_unchanged = deleting_with_race
+
+    context = service.load_conversation_context(request=_make_request(), user_id=42, trace_id="req_123")
+
+    assert context["pending_overlay"] is None
+    assert service.execution_cache.get_overlay_assistant(user_id=42, conversation_id=123)["trace_id"] == "req_new"
 
 
 def test_retry_after_user_write_before_accept_converges_on_same_turn():
@@ -621,6 +1124,100 @@ def test_runtime_guard_failure_after_accept_before_cache_blocks_success():
         return original_set_turn_result(**kwargs)
 
     service.execution_cache.set_turn_result = delayed_set_turn_result
+
+    with pytest.raises(APIError) as exc_info:
+        service.run_turn(
+            request=_make_request(),
+            user_id=42,
+            execute_turn=lambda context: {"answer_text": "Patent answer"},
+        )
+
+    assert exc_info.value.code == codes.SERVICE_NOT_READY
+
+
+def test_turn_result_commit_failure_fails_closed_and_blocks_same_trace_replay():
+    service, authority, _ = _build_service()
+    execute_calls = []
+    service.execution_cache.set_turn_result = lambda **kwargs: False
+
+    with pytest.raises(APIError) as exc_info:
+        service.run_turn(
+            request=_make_request(),
+            user_id=42,
+            execute_turn=lambda context: execute_calls.append("first") or {"answer_text": "Patent answer"},
+        )
+
+    assert exc_info.value.code == codes.SERVICE_NOT_READY
+    assert execute_calls == ["first"]
+    assert len(authority.assistant_accepts) == 1
+
+    with pytest.raises(APIError) as replay_info:
+        service.run_turn(
+            request=_make_request(),
+            user_id=42,
+            execute_turn=lambda context: execute_calls.append("replay") or {"answer_text": "Patent answer"},
+        )
+
+    assert replay_info.value.code == codes.SERVICE_NOT_READY
+    assert execute_calls == ["first"]
+
+
+def test_overlay_commit_failure_keeps_pending_turn_blocked_until_overlay_visibility_recovers():
+    service, authority, _ = _build_service()
+    original_set_overlay_assistant = service.execution_cache.set_overlay_assistant
+    service.execution_cache.set_overlay_assistant = lambda **kwargs: False
+
+    with pytest.raises(APIError) as exc_info:
+        service.run_turn(
+            request=_make_request(),
+            user_id=42,
+            execute_turn=lambda context: {"answer_text": "Patent answer"},
+        )
+
+    assert exc_info.value.code == codes.SERVICE_NOT_READY
+    assert len(authority.assistant_accepts) == 1
+    assert service.execution_cache.get_turn_result(conversation_id=123, trace_id="req_123") is not None
+    assert service.execution_cache.get_pending_turn(conversation_id=123) == "req_123"
+
+    service.execution_cache.set_overlay_assistant = original_set_overlay_assistant
+
+    with pytest.raises(APIError) as replay_info:
+        service.run_turn(
+            request=_make_request(),
+            user_id=42,
+            execute_turn=lambda context: {"answer_text": "Patent answer"},
+        )
+
+    assert replay_info.value.code == codes.SERVICE_NOT_READY
+    assert service.execution_cache.get_pending_turn(conversation_id=123) == "req_123"
+
+    service.execution_cache.set_overlay_assistant(
+        user_id=42,
+        conversation_id=123,
+        payload={"trace_id": "req_123", "route": "kb_qa", "assistant_content": "Patent answer"},
+        ttl_seconds=60,
+    )
+
+    replayed = service.run_turn(
+        request=_make_request(),
+        user_id=42,
+        execute_turn=lambda context: {"answer_text": "Patent answer"},
+    )
+
+    assert replayed["assistant_accept_skipped"] is True
+    assert replayed["execution_result"]["answer_text"] == "Patent answer"
+    assert service.execution_cache.get_pending_turn(conversation_id=123) == ""
+
+
+def test_durable_flow_fails_closed_when_atomic_compare_delete_is_unavailable():
+    class _NoCompareDeleteRedis(_FakeRedis):
+        def __getattribute__(self, name):
+            if name == "compare_delete":
+                raise AttributeError(name)
+            return super().__getattribute__(name)
+
+    redis = _NoCompareDeleteRedis()
+    service, _, _ = _build_service(redis=redis)
 
     with pytest.raises(APIError) as exc_info:
         service.run_turn(

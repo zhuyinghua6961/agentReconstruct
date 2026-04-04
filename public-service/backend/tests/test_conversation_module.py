@@ -1300,6 +1300,98 @@ def test_authority_user_write_dedupes_same_idempotency_key():
         assert len(snapshot["data"]["recent_turns"]) == 1
 
 
+def test_authority_user_write_accepts_patentqa_source_service():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Authority Patent User Write")
+        conversation_id = int(created["data"]["conversation_id"])
+
+        written = service.add_authority_user_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-patent-user",
+            source_service="patentQA",
+            route="kb_qa",
+            requested_mode="patent",
+            actual_mode="patent",
+            idempotency_key=f"{conversation_id}:trace-patent-user:user",
+            content="Explain the claim scope.",
+            context_hints={},
+        )
+
+        assert written["success"] is True
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+        assert detail["success"] is True
+        assert [item["content"] for item in detail["data"]["messages"]] == ["Explain the claim scope."]
+
+
+def test_authority_assistant_async_accepts_patentqa_source_service():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Authority Patent Assistant Write")
+        conversation_id = int(created["data"]["conversation_id"])
+
+        accepted = service.accept_authority_assistant_async(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-patent-assistant",
+            source_service="patentQA",
+            route="kb_qa",
+            requested_mode="patent",
+            actual_mode="patent",
+            idempotency_key=f"{conversation_id}:trace-patent-assistant:assistant",
+            final_event={
+                "done_seen": True,
+                "answer_text": "Patent answer.",
+                "steps": [],
+                "references": [],
+                "used_files": [],
+                "timings": {},
+            },
+        )
+
+        assert accepted["success"] is True
+        assert accepted["accepted"] is True
+        task = repo.get_authority_assistant_task(task_id=int(accepted["task_id"]))
+        assert task is not None
+        metadata = task["metadata"]
+        assert metadata["source_service"] == "patentQA"
+        assert metadata["requested_mode"] == "patent"
+        assert metadata["actual_mode"] == "patent"
+
+
 def test_authority_context_snapshot_uses_last_assistant_state():
     repo = _MemoryConversationRepo()
     outbox = _OutboxRecorder()

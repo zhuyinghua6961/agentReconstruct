@@ -152,28 +152,30 @@ class PatentOriginalStore:
             figure_group = manifest.objects.figures.get(figure_source)
             if figure_group is None:
                 continue
-            object_name = str(figure_group.primary_object or "").strip()
-            if not object_name:
-                ordered = [str(item).strip() for item in figure_group.ordered_objects if str(item or "").strip()]
-                object_name = ordered[0] if ordered else ""
-            if not object_name:
-                continue
-            stat = self._stat_object(object_name)
-            if stat is None:
-                raise PatentOriginalUnavailableError(
-                    f"figure object unavailable for {manifest.canonical_patent_id}: {object_name}"
-                )
-            return PatentOriginalResolvedSection(
-                canonical_patent_id=manifest.canonical_patent_id,
-                section="figure",
-                section_label="附图",
-                original_version=manifest.original_version,
-                anchor_hit=True,
-                figure_source=figure_source,
-                served_object_key=object_name,
-                object_key=object_name,
-                media_type=str(stat.get("content_type") or "application/octet-stream"),
+            candidates: list[str] = []
+            primary_object = str(figure_group.primary_object or "").strip()
+            if primary_object:
+                candidates.append(primary_object)
+            candidates.extend(
+                item
+                for item in [str(entry).strip() for entry in figure_group.ordered_objects if str(entry or "").strip()]
+                if item and item not in candidates
             )
+            for object_name in candidates:
+                stat = self._stat_object(object_name)
+                if stat is None:
+                    continue
+                return PatentOriginalResolvedSection(
+                    canonical_patent_id=manifest.canonical_patent_id,
+                    section="figure",
+                    section_label="附图",
+                    original_version=manifest.original_version,
+                    anchor_hit=True,
+                    figure_source=figure_source,
+                    served_object_key=object_name,
+                    object_key=object_name,
+                    media_type=str(stat.get("content_type") or "application/octet-stream"),
+                )
         raise PatentOriginalUnavailableError(f"figure object unavailable for {manifest.canonical_patent_id}")
 
     def _resolve_fulltext(self, manifest: PatentOriginalManifest) -> PatentOriginalResolvedSection:

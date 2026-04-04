@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Iterator
 
 
 class StorageBackend(ABC):
@@ -11,6 +11,10 @@ class StorageBackend(ABC):
 
     @abstractmethod
     def read_object_bytes(self, *, object_name: str, bucket: str | None = None) -> bytes | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def iter_object_bytes(self, *, object_name: str, bucket: str | None = None, chunk_size: int = 65536) -> Iterator[bytes]:
         raise NotImplementedError
 
     @abstractmethod

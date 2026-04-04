@@ -175,6 +175,35 @@ def test_patent_original_head_route_accepts_query_token_auth(monkeypatch):
     assert response.headers["etag"] == '"patent-original:version-2"'
 
 
+def test_patent_original_fulltext_route_streams_pdf_body(monkeypatch):
+    with TestClient(app) as client:
+        client.app.dependency_overrides[require_auth_context] = lambda: AuthContext(
+            user_id=7,
+            role="user",
+            username="alice",
+        )
+        monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+        monkeypatch.setattr(quota_service_module.quota_service, "check_quota", lambda **kwargs: {"success": True, "allowed": True})
+        monkeypatch.setattr(quota_service_module.quota_service, "increment_quota", lambda **kwargs: {"success": True})
+        monkeypatch.setattr(
+            documents_service,
+            "patent_original_view",
+            lambda **kwargs: {
+                "status_code": 200,
+                "headers": {"etag": '"patent-original:version-2"', "cache-control": "public, max-age=300"},
+                "media_type": "application/pdf",
+                "body_iter": iter([b"%PDF-1.4\n", b"tail"]),
+            },
+        )
+
+        response = client.get("/api/v1/patent/original/CN123456789A", params={"section": "fulltext"})
+        client.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.headers["etag"] == '"patent-original:version-2"'
+    assert response.content == b"%PDF-1.4\ntail"
+
+
 def test_patent_original_route_rejects_invalid_anchor_combinations(monkeypatch):
     with TestClient(app) as client:
         client.app.dependency_overrides[require_auth_context] = lambda: AuthContext(

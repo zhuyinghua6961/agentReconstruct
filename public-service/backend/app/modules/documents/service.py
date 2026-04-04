@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from html import escape
+from itertools import chain
 import os
 import re
 import tempfile
@@ -240,22 +241,32 @@ class DocumentsService:
         if resolved.section == "fulltext":
             if normalized_format == "redirect":
                 raise AppError(message="provider_redirect_unavailable", code="PROVIDER_REDIRECT_ONLY", status_code=404)
-            body = b""
             if not head_only:
                 try:
-                    body = storage_service.read_object_bytes(
-                        object_name=str(resolved.object_key or ""),
-                        project_root=str(get_settings().local_storage_root),
-                    ) or b""
+                    body_iter = iter(
+                        storage_service.iter_object_bytes(
+                            object_name=str(resolved.object_key or ""),
+                            project_root=str(get_settings().local_storage_root),
+                        )
+                    )
+                    first_chunk = next(body_iter, b"")
+                except StopIteration:
+                    first_chunk = b""
                 except Exception as exc:
                     raise AppError(message=str(exc), code="OBJECT_STORE_UNAVAILABLE", status_code=503) from exc
-                if not body:
+                if not first_chunk:
                     raise AppError(message="fulltext pdf unavailable", code="ORIGINAL_NOT_AVAILABLE", status_code=404)
+                return {
+                    "status_code": 200,
+                    "headers": headers,
+                    "media_type": str(resolved.media_type or "application/pdf"),
+                    "body_iter": chain((first_chunk,), body_iter),
+                }
             return {
                 "status_code": 200,
                 "headers": headers,
                 "media_type": str(resolved.media_type or "application/pdf"),
-                "body": body,
+                "body": b"",
             }
 
         content = resolved.content

@@ -42,24 +42,25 @@ class PatentResultBuilder:
         trace_id: str,
         execution_result: dict[str, Any],
     ) -> dict[str, Any]:
+        references, reference_objects = self._normalize_reference_payloads(execution_result)
+        resolved_route = str(request.route or "kb_qa")
+        resolved_source_scope = str(request.source_scope or "kb")
         payload = PatentSyncSuccess(
-            data={
-                "final_answer": str(execution_result.get("answer_text") or ""),
-                "timings": dict(execution_result.get("timings") or {}),
-                "metadata": {
-                    "requested_mode": self._mode_profile.requested_mode,
-                    "actual_mode": self._mode_profile.actual_mode,
-                    "route": str(execution_result.get("route") or self._mode_profile.route),
-                    "mode": self._mode_profile.actual_mode,
-                    "query_mode": str(execution_result.get("query_mode") or self._mode_profile.query_mode),
-                    "conversation_id": request.conversation_id,
-                },
-                "references": list(execution_result.get("references") or []),
-                "pdf_links": list(execution_result.get("pdf_links") or []),
-                "reference_links": list(execution_result.get("reference_links") or []),
-                "trace_id": str(trace_id),
-            },
+            final_answer=str(execution_result.get("answer_text") or ""),
+            query_mode=self._query_mode(route=resolved_route, execution_result=execution_result),
+            route=resolved_route,
+            requested_mode=self._mode_profile.requested_mode,
+            actual_mode=self._mode_profile.actual_mode,
+            source_scope=resolved_source_scope,
+            timings=dict(execution_result.get("timings") or {}),
+            references=references,
+            reference_objects=reference_objects,
+            reference_links=self._coerce_object_list(execution_result.get("reference_links")),
+            original_links=self._coerce_object_list(execution_result.get("original_links")),
+            metadata=dict(execution_result.get("metadata") or {}),
             trace_id=str(trace_id),
+            used_files=self._coerce_object_list(execution_result.get("used_files")),
+            file_selection=dict(execution_result.get("file_selection") or {}),
         )
         return payload.model_dump()
 
@@ -70,14 +71,18 @@ class PatentResultBuilder:
         seq: int,
         route: str | None = None,
         query_mode: str | None = None,
+        source_scope: str | None = None,
     ) -> dict[str, Any]:
+        resolved_route = str(route or self._mode_profile.route)
         event = MetadataEvent(
             seq=int(seq),
             ts=self._timestamp(),
             requested_mode=self._mode_profile.requested_mode,
             actual_mode=self._mode_profile.actual_mode,
-            route=str(route or self._mode_profile.route),
-            query_mode=str(query_mode or self._mode_profile.query_mode),
+            route=resolved_route,
+            query_mode=str(query_mode or get_patent_mode_profile(resolved_route).query_mode),
+            source_scope=str(source_scope or "kb"),
+            metadata={},
             trace_id=str(trace_id),
         )
         return event.model_dump()
@@ -90,39 +95,62 @@ class PatentResultBuilder:
     ) -> Iterator[dict[str, Any]]:
         seq = int(starting_seq)
         for step in self._coerce_steps(execution_result.get("steps") or []):
-            yield StepEvent(
-                seq=seq,
-                ts=self._timestamp(),
-                title=step.get("title"),
-                message=step.get("message"),
-            ).model_dump()
+            yield self.build_step_event(seq=seq, step=step)
             seq += 1
 
         answer_text = str(execution_result.get("answer_text") or "")
         if answer_text:
-            yield ContentEvent(
-                seq=seq,
-                ts=self._timestamp(),
-                content=answer_text,
-            ).model_dump()
+            yield self.build_content_event(seq=seq, content=answer_text)
+
+    def build_step_event(self, *, seq: int, step: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(step or {})
+        return StepEvent(
+            seq=int(seq),
+            ts=self._timestamp(),
+            step=str(payload.get("step") or "").strip() or None,
+            title=str(payload.get("title") or "").strip() or None,
+            message=str(payload.get("message") or "").strip() or None,
+            detail=str(payload.get("detail") or "").strip() or None,
+            status=str(payload.get("status") or "").strip() or None,
+            error=str(payload.get("error") or "").strip() or None,
+            data=dict(payload.get("data") or {}) if isinstance(payload.get("data"), dict) else None,
+        ).model_dump()
+
+    def build_content_event(self, *, seq: int, content: str) -> dict[str, Any]:
+        return ContentEvent(
+            seq=int(seq),
+            ts=self._timestamp(),
+            content=str(content or ""),
+        ).model_dump()
 
     def build_done_event(
         self,
         *,
+        request: PatentAskRequest,
         trace_id: str,
         execution_result: dict[str, Any],
         seq: int,
     ) -> dict[str, Any]:
+        references, reference_objects = self._normalize_reference_payloads(execution_result)
+        resolved_route = str(request.route or "kb_qa")
+        resolved_source_scope = str(request.source_scope or "kb")
         event = DoneEvent(
             seq=int(seq),
             ts=self._timestamp(),
             final_answer=str(execution_result.get("answer_text") or ""),
+            query_mode=self._query_mode(route=resolved_route, execution_result=execution_result),
+            route=resolved_route,
+            requested_mode=self._mode_profile.requested_mode,
+            actual_mode=self._mode_profile.actual_mode,
+            source_scope=resolved_source_scope,
             timings=dict(execution_result.get("timings") or {}),
-            references=list(execution_result.get("references") or []),
+            references=references,
+            reference_objects=reference_objects,
+            reference_links=self._coerce_object_list(execution_result.get("reference_links")),
+            original_links=self._coerce_object_list(execution_result.get("original_links")),
+            metadata=dict(execution_result.get("metadata") or {}),
             trace_id=str(trace_id),
-            used_files=list(execution_result.get("used_files") or []),
-            reference_links=list(execution_result.get("reference_links") or []),
-            pdf_links=list(execution_result.get("pdf_links") or []),
+            used_files=self._coerce_object_list(execution_result.get("used_files")),
             file_selection=dict(execution_result.get("file_selection") or {}),
         )
         return event.model_dump()
@@ -160,14 +188,74 @@ class PatentResultBuilder:
     def _timestamp(self) -> str:
         return str(self._now_factory())
 
+    def _query_mode(self, *, route: str, execution_result: dict[str, Any]) -> str:
+        raw_query_mode = str(execution_result.get("query_mode") or "").strip()
+        if raw_query_mode and raw_query_mode != "patent":
+            return raw_query_mode
+        return str(get_patent_mode_profile(route).query_mode)
+
+    def _normalize_reference_payloads(self, execution_result: dict[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
+        references = self._coerce_references(execution_result.get("references"))
+        reference_objects = self._coerce_object_list(execution_result.get("reference_objects"))
+        if not reference_objects:
+            return references, reference_objects
+
+        derived_references = self._derive_references_from_objects(reference_objects)
+        if references and references != derived_references:
+            raise ValueError("references must match reference_objects canonical patent identifiers")
+        return derived_references, reference_objects
+
     @staticmethod
     def _coerce_steps(value: Iterable[dict[str, Any]] | list[Any]) -> list[dict[str, Any]]:
         normalized: list[dict[str, Any]] = []
         for item in value or []:
             if not isinstance(item, dict):
                 continue
-            normalized.append({
-                "title": str(item.get("title") or "").strip() or None,
-                "message": str(item.get("message") or "").strip() or None,
-            })
+            normalized.append(
+                {
+                    "step": str(item.get("step") or "").strip() or None,
+                    "title": str(item.get("title") or "").strip() or None,
+                    "message": str(item.get("message") or "").strip() or None,
+                    "detail": str(item.get("detail") or "").strip() or None,
+                    "status": str(item.get("status") or "").strip() or None,
+                    "error": str(item.get("error") or "").strip() or None,
+                    "data": dict(item.get("data") or {}) if isinstance(item.get("data"), dict) else None,
+                }
+            )
+        return normalized
+
+    @staticmethod
+    def _coerce_references(value: Any) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValueError("references must be a list")
+        normalized: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError("references items must be strings")
+            normalized.append(item.strip())
+        return normalized
+
+    @staticmethod
+    def _coerce_object_list(value: Any) -> list[dict[str, Any]]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValueError("object-list fields must be lists")
+        normalized: list[dict[str, Any]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                raise ValueError("object-list items must be objects")
+            normalized.append(dict(item))
+        return normalized
+
+    @staticmethod
+    def _derive_references_from_objects(reference_objects: list[dict[str, Any]]) -> list[str]:
+        normalized: list[str] = []
+        for item in reference_objects:
+            canonical_patent_id = str(item.get("canonical_patent_id") or "").strip()
+            if not canonical_patent_id:
+                raise ValueError("reference_objects items must include canonical_patent_id")
+            normalized.append(canonical_patent_id)
         return normalized

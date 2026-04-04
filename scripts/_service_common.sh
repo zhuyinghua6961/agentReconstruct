@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RESOURCE_DIR="$ROOT_DIR/resource"
 
-SERVICES=(public-service fastQA highThinkingQA gateway)
+SERVICES=(public-service fastQA highThinkingQA patent gateway)
 
 env_bool() {
   local value
@@ -59,6 +59,7 @@ service_port() {
     public-service) echo 8102 ;;
     fastQA) echo 8008 ;;
     highThinkingQA) echo 8009 ;;
+    patent) echo 8010 ;;
     *) return 1 ;;
   esac
 }
@@ -69,6 +70,7 @@ service_health_url() {
     public-service) echo "http://127.0.0.1:8102/api/health" ;;
     fastQA) echo "http://127.0.0.1:8008/api/health" ;;
     highThinkingQA) echo "http://127.0.0.1:8009/api/health" ;;
+    patent) echo "http://127.0.0.1:8010/api/health" ;;
     *) return 1 ;;
   esac
 }
@@ -79,6 +81,7 @@ service_pid_file() {
     public-service) echo "$ROOT_DIR/public-service/.runtime/public-service-gunicorn.pid" ;;
     fastQA) echo "$RESOURCE_DIR/runtime/dev/fastQA/fastqa-gunicorn.pid" ;;
     highThinkingQA) echo "$RESOURCE_DIR/runtime/dev/highThinkingQA/gunicorn.pid" ;;
+    patent) echo "$RESOURCE_DIR/runtime/dev/patent/patent-gunicorn.pid" ;;
     *) return 1 ;;
   esac
 }
@@ -152,6 +155,23 @@ run_service_script() {
       HIGHTHINKINGQA_SERVICE_ASSET_ROOT="$RESOURCE_DIR/assets" \
       APP_PORT=8009 \
       bash "$ROOT_DIR/highThinkingQA/scripts/status_fastapi_gunicorn.sh"
+      ;;
+    patent:start)
+      PATENT_PORT=8010 \
+      PATENT_SERVICE_RUNTIME_ROOT="$RESOURCE_DIR/runtime/dev/patent" \
+      PATENT_SERVICE_LOG_ROOT="$RESOURCE_DIR/logs/dev/patent" \
+      bash "$ROOT_DIR/patent/scripts/start_gunicorn.sh"
+      ;;
+    patent:stop)
+      PATENT_PORT=8010 \
+      PATENT_SERVICE_RUNTIME_ROOT="$RESOURCE_DIR/runtime/dev/patent" \
+      bash "$ROOT_DIR/patent/scripts/stop_gunicorn.sh"
+      ;;
+    patent:status)
+      PATENT_PORT=8010 \
+      PATENT_SERVICE_RUNTIME_ROOT="$RESOURCE_DIR/runtime/dev/patent" \
+      PATENT_SERVICE_LOG_ROOT="$RESOURCE_DIR/logs/dev/patent" \
+      bash "$ROOT_DIR/patent/scripts/status_gunicorn.sh"
       ;;
     *)
       echo "unsupported service/action: $service $action" >&2

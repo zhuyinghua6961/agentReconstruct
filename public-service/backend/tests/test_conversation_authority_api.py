@@ -266,6 +266,30 @@ def test_internal_assistant_async_allows_fastqa_rerouted_thinking_request(monkey
     assert payload["trace_id"] == "trc_fast_001"
 
 
+def test_internal_assistant_terminal_async_allows_patentqa_patent_request(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="authority patent terminal write")
+        conversation_id = int(created["data"]["conversation_id"])
+        response = client.post(
+            f"/internal/conversations/{conversation_id}/messages/assistant-terminal-async",
+            json=_assistant_terminal_body(
+                conversation_id=conversation_id,
+                source_service="patentQA",
+                requested_mode="patent",
+                actual_mode="patent",
+                idempotency_key=f"{conversation_id}:trc_fast_001:assistant",
+            ),
+            headers=_internal_headers("patentQA"),
+        )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["accepted"] is True
+    assert payload["trace_id"] == "trc_fast_001"
+
+
 def test_internal_context_snapshot_read_does_not_require_idempotency_key(monkeypatch):
     monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
 

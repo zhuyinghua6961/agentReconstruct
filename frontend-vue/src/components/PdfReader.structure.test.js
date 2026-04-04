@@ -35,7 +35,40 @@ test('PdfReader citation panel uses the full right-panel space when citations ta
 
 test('PdfReader uses the shared quota card and single-request pdf open flow', () => {
   assert.match(source, /import QuotaLimitCard from '\.\/QuotaLimitCard\.vue'/)
-  assert.match(source, /import \{ fetchPdfDocument \} from '\.\.\/api\/literature'/)
+  assert.match(source, /import \{ fetchPdfDocument, fetchPdfDocumentByUrl \} from '\.\.\/api\/literature'/)
   assert.match(source, /import \{ buildPdfReaderOpenState, releasePdfBlobUrl \} from '\.\.\/utils\/pdfReaderOpenFlow'/)
   assert.match(source, /<QuotaLimitCard v-if="pdfError\?\.quotaCard" :card="pdfError\.quotaCard" \/>/)
+})
+
+test('PdfReader translation panel exposes paste-and-translate structure', () => {
+  assert.match(source, /粘贴并翻译/)
+  assert.match(source, /clipboardFeedback/)
+  assert.match(source, /@click="pasteAndTranslate"/)
+  assert.match(source, /读取系统剪贴板内容，不是当前 PDF 划选内容/)
+  assert.match(source, /\.\.\/utils\/pdfReaderClipboardTranslate\.js'/)
+  assert.match(source, /buildTranslatePayload/)
+  assert.match(source, /classifyClipboardFailure/)
+  assert.match(source, /getClipboardFeedbackMessage/)
+  assert.match(source, /normalizeClipboardText/)
+  assert.match(source, /const translationSessionId = ref\(0\)/)
+  assert.match(source, /function resetTranslationInteractionSession\(\)/)
+  assert.match(source, /function isActiveTranslationSession\(sessionId\)/)
+  assert.match(source, /const hasManualTranslateText = computed\(\(\) => normalizeClipboardText\(manualText\.value\)\.length > 0\)/)
+  assert.match(source, /:disabled="!hasManualTranslateText \|\| isTranslating"/)
+  assert.match(source, /async function runTranslation\(text, sessionId = translationSessionId\.value\)/)
+  assert.match(source, /async function pasteAndTranslate\(\)[\s\S]*?const sessionId = translationSessionId\.value[\s\S]*?isTranslating\.value = true[\s\S]*?translationQuotaCard\.value = null/)
+  assert.match(source, /await clipboardApi\.readText\(\)[\s\S]*?if \(!isActiveTranslationSession\(sessionId\)\) return/)
+  assert.match(source, /await api\.translate\(buildTranslatePayload\(text\)\)[\s\S]*?if \(!isActiveTranslationSession\(sessionId\)\) return/)
+})
+
+test('PdfReader clears clipboard feedback when manual translation text changes', () => {
+  assert.match(source, /import \{ computed, onBeforeUnmount, ref, watch \} from 'vue'/)
+  assert.match(source, /watch\(manualText, \(\) => \{/)
+  assert.match(source, /clipboardFeedback\.value = ''/)
+})
+
+test('PdfReader resets translate busy state when opening and closing the reader', () => {
+  assert.match(source, /async function openReader\(doi, locations = \[\]\) \{[\s\S]*?resetTranslationInteractionSession\(\)[\s\S]*?clipboardFeedback\.value = ''/)
+  assert.match(source, /async function openUrlReader\(label, documentUrl, locations = \[\]\) \{[\s\S]*?fetchPdfDocumentByUrl\(documentUrl\)/)
+  assert.match(source, /function closeReader\(\) \{[\s\S]*?resetTranslationInteractionSession\(\)[\s\S]*?translationQuotaCard\.value = null[\s\S]*?clipboardFeedback\.value = ''/)
 })

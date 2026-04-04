@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { fetchPdfDocument } from './literature.js'
+import { fetchPdfDocument, fetchPdfDocumentByUrl } from './literature.js'
 
 test('fetchPdfDocument returns blobUrl when view_pdf responds with PDF', async () => {
   const originalFetch = global.fetch
@@ -59,5 +59,38 @@ test('fetchPdfDocument returns errorPayload when view_pdf responds with JSON err
     assert.equal(result.errorPayload.data.quota_type, 'file_view')
   } finally {
     global.fetch = originalFetch
+  }
+})
+
+test('fetchPdfDocumentByUrl requests the provided patent original url with auth header', async () => {
+  const originalFetch = global.fetch
+  const originalCreate = URL.createObjectURL
+  const calls = []
+
+  global.fetch = async (url, options) => {
+    calls.push({ url, options })
+    return new Response(new Blob(['pdf-bytes'], { type: 'application/pdf' }), {
+      status: 200,
+      headers: { 'content-type': 'application/pdf' },
+    })
+  }
+  URL.createObjectURL = () => 'blob:patent-pdf-demo'
+  global.localStorage = {
+    getItem(key) {
+      if (key === 'token') return 'demo-token'
+      return ''
+    },
+  }
+
+  try {
+    const result = await fetchPdfDocumentByUrl('/api/patent/original/CN100420075C')
+    assert.equal(result.ok, true)
+    assert.equal(result.blobUrl, 'blob:patent-pdf-demo')
+    assert.match(String(calls[0].url), /\/api\/patent\/original\/CN100420075C$/)
+    assert.equal(calls[0].options.headers.Authorization, 'Bearer demo-token')
+  } finally {
+    global.fetch = originalFetch
+    URL.createObjectURL = originalCreate
+    delete global.localStorage
   }
 })

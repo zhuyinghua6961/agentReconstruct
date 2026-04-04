@@ -437,6 +437,64 @@ def _file_status_stream(*, trace_id: str, route_decision) -> StreamingResponse:
     )
 
 
+def _patent_file_routes_disabled(*, request: Request, route_decision) -> bool:
+    settings = getattr(request.app.state, "settings", None)
+    if route_decision.requested_mode != "patent":
+        return False
+    if str(route_decision.route or "").strip().lower() not in _FILE_ROUTES:
+        return False
+    return not bool(getattr(settings, "patent_file_routes_enabled", False))
+
+
+def _patent_file_route_disabled_json(*, trace_id: str, route_decision) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={
+            "success": False,
+            "code": "PATENT_FILE_ROUTE_DISABLED",
+            "error": "patent_file_route_disabled",
+            "message": "patent file routes are disabled",
+            "retriable": False,
+            "trace_id": trace_id,
+            "requested_mode": route_decision.requested_mode,
+            "actual_mode": route_decision.actual_mode,
+            "route": route_decision.route,
+            "detail": _route_context_payload(route_decision),
+        },
+        headers={"X-Gateway-Backend": route_decision.actual_mode},
+    )
+
+
+def _patent_file_route_disabled_stream(*, trace_id: str, route_decision) -> StreamingResponse:
+    def _frames():
+        yield (
+            'data: {"type":"metadata","requested_mode":"%s","actual_mode":"%s","route":"%s","source_scope":%s,"selected_file_ids":%s,"strategy":%s,"file_selection":%s,"route_reasons":%s,"route_confidence":%s,"classifier_used":%s,"trace_id":"%s"}\n\n'
+            % (
+                route_decision.requested_mode,
+                route_decision.actual_mode,
+                route_decision.route,
+                json.dumps(route_decision.source_scope, ensure_ascii=False),
+                json.dumps(list(route_decision.selected_file_ids or []), ensure_ascii=False),
+                json.dumps(route_decision.strategy, ensure_ascii=False),
+                json.dumps(dict(route_decision.file_selection or {}), ensure_ascii=False),
+                json.dumps(list(route_decision.route_reasons or []), ensure_ascii=False),
+                json.dumps(route_decision.route_confidence, ensure_ascii=False),
+                json.dumps(route_decision.classifier_used, ensure_ascii=False),
+                trace_id,
+            )
+        )
+        yield (
+            'data: {"type":"error","code":"PATENT_FILE_ROUTE_DISABLED","error":"patent_file_route_disabled","message":"patent file routes are disabled","retriable":false,"trace_id":"%s"}\n\n'
+            % trace_id
+        )
+
+    return StreamingResponse(
+        _frames(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "X-Gateway-Backend": route_decision.actual_mode},
+    )
+
+
 def _upstream_stream_error_stream(*, trace_id: str, backend: str, exc: Exception) -> StreamingResponse:
     message = str(exc).replace('"', '\\"') or "upstream_stream_unavailable"
 
@@ -511,6 +569,8 @@ async def _proxy_ask(request: Request, payload: AskRequest, mode: str) -> JSONRe
         return _clarification_json(trace_id=trace_id, route_decision=route_decision)
     if route_decision.status_code:
         return _file_status_json(trace_id=trace_id, route_decision=route_decision)
+    if _patent_file_routes_disabled(request=request, route_decision=route_decision):
+        return _patent_file_route_disabled_json(trace_id=trace_id, route_decision=route_decision)
 
     registry = request.app.state.backend_registry
     proxy_service: ProxyService = request.app.state.proxy_service
@@ -580,6 +640,8 @@ async def _proxy_ask_stream(request: Request, payload: AskRequest, mode: str):
         return _clarification_stream(trace_id=trace_id, route_decision=route_decision)
     if route_decision.status_code:
         return _file_status_stream(trace_id=trace_id, route_decision=route_decision)
+    if _patent_file_routes_disabled(request=request, route_decision=route_decision):
+        return _patent_file_route_disabled_stream(trace_id=trace_id, route_decision=route_decision)
 
     registry = request.app.state.backend_registry
     proxy_service: ProxyService = request.app.state.proxy_service

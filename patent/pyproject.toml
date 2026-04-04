@@ -4,13 +4,17 @@ version = "0.1.0"
 description = "Phase 1 scaffold for the patent FastAPI service"
 requires-python = ">=3.10"
 dependencies = [
+  "chromadb>=0.5,<1.0",
   "fastapi>=0.115,<1.0",
   "gunicorn>=23,<24",
   "httpx>=0.28,<1.0",
   "itsdangerous>=2.2,<3.0",
+  "pandas>=2.2,<3.0",
+  "PyMuPDF>=1.24,<2.0",
   "pydantic>=2.9,<3.0",
   "pytest>=8,<9",
   "redis>=5,<6",
+  "xlrd>=2.0,<3.0",
   "uvicorn>=0.34,<1.0",
 ]
 

@@ -1,4 +1,5 @@
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -7,6 +8,8 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from config import get_settings
 from server.patent.executor import PatentExecutor
+from server.patent.original_service import OriginalViewService
+from server.patent.runtime import build_default_patent_runtime
 from server.runtime.ordered_task_dispatcher import OrderedTaskDispatcher
 from server.runtime.request_context import clear_trace_id, generate_trace_id, get_trace_id, set_trace_id
 from server.services.ask_service import AskService
@@ -16,6 +19,7 @@ from server.services.execution_cache import ExecutionCache
 from server.services.execution_lock import ExecutionLockManager
 from server.services.redis_client import bootstrap_redis_state
 from server_fastapi.errors import register_exception_handlers
+from server_fastapi.logging import configure_logging
 from server_fastapi.routers import register_routers
 
 
@@ -74,14 +78,41 @@ def _bootstrap_service_state(app: FastAPI) -> None:
         execution_cache=execution_cache,
         durable_mode_enabled=bool(app.state.settings.durable_mode_enabled),
     )
-    ask_service = AskService(
-        patent_executor=PatentExecutor(),
-        persistence_service=chat_persistence_service,
-    )
+    patent_runtime = build_default_patent_runtime()
+    component_status = dict(getattr(app.state, "component_status", {}) or {})
+    runtime_status = dict(component_status.get("runtime") or {})
+    runtime_status["ready"] = patent_runtime is not None
+    if patent_runtime is None:
+        runtime_status["detail"] = "patent runtime bootstrap unavailable"
+    else:
+        runtime_status.pop("detail", None)
+    component_status["runtime"] = runtime_status
+    app.state.component_status = component_status
+    try:
+        ask_service = AskService(
+            patent_executor=PatentExecutor(
+                runtime=patent_runtime,
+                runtime_required=True,
+            ),
+            persistence_service=chat_persistence_service,
+        )
+        original_service = OriginalViewService(
+            execution_cache=execution_cache,
+        )
+    except Exception:
+        close = getattr(patent_runtime, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+        raise
     app.state.execution_lock_manager = execution_lock_manager
     app.state.execution_cache = execution_cache
     app.state.chat_persistence_service = chat_persistence_service
+    app.state.patent_runtime = patent_runtime
     app.state.ask_service = ask_service
+    app.state.original_service = original_service
 
 
 def _close_state_resource(container: object, attr_name: str) -> None:
@@ -108,6 +139,7 @@ def _bootstrap_app_state(app: FastAPI) -> None:
         _bootstrap_service_state(app)
     except Exception:
         _close_state_resource(app.state, "authority_client")
+        _close_state_resource(app.state, "patent_runtime")
         redis_bindings = getattr(app.state, "redis_bindings", None)
         if redis_bindings is not None:
             _close_state_resource(redis_bindings, "client")
@@ -123,6 +155,7 @@ async def _lifespan(app: FastAPI):
         yield
     finally:
         _close_state_resource(app.state, "authority_client")
+        _close_state_resource(app.state, "patent_runtime")
         redis_bindings = getattr(app.state, "redis_bindings", None)
         if redis_bindings is not None:
             _close_state_resource(redis_bindings, "client")
@@ -132,6 +165,7 @@ async def _lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    configure_logging(str(os.getenv("PATENT_LOG_LEVEL") or os.getenv("LOG_LEVEL") or "INFO"))
     app = FastAPI(title=settings.service_name, lifespan=_lifespan)
     app.logger = logging.getLogger("patent.server_fastapi")
 
@@ -148,6 +182,7 @@ def create_app() -> FastAPI:
         "authority": {"ready": False},
         "runtime": dispatcher.runtime_state(),
     }
+    app.state.original_route_compatibility_enabled = False
     app.state._rebootstrap_on_startup = False
 
     app.add_middleware(TraceContextMiddleware)

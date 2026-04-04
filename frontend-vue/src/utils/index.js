@@ -29,6 +29,11 @@ function normalizeDoiForLink(raw) {
   return /^10\.\d{1,9}\//i.test(value) ? value : ''
 }
 
+function normalizePatentIdForLink(raw) {
+  const value = String(raw || '').trim().replace(/[)\],;:]+$/g, '').toUpperCase()
+  return /^[A-Z]{2}[A-Z0-9._/\-]+$/.test(value) ? value : ''
+}
+
 function readEnclosedSpan(text, startIndex, openChar, closeChar) {
   if (text[startIndex] !== openChar) return null
   let depth = 0
@@ -213,6 +218,42 @@ function applyDoiLinksToHtml(html) {
     .join('')
 }
 
+function linkifyPatentTextSegment(text) {
+  return String(text || '').replace(
+    /\(\s*patent_id\s*=\s*([A-Za-z0-9._/\-]+)\s*\)/gi,
+    (_match, rawPatentId) => {
+      const patentId = normalizePatentIdForLink(rawPatentId)
+      if (!patentId) return _match
+      return `(<a href="#" class="doi-link patent-link" data-patent-id="${patentId}">patent_id=${patentId}</a>)`
+    }
+  )
+}
+
+function applyPatentLinksToHtml(html) {
+  const segments = String(html || '').split(/(<[^>]+>)/g)
+  let inAnchor = false
+
+  return segments
+    .map((segment) => {
+      if (!segment) return segment
+      if (segment.startsWith('<')) {
+        if (/^<a\b/i.test(segment)) {
+          inAnchor = true
+        } else if (/^<\/a\b/i.test(segment)) {
+          inAnchor = false
+        }
+        return segment
+      }
+      if (inAnchor) return segment
+      return linkifyPatentTextSegment(segment)
+    })
+    .join('')
+}
+
+function applyCitationLinksToHtml(html) {
+  return applyPatentLinksToHtml(applyDoiLinksToHtml(html))
+}
+
 function protectDoiSegments(text) {
   const placeholders = []
   const source = String(text || '')
@@ -250,6 +291,28 @@ function protectDoiSegments(text) {
   }
 }
 
+function protectPatentSegments(text) {
+  const placeholders = []
+  const protectedText = String(text || '').replace(
+    /\(\s*patent_id\s*=\s*[A-Za-z0-9._/\-]+\s*\)/gi,
+    (raw) => {
+      const token = `@@PATENT${placeholders.length}@@`
+      placeholders.push(raw)
+      return token
+    }
+  )
+
+  return {
+    text: protectedText,
+    restore(value) {
+      return placeholders.reduce(
+        (result, original, index) => result.replaceAll(`@@PATENT${index}@@`, original),
+        String(value || '')
+      )
+    }
+  }
+}
+
 function containsMathMarkup(text) {
   const protectedText = protectDoiSegments(text).text
   return /\\\(|\\\[|\$\$?/.test(protectedText)
@@ -260,6 +323,7 @@ function normalizeMarkdownForRender(text) {
   const input = String(text || '')
     .replace(/\r\n/g, '\n')
     .replace(/\u00a0/g, ' ')
+    .replace(/([。！？：:])\s*(#{1,6}\s+)/g, '$1\n\n$2')
 
   const lines = input.split('\n')
   const normalized = []
@@ -400,7 +464,7 @@ export function formatAnswer(text, referenceSnippets = []) {
     html = formatStreamingFallback(normalizedText)
   }
 
-  return applyDoiLinksToHtml(html)
+  return applyCitationLinksToHtml(html)
 }
 
 export function formatStreamingAnswer(text) {
@@ -410,7 +474,7 @@ export function formatStreamingAnswer(text) {
   const shouldRenderMath = containsMathMarkup(baseText) || containsInlineRenderMarkup(baseText)
 
   if (!containsStructuredMarkdown(baseText) && !shouldRenderMath) {
-    return applyDoiLinksToHtml(formatStreamingFallback(baseText))
+    return applyCitationLinksToHtml(formatStreamingFallback(baseText))
   }
 
   const normalizedText = shouldRenderMath ? renderMathMarkup(baseText) : baseText
@@ -426,7 +490,7 @@ export function formatStreamingAnswer(text) {
     html = formatStreamingFallback(normalizedText)
   }
 
-  return applyDoiLinksToHtml(html)
+  return applyCitationLinksToHtml(html)
 }
 
 // 修复表格格式
@@ -470,14 +534,15 @@ function fixTableFormat(text) {
 
 function renderMathMarkup(text) {
   const doiProtection = protectDoiSegments(text)
-  let next = doiProtection.text
+  const patentProtection = protectPatentSegments(doiProtection.text)
+  let next = patentProtection.text
 
   next = next.replace(/\\\[((?:.|\n)*?)\\\]/g, (_match, expr) => renderMathExpression(expr))
   next = next.replace(/\$\$([\s\S]*?)\$\$/g, (_match, expr) => renderMathExpression(expr))
   next = next.replace(/\\\(((?:.|\n)*?)\\\)/g, (_match, expr) => renderMathExpression(expr))
   next = next.replace(/\$([^$\n]+)\$/g, (_match, expr) => renderMathExpression(expr))
 
-  return doiProtection.restore(renderSubSupMarkup(next))
+  return doiProtection.restore(patentProtection.restore(renderSubSupMarkup(next)))
 }
 
 function renderMathExpression(text) {

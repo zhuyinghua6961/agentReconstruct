@@ -10,10 +10,10 @@ class AuthorityRequestBase(BaseModel):
     conversation_id: int = Field(gt=0)
     user_id: int = Field(gt=0)
     trace_id: str = Field(min_length=1)
-    source_service: Literal["fastQA", "highThinkingQA"]
+    source_service: Literal["fastQA", "highThinkingQA", "patentQA"]
     route: str = Field(min_length=1)
-    requested_mode: Literal["fast", "thinking"]
-    actual_mode: Literal["fast", "thinking"]
+    requested_mode: Literal["fast", "thinking", "patent"]
+    actual_mode: Literal["fast", "thinking", "patent"]
 
 
 class AuthorityUserMessagePayload(BaseModel):

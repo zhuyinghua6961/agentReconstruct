@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from anyio import CapacityLimiter
 from dataclasses import dataclass
 from threading import BoundedSemaphore, Lock
 
@@ -26,6 +27,7 @@ class OrderedTaskDispatcher:
     def __init__(self, *, stream_max_concurrent: int, ask_executor_max_workers: int) -> None:
         self._stream_capacity = max(1, int(stream_max_concurrent))
         self._ask_executor_max_workers = max(1, int(ask_executor_max_workers))
+        self._ask_limiter = CapacityLimiter(total_tokens=self._ask_executor_max_workers)
         self._stream_slots = BoundedSemaphore(value=self._stream_capacity)
         self._lock = Lock()
         self._inflight_streams = 0
@@ -47,6 +49,10 @@ class OrderedTaskDispatcher:
             "stream_slots_available": max(0, int(available)),
             "ask_executor_max_workers": self._ask_executor_max_workers,
         }
+
+    @property
+    def ask_limiter(self) -> CapacityLimiter:
+        return self._ask_limiter
 
     def _release_stream_slot(self) -> None:
         should_release = False

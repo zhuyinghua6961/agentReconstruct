@@ -7,7 +7,7 @@ import re
 import tempfile
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import unquote
 
 from app.integrations.storage.factory import get_storage_backend
@@ -114,6 +114,29 @@ class StorageService:
         if not path.exists() or not path.is_file():
             return None
         return path.read_bytes()
+
+    def iter_object_bytes(
+        self,
+        *,
+        object_name: str,
+        project_root: str | None = None,
+        backend: Any | None = None,
+        chunk_size: int = 65536,
+    ) -> Iterator[bytes]:
+        active_backend = self._resolve_backend(backend=backend, project_root=project_root)
+        reader = getattr(active_backend, "iter_object_bytes", None)
+        if callable(reader):
+            yield from reader(object_name=object_name, chunk_size=max(1, int(chunk_size)))
+            return
+        path = self._resolve_local_backend_path(backend=active_backend, object_name=object_name)
+        if not path.exists() or not path.is_file():
+            return
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(max(1, int(chunk_size)))
+                if not chunk:
+                    break
+                yield chunk
 
     def read_json_object(
         self,

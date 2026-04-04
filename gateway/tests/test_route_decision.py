@@ -45,6 +45,9 @@ def test_selected_pdf_file_scope_does_not_force_fast_mode_for_plain_question():
     assert routed.source_scope == "kb"
     assert routed.turn_mode == "kb_only"
     assert routed.strategy == "none"
+    assert routed.selected_file_ids == []
+    assert routed.file_selection == {}
+    assert routed.primary_file_id is None
     assert routed.execution_files == []
     assert "NO_FILE_INTENT" in routed.route_reasons
 
@@ -157,7 +160,7 @@ def test_mixed_pdf_turn_exposes_canonical_file_aware_fields():
     assert "EXPLICIT_MIXED_INTENT" in routed.route_reasons
 
 
-def test_patent_requested_mode_is_forced_to_fast_for_file_routes():
+def test_patent_requested_mode_keeps_patent_backend_for_file_routes():
     decision = resolver.resolve(
         question="请总结这篇文献",
         pdf_context={"selected_ids": [11]},
@@ -166,10 +169,27 @@ def test_patent_requested_mode_is_forced_to_fast_for_file_routes():
     routed = router.decide(requested_mode="patent", file_context=decision)
 
     assert routed.route == "pdf_qa"
-    assert routed.actual_mode == "fast"
+    assert routed.actual_mode == "patent"
     assert routed.requested_mode == "patent"
     assert routed.source_scope == "pdf"
     assert "EXPLICIT_SELECTED_FILES" in routed.route_reasons
+
+
+def test_patent_requested_mode_keeps_patent_backend_for_hybrid_routes():
+    decision = resolver.resolve(
+        question="请结合知识库总结这篇文献",
+        pdf_context={"selected_ids": [11]},
+        available_files=[PDF],
+    )
+    routed = router.decide(requested_mode="patent", file_context=decision)
+
+    assert routed.route == "hybrid_qa"
+    assert routed.actual_mode == "patent"
+    assert routed.requested_mode == "patent"
+    assert routed.turn_mode == "mixed"
+    assert routed.source_scope == "pdf+kb"
+    assert routed.kb_enabled is True
+    assert "EXPLICIT_MIXED_INTENT" in routed.route_reasons
 
 
 def test_pdf_table_file_turn_maps_to_file_only_scope():

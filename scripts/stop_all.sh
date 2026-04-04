@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/_service_common.sh"
 
-STOP_ORDER=(gateway highThinkingQA fastQA public-service)
+STOP_ORDER=(gateway patent highThinkingQA fastQA public-service)
 
 run_gateway_admission_worker stop >/dev/null 2>&1 || true
 wait_for_pid_state "$(gateway_admission_worker_pid_file)" 0 15 || true

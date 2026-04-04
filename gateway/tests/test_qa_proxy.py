@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 import anyio
 
 import httpx
@@ -1046,13 +1047,60 @@ def test_mode_ask_keeps_requested_backend_for_plain_question_with_selected_scope
     assert captured["body"]["actual_mode"] == "thinking"
     assert captured["body"]["route"] == "kb_qa"
     assert captured["body"]["source_scope"] == "kb"
-    assert captured["body"]["selected_file_ids"] == [11]
+    assert captured["body"]["selected_file_ids"] == []
+    assert captured["body"]["file_selection"] == {}
     assert captured["body"]["strategy"] == "none"
     assert captured["body"]["execution_files"] == []
     assert "NO_FILE_INTENT" in captured["body"]["route_reasons"]
     assert fake_persistence.user_calls == []
     assert fake_persistence.assistant_calls == []
     assert response.headers["x-gateway-backend"] == "thinking"
+
+
+def test_mode_ask_keeps_patent_backend_for_plain_question_with_selected_scope_without_forwarding_file_fields():
+    original = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub(
+        [
+            ConversationFileRow(
+                file_id=11,
+                file_type="pdf",
+                file_name="battery-paper.pdf",
+            )
+        ]
+    )
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"success": True, "final_answer": "ok"})
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            response = client.post(
+                "/api/patent/ask",
+                json={
+                    "question": "磷酸铁锂电压范围是多少？",
+                    "requested_mode": "patent",
+                    "conversation_id": 42,
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            )
+    finally:
+        app.state.conversation_file_service = original
+
+    assert response.status_code == 200
+    assert captured["url"].endswith("/api/patent/ask")
+    assert captured["body"]["actual_mode"] == "patent"
+    assert captured["body"]["route"] == "kb_qa"
+    assert captured["body"]["source_scope"] == "kb"
+    assert captured["body"]["used_files"] == []
+    assert captured["body"]["execution_files"] == []
+    assert captured["body"]["selected_file_ids"] == []
+    assert captured["body"]["file_selection"] == {}
+    assert captured["body"]["strategy"] == "none"
+    assert response.headers["x-gateway-backend"] == "patent"
 
 def test_mode_ask_routes_mixed_question_to_fast_backend():
     original = app.state.conversation_file_service
@@ -1105,8 +1153,103 @@ def test_mode_ask_routes_mixed_question_to_fast_backend():
     assert response.headers["x-gateway-backend"] == "fast"
 
 
-def test_mode_ask_routes_patent_file_question_to_fast_backend():
+def test_mode_ask_routes_patent_file_question_to_patent_backend():
     original = app.state.conversation_file_service
+    original_settings = app.state.settings
+    app.state.conversation_file_service = _ConversationFilesStub(
+        [
+            ConversationFileRow(
+                file_id=11,
+                file_type="pdf",
+                file_name="battery-paper.pdf",
+            )
+        ]
+    )
+    app.state.settings = replace(original_settings, patent_file_routes_enabled=True)
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            response = client.post(
+                "/api/patent/ask",
+                json={
+                    "question": "请总结这篇文献",
+                    "requested_mode": "patent",
+                    "conversation_id": 301,
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            )
+    finally:
+        app.state.conversation_file_service = original
+        app.state.settings = original_settings
+
+    assert response.status_code == 200
+    assert captured["url"].endswith("/api/patent/ask")
+    assert captured["body"]["requested_mode"] == "patent"
+    assert captured["body"]["actual_mode"] == "patent"
+    assert captured["body"]["route"] == "pdf_qa"
+    assert captured["body"]["source_scope"] == "pdf"
+    assert "EXPLICIT_SELECTED_FILES" in captured["body"]["route_reasons"]
+    assert response.headers["x-gateway-backend"] == "patent"
+
+
+def test_mode_ask_routes_patent_mixed_question_to_patent_backend():
+    original = app.state.conversation_file_service
+    original_settings = app.state.settings
+    app.state.conversation_file_service = _ConversationFilesStub(
+        [
+            ConversationFileRow(
+                file_id=11,
+                file_type="pdf",
+                file_name="battery-paper.pdf",
+            )
+        ]
+    )
+    app.state.settings = replace(original_settings, patent_file_routes_enabled=True)
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            response = client.post(
+                "/api/patent/ask",
+                json={
+                    "question": "请结合知识库总结这篇文献",
+                    "requested_mode": "patent",
+                    "conversation_id": 302,
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            )
+    finally:
+        app.state.conversation_file_service = original
+        app.state.settings = original_settings
+
+    assert response.status_code == 200
+    assert captured["url"].endswith("/api/patent/ask")
+    assert captured["body"]["requested_mode"] == "patent"
+    assert captured["body"]["actual_mode"] == "patent"
+    assert captured["body"]["route"] == "hybrid_qa"
+    assert captured["body"]["source_scope"] == "pdf+kb"
+    assert captured["body"]["turn_mode"] == "mixed"
+    assert captured["body"]["kb_enabled"] is True
+    assert "EXPLICIT_MIXED_INTENT" in captured["body"]["route_reasons"]
+    assert response.headers["x-gateway-backend"] == "patent"
+
+
+def test_mode_ask_patent_file_route_is_open_by_default():
+    original = app.state.conversation_file_service
+    original_settings = app.state.settings
     app.state.conversation_file_service = _ConversationFilesStub(
         [
             ConversationFileRow(
@@ -1137,15 +1280,64 @@ def test_mode_ask_routes_patent_file_question_to_fast_backend():
             )
     finally:
         app.state.conversation_file_service = original
+        app.state.settings = original_settings
 
     assert response.status_code == 200
-    assert captured["url"].endswith("/api/fast/ask")
+    assert captured["url"].endswith("/api/patent/ask")
     assert captured["body"]["requested_mode"] == "patent"
-    assert captured["body"]["actual_mode"] == "fast"
+    assert captured["body"]["actual_mode"] == "patent"
     assert captured["body"]["route"] == "pdf_qa"
     assert captured["body"]["source_scope"] == "pdf"
-    assert "EXPLICIT_SELECTED_FILES" in captured["body"]["route_reasons"]
-    assert response.headers["x-gateway-backend"] == "fast"
+    assert response.headers["x-gateway-backend"] == "patent"
+
+
+def test_mode_ask_patent_file_route_returns_gated_error_when_disabled():
+    original_files = app.state.conversation_file_service
+    original_settings = app.state.settings
+    app.state.conversation_file_service = _ConversationFilesStub(
+        [
+            ConversationFileRow(
+                file_id=11,
+                file_type="pdf",
+                file_name="battery-paper.pdf",
+            )
+        ]
+    )
+    app.state.settings = replace(original_settings, patent_file_routes_enabled=False)
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            response = client.post(
+                "/api/patent/ask",
+                json={
+                    "question": "请总结这篇文献",
+                    "requested_mode": "patent",
+                    "conversation_id": 301,
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            )
+    finally:
+        app.state.conversation_file_service = original_files
+        app.state.settings = original_settings
+
+    payload = response.json()
+    assert response.status_code == 503
+    assert calls == []
+    assert payload["success"] is False
+    assert payload["code"] == "PATENT_FILE_ROUTE_DISABLED"
+    assert payload["retriable"] is False
+    assert payload["requested_mode"] == "patent"
+    assert payload["actual_mode"] == "patent"
+    assert payload["route"] == "pdf_qa"
+    assert payload["detail"]["source_scope"] == "pdf"
+    assert payload["detail"]["selected_file_ids"] == [11]
+    assert response.headers["x-gateway-backend"] == "patent"
 
 def test_v1_ask_stream_alias_is_removed():
     called = {"upstream": False}
@@ -1216,6 +1408,101 @@ def test_mode_ask_stream_routes_file_question_to_fast_backend():
     assert b'"type":"done"' in body
     assert calls == ["/api/fast/ask_stream"]
     assert response.headers["x-gateway-backend"] == "fast"
+
+
+def test_mode_ask_stream_patent_file_route_returns_gated_error_when_disabled():
+    original_files = app.state.conversation_file_service
+    original_settings = app.state.settings
+    app.state.conversation_file_service = _ConversationFilesStub(
+        [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")]
+    )
+    app.state.settings = replace(original_settings, patent_file_routes_enabled=False)
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            with client.stream(
+                "POST",
+                "/api/patent/ask_stream",
+                json={
+                    "question": "请总结这篇文献",
+                    "requested_mode": "patent",
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            ) as response:
+                body = b"".join(response.iter_bytes())
+    finally:
+        app.state.conversation_file_service = original_files
+        app.state.settings = original_settings
+
+    assert response.status_code == 200
+    assert calls == []
+    assert b'"type":"metadata"' in body
+    assert b'"requested_mode":"patent"' in body
+    assert b'"actual_mode":"patent"' in body
+    assert b'"route":"pdf_qa"' in body
+    assert b'"selected_file_ids":[11]' in body
+    assert b'"type":"error"' in body
+    assert b'"code":"PATENT_FILE_ROUTE_DISABLED"' in body
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["x-gateway-backend"] == "patent"
+
+
+def test_mode_ask_stream_routes_patent_mixed_question_to_patent_backend():
+    original = app.state.conversation_file_service
+    original_settings = app.state.settings
+    app.state.conversation_file_service = _ConversationFilesStub(
+        [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")]
+    )
+    app.state.settings = replace(original_settings, patent_file_routes_enabled=True)
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        assert str(request.url).endswith("/api/patent/ask_stream")
+        payload = json.loads(request.content.decode("utf-8"))
+        assert payload["requested_mode"] == "patent"
+        assert payload["actual_mode"] == "patent"
+        assert payload["route"] == "hybrid_qa"
+        assert payload["source_scope"] == "pdf+kb"
+        return httpx.Response(
+            200,
+            content=(
+                b'data: {"type":"metadata","query_mode":"patent","route":"hybrid_qa","source_scope":"pdf+kb"}\n\n'
+                b'data: {"type":"content","content":"hello"}\n\n'
+                b'data: {"type":"done","final_answer":"hello","route":"hybrid_qa","source_scope":"pdf+kb"}\n\n'
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            with client.stream(
+                "POST",
+                "/api/patent/ask_stream",
+                json={
+                    "question": "请结合知识库总结这篇文献",
+                    "requested_mode": "patent",
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            ) as response:
+                body = b"".join(response.iter_bytes())
+    finally:
+        app.state.conversation_file_service = original
+        app.state.settings = original_settings
+
+    assert response.status_code == 200
+    assert calls == ["/api/patent/ask_stream"]
+    assert b'"type":"done"' in body
+    assert b'"route":"hybrid_qa"' in body
+    assert b'"source_scope":"pdf+kb"' in body
+    assert response.headers["x-gateway-backend"] == "patent"
 
 
 def test_mode_ask_stream_passthroughs_sse():

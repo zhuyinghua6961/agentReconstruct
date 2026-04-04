@@ -54,3 +54,19 @@ def test_wait_for_service_health_times_out_when_probe_never_succeeds() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert 'expected-timeout' in result.stdout
+
+
+def test_patent_service_is_registered_in_common_helpers() -> None:
+    result = _run_bash(
+        f"""
+        set -euo pipefail
+        source '{SCRIPT}'
+        [[ " ${{SERVICES[*]}} " == *" patent "* ]]
+        [[ "$(service_port patent)" == "8010" ]]
+        [[ "$(service_health_url patent)" == "http://127.0.0.1:8010/api/health" ]]
+        [[ "$(service_pid_file patent)" == "{ROOT}/resource/runtime/dev/patent/patent-gunicorn.pid" ]]
+        echo registered
+        """
+    )
+    assert result.returncode == 0, result.stderr
+    assert 'registered' in result.stdout

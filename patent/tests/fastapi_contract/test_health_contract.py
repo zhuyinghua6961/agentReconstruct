@@ -191,6 +191,26 @@ def test_start_script_uses_conda_agent_and_gunicorn():
     assert "conda run -n agent" in script
     assert "gunicorn" in script
     assert "server_fastapi/gunicorn.conf.py" in script
+    assert "server_fastapi.asgi:app" in script
+
+
+def test_start_gunicorn_script_bootstraps_patent_durable_runtime_env():
+    script = (ROOT_DIR / "scripts" / "start_gunicorn.sh").read_text(encoding="utf-8")
+
+    assert "server_fastapi.asgi:app" in script
+    assert "PATENT_DURABLE_MODE_ENABLED" in script
+    assert "PATENT_DURABLE_AUTHORITY_ENABLED" in script
+    assert "PATENT_AUTHORITY_BASE_URL" in script
+    assert "PATENT_REDIS_ENABLED" in script
+    assert "PATENT_REDIS_URL" in script
+    assert "PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN" in script
+
+
+def test_asgi_module_exposes_patent_app():
+    namespace = runpy.run_path(str(ROOT_DIR / "server_fastapi" / "asgi.py"))
+
+    app = namespace["app"]
+    assert app.state.service_name == "patent"
 
 
 def test_pyproject_includes_server_package_discovery_for_future_tasks():
@@ -484,6 +504,27 @@ def test_reused_app_rebootstraps_resources_on_next_startup(monkeypatch):
         assert app.state.redis_bindings.client is redis_instances[1]
 
 
+def test_reused_app_recovers_runtime_readiness_on_successful_rebootstrap(monkeypatch):
+    runtimes = [None, object()]
+
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "build_default_patent_runtime",
+        lambda: runtimes.pop(0),
+    )
+
+    app = create_app()
+    assert app.state.component_status["runtime"]["ready"] is False
+    assert app.state.component_status["runtime"]["detail"] == "patent runtime bootstrap unavailable"
+
+    with TestClient(app):
+        pass
+
+    with TestClient(app):
+        assert app.state.component_status["runtime"]["ready"] is True
+        assert "detail" not in app.state.component_status["runtime"]
+
+
 def test_create_app_cleans_up_open_resources_when_bootstrap_fails(monkeypatch):
     authority_instances = []
     redis_instances = []
@@ -525,6 +566,27 @@ def test_create_app_cleans_up_open_resources_when_bootstrap_fails(monkeypatch):
     assert len(redis_instances) == 1
     assert authority_instances[0].closed is True
     assert redis_instances[0].closed is True
+
+
+def test_create_app_closes_runtime_when_service_bootstrap_fails_after_runtime_creation(monkeypatch):
+    runtime_instances = []
+
+    class _Runtime:
+        def __init__(self):
+            self.closed = False
+            runtime_instances.append(self)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(patent_fastapi_app, "build_default_patent_runtime", lambda: _Runtime())
+    monkeypatch.setattr(patent_fastapi_app, "OriginalViewService", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        create_app()
+
+    assert len(runtime_instances) == 1
+    assert runtime_instances[0].closed is True
 
 
 def test_rebootstrap_failure_closes_reopened_resources(monkeypatch):
@@ -601,3 +663,47 @@ def test_health_returns_503_when_durable_mode_is_enabled_without_ready_dependenc
     assert payload["code"] == "SERVICE_NOT_READY"
     assert payload["components"]["redis"]["ready"] is False
     assert payload["components"]["authority"]["ready"] is False
+
+
+def test_health_route_allows_durable_file_only_probe_without_runtime(monkeypatch):
+    monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    monkeypatch.setenv("JWT_SECRET", TEST_JWT_SECRET)
+    monkeypatch.setattr(patent_fastapi_app, "build_default_patent_runtime", lambda: None)
+    app = create_app()
+    app.state.component_status["redis"]["ready"] = True
+    app.state.component_status["authority"]["ready"] = True
+    token = _make_bearer_token(42)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/health",
+            params={"durable": "true", "route": "pdf_qa", "source_scope": "pdf"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["components"]["runtime"]["ready"] is False
+
+
+def test_health_route_reports_not_ready_when_file_route_gate_is_disabled(monkeypatch):
+    monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "true")
+    monkeypatch.setenv("JWT_SECRET", TEST_JWT_SECRET)
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "false")
+    app = create_app()
+    app.state.component_status["redis"]["ready"] = True
+    app.state.component_status["authority"]["ready"] = True
+    token = _make_bearer_token(42)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/health",
+            params={"durable": "true", "route": "pdf_qa", "source_scope": "pdf"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 503
+    payload = response.json()
+    assert payload["code"] == "SERVICE_NOT_READY"

@@ -1,0 +1,303 @@
+from __future__ import annotations
+
+import pytest
+
+from server.errors import codes
+from server.errors.core import APIError
+from server.patent.kb_service import PatentKbService
+from server.patent.models import PatentQaExecutionMetadata, PatentQaExecutionResult
+from server.patent.retrieval_models import PatentCatalogRecord, PatentClaim, PatentDescriptionSnippet
+from server.patent.retrieval_service import PatentRetrievalService
+from server.schemas.request_models import PatentAskRequest
+
+
+class _FakeOrchestrator:
+    def run(self, *, question: str, runtime, conversation_context=None) -> PatentQaExecutionResult:
+        assert question == "Explain the novelty"
+        assert conversation_context == {"recent_turns_for_llm": [{"role": "user", "content": "Earlier turn"}]}
+        return PatentQaExecutionResult(
+            success=True,
+            final_answer="staged patent answer",
+            metadata=PatentQaExecutionMetadata(
+                route="kb_qa",
+                query_mode="patent staged qa",
+                source_ids=["CN115132975B"],
+                stage_timings_ms={"stage1": 5.0, "stage2": 8.0},
+                stage25_skipped=True,
+                stage25_skip_reason="patent_mode_no_md_expansion",
+            ),
+            raw={
+                "references": ["CN115132975B"],
+                "reference_objects": [{"canonical_patent_id": "CN115132975B"}],
+                "reference_links": [],
+                "original_links": [],
+                "metadata": {"retrieval_backend": "vector_hybrid"},
+                "steps": [
+                    {"step": "stage1", "title": "Stage 1", "message": "Stage 1 planned.", "status": "success"},
+                    {"step": "stage2", "title": "Stage 2", "message": "Stage 2 retrieved.", "status": "success"},
+                    {"step": "stage25", "title": "Stage 2.5", "message": "Stage 2.5 skipped: patent_mode_no_md_expansion.", "status": "skipped"},
+                    {"step": "stage3", "title": "Stage 3", "message": "Stage 3 attached tables.", "status": "success"},
+                    {"step": "stage4", "title": "Stage 4", "message": "Stage 4 synthesized.", "status": "success"},
+                ],
+            },
+        )
+
+
+class _FakeStagedRuntime:
+    def stage1_pre_answer_and_planning(self, user_question: str, conversation_context=None) -> dict[str, object]:
+        return {}
+
+    def stage2_targeted_retrieval(self, retrieval_plan, *, user_question: str, should_cancel=None, active_stream_count=None) -> dict[str, object]:
+        return {}
+
+    def _extract_patent_ids_from_results(self, retrieval_results: dict[str, object]) -> list[str]:
+        return []
+
+    def stage25_patent_evidence_expansion(self, *, retrieval_results: dict[str, object], user_question: str, source_ids: list[str]) -> dict[str, object]:
+        return {}
+
+    def stage3_load_patent_evidence(self, *, retrieval_results: dict[str, object], source_ids: list[str], should_cancel=None) -> dict[str, object]:
+        return {}
+
+    def stage4_synthesis_with_patent_evidence(
+        self,
+        *,
+        user_question: str,
+        deep_answer: str,
+        patent_evidence_bundle: dict[str, object],
+        retrieval_results: dict[str, object] | None = None,
+        should_cancel=None,
+        conversation_context=None,
+    ) -> dict[str, object]:
+        return {}
+
+
+def _make_request(question: str = "Explain the novelty") -> PatentAskRequest:
+    return PatentAskRequest(
+        question=question,
+        conversation_id=123,
+        chat_history=[],
+        requested_mode="patent",
+        actual_mode="patent",
+        route="kb_qa",
+        source_scope="kb",
+        turn_mode="kb_only",
+        kb_enabled=True,
+        allow_kb_verification=False,
+        used_files=[],
+        execution_files=[],
+        selected_file_ids=[],
+        primary_file_id=None,
+        file_selection={},
+        trace_id="req_kb",
+        options={},
+    )
+
+
+def test_kb_service_returns_shell_compatible_execution_result_from_orchestrator():
+    service = PatentKbService(orchestrator=_FakeOrchestrator())
+
+    execution_result = service.run(
+        request=_make_request(),
+        runtime=_FakeStagedRuntime(),
+        conversation_context={"recent_turns_for_llm": [{"role": "user", "content": "Earlier turn"}]},
+    )
+
+    assert execution_result["answer_text"] == "staged patent answer"
+    assert execution_result["route"] == "kb_qa"
+    assert execution_result["references"] == ["CN115132975B"]
+    assert execution_result["reference_objects"] == [{"canonical_patent_id": "CN115132975B"}]
+    assert execution_result["reference_links"] == []
+    assert execution_result["original_links"] == []
+    assert execution_result["metadata"]["retrieval_backend"] == "vector_hybrid"
+    assert execution_result["metadata"]["stage25_skipped"] is True
+    assert execution_result["timings"] == {"stage1": 5.0, "stage2": 8.0}
+    assert execution_result["steps"] == [
+        {"step": "stage1", "title": "Stage 1", "message": "Stage 1 planned.", "status": "success"},
+        {"step": "stage2", "title": "Stage 2", "message": "Stage 2 retrieved.", "status": "success"},
+        {"step": "stage25", "title": "Stage 2.5", "message": "Stage 2.5 skipped: patent_mode_no_md_expansion.", "status": "skipped"},
+        {"step": "stage3", "title": "Stage 3", "message": "Stage 3 attached tables.", "status": "success"},
+        {"step": "stage4", "title": "Stage 4", "message": "Stage 4 synthesized.", "status": "success"},
+    ]
+
+
+def test_kb_service_falls_back_to_runtime_retrieval_service_when_runtime_is_not_staged():
+    class _FailingOrchestrator:
+        def run(self, *, question: str, runtime, conversation_context=None) -> PatentQaExecutionResult:
+            raise AssertionError("orchestrator should not be used for a partial runtime")
+
+    class _PartialRuntime:
+        def __init__(self, retrieval_service: PatentRetrievalService) -> None:
+            self.retrieval_service = retrieval_service
+
+    retrieval_service = PatentRetrievalService(
+        identity_registry={"CN123456789A": "CN123456789A"},
+        catalog_records=[
+            PatentCatalogRecord(
+                canonical_patent_id="CN123456789A",
+                publication_number="CN123456789A",
+                application_number="CN202410001234X",
+                title="Battery thermal management system for electric vehicles",
+                abstract_text="A thermal control system for electric vehicle battery packs.",
+                applicant_names=["Example Battery Co"],
+                inventor_names=["Alice Inventor"],
+                ipc_codes=["H01M10/613"],
+                cpc_codes=["H01M10/613"],
+                claims=[PatentClaim(claim_number=1, text="A battery thermal management system configured for electric vehicles.")],
+                description_snippets=[PatentDescriptionSnippet(paragraph_id="p-001", text="Battery temperature control.")],
+                country="CN",
+                kind_code="A",
+                publication_date="2024-01-01",
+                provider="patent_source_x",
+                original_available=True,
+            )
+        ],
+        retrieval_version="retrieval-v1",
+        catalog_index_version="catalog-v1",
+    )
+    service = PatentKbService(orchestrator=_FailingOrchestrator())
+
+    execution_result = service.run(
+        request=_make_request(question="Please summarize CN123456789A"),
+        runtime=_PartialRuntime(retrieval_service),
+        conversation_context={"trace_id": "req_kb"},
+    )
+
+    assert execution_result["answer_text"].startswith("Patent retrieval answer:")
+    assert execution_result["references"] == ["CN123456789A"]
+    assert execution_result["metadata"]["retrieval_backend"] == "exact_id"
+
+
+def test_kb_service_raises_api_error_when_staged_execution_fails():
+    class _FailingOrchestrator:
+        def run(self, *, question: str, runtime, conversation_context=None) -> PatentQaExecutionResult:
+            return PatentQaExecutionResult(
+                success=False,
+                final_answer="",
+                metadata=PatentQaExecutionMetadata(
+                    route="kb_qa",
+                    query_mode="patent staged qa",
+                    source_ids=[],
+                    stage_timings_ms={"stage1": 5.0, "stage4": 0.0},
+                ),
+                raw={"metadata": {}, "steps": []},
+            )
+
+    service = PatentKbService(orchestrator=_FailingOrchestrator())
+
+    with pytest.raises(APIError) as exc_info:
+        service.run(
+            request=_make_request(),
+            runtime=_FakeStagedRuntime(),
+            conversation_context={"recent_turns_for_llm": []},
+        )
+
+    assert exc_info.value.code == codes.INTERNAL_ERROR
+    assert exc_info.value.error == "internal_error"
+    assert "stage4" in exc_info.value.message.lower()
+
+
+def test_kb_service_builds_semantic_stage_messages_when_raw_steps_missing():
+    class _NoStepsOrchestrator:
+        def run(self, *, question: str, runtime, conversation_context=None) -> PatentQaExecutionResult:
+            return PatentQaExecutionResult(
+                success=True,
+                final_answer="staged patent answer",
+                metadata=PatentQaExecutionMetadata(
+                    route="kb_qa",
+                    query_mode="patent staged qa",
+                    source_ids=["CN115132975B"],
+                    stage_timings_ms={"stage1": 5.0, "stage2": 8.0, "stage3": 13.0, "stage4": 21.0},
+                    stage25_skipped=True,
+                    stage25_skip_reason="patent_mode_no_md_expansion",
+                ),
+                raw={"metadata": {"retrieval_backend": "vector_hybrid"}, "steps": []},
+            )
+
+    service = PatentKbService(orchestrator=_NoStepsOrchestrator())
+
+    execution_result = service.run(
+        request=_make_request(),
+        runtime=_FakeStagedRuntime(),
+        conversation_context={"recent_turns_for_llm": []},
+    )
+
+    assert [step["message"] for step in execution_result["steps"]] == [
+        "Stage 1 planning completed.",
+        "Stage 2 dual-search retrieval completed.",
+        "Stage 2.5 skipped: patent_mode_no_md_expansion.",
+        "Stage 3 table attachment completed.",
+        "Stage 4 synthesis completed.",
+    ]
+
+
+def test_kb_service_builds_stage25_completion_message_when_not_skipped():
+    class _NoStepsOrchestrator:
+        def run(self, *, question: str, runtime, conversation_context=None) -> PatentQaExecutionResult:
+            return PatentQaExecutionResult(
+                success=True,
+                final_answer="staged patent answer",
+                metadata=PatentQaExecutionMetadata(
+                    route="kb_qa",
+                    query_mode="patent staged qa",
+                    source_ids=["CN115132975B"],
+                    stage_timings_ms={"stage1": 5.0, "stage2": 8.0, "stage25": 10.0, "stage3": 13.0, "stage4": 21.0},
+                    stage25_skipped=False,
+                    stage25_skip_reason="",
+                ),
+                raw={"metadata": {"retrieval_backend": "vector_hybrid"}, "steps": []},
+            )
+
+    service = PatentKbService(orchestrator=_NoStepsOrchestrator())
+
+    execution_result = service.run(
+        request=_make_request(),
+        runtime=_FakeStagedRuntime(),
+        conversation_context={"recent_turns_for_llm": []},
+    )
+
+    assert execution_result["steps"][2] == {
+        "step": "stage25",
+        "title": "Stage 2.5",
+        "message": "Stage 2.5 patent evidence expansion completed.",
+        "status": "success",
+    }
+
+
+def test_kb_service_preserves_stage1_short_circuit_answer_without_later_stage_steps():
+    class _Stage1OnlyOrchestrator:
+        def run(self, *, question: str, runtime, conversation_context=None) -> PatentQaExecutionResult:
+            return PatentQaExecutionResult(
+                success=True,
+                final_answer="stage1 only answer",
+                metadata=PatentQaExecutionMetadata(
+                    route="kb_qa",
+                    query_mode="patent staged qa",
+                    source_ids=[],
+                    stage_timings_ms={"stage1": 5.0},
+                ),
+                raw={
+                    "references": [],
+                    "reference_objects": [],
+                    "reference_links": [],
+                    "original_links": [],
+                    "metadata": {"stage1_short_circuit": True},
+                    "steps": [
+                        {"step": "stage1", "title": "Stage 1", "message": "Stage 1 planning completed.", "status": "success"}
+                    ],
+                },
+            )
+
+    service = PatentKbService(orchestrator=_Stage1OnlyOrchestrator())
+
+    execution_result = service.run(
+        request=_make_request(),
+        runtime=_FakeStagedRuntime(),
+        conversation_context={"recent_turns_for_llm": []},
+    )
+
+    assert execution_result["answer_text"] == "stage1 only answer"
+    assert execution_result["steps"] == [
+        {"step": "stage1", "title": "Stage 1", "message": "Stage 1 planning completed.", "status": "success"}
+    ]
+    assert execution_result["metadata"]["stage1_short_circuit"] is True

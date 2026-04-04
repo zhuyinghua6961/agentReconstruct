@@ -11,15 +11,18 @@ _TABLE_FILE_TYPES = {"csv", "excel", "xls", "xlsx"}
 
 class RouteDecisionService:
     def decide(self, *, requested_mode: str, file_context: FileContextDecision) -> RouteDecision:
-        actual_mode = requested_mode
-        if file_context.turn_mode in {"file_only", "mixed"}:
-            actual_mode = "fast"
-
         route = self._normalized_route(file_context)
+        actual_mode = self._actual_mode(requested_mode=requested_mode, turn_mode=file_context.turn_mode)
         source_scope = self._source_scope(route=route, file_context=file_context)
         kb_enabled = bool(source_scope and "kb" in source_scope)
-        selected_file_ids = list(file_context.selected_file_ids)
-        primary_file_id = selected_file_ids[0] if len(selected_file_ids) == 1 else None
+        if route == "kb_qa" and not file_context.needs_clarification:
+            selected_file_ids = []
+            execution_files: list[dict[str, Any]] = []
+            primary_file_id = None
+        else:
+            selected_file_ids = list(file_context.selected_file_ids)
+            execution_files = list(file_context.execution_files)
+            primary_file_id = selected_file_ids[0] if len(selected_file_ids) == 1 else None
         strategy = self._canonical_strategy(file_context.strategy)
 
         return RouteDecision(
@@ -39,10 +42,11 @@ class RouteDecisionService:
             source_scope=source_scope,
             kb_enabled=kb_enabled,
             selected_file_ids=selected_file_ids,
-            execution_files=list(file_context.execution_files),
+            execution_files=execution_files,
             strategy=strategy,
             primary_file_id=primary_file_id,
             file_selection=self._file_selection(
+                route=route,
                 file_context=file_context,
                 strategy=strategy,
                 source_scope=source_scope,
@@ -59,6 +63,13 @@ class RouteDecisionService:
             route_confidence=self._route_confidence(file_context=file_context),
             classifier_used=bool(file_context.classifier_used),
         )
+
+    def _actual_mode(self, *, requested_mode: str, turn_mode: str) -> str:
+        if turn_mode not in {"file_only", "mixed"}:
+            return requested_mode
+        if requested_mode == "patent":
+            return "patent"
+        return "fast"
 
     def _normalized_route(self, file_context: FileContextDecision) -> RouteName:
         families = self._selected_families(file_context)
@@ -121,12 +132,15 @@ class RouteDecisionService:
     def _file_selection(
         self,
         *,
+        route: RouteName,
         file_context: FileContextDecision,
         strategy: str,
         source_scope: SourceScope | None,
         kb_enabled: bool,
         selected_file_ids: list[int],
     ) -> dict[str, Any]:
+        if route == "kb_qa" and not file_context.needs_clarification:
+            return {}
         if not selected_file_ids and strategy == "none":
             return {}
 

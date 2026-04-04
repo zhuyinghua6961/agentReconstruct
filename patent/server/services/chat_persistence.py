@@ -65,6 +65,56 @@ def _normalize_snapshot_history(snapshot: dict[str, Any]) -> list[dict[str, Any]
 
 
 
+def _normalize_authority_references(execution_result: dict[str, Any]) -> list[dict[str, Any]]:
+    reference_objects = execution_result.get("reference_objects")
+    if isinstance(reference_objects, list):
+        normalized_objects = [dict(item) for item in reference_objects if isinstance(item, dict)]
+        if normalized_objects:
+            return normalized_objects
+
+    references = execution_result.get("references")
+    if not isinstance(references, list):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for item in references:
+        if isinstance(item, dict):
+            normalized.append(dict(item))
+            continue
+        canonical_patent_id = _normalize_text(item)
+        if canonical_patent_id:
+            normalized.append(
+                {
+                    "source_type": "patent",
+                    "canonical_patent_id": canonical_patent_id,
+                }
+            )
+    return normalized
+
+
+def _normalize_mode_origin(request: PatentAskRequest, execution_result: dict[str, Any] | None = None) -> dict[str, Any]:
+    options = request.options if isinstance(request.options, dict) else {}
+    option_mode_origin = options.get("mode_origin") if isinstance(options.get("mode_origin"), dict) else {}
+    metadata = execution_result.get("metadata") if isinstance(execution_result, dict) else None
+    metadata_mode_origin = metadata.get("mode_origin") if isinstance(metadata, dict) and isinstance(metadata.get("mode_origin"), dict) else {}
+
+    requested_mode = _normalize_text(metadata_mode_origin.get("requested_mode")) or _normalize_text(option_mode_origin.get("requested_mode"))
+    execution_backend = _normalize_text(metadata_mode_origin.get("execution_backend")) or _normalize_text(option_mode_origin.get("execution_backend"))
+
+    compatibility_route_value = metadata_mode_origin.get("compatibility_route")
+    if not isinstance(compatibility_route_value, bool):
+        compatibility_route_value = option_mode_origin.get("compatibility_route")
+
+    normalized: dict[str, Any] = {}
+    if requested_mode:
+        normalized["requested_mode"] = requested_mode
+    if execution_backend:
+        normalized["execution_backend"] = execution_backend
+    if isinstance(compatibility_route_value, bool):
+        normalized["compatibility_route"] = compatibility_route_value
+    return normalized
+
+
 def _snapshot_has_converged(*, snapshot: dict[str, Any], overlay: dict[str, Any]) -> bool:
     trace_id = _normalize_text(overlay.get("trace_id"))
     if not trace_id:
@@ -83,39 +133,47 @@ def _snapshot_has_converged(*, snapshot: dict[str, Any], overlay: dict[str, Any]
 
 
 
-def _merge_pending_overlay(
+def _merge_pending_overlays(
     *,
     snapshot: dict[str, Any],
     chat_history: list[dict[str, Any]],
-    overlay: dict[str, Any] | None,
-) -> tuple[list[dict[str, Any]], dict[str, Any] | None, bool]:
+    overlays: list[dict[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
     normalized_history = [dict(item) for item in chat_history if isinstance(item, dict)]
-    if not isinstance(overlay, dict):
-        return normalized_history, None, False
-    normalized_overlay = {
-        "trace_id": _normalize_text(overlay.get("trace_id")),
-        "route": _normalize_text(overlay.get("route")),
-        "assistant_content": _normalize_text(overlay.get("assistant_content")),
-    }
-    if not normalized_overlay["trace_id"] or not normalized_overlay["assistant_content"]:
-        return normalized_history, None, False
-    if _snapshot_has_converged(snapshot=snapshot, overlay=normalized_overlay):
-        return normalized_history, None, True
-    for item in normalized_history:
-        if _normalize_text(item.get("role")).lower() != "assistant":
+    normalized_overlays: list[dict[str, Any]] = []
+    all_converged = bool(overlays)
+    for overlay in overlays or []:
+        if not isinstance(overlay, dict):
             continue
-        if _normalize_text(item.get("trace_id")) == normalized_overlay["trace_id"]:
-            return normalized_history, normalized_overlay, False
-    normalized_history.append(
-        {
-            "role": "assistant",
-            "content": normalized_overlay["assistant_content"],
-            "trace_id": normalized_overlay["trace_id"],
-            "created_at": "",
-            "message_id": "",
+        normalized_overlay = {
+            "trace_id": _normalize_text(overlay.get("trace_id")),
+            "route": _normalize_text(overlay.get("route")),
+            "assistant_content": _normalize_text(overlay.get("assistant_content")),
         }
-    )
-    return normalized_history, normalized_overlay, False
+        if not normalized_overlay["trace_id"] or not normalized_overlay["assistant_content"]:
+            all_converged = False
+            continue
+        if _snapshot_has_converged(snapshot=snapshot, overlay=normalized_overlay):
+            continue
+        all_converged = False
+        normalized_overlays.append(normalized_overlay)
+        duplicate = any(
+            _normalize_text(item.get("role")).lower() == "assistant"
+            and _normalize_text(item.get("trace_id")) == normalized_overlay["trace_id"]
+            for item in normalized_history
+        )
+        if duplicate:
+            continue
+        normalized_history.append(
+            {
+                "role": "assistant",
+                "content": normalized_overlay["assistant_content"],
+                "trace_id": normalized_overlay["trace_id"],
+                "created_at": "",
+                "message_id": "",
+            }
+        )
+    return normalized_history, normalized_overlays, all_converged
 
 
 class ChatPersistenceService:
@@ -158,6 +216,7 @@ class ChatPersistenceService:
             "conversation_state": {},
             "snapshot": None,
             "pending_overlay": None,
+            "pending_overlays": [],
         }
         resolved_user_id = _safe_positive_int(user_id)
         if not request.is_durable or resolved_user_id is None or self.authority_client is None:
@@ -169,19 +228,20 @@ class ChatPersistenceService:
             trace_id=trace_id,
         )
         chat_history = _normalize_snapshot_history(snapshot)
-        overlay = self.execution_cache.get_overlay_assistant(
+        overlay_items, overlay_raw = self.execution_cache.get_overlay_assistant_state(
             user_id=resolved_user_id,
             conversation_id=int(request.conversation_id),
         )
-        merged_history, pending_overlay, should_clear = _merge_pending_overlay(
+        merged_history, pending_overlays, should_clear = _merge_pending_overlays(
             snapshot=snapshot,
             chat_history=chat_history,
-            overlay=overlay,
+            overlays=overlay_items,
         )
-        if should_clear:
-            self.execution_cache.delete_overlay_assistant(
+        if should_clear and overlay_raw:
+            self.execution_cache.delete_overlay_assistant_if_unchanged(
                 user_id=resolved_user_id,
                 conversation_id=int(request.conversation_id),
+                raw_value=overlay_raw,
             )
         context.update(
             {
@@ -189,7 +249,8 @@ class ChatPersistenceService:
                 "summary": dict(snapshot.get("summary") or {}),
                 "conversation_state": dict(snapshot.get("conversation_state") or {}),
                 "snapshot": snapshot,
-                "pending_overlay": pending_overlay,
+                "pending_overlay": dict(pending_overlays[-1]) if pending_overlays else None,
+                "pending_overlays": [dict(item) for item in pending_overlays],
             }
         )
         return context
@@ -264,6 +325,13 @@ class ChatPersistenceService:
                         trace_id=trace_id,
                         cached_result=cached_result,
                     )
+                raise APIError(
+                    code=codes.SERVICE_NOT_READY,
+                    message="durable patent turn terminal state unavailable",
+                    status_code=503,
+                    error="service_not_ready",
+                    retriable=True,
+                )
 
             inflight_claimed = self.execution_cache.mark_turn_inflight(
                 conversation_id=conversation_id,
@@ -326,6 +394,7 @@ class ChatPersistenceService:
                 "inflight_claimed": inflight_claimed,
                 "pending_claimed": pending_claimed,
                 "user_turn_written": user_turn_written,
+                "assistant_accept_committed": False,
                 "released": False,
             }
             self._start_runtime_guard_renewal(runtime_state)
@@ -425,30 +494,53 @@ class ChatPersistenceService:
                     error="authority_unavailable",
                     retriable=True,
                 )
+            runtime_state["assistant_accept_committed"] = True
             self._assert_runtime_state_healthy(runtime_state)
-            if answer_text:
-                self.execution_cache.set_overlay_assistant(
-                    user_id=int(runtime_state.get("user_id") or 0),
-                    conversation_id=int(runtime_state.get("conversation_id") or request.conversation_id or 0),
-                    payload={
-                        "trace_id": trace_id,
-                        "route": request.route,
-                        "assistant_content": answer_text,
-                    },
-                    ttl_seconds=self.overlay_ttl_seconds,
-                )
-            self.execution_cache.set_turn_result(
-                conversation_id=int(runtime_state.get("conversation_id") or request.conversation_id or 0),
+            conversation_id = int(runtime_state.get("conversation_id") or request.conversation_id or 0)
+            user_id = int(runtime_state.get("user_id") or 0)
+            if not self.execution_cache.set_turn_result(
+                conversation_id=conversation_id,
                 trace_id=trace_id,
                 payload={
                     "execution_result": normalized_execution_result,
                 },
                 ttl_seconds=self.turn_state_ttl_seconds,
-            )
-            self.execution_cache.clear_pending_turn(
+            ):
+                raise APIError(
+                    code=codes.SERVICE_NOT_READY,
+                    message="durable patent turn result commit failed",
+                    status_code=503,
+                    error="service_not_ready",
+                    retriable=True,
+                )
+            if answer_text and not self.execution_cache.set_overlay_assistant(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                payload={
+                    "trace_id": trace_id,
+                    "route": request.route,
+                    "assistant_content": answer_text,
+                },
+                ttl_seconds=self.overlay_ttl_seconds,
+            ):
+                raise APIError(
+                    code=codes.SERVICE_NOT_READY,
+                    message="durable patent assistant overlay commit failed",
+                    status_code=503,
+                    error="service_not_ready",
+                    retriable=True,
+                )
+            if not self.execution_cache.clear_pending_turn(
                 conversation_id=int(runtime_state.get("conversation_id") or request.conversation_id or 0),
                 trace_id=trace_id,
-            )
+            ):
+                raise APIError(
+                    code=codes.SERVICE_NOT_READY,
+                    message="durable patent pending turn clear failed",
+                    status_code=503,
+                    error="service_not_ready",
+                    retriable=True,
+                )
             self._assert_runtime_state_healthy(runtime_state)
             return {
                 "trace_id": trace_id,
@@ -511,11 +603,12 @@ class ChatPersistenceService:
             user_id is None
             or self.authority_client is None
             or not self.execution_cache.available
+            or not self.execution_cache.coordination_ready()
             or not self.execution_lock_manager.available
         ):
             raise APIError(
                 code=codes.SERVICE_NOT_READY,
-                message="durable patent prerequisites are not ready",
+                message=f"durable patent prerequisites are not ready: {self.execution_cache.last_error or 'unknown coordination error'}",
                 status_code=503,
                 error="service_not_ready",
                 retriable=True,
@@ -529,12 +622,38 @@ class ChatPersistenceService:
         trace_id: str,
         cached_result: dict[str, Any],
     ) -> PreparedTurn:
-        self.execution_cache.clear_pending_turn(
-            conversation_id=int(request.conversation_id),
-            trace_id=trace_id,
-        )
-        context = self.load_conversation_context(request=request, user_id=user_id, trace_id=trace_id)
         execution_result = cached_result.get("execution_result") if isinstance(cached_result, dict) else None
+        context = self.load_conversation_context(request=request, user_id=user_id, trace_id=trace_id)
+        if request.is_durable and request.conversation_id is not None:
+            pending_state = self.execution_cache.get_pending_turn_state(
+                conversation_id=int(request.conversation_id),
+            )
+            if str(pending_state.get("trace_id") or "") == trace_id:
+                if self._cached_replay_visibility_ready(
+                    request=request,
+                    trace_id=trace_id,
+                    context=context,
+                    execution_result=dict(execution_result or {}),
+                ):
+                    if not self.execution_cache.clear_pending_turn(
+                        conversation_id=int(request.conversation_id),
+                        trace_id=trace_id,
+                    ):
+                        raise APIError(
+                            code=codes.SERVICE_NOT_READY,
+                            message="durable patent cached replay pending clear failed",
+                            status_code=503,
+                            error="service_not_ready",
+                            retriable=True,
+                        )
+                else:
+                    raise APIError(
+                        code=codes.SERVICE_NOT_READY,
+                        message="durable patent cached replay awaiting assistant visibility",
+                        status_code=503,
+                        error="service_not_ready",
+                        retriable=True,
+                    )
         return {
             "trace_id": trace_id,
             "context": context,
@@ -562,6 +681,15 @@ class ChatPersistenceService:
                 trace_id=trace_id,
             )
         if (
+            not bool(state.get("assistant_accept_committed"))
+            and conversation_id is not None
+            and trace_id
+        ):
+            self.execution_cache.clear_turn_identity(
+                conversation_id=conversation_id,
+                trace_id=trace_id,
+            )
+        if (
             bool(state.get("pending_claimed"))
             and not bool(state.get("user_turn_written"))
             and conversation_id is not None
@@ -575,6 +703,30 @@ class ChatPersistenceService:
         if isinstance(lock_handle, LockHandle):
             self.execution_lock_manager.release(lock_handle.key, lock_handle.token)
         state["released"] = True
+
+    def _cached_replay_visibility_ready(
+        self,
+        *,
+        request: PatentAskRequest,
+        trace_id: str,
+        context: dict[str, Any],
+        execution_result: dict[str, Any],
+    ) -> bool:
+        answer_text = _normalize_text(execution_result.get("answer_text") or execution_result.get("final_answer"))
+        if not answer_text:
+            return True
+        pending_overlays = context.get("pending_overlays") if isinstance(context.get("pending_overlays"), list) else []
+        if any(str(item.get("trace_id") or "").strip() == trace_id for item in pending_overlays if isinstance(item, dict)):
+            return True
+        snapshot = context.get("snapshot") if isinstance(context.get("snapshot"), dict) else {}
+        return _snapshot_has_converged(
+            snapshot=snapshot,
+            overlay={
+                "trace_id": trace_id,
+                "route": request.route,
+                "assistant_content": answer_text,
+            },
+        )
 
     def _start_runtime_guard_renewal(self, runtime_state: dict[str, Any]) -> None:
         conversation_id = _safe_positive_int(runtime_state.get("conversation_id"))
@@ -643,17 +795,22 @@ class ChatPersistenceService:
         return handle
 
     def _write_user_turn(self, *, request: PatentAskRequest, user_id: int, trace_id: str) -> dict[str, Any]:
+        mode_origin = _normalize_mode_origin(request)
         try:
             return self.authority_client.write_user_turn(
                 user_id=user_id,
                 conversation_id=int(request.conversation_id),
                 trace_id=trace_id,
                 route=request.route,
+                source_scope=request.source_scope,
                 requested_mode=request.requested_mode,
                 actual_mode=request.actual_mode,
                 content=request.question,
                 selected_file_ids=list(request.selected_file_ids),
                 last_turn_route_hint=request.route,
+                mode_origin_requested_mode=_normalize_text(mode_origin.get("requested_mode")),
+                mode_origin_execution_backend=_normalize_text(mode_origin.get("execution_backend")),
+                compatibility_route=mode_origin.get("compatibility_route") if isinstance(mode_origin.get("compatibility_route"), bool) else None,
             )
         except Exception as exc:
             raise APIError(
@@ -671,6 +828,7 @@ class ChatPersistenceService:
                 conversation_id=int(request.conversation_id),
                 trace_id=trace_id,
                 route=request.route,
+                source_scope=request.source_scope,
                 requested_mode=request.requested_mode,
                 actual_mode=request.actual_mode,
             )
@@ -692,17 +850,30 @@ class ChatPersistenceService:
         answer_text: str,
         execution_result: dict[str, Any],
     ) -> dict[str, Any]:
+        metadata = dict(execution_result.get("metadata") or {})
+        mode_origin = _normalize_mode_origin(request, execution_result)
+        if mode_origin:
+            existing_mode_origin = metadata.get("mode_origin")
+            merged_mode_origin = dict(existing_mode_origin) if isinstance(existing_mode_origin, dict) else {}
+            for key, value in mode_origin.items():
+                merged_mode_origin[key] = value
+            metadata["mode_origin"] = merged_mode_origin
         try:
             return self.authority_client.accept_assistant_turn_async(
                 user_id=user_id,
                 conversation_id=int(request.conversation_id),
                 trace_id=trace_id,
                 route=request.route,
+                source_scope=request.source_scope,
                 requested_mode=request.requested_mode,
                 actual_mode=request.actual_mode,
                 answer_text=answer_text,
+                metadata=metadata,
                 steps=list(execution_result.get("steps") or []),
-                references=list(execution_result.get("references") or []),
+                references=_normalize_authority_references(execution_result),
+                reference_objects=[dict(item) for item in list(execution_result.get("reference_objects") or []) if isinstance(item, dict)],
+                reference_links=[dict(item) for item in list(execution_result.get("reference_links") or []) if isinstance(item, dict)],
+                original_links=[dict(item) for item in list(execution_result.get("original_links") or []) if isinstance(item, dict)],
                 used_files=list(execution_result.get("used_files") or []),
                 timings=dict(execution_result.get("timings") or {}),
             )

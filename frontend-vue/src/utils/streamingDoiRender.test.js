@@ -46,6 +46,15 @@ test('streaming answer keeps bracket doi clickable', async () => {
   assert.match(html, /data-doi="10\.1016\/S0378-7753\(03\)00297-0"/)
 })
 
+test('streaming answer keeps patent citation clickable', async () => {
+  const { formatStreamingAnswer } = await loadRenderUtils()
+
+  const html = formatStreamingAnswer('结论成立 (patent_id=CN100420075C)')
+
+  assert.match(html, /class="doi-link patent-link"/)
+  assert.match(html, /data-patent-id="CN100420075C"/)
+})
+
 test('streaming answer handles incomplete doi fragments without pathological slowdown', async () => {
   const { formatStreamingAnswer } = await loadRenderUtils()
 

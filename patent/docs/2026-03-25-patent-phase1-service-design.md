@@ -5,15 +5,18 @@
 - Date: 2026-03-25
 - Scope: design only, no retrieval implementation yet
 - Write scope: `patent/` directory only
-- Goal: define the Phase 1 `patent` service skeleton so implementation can start within `patent/` without immediately changing `gateway`, `public-service`, `fastQA`, or `highThinkingQA`
+- Goal: define the `patent` service contract and runtime shape so the service can own patent `kb_qa`, `pdf_qa`, `tabular_qa`, and `hybrid_qa` inside `patent/`
 
 ## Goal
 
 Build an independent `patent` FastAPI service that can serve as the future `patent` execution backend behind gateway, while keeping patent retrieval logic stubbed for now.
 
-Phase 1 must support:
+Current service must support:
 
-- `kb_only` patent asks only
+- patent `kb_qa`
+- patent `pdf_qa`
+- patent `tabular_qa`
+- patent `hybrid_qa`
 - sync and stream ask endpoints
 - durable chat flow through `public-service` authority APIs
 - ephemeral asks when no durable conversation is present
@@ -21,11 +24,10 @@ Phase 1 must support:
 - Gunicorn deployment wrapper
 - Redis-based execution infrastructure for dedupe, locking, and future retrieval caching
 
-Phase 1 must not attempt to implement:
+Current non-goals:
 
 - real patent retrieval strategy
 - patent-native citation model
-- file-aware or mixed patent execution
 - ownership of transcript durability inside `patent`
 
 ## Non-Goals
@@ -34,7 +36,7 @@ This design does not:
 
 - require `gateway` routing changes in order to make the `patent/` service scaffold internally coherent
 - require `public-service` schema or whitelist changes in order to scaffold the service code inside `patent/`
-- change `fastQA` compatibility routing in this phase
+- change the existing `thinking + file route -> fastQA` compatibility rule
 - define how patent retrieval ranking, recall, rerank, or grounding will work
 - define patent ingestion or indexing pipelines
 
@@ -64,8 +66,8 @@ The service design assumes the already-written protocol documents are the source
 The most important confirmed Phase 1 rules are:
 
 - gateway sends patent traffic only for `requested_mode=patent`
-- only `turn_mode=kb_only` should reach `patent`
-- `file_only` and `mixed` patent turns still belong to `fastQA`
+- gateway is the only file-intent and route authority
+- `patent` now accepts `kb_only`, `file_only`, and `mixed` patent turns through the shared canonical contract
 - durable patent transcript ownership belongs to `public-service`, not the patent service
 - `patent` must authenticate forwarded browser auth and derive `user_id` locally before authority writes
 - `assistant-async` success must happen before sync success or stream `done`
@@ -88,9 +90,8 @@ Durable patent traffic must not be enabled until all of the following external d
 - `gateway` disables direct conversation persistence for `actual_mode=patent` so patent authority writes do not double-persist the same turn
 - `public-service` extends its authority schema literals and allowlist to accept `source_service=patentQA` and `requested_mode=actual_mode=patent`
 - `gateway` preserves forwarded auth and trace behavior expected by the patent service
-- `gateway` implements the required patent file/mixed compatibility rewrite so `fastQA` receives `requested_mode=fast` and `actual_mode=fast` for those turns
-- the gateway compatibility rule for file and mixed patent turns remains in place until patent explicitly owns those turns
-- the team explicitly chooses how requested patent mode is or is not preserved in persisted metadata for file/mixed compatibility turns routed through `fastQA`
+- `gateway` routes `requested_mode=patent` file-aware turns to the patent backend
+- gateway and patent file-route gates ship in the same rollout batch and now default to enabled, while explicit `false` remains the emergency close path
 
 Until those dependencies land, durable patent mode inside the patent service should be treated as feature-flagged or test-only.
 
@@ -192,7 +193,7 @@ Important limit of this reuse:
 
 Reuse `fastQA` as the main template:
 
-- rejected because `fastQA` is structurally optimized around file and mixed QA ownership, while patent Phase 1 is explicitly text-only and authority-first
+- rejected because `fastQA` is structurally optimized around the fast knowledge domain, while `patent` must stay authority-first and patent-runtime-local even after it owns file-aware routes
 
 Create a much smaller custom service from scratch:
 
@@ -207,9 +208,9 @@ Create a much smaller custom service from scratch:
 3. request parser validates protocol invariants:
    - `requested_mode=patent`
    - `actual_mode=patent`
-   - `route=kb_qa`
-   - `turn_mode=kb_only`
-   - no file execution payloads
+   - `route` is one of `kb_qa / pdf_qa / tabular_qa / hybrid_qa`
+   - `turn_mode` matches the canonical route contract
+   - file-aware turns consume the forwarded canonical file payload without re-inferring intent
 4. conversation mode is determined:
    - durable if `conversation_id` can coerce to positive int
    - ephemeral otherwise
@@ -607,27 +608,27 @@ This is intentionally stricter than the current `highThinkingQA` soft-fail persi
 
 ### Sync
 
-The sync response should follow the wrapped patent target contract:
+The sync response should follow the flat patent contract:
 
 ```json
 {
   "success": true,
-  "data": {
-    "final_answer": "...",
-    "timings": {},
-    "metadata": {
-      "requested_mode": "patent",
-      "actual_mode": "patent",
-      "route": "kb_qa",
-      "mode": "patent",
-      "query_mode": "patent",
-      "conversation_id": 123
-    },
-    "references": [],
-    "pdf_links": [],
-    "reference_links": [],
-    "trace_id": "req_xxx"
+  "final_answer": "...",
+  "query_mode": "patent_hybrid_qa",
+  "route": "hybrid_qa",
+  "requested_mode": "patent",
+  "actual_mode": "patent",
+  "source_scope": "pdf+kb",
+  "timings": {},
+  "references": [],
+  "reference_objects": [],
+  "reference_links": [],
+  "original_links": [],
+  "metadata": {
+    "conversation_id": 123
   },
+  "used_files": [],
+  "file_selection": {},
   "trace_id": "req_xxx"
 }
 ```
@@ -655,10 +656,10 @@ Testing should stay entirely under `patent/tests/` for this phase.
 ### Contract tests
 
 - ask route mode support
-- sync wrapped response shape
+- sync flat response shape
 - stream `metadata/content/done` ordering
 - stream error contract
-- protocol mismatch rejection for non-Phase-1 payloads
+- protocol mismatch rejection for invalid canonical payloads
 
 ### Authority tests
 
@@ -746,7 +747,6 @@ These items should remain open after Phase 1 scaffold lands:
 - Redis usage for retrieval result reuse vs. corpus versioning
 - patent-native citation object format
 - retry semantics for assistant-accept failures beyond request-time failure
-- future file-aware patent execution ownership
 
 ## Review Checklist
 
@@ -757,7 +757,6 @@ A reviewer should reject the design if any of the following is missing:
 - multi-instance duplicate execution is not addressed
 - assistant accept is not a hard success gate for durable patent asks
 - Gunicorn is omitted from the deployment design
-- file-aware patent turns are accidentally pulled into Phase 1 scope
 - the design confuses patent-only scaffold work with production-ready rollout dependencies
 - the design requires changing directories outside `patent/` to make the service skeleton itself coherent
 

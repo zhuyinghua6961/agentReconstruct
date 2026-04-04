@@ -24,16 +24,30 @@ class _ScriptRedisClient:
     def register_script(self, script):
         def runner(*, keys, args):
             key = keys[0]
-            token = args[0]
             if "DEL" in script:
+                token = args[0]
                 if self.store.get(key) != token:
                     return 0
                 self.store.pop(key, None)
                 self.expiry.pop(key, None)
                 return 1
-            ttl = int(args[1])
-            if self.store.get(key) != token:
+            if "EXPIRE" in script:
+                token = args[0]
+                ttl = int(args[1])
+                if self.store.get(key) != token:
+                    return 0
+                self.expiry[key] = ttl
+                return 1
+            expected = str(args[0] or "")
+            replacement = args[1]
+            ttl = int(args[2])
+            current = self.store.get(key)
+            if current is None:
+                if expected:
+                    return 0
+            elif current != expected:
                 return 0
+            self.store[key] = replacement
             self.expiry[key] = ttl
             return 1
 
@@ -60,17 +74,33 @@ class _EvalRedisClient:
         self.expiry[key] = ttl
         return 1
 
-    def eval(self, script, numkeys, key, token, ttl=None):
+    def eval(self, script, numkeys, key, *args):
         assert numkeys == 1
         if "DEL" in script:
+            token = args[0]
             if self.store.get(key) != token:
                 return 0
             self.store.pop(key, None)
             self.expiry.pop(key, None)
             return 1
-        if self.store.get(key) != token:
+        if "EXPIRE" in script:
+            token = args[0]
+            ttl = args[1]
+            if self.store.get(key) != token:
+                return 0
+            self.expiry[key] = int(ttl)
+            return 1
+        expected = str(args[0] or "")
+        replacement = args[1]
+        ttl_seconds = int(args[2])
+        current = self.store.get(key)
+        if current is None:
+            if expected:
+                return 0
+        elif current != expected:
             return 0
-        self.expiry[key] = int(ttl)
+        self.store[key] = replacement
+        self.expiry[key] = ttl_seconds
         return 1
 
 
@@ -126,6 +156,7 @@ def test_bootstrap_redis_sets_component_status(monkeypatch):
     assert state.redis_key_factory.cache("abc") == "tenant-a:test:exec:cache:abc"
     assert callable(state.redis_bindings.client.compare_delete)
     assert callable(state.redis_bindings.client.compare_expire)
+    assert callable(state.redis_bindings.client.compare_set)
 
 
 def test_build_redis_bindings_marks_disabled_config(monkeypatch):
@@ -153,6 +184,11 @@ def test_build_redis_bindings_attaches_atomic_compare_helpers(monkeypatch):
     assert client.expiry["lock-key"] == 45
     assert client.compare_delete("lock-key", "owner-token") == 1
     assert client.get("lock-key") is None
+    assert client.compare_set("set-key", "", "value-1", 20) == 1
+    assert client.compare_set("set-key", "value-1", "value-2", 30) == 1
+    assert client.compare_set("set-key", "stale", "value-3", 40) == 0
+    assert client.get("set-key") == "value-2"
+    assert client.expiry["set-key"] == 30
 
 
 def test_build_redis_bindings_attaches_atomic_compare_helpers_via_eval(monkeypatch):
@@ -167,6 +203,11 @@ def test_build_redis_bindings_attaches_atomic_compare_helpers_via_eval(monkeypat
     assert client.compare_expire("lock-key", "owner-token", 30) == 1
     assert client.expiry["lock-key"] == 30
     assert client.compare_delete("lock-key", "owner-token") == 1
+    assert client.compare_set("set-key", "", "value-1", 20) == 1
+    assert client.compare_set("set-key", "value-1", "value-2", 30) == 1
+    assert client.compare_set("set-key", "stale", "value-3", 40) == 0
+    assert client.get("set-key") == "value-2"
+    assert client.expiry["set-key"] == 30
 
 
 def test_build_redis_bindings_rejects_clients_without_atomic_compare_support(monkeypatch):

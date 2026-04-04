@@ -11,7 +11,7 @@ frontend-vue/node_modules/
 frontend-vue/dist/
 gateway/frontend-vue/node_modules/
 gateway/frontend-vue/dist/
-
+patent/.tmp
 cache/
 data/
 papers/
