@@ -13,11 +13,15 @@ Out of scope:
 - plain non-file `kb_qa`
 - public-service auth / conversation persistence contract details
 - highThinkingQA request contract
-- patent mode
+
+Patent note:
+- `patent` now consumes the same canonical file-aware contract when `requested_mode=patent`
+- `gateway` remains the only file-intent authority
+- execution semantics stay backend-local: `fastQA` uses fast knowledge/runtime, `patent` uses patent-local knowledge/runtime
 
 Primary goal:
 - make `gateway` the single routing and file-context authority
-- make `fastQA` a pure executor for file-aware ask turns
+- make downstream file executors pure executors for file-aware ask turns
 - remove duplicate route/file intent judgment from downstream execution services
 - define a stable protocol that future backends must adapt to
 
@@ -28,7 +32,7 @@ Primary goal:
 The current system has already moved major responsibilities into `gateway`, but the file QA boundary is not yet fully clean.
 
 Current problems:
-- route/file intent ownership used to be split across `gateway` and `fastQA`, which created duplicate judgment risk
+- route/file intent ownership used to be split across `gateway` and downstream executors such as `fastQA`, which created duplicate judgment risk
 - `pdf_qa`, `tabular_qa`, and `hybrid_qa` semantics are not frozen as a protocol.
 - "mixed QA" is still partially represented as `allow_kb_verification` attached to single-source routes, which creates ambiguous execution semantics.
 - frontend-visible stream behavior and file-selection metadata can drift if route authority and frontend-visible short-circuit contracts are not documented precisely.
@@ -48,7 +52,7 @@ This spec fixes those problems by defining a strict upstream/downstream contract
 - decide the final execution route
 - decide whether knowledge-base supplementation is enabled
 
-`fastQA` must not re-decide route or file intent from the raw question.
+Downstream executors such as `fastQA` and `patent` must not re-decide route or file intent from the raw question.
 
 ### 3.2 Explicit source model
 
@@ -56,7 +60,7 @@ Route alone is not enough. The execution request must explicitly state which sou
 
 ### 3.3 Execution-only downstream
 
-`fastQA` is responsible for:
+The downstream file executor is responsible for:
 - validating execution prerequisites
 - loading files
 - running retrieval / execution / synthesis
@@ -70,7 +74,7 @@ It is not responsible for upstream user-intent interpretation.
 The design should allow incremental migration from the current state:
 - first freeze the protocol
 - then align gateway output to that protocol
-- then remove duplicate fastQA route/file reinterpretation
+- then remove duplicate downstream route/file reinterpretation
 
 ---
 
@@ -130,7 +134,7 @@ Meaning:
 - user-facing trace of why those files are in scope
 
 `execution_files`:
-- concrete files that fastQA should load
+- concrete files that the downstream executor should load
 - fully normalized execution-time descriptors
 
 In most cases they overlap, but protocol keeps them separate.
@@ -162,11 +166,11 @@ Examples:
 - turn-mode selection
 - knowledge-base participation decision
 - final `execution_files` list
-- payload normalization before forwarding to fastQA
+- payload normalization before forwarding to the selected backend
 
-### 5.2 FastQA owns
+### 5.2 Downstream executor owns
 
-`fastQA` owns all of the following:
+The selected downstream file executor owns all of the following:
 - contract validation
 - verifying route/source_scope compatibility
 - validating file-type presence
@@ -178,9 +182,9 @@ Examples:
 - streaming step / content / done events
 - returning source usage and references
 
-### 5.3 FastQA must not own
+### 5.3 Downstream executor must not own
 
-`fastQA` must not:
+The selected downstream file executor must not:
 - decide whether a turn is file-aware from the raw user question
 - reinterpret `conversation_id` into selected files
 - override route because it thinks another route is better
@@ -190,7 +194,7 @@ Examples:
 
 ### 5.4 Validation vs reinterpretation
 
-FastQA may reject invalid upstream input.
+The selected downstream file executor may reject invalid upstream input.
 
 Examples of valid rejection:
 - missing explicit `route` for a file execution payload
@@ -200,7 +204,7 @@ Examples of valid rejection:
 - `route=tabular_qa` but no table file in `execution_files`
 - `route=hybrid_qa` with `source_scope=pdf+table` but no table file present
 
-FastQA may not reinterpret those requests into another route. It must fail with a protocol error.
+The selected downstream file executor may not reinterpret those requests into another route. It must fail with a protocol error.
 
 ---
 
@@ -339,7 +343,7 @@ Clarification is required when, for example:
 
 ---
 
-## 8. Canonical Gateway -> FastQA Request Contract
+## 8. Canonical Gateway -> File Executor Request Contract
 
 ## 8.1 Required top-level fields
 
@@ -434,7 +438,7 @@ Recommended schema:
 
 ### 8.4 Contract invariants
 
-FastQA must be allowed to assume all of the following are true:
+The selected downstream file executor must be allowed to assume all of the following are true:
 - `route` is final
 - `source_scope` is final
 - `turn_mode` is final
@@ -444,7 +448,9 @@ FastQA must be allowed to assume all of the following are true:
 
 ---
 
-## 9. FastQA Execution Semantics
+## 9. File Executor Execution Semantics
+
+Unless otherwise noted, the execution semantics in this section describe the canonical file-aware contract that `fastQA` and `patent` both implement with backend-local knowledge/runtime.
 
 ## 9.1 Shared execution pipeline
 
