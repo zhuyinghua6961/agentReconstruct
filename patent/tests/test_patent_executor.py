@@ -41,9 +41,10 @@ def _make_file_request(
     execution_files: list[dict[str, object]],
     selected_file_ids: list[int],
     trace_id: str = "req_file",
+    question: str = "Use the selected files.",
 ) -> PatentAskRequest:
     return PatentAskRequest(
-        question="Use the selected files.",
+        question=question,
         conversation_id=123,
         chat_history=[],
         requested_mode="patent",
@@ -563,7 +564,7 @@ def test_executor_file_routes_stream_pdf_answer_content_before_returning_result(
             answer_question_fn=lambda **kwargs: answer_text,
         )
     )
-    streamed_chunks: list[str] = []
+    events: list[tuple[str, str, str]] = []
 
     result = executor.execute_with_progress(
         request=_make_file_request(
@@ -575,12 +576,319 @@ def test_executor_file_routes_stream_pdf_answer_content_before_returning_result(
             trace_id="req_stream_pdf",
         ),
         context={"recent_turns_for_llm": []},
-        progress_callback=None,
-        content_callback=streamed_chunks.append,
+        progress_callback=lambda step: events.append(("step", str(step.get("step") or ""), str(step.get("status") or ""))),
+        content_callback=lambda chunk: events.append(("content", str(chunk or ""), "")),
     )
 
+    streamed_chunks = [item[1] for item in events if item[0] == "content"]
     assert len(streamed_chunks) >= 2
     assert "".join(streamed_chunks) == result["answer_text"]
+    first_content_index = next(index for index, item in enumerate(events) if item[0] == "content")
+    final_success_index = max(
+        index for index, item in enumerate(events) if item[0] == "step" and item[1] == "pdf_answer" and item[2] == "success"
+    )
+    assert final_success_index < first_content_index
+
+
+def test_executor_pdf_unreadable_fallback_emits_final_steps_before_failure_body(tmp_path):
+    pdf_path = tmp_path / "spec.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    executor = PatentExecutor(
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "",
+            answer_question_fn=lambda **kwargs: "不应该进入成功生成",
+        )
+    )
+    events: list[tuple[str, str, str]] = []
+
+    result = executor.execute_with_progress(
+        request=_make_file_request(
+            route="pdf_qa",
+            source_scope="pdf",
+            turn_mode="file_only",
+            execution_files=[{"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf", "local_path": str(pdf_path)}],
+            selected_file_ids=[11],
+            trace_id="req_stream_pdf_unreadable",
+        ),
+        context={"recent_turns_for_llm": []},
+        progress_callback=lambda step: events.append(("step", str(step.get("step") or ""), str(step.get("status") or ""))),
+        content_callback=lambda chunk: events.append(("content", str(chunk or ""), "")),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_text_unavailable"
+    first_content_index = next(index for index, item in enumerate(events) if item[0] == "content")
+    final_step_index = max(
+        index for index, item in enumerate(events) if item[0] == "step" and item[1] in {"pdf_extract", "pdf_answer"}
+    )
+    assert final_step_index < first_content_index
+
+
+def test_executor_pdf_streaming_generator_success_emits_final_step_before_first_content(tmp_path):
+    pdf_path = tmp_path / "spec.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+
+    def _streaming_answer(**kwargs):
+        yield "真实总结：本文研究硅负极"
+        yield "包覆方案，并报告循环寿命改善。"
+
+    executor = PatentExecutor(
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "This paper studies silicon anode coating for lithium batteries.",
+            answer_question_fn=_streaming_answer,
+        )
+    )
+    events: list[tuple[str, str, str]] = []
+
+    result = executor.execute_with_progress(
+        request=_make_file_request(
+            route="pdf_qa",
+            source_scope="pdf",
+            turn_mode="file_only",
+            execution_files=[{"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf", "local_path": str(pdf_path)}],
+            selected_file_ids=[11],
+            trace_id="req_stream_pdf_generator",
+        ),
+        context={"recent_turns_for_llm": []},
+        progress_callback=lambda step: events.append(("step", str(step.get("step") or ""), str(step.get("status") or ""))),
+        content_callback=lambda chunk: events.append(("content", str(chunk or ""), "")),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_text_summary"
+    first_content_index = next(index for index, item in enumerate(events) if item[0] == "content")
+    final_success_index = max(
+        index for index, item in enumerate(events) if item[0] == "step" and item[1] == "pdf_answer" and item[2] == "success"
+    )
+    assert final_success_index < first_content_index
+
+
+def test_executor_pdf_compare_route_records_compare_steps_and_metadata_parity(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    executor = PatentExecutor(
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "Abstract A.\n\nResults A observed.\n\nConclusion A final."
+                if path == str(pdf_path_a)
+                else "Abstract B.\n\nResults B observed.\n\nConclusion B final."
+            ),
+            answer_question_fn=lambda **kwargs: "对比结果：文献 1 与文献 2 存在明显差异。",
+        )
+    )
+    progress_steps: list[dict[str, object]] = []
+
+    result = executor.execute_with_progress(
+        request=_make_file_request(
+            route="pdf_qa",
+            source_scope="pdf",
+            turn_mode="file_only",
+            question="对比一下这两篇文献的内容",
+            execution_files=[
+                {"file_id": 11, "file_type": "pdf", "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+                {"file_id": 12, "file_type": "pdf", "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+            ],
+            selected_file_ids=[11, 12],
+            trace_id="req_compare_pdf",
+        ),
+        context={"recent_turns_for_llm": []},
+        progress_callback=progress_steps.append,
+        content_callback=None,
+    )
+
+    assert [step["step"] for step in progress_steps] == [
+        "dispatch",
+        "pdf_extract",
+        "pdf_extract",
+        "multi_pdf_compare",
+        "multi_pdf_compare",
+        "pdf_answer",
+        "pdf_answer",
+    ]
+    assert result["metadata"]["steps"] == result["steps"]
+    assert [step["step"] for step in result["steps"]] == [
+        "dispatch",
+        "pdf_extract",
+        "multi_pdf_compare",
+        "pdf_answer",
+    ]
+    assert result["steps"][2]["status"] == "success"
+    assert result["steps"][3]["status"] == "success"
+
+
+def test_executor_pdf_compare_success_emits_final_step_before_first_content(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    executor = PatentExecutor(
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "Abstract A.\n\nResults A observed.\n\nConclusion A final."
+                if path == str(pdf_path_a)
+                else "Abstract B.\n\nResults B observed.\n\nConclusion B final."
+            ),
+            answer_question_fn=lambda **kwargs: "对比结果：文献 1 与文献 2 存在明显差异。",
+        )
+    )
+    events: list[tuple[str, str, str]] = []
+
+    result = executor.execute_with_progress(
+        request=_make_file_request(
+            route="pdf_qa",
+            source_scope="pdf",
+            turn_mode="file_only",
+            question="对比一下这两篇文献的内容",
+            execution_files=[
+                {"file_id": 11, "file_type": "pdf", "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+                {"file_id": 12, "file_type": "pdf", "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+            ],
+            selected_file_ids=[11, 12],
+            trace_id="req_compare_pdf_step_before_content",
+        ),
+        context={"recent_turns_for_llm": []},
+        progress_callback=lambda step: events.append(("step", str(step.get("step") or ""), str(step.get("status") or ""))),
+        content_callback=lambda chunk: events.append(("content", str(chunk or ""), "")),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_text_compare"
+    first_content_index = next(index for index, item in enumerate(events) if item[0] == "content")
+    final_success_index = max(
+        index
+        for index, item in enumerate(events)
+        if item[0] == "step" and item[1] == "pdf_answer" and item[2] == "success"
+    )
+    assert final_success_index < first_content_index
+
+
+def test_executor_pdf_compare_failure_emits_error_steps_before_failure_body(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    executor = PatentExecutor(
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "Abstract A.\n\nResults A observed.\n\nConclusion A final."
+                if path == str(pdf_path_a)
+                else ""
+            ),
+            answer_question_fn=lambda **kwargs: "不应该进入成功比较生成",
+        )
+    )
+    events: list[tuple[str, str, str]] = []
+
+    result = executor.execute_with_progress(
+        request=_make_file_request(
+            route="pdf_qa",
+            source_scope="pdf",
+            turn_mode="file_only",
+            question="对比一下这两篇文献的内容",
+            execution_files=[
+                {"file_id": 11, "file_type": "pdf", "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+                {"file_id": 12, "file_type": "pdf", "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+            ],
+            selected_file_ids=[11, 12],
+            trace_id="req_compare_pdf_fail",
+        ),
+        context={"recent_turns_for_llm": []},
+        progress_callback=lambda step: events.append(("step", str(step.get("step") or ""), str(step.get("status") or ""))),
+        content_callback=lambda chunk: events.append(("content", str(chunk or ""), "")),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert ("step", "multi_pdf_compare", "error") in events
+    assert ("step", "pdf_answer", "error") in events
+    first_content_index = next(index for index, item in enumerate(events) if item[0] == "content")
+    last_error_index = max(
+        index
+        for index, item in enumerate(events)
+        if item[0] == "step" and item[1] in {"multi_pdf_compare", "pdf_answer"} and item[2] == "error"
+    )
+    assert last_error_index < first_content_index
+
+
+def test_executor_pdf_compare_all_unreadable_emits_compare_error_steps_before_failure_body(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    executor = PatentExecutor(
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "",
+            answer_question_fn=lambda **kwargs: "不应该进入成功比较生成",
+        )
+    )
+    events: list[tuple[str, str, str]] = []
+
+    result = executor.execute_with_progress(
+        request=_make_file_request(
+            route="pdf_qa",
+            source_scope="pdf",
+            turn_mode="file_only",
+            question="对比一下这两篇文献的内容",
+            execution_files=[
+                {"file_id": 11, "file_type": "pdf", "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+                {"file_id": 12, "file_type": "pdf", "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+            ],
+            selected_file_ids=[11, 12],
+            trace_id="req_compare_pdf_all_unreadable",
+        ),
+        context={"recent_turns_for_llm": []},
+        progress_callback=lambda step: events.append(("step", str(step.get("step") or ""), str(step.get("status") or ""))),
+        content_callback=lambda chunk: events.append(("content", str(chunk or ""), "")),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert ("step", "multi_pdf_compare", "error") in events
+    assert ("step", "pdf_answer", "error") in events
+    first_content_index = next(index for index, item in enumerate(events) if item[0] == "content")
+    last_error_index = max(
+        index
+        for index, item in enumerate(events)
+        if item[0] == "step" and item[1] in {"multi_pdf_compare", "pdf_answer"} and item[2] == "error"
+    )
+    assert last_error_index < first_content_index
+
+
+def test_executor_pdf_compare_empty_model_answer_returns_failure_not_exception(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    executor = PatentExecutor(
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "Abstract A.\n\nResults A observed.\n\nConclusion A final."
+                if path == str(pdf_path_a)
+                else "Abstract B.\n\nResults B observed.\n\nConclusion B final."
+            ),
+            answer_question_fn=lambda **kwargs: "",
+        )
+    )
+    events: list[tuple[str, str, str]] = []
+
+    result = executor.execute_with_progress(
+        request=_make_file_request(
+            route="pdf_qa",
+            source_scope="pdf",
+            turn_mode="file_only",
+            question="对比一下这两篇文献的内容",
+            execution_files=[
+                {"file_id": 11, "file_type": "pdf", "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+                {"file_id": 12, "file_type": "pdf", "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+            ],
+            selected_file_ids=[11, 12],
+            trace_id="req_compare_pdf_empty_answer",
+        ),
+        context={"recent_turns_for_llm": []},
+        progress_callback=lambda step: events.append(("step", str(step.get("step") or ""), str(step.get("status") or ""))),
+        content_callback=lambda chunk: events.append(("content", str(chunk or ""), "")),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert ("step", "pdf_answer", "error") in events
+    assert "无法完成完整比较" in result["answer_text"]
 
 
 def test_executor_dispatches_tabular_route_to_patent_tabular_service():

@@ -83,6 +83,23 @@ def _pdf_payload() -> dict:
     return payload
 
 
+def _pdf_compare_payload() -> dict:
+    payload = _pdf_payload()
+    payload["question"] = "对比一下这两篇文献的内容"
+    payload["used_files"] = [
+        {"file_id": 11, "file_type": "pdf", "file_name": "paper-a.pdf"},
+        {"file_id": 12, "file_type": "pdf", "file_name": "paper-b.pdf"},
+    ]
+    payload["execution_files"] = [
+        {"file_id": 11, "file_type": "pdf", "file_name": "paper-a.pdf"},
+        {"file_id": 12, "file_type": "pdf", "file_name": "paper-b.pdf"},
+    ]
+    payload["selected_file_ids"] = [11, 12]
+    payload["primary_file_id"] = 11
+    payload["file_selection"] = {"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"}
+    return payload
+
+
 def _tabular_payload() -> dict:
     payload = _base_payload()
     payload.update(
@@ -642,8 +659,9 @@ from server_fastapi.routers.ask import _build_streaming_response
 
 
 class _FakePersistenceService:
-    def __init__(self, *, fail_accept: bool = False):
+    def __init__(self, *, fail_accept: bool = False, context: dict | None = None):
         self.fail_accept = fail_accept
+        self.context = dict(context or {})
         self.calls = []
 
     def prepare_turn(self, *, request, user_id):
@@ -657,6 +675,7 @@ class _FakePersistenceService:
             "pending_overlay": None,
             "snapshot": None,
         }
+        context.update(self.context)
         self.calls.append({"op": "prepare", "trace_id": request.trace_id, "user_id": user_id})
         return {
             "trace_id": request.trace_id,
@@ -844,7 +863,12 @@ def _make_retrieval_service() -> PatentRetrievalService:
 def test_ask_service_sync_payload_matches_contract():
     service = AskService(
         patent_executor=PatentExecutor(),
-        persistence_service=_FakePersistenceService(),
+        persistence_service=_FakePersistenceService(
+            context={
+                "chat_history": [{"role": "assistant", "content": "Earlier turn", "trace_id": "req_prev"}],
+                "summary": {"short_summary": "Earlier patent context"},
+            }
+        ),
         now_factory=lambda: "2026-03-26T00:00:00Z",
     )
 
@@ -855,7 +879,8 @@ def test_ask_service_sync_payload_matches_contract():
     assert validated.requested_mode == "patent"
     assert validated.route == "kb_qa"
     assert validated.query_mode == "patent_kb_qa"
-    assert validated.metadata == {}
+    assert validated.metadata["steps"][0]["step"] == "context_ready"
+    assert "最近 1 条消息" in validated.metadata["steps"][0]["message"]
     assert validated.trace_id == "req_123"
 
 
@@ -864,7 +889,12 @@ def test_stream_done_is_emitted_only_after_accept_success():
     request = parse_patent_request(_base_payload())
     success_service = AskService(
         patent_executor=PatentExecutor(),
-        persistence_service=_FakePersistenceService(),
+        persistence_service=_FakePersistenceService(
+            context={
+                "chat_history": [{"role": "assistant", "content": "Earlier turn", "trace_id": "req_prev"}],
+                "summary": {"short_summary": "Earlier patent context"},
+            }
+        ),
         now_factory=lambda: "2026-03-26T00:00:00Z",
     )
     success_events = list(success_service.stream_ask(request, user_id=42))
@@ -872,9 +902,12 @@ def test_stream_done_is_emitted_only_after_accept_success():
     assert success_events[0]["type"] == "metadata"
     assert success_events[0]["query_mode"] == "patent_kb_qa"
     assert success_events[0]["metadata"] == {}
+    assert success_events[1]["type"] == "step"
+    assert success_events[1]["step"] == "context_ready"
+    assert "最近 1 条消息" in success_events[1]["message"]
     assert success_events[-1]["type"] == "done"
     assert success_events[-1]["query_mode"] == "patent_kb_qa"
-    assert success_events[-1]["metadata"] == {}
+    assert success_events[-1]["metadata"]["steps"][0]["step"] == "context_ready"
     assert all(event["seq"] == index for index, event in enumerate(success_events))
 
     failure_service = AskService(
@@ -938,6 +971,7 @@ def test_stream_ask_emits_stage_progress_before_later_stage_completion():
 
     stream = service.stream_ask(parse_patent_request(_base_payload()), user_id=42)
     assert next(stream)["type"] == "metadata"
+    assert next(stream)["step"] == "context_ready"
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(next, stream)
@@ -1004,11 +1038,12 @@ def test_stream_ask_short_circuits_after_stage1_when_no_retrieval_claims_are_ava
 
     events = list(service.stream_ask(parse_patent_request(_base_payload()), user_id=42))
 
-    assert [event["type"] for event in events] == ["metadata", "step", "content", "done"]
-    assert events[1]["step"] == "stage1"
-    assert events[1]["status"] == "processing"
-    assert events[1]["message"] == "阶段一：生成深度预回答与检索规划..."
-    assert events[2]["content"] == "stage1 only:Explain the patent novelty."
+    assert [event["type"] for event in events] == ["metadata", "step", "step", "content", "done"]
+    assert events[1]["step"] == "context_ready"
+    assert events[2]["step"] == "stage1"
+    assert events[2]["status"] == "processing"
+    assert events[2]["message"] == "阶段一：生成深度预回答与检索规划..."
+    assert events[3]["content"] == "stage1 only:Explain the patent novelty."
     assert events[-1]["final_answer"] == "stage1 only:Explain the patent novelty."
     assert events[-1]["metadata"]["stage1_short_circuit"] is True
 
@@ -1083,7 +1118,7 @@ def test_stream_emits_progress_before_accept_failure_when_split_phase_is_availab
     events = list(service.stream_ask(request, user_id=42))
 
     assert [event["type"] for event in events] == ["metadata", "step", "content", "error"]
-    assert events[1]["title"] == "Patent Stub"
+    assert events[1]["step"] == "context_ready"
     assert events[2]["content"] == "Patent Phase 1 stub answer: Explain the patent novelty."
     assert all(event["type"] != "done" for event in events)
 
@@ -1163,7 +1198,8 @@ def test_stream_rejects_failed_execution_payload_with_terminal_error():
 
     events = list(service.stream_ask(parse_patent_request(_base_payload()), user_id=42))
 
-    assert [event["type"] for event in events] == ["metadata", "error"]
+    assert [event["type"] for event in events] == ["metadata", "step", "error"]
+    assert events[1]["step"] == "context_ready"
     assert events[-1]["error"] == "internal_error"
     assert [call["op"] for call in persistence.calls] == ["prepare"]
     assert len(persistence.aborted) == 1
@@ -2177,6 +2213,12 @@ def test_http_stream_pdf_route_emits_incremental_content_before_done(monkeypatch
     assert len(content_events) >= 2
     assert "".join(event["content"] for event in content_events) == events[-1]["final_answer"]
     assert events.index(content_events[0]) < len(events) - 1
+    final_success_index = max(
+        index
+        for index, event in enumerate(events)
+        if event["type"] == "step" and event["step"] == "pdf_answer" and event["status"] == "success"
+    )
+    assert final_success_index < events.index(content_events[0])
     assert events[-1]["type"] == "done"
 
 
@@ -2201,6 +2243,7 @@ def test_http_stream_pdf_route_emits_live_step_events_before_done(monkeypatch, t
     step_events = [event for event in events if event["type"] == "step"]
 
     assert [event["step"] for event in step_events] == [
+        "context_ready",
         "dispatch",
         "pdf_extract",
         "pdf_extract",
@@ -2208,6 +2251,274 @@ def test_http_stream_pdf_route_emits_live_step_events_before_done(monkeypatch, t
         "pdf_answer",
     ]
     assert events[-1]["type"] == "done", events[-1]
+
+
+def test_http_stream_pdf_compare_route_emits_context_and_compare_steps_before_done(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    app.state.ask_service._patent_executor._pdf_service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: (
+            "Abstract A.\n\nResults A observed.\n\nConclusion A final."
+            if path == str(pdf_path_a)
+            else "Abstract B.\n\nResults B observed.\n\nConclusion B final."
+        ),
+        answer_question_fn=lambda **kwargs: "对比结果：文献 1 与文献 2 存在明显差异。",
+    )
+    payload = _pdf_compare_payload()
+    payload["execution_files"][0]["local_path"] = str(pdf_path_a)
+    payload["execution_files"][1]["local_path"] = str(pdf_path_b)
+    payload["used_files"][0]["local_path"] = str(pdf_path_a)
+    payload["used_files"][1]["local_path"] = str(pdf_path_b)
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask_stream", json=payload)
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    step_events = [event for event in events if event["type"] == "step"]
+
+    assert [event["step"] for event in step_events] == [
+        "context_ready",
+        "dispatch",
+        "pdf_extract",
+        "pdf_extract",
+        "multi_pdf_compare",
+        "multi_pdf_compare",
+        "pdf_answer",
+        "pdf_answer",
+    ]
+    assert [step["step"] for step in events[-1]["metadata"]["steps"]] == [
+        "context_ready",
+        "dispatch",
+        "pdf_extract",
+        "multi_pdf_compare",
+        "pdf_answer",
+    ]
+    assert events[-1]["metadata"]["steps"] == [dict(step) for step in events[-1]["metadata"]["steps"]]
+    assert events[-1]["type"] == "done"
+
+
+def test_http_stream_pdf_unreadable_fallback_emits_final_steps_before_failure_body(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    pdf_path = tmp_path / "spec.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    app.state.ask_service._patent_executor._pdf_service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: "",
+        answer_question_fn=lambda **kwargs: "不应该进入成功生成",
+    )
+    payload = _pdf_payload()
+    payload["execution_files"][0]["local_path"] = str(pdf_path)
+    payload["used_files"][0]["local_path"] = str(pdf_path)
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask_stream", json=payload)
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    first_content_index = next(index for index, event in enumerate(events) if event["type"] == "content")
+    final_step_index = max(
+        index
+        for index, event in enumerate(events)
+        if event["type"] == "step" and event["step"] in {"pdf_extract", "pdf_answer"}
+    )
+    assert final_step_index < first_content_index
+
+
+def test_http_stream_pdf_generator_success_emits_final_step_before_first_content(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    pdf_path = tmp_path / "spec.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+
+    def _streaming_answer(**kwargs):
+        yield "真实总结：本文提出硅负极"
+        yield "包覆方法，并报告循环寿命改善。"
+
+    app.state.ask_service._patent_executor._pdf_service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: "This paper proposes a silicon anode coating method and reports improved cycle life.",
+        answer_question_fn=_streaming_answer,
+    )
+    payload = _pdf_payload()
+    payload["execution_files"][0]["local_path"] = str(pdf_path)
+    payload["used_files"][0]["local_path"] = str(pdf_path)
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask_stream", json=payload)
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    first_content_index = next(index for index, event in enumerate(events) if event["type"] == "content")
+    final_success_index = max(
+        index
+        for index, event in enumerate(events)
+        if event["type"] == "step" and event["step"] == "pdf_answer" and event["status"] == "success"
+    )
+    assert final_success_index < first_content_index
+
+
+def test_http_stream_pdf_compare_success_emits_final_step_before_first_content(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    app.state.ask_service._patent_executor._pdf_service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: (
+            "Abstract A.\n\nResults A observed.\n\nConclusion A final."
+            if path == str(pdf_path_a)
+            else "Abstract B.\n\nResults B observed.\n\nConclusion B final."
+        ),
+        answer_question_fn=lambda **kwargs: "对比结果：文献 1 与文献 2 存在明显差异。",
+    )
+    payload = _pdf_compare_payload()
+    payload["execution_files"][0]["local_path"] = str(pdf_path_a)
+    payload["execution_files"][1]["local_path"] = str(pdf_path_b)
+    payload["used_files"][0]["local_path"] = str(pdf_path_a)
+    payload["used_files"][1]["local_path"] = str(pdf_path_b)
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask_stream", json=payload)
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    first_content_index = next(index for index, event in enumerate(events) if event["type"] == "content")
+    final_success_index = max(
+        index
+        for index, event in enumerate(events)
+        if event["type"] == "step" and event["step"] == "pdf_answer" and event["status"] == "success"
+    )
+    assert final_success_index < first_content_index
+
+
+def test_http_stream_pdf_compare_failure_emits_error_steps_before_failure_body(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    app.state.ask_service._patent_executor._pdf_service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: (
+            "Abstract A.\n\nResults A observed.\n\nConclusion A final."
+            if path == str(pdf_path_a)
+            else ""
+        ),
+        answer_question_fn=lambda **kwargs: "不应该进入成功比较生成",
+    )
+    payload = _pdf_compare_payload()
+    payload["execution_files"][0]["local_path"] = str(pdf_path_a)
+    payload["execution_files"][1]["local_path"] = str(pdf_path_b)
+    payload["used_files"][0]["local_path"] = str(pdf_path_a)
+    payload["used_files"][1]["local_path"] = str(pdf_path_b)
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask_stream", json=payload)
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    step_events = [event for event in events if event["type"] == "step"]
+    content_events = [event for event in events if event["type"] == "content"]
+
+    assert ("multi_pdf_compare", "error") in {(event["step"], event["status"]) for event in step_events}
+    assert ("pdf_answer", "error") in {(event["step"], event["status"]) for event in step_events}
+    first_content_index = next(index for index, event in enumerate(events) if event["type"] == "content")
+    last_error_index = max(
+        index
+        for index, event in enumerate(events)
+        if event["type"] == "step" and event["step"] in {"multi_pdf_compare", "pdf_answer"} and event["status"] == "error"
+    )
+    assert last_error_index < first_content_index
+    assert "无法完成完整比较" in events[-1]["final_answer"]
+    assert content_events
+
+
+def test_http_stream_pdf_compare_all_unreadable_emits_compare_error_steps_before_failure_body(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    app.state.ask_service._patent_executor._pdf_service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: "",
+        answer_question_fn=lambda **kwargs: "不应该进入成功比较生成",
+    )
+    payload = _pdf_compare_payload()
+    payload["execution_files"][0]["local_path"] = str(pdf_path_a)
+    payload["execution_files"][1]["local_path"] = str(pdf_path_b)
+    payload["used_files"][0]["local_path"] = str(pdf_path_a)
+    payload["used_files"][1]["local_path"] = str(pdf_path_b)
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask_stream", json=payload)
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    step_events = [event for event in events if event["type"] == "step"]
+    content_events = [event for event in events if event["type"] == "content"]
+
+    assert ("multi_pdf_compare", "error") in {(event["step"], event["status"]) for event in step_events}
+    assert ("pdf_answer", "error") in {(event["step"], event["status"]) for event in step_events}
+    first_content_index = next(index for index, event in enumerate(events) if event["type"] == "content")
+    last_error_index = max(
+        index
+        for index, event in enumerate(events)
+        if event["type"] == "step" and event["step"] in {"multi_pdf_compare", "pdf_answer"} and event["status"] == "error"
+    )
+    assert last_error_index < first_content_index
+    assert "无法完成完整比较" in events[-1]["final_answer"]
+    assert [step["step"] for step in events[-1]["metadata"]["steps"]] == [
+        "context_ready",
+        "dispatch",
+        "pdf_extract",
+        "multi_pdf_compare",
+        "pdf_answer",
+    ]
+
+
+def test_http_stream_pdf_compare_partial_stream_error_does_not_leak_partial_content(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+
+    def _broken_compare_stream(**kwargs):
+        yield "partial compare body "
+        raise RuntimeError("stream interrupted")
+
+    app.state.ask_service._patent_executor._pdf_service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: (
+            "Abstract A.\n\nResults A observed.\n\nConclusion A final."
+            if path == str(pdf_path_a)
+            else "Abstract B.\n\nResults B observed.\n\nConclusion B final."
+        ),
+        answer_question_fn=_broken_compare_stream,
+    )
+    payload = _pdf_compare_payload()
+    payload["execution_files"][0]["local_path"] = str(pdf_path_a)
+    payload["execution_files"][1]["local_path"] = str(pdf_path_b)
+    payload["used_files"][0]["local_path"] = str(pdf_path_a)
+    payload["used_files"][1]["local_path"] = str(pdf_path_b)
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask_stream", json=payload)
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    step_events = [event for event in events if event["type"] == "step"]
+    content_events = [event for event in events if event["type"] == "content"]
+
+    assert ("pdf_answer", "error") in {(event["step"], event["status"]) for event in step_events}
+    assert "无法完成完整比较" in events[-1]["final_answer"]
+    assert all("partial compare body" not in event["content"] for event in content_events)
 
 
 def test_http_sync_tabular_route_uses_real_patent_tabular_handler_when_gate_is_enabled(monkeypatch):
@@ -2352,6 +2663,7 @@ def test_http_stream_hybrid_route_emits_file_progress_steps_before_done(monkeypa
     step_events = [event for event in events if event["type"] == "step"]
 
     assert [event["step"] for event in step_events] == [
+        "context_ready",
         "dispatch",
         "pdf_extract",
         "pdf_extract",

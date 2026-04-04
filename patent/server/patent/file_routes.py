@@ -219,6 +219,12 @@ def _build_hybrid_result(
             "answer_mode": "hybrid_file_synthesis",
             "pdf_answer_mode": str(dict(pdf_result.get("metadata") or {}).get("answer_mode") or ""),
             "tabular_answer_mode": str(dict(tabular_result.get("metadata") or {}).get("answer_mode") or ""),
+            "steps": [
+                dict(dispatch_step),
+                *[dict(item) for item in list(pdf_result.get("steps") or []) if isinstance(item, dict)],
+                *[dict(item) for item in list(tabular_result.get("steps") or []) if isinstance(item, dict)],
+                dict(hybrid_step),
+            ],
         },
         "timings": {
             **dict(pdf_result.get("timings") or {}),
@@ -255,6 +261,9 @@ def _with_leading_steps(*, result: dict[str, Any], steps: list[dict[str, Any]]) 
         *[dict(item) for item in steps if isinstance(item, dict)],
         *[dict(item) for item in list(payload.get("steps") or []) if isinstance(item, dict)],
     ]
+    metadata = dict(payload.get("metadata") or {})
+    metadata["steps"] = [dict(item) for item in payload["steps"]]
+    payload["metadata"] = metadata
     return payload
 
 

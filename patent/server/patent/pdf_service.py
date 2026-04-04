@@ -297,37 +297,107 @@ class PatentPdfService:
                     "data": {"count": len(used_files), "chars": len(pdf_text)},
                 },
             )
-            self._record_step(
-                steps,
-                progress_callback=progress_callback,
-                payload={
-                    "step": "pdf_answer",
-                    "title": "生成文件答案",
-                    "message": "✍️ 正在基于 PDF 原文生成答案...",
-                    "status": "running",
-                },
-            )
-            answer_text, answer_mode = self._build_answer(
+            if compare_mode:
+                self._record_step(
+                    steps,
+                    progress_callback=progress_callback,
+                    payload={
+                        "step": "multi_pdf_compare",
+                        "title": "准备多文献比较",
+                        "message": f"🔍 已识别多文献比较请求，正在准备 {len(available_labels)} 篇文献证据...",
+                        "status": "running",
+                        "data": {"count": len(available_labels)},
+                    },
+                )
+            prepared = self._prepare_answer_input(
                 question=contract.question,
                 pdf_text=pdf_text,
                 pdf_documents=pdf_documents,
-                file_name=", ".join(selected_labels) if len(selected_labels) > 1 else (selected_labels[0] if selected_labels else "unknown.pdf"),
                 selected_file_labels=selected_labels,
                 available_file_labels=available_labels,
-                include_kb=include_kb,
                 compare_mode=compare_mode,
-                content_callback=content_callback,
             )
-            self._record_step(
-                steps,
-                progress_callback=progress_callback,
-                payload={
-                    "step": "pdf_answer",
-                    "title": "生成文件答案",
-                    "message": "✍️ 已基于 PDF 原文生成答案",
-                    "status": "success",
-                },
-            )
+            if compare_mode:
+                compare_status = "success" if prepared["ok"] else "error"
+                compare_message = (
+                    f"🔍 已完成多文献比较证据准备，共 {len(available_labels)} 篇文献"
+                    if prepared["ok"]
+                    else f"🔍 多文献比较准备失败：{prepared['failure_reason']}"
+                )
+                self._record_step(
+                    steps,
+                    progress_callback=progress_callback,
+                    payload={
+                        "step": "multi_pdf_compare",
+                        "title": "准备多文献比较",
+                        "message": compare_message,
+                        "status": compare_status,
+                        "error": None if prepared["ok"] else str(prepared["failure_reason"]),
+                        "data": {"count": len(available_labels)},
+                    },
+                )
+            if prepared["ok"]:
+                self._record_step(
+                    steps,
+                    progress_callback=progress_callback,
+                    payload={
+                        "step": "pdf_answer",
+                        "title": "生成文件答案",
+                        "message": "✍️ 正在基于 PDF 原文生成比较答案..." if compare_mode else "✍️ 正在基于 PDF 原文生成答案...",
+                        "status": "running",
+                    },
+                )
+                rendered = self._render_answer(
+                    question=contract.question,
+                    prepared_pdf_text=str(prepared["prepared_pdf_text"]),
+                    file_name=", ".join(selected_labels) if len(selected_labels) > 1 else (selected_labels[0] if selected_labels else "unknown.pdf"),
+                    selected_file_labels=selected_labels,
+                    available_file_labels=available_labels,
+                    include_kb=include_kb,
+                    compare_mode=compare_mode,
+                    content_callback=content_callback,
+                )
+                answer_text = str(rendered["answer_text"])
+                answer_mode = str(rendered["answer_mode"])
+                self._record_step(
+                    steps,
+                    progress_callback=progress_callback,
+                    payload={
+                        "step": "pdf_answer",
+                        "title": "生成文件答案",
+                        "message": (
+                            "✍️ 已基于 PDF 原文生成比较答案"
+                            if rendered["ok"] and compare_mode
+                            else "✍️ 已基于 PDF 原文生成答案"
+                            if rendered["ok"]
+                            else "✍️ 多文献比较失败，已返回明确失败说明"
+                            if compare_mode
+                            else "✍️ 文件答案生成失败"
+                        ),
+                        "status": "success" if rendered["ok"] else "error",
+                        "error": None if rendered["ok"] else str(rendered["failure_reason"]),
+                    },
+                )
+                if rendered["ok"] and rendered.get("emit_after_steps") and callable(content_callback):
+                    emit_text_chunks(answer_text, content_callback=content_callback)
+                if not rendered["ok"] and rendered.get("stream_after_steps") and callable(content_callback):
+                    emit_text_chunks(answer_text, content_callback=content_callback)
+            else:
+                answer_text = str(prepared["answer_text"])
+                answer_mode = str(prepared["answer_mode"])
+                self._record_step(
+                    steps,
+                    progress_callback=progress_callback,
+                    payload={
+                        "step": "pdf_answer",
+                        "title": "生成文件答案",
+                        "message": "✍️ 多文献比较失败，已返回明确失败说明" if compare_mode else "✍️ 文件答案生成失败",
+                        "status": "error",
+                        "error": str(prepared["failure_reason"]),
+                    },
+                )
+                if callable(content_callback):
+                    emit_text_chunks(answer_text, content_callback=content_callback)
         else:
             answer_mode = "pdf_compare_unavailable" if compare_mode else "pdf_text_unavailable"
             answer_text = (
@@ -340,29 +410,79 @@ class PatentPdfService:
                 if compare_mode
                 else "当前未拿到可读的 PDF 原文内容，无法生成基于正文的总结。请稍后重试或检查文件处理状态。"
             )
-            if callable(content_callback):
-                emit_text_chunks(answer_text, content_callback=content_callback)
-            self._record_step(
-                steps,
-                progress_callback=progress_callback,
-                payload={
-                    "step": "pdf_extract",
-                    "title": "分析 PDF 原文",
-                    "message": f"📄 未拿到可读的 PDF 原文内容，当前选择文件数 {len(used_files)}",
-                    "status": "success",
-                    "data": {"count": len(used_files), "chars": 0},
-                },
-            )
-            self._record_step(
-                steps,
-                progress_callback=progress_callback,
-                payload={
-                    "step": "pdf_answer",
-                    "title": "生成文件答案",
-                    "message": "✍️ 已返回文件不可读的说明",
-                    "status": "success",
-                },
-            )
+            if compare_mode:
+                self._record_step(
+                    steps,
+                    progress_callback=progress_callback,
+                    payload={
+                        "step": "pdf_extract",
+                        "title": "分析 PDF 原文",
+                        "message": f"📄 未拿到可读的 PDF 原文内容，当前选择文件数 {len(used_files)}",
+                        "status": "error",
+                        "error": "当前未拿到可读的 PDF 原文内容",
+                        "data": {"count": len(used_files), "chars": 0},
+                    },
+                )
+                self._record_step(
+                    steps,
+                    progress_callback=progress_callback,
+                    payload={
+                        "step": "multi_pdf_compare",
+                        "title": "准备多文献比较",
+                        "message": f"🔍 已识别多文献比较请求，正在准备 {len(used_files)} 篇文献证据...",
+                        "status": "running",
+                        "data": {"count": len(used_files)},
+                    },
+                )
+                self._record_step(
+                    steps,
+                    progress_callback=progress_callback,
+                    payload={
+                        "step": "multi_pdf_compare",
+                        "title": "准备多文献比较",
+                        "message": "🔍 多文献比较准备失败：当前未拿到可读的 PDF 原文内容",
+                        "status": "error",
+                        "error": "当前未拿到可读的 PDF 原文内容",
+                        "data": {"count": len(used_files)},
+                    },
+                )
+                self._record_step(
+                    steps,
+                    progress_callback=progress_callback,
+                    payload={
+                        "step": "pdf_answer",
+                        "title": "生成文件答案",
+                        "message": "✍️ 多文献比较失败，已返回明确失败说明",
+                        "status": "error",
+                        "error": "当前未拿到可读的 PDF 原文内容",
+                    },
+                )
+                if callable(content_callback):
+                    emit_text_chunks(answer_text, content_callback=content_callback)
+            else:
+                self._record_step(
+                    steps,
+                    progress_callback=progress_callback,
+                    payload={
+                        "step": "pdf_extract",
+                        "title": "分析 PDF 原文",
+                        "message": f"📄 未拿到可读的 PDF 原文内容，当前选择文件数 {len(used_files)}",
+                        "status": "success",
+                        "data": {"count": len(used_files), "chars": 0},
+                    },
+                )
+                self._record_step(
+                    steps,
+                    progress_callback=progress_callback,
+                    payload={
+                        "step": "pdf_answer",
+                        "title": "生成文件答案",
+                        "message": "✍️ 已返回文件不可读的说明",
+                        "status": "success",
+                    },
+                )
+                if callable(content_callback):
+                    emit_text_chunks(answer_text, content_callback=content_callback)
         return {
             "handler": "pdf",
             "answer_text": answer_text,
@@ -377,6 +497,7 @@ class PatentPdfService:
                 "kb_enabled": bool(include_kb),
                 "answer_mode": answer_mode,
                 "pdf_text_chars": len(pdf_text),
+                "steps": [dict(item) for item in steps],
             },
             "timings": {
                 "patent_pdf_route_ms": 1,
@@ -434,38 +555,18 @@ class PatentPdfService:
             sections.append({"label": label, "text": extracted})
         return sections
 
-    def _build_answer(
+    def _prepare_answer_input(
         self,
         *,
         question: str,
         pdf_text: str,
         pdf_documents: list[dict[str, str]],
-        file_name: str,
         selected_file_labels: list[str],
         available_file_labels: list[str],
-        include_kb: bool,
         compare_mode: bool,
-        content_callback: Callable[[str], None] | None = None,
-    ) -> tuple[str, str]:
-        answer_parts: list[str] = []
+    ) -> dict[str, Any]:
         summary_mode = is_summary_question(question)
         missing_labels = [label for label in selected_file_labels if label not in set(available_file_labels)]
-
-        def _emit_stream_piece(piece: str) -> None:
-            text = str(piece or "")
-            if not text:
-                return
-            answer_parts.append(text)
-            if callable(content_callback):
-                content_callback(text)
-
-        def _emit_buffered_text(text: str) -> str:
-            normalized = str(text or "").strip()
-            if not normalized:
-                return ""
-            if callable(content_callback):
-                emit_text_chunks(normalized, content_callback=content_callback)
-            return normalized
 
         if compare_mode and (len(available_file_labels) < 2 or missing_labels):
             message = build_compare_failure_message(
@@ -474,7 +575,13 @@ class PatentPdfService:
                 missing_docs=missing_labels,
                 reason="参与比较的文献正文不完整",
             )
-            return _emit_buffered_text(message), "pdf_compare_unavailable"
+            return {
+                "ok": False,
+                "prepared_pdf_text": "",
+                "answer_text": message,
+                "answer_mode": "pdf_compare_unavailable",
+                "failure_reason": "参与比较的文献正文不完整",
+            }
 
         try:
             prepared_pdf_text = smart_truncate_pdf_content(
@@ -492,7 +599,13 @@ class PatentPdfService:
                 missing_docs=missing_labels,
                 reason=str(exc),
             )
-            return _emit_buffered_text(message), "pdf_compare_unavailable"
+            return {
+                "ok": False,
+                "prepared_pdf_text": "",
+                "answer_text": message,
+                "answer_mode": "pdf_compare_unavailable",
+                "failure_reason": str(exc),
+            }
 
         if compare_mode:
             try:
@@ -504,7 +617,45 @@ class PatentPdfService:
                     missing_docs=missing_labels,
                     reason=str(exc),
                 )
-                return _emit_buffered_text(message), "pdf_compare_unavailable"
+                return {
+                    "ok": False,
+                    "prepared_pdf_text": "",
+                    "answer_text": message,
+                    "answer_mode": "pdf_compare_unavailable",
+                    "failure_reason": str(exc),
+                }
+
+        return {
+            "ok": True,
+            "prepared_pdf_text": prepared_pdf_text,
+            "answer_text": "",
+            "answer_mode": "pdf_text_compare" if compare_mode else "pdf_text_summary",
+            "failure_reason": "",
+        }
+
+    def _render_answer(
+        self,
+        *,
+        question: str,
+        prepared_pdf_text: str,
+        file_name: str,
+        selected_file_labels: list[str],
+        available_file_labels: list[str],
+        include_kb: bool,
+        compare_mode: bool,
+        content_callback: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        answer_parts: list[str] = []
+        missing_labels = [label for label in selected_file_labels if label not in set(available_file_labels)]
+
+        def _emit_stream_piece(piece: str) -> None:
+            text = str(piece or "")
+            if not text:
+                return
+            answer_parts.append(text)
+
+        def _buffer_text(text: str) -> str:
+            return str(text or "").strip()
 
         if callable(self._answer_question_fn):
             output = self._answer_question_fn(
@@ -514,12 +665,22 @@ class PatentPdfService:
                 include_kb=include_kb,
             )
             if isinstance(output, (str, bytes)):
-                answer = _emit_buffered_text(str(output or ""))
+                answer = _buffer_text(str(output or ""))
                 if answer:
-                    return answer, "pdf_text_compare" if compare_mode else "pdf_text_summary"
+                    return {
+                        "ok": True,
+                        "answer_text": answer,
+                        "answer_mode": "pdf_text_compare" if compare_mode else "pdf_text_summary",
+                        "failure_reason": "",
+                        "emit_after_steps": True,
+                        "stream_after_steps": False,
+                    }
             else:
-                for piece in iter_text_output(output):
-                    _emit_stream_piece(piece)
+                try:
+                    for piece in iter_text_output(output):
+                        _emit_stream_piece(piece)
+                except Exception:
+                    answer_parts = []
         elif self._client is not None:
             try:
                 stream_builder = getattr(self._client, "stream_answer", None)
@@ -538,7 +699,7 @@ class PatentPdfService:
                 answer_parts = []
             if not "".join(answer_parts).strip():
                 try:
-                    answer = _emit_buffered_text(
+                    answer = _buffer_text(
                         self._client.answer(
                             question=question,
                             pdf_text=prepared_pdf_text,
@@ -548,13 +709,27 @@ class PatentPdfService:
                         )
                     )
                     if answer:
-                        return answer, "pdf_text_compare" if compare_mode else "pdf_text_summary"
+                        return {
+                            "ok": True,
+                            "answer_text": answer,
+                            "answer_mode": "pdf_text_compare" if compare_mode else "pdf_text_summary",
+                            "failure_reason": "",
+                            "emit_after_steps": True,
+                            "stream_after_steps": False,
+                        }
                 except Exception:
                     answer_parts = []
 
         answer = "".join(answer_parts).strip()
         if answer:
-            return answer, "pdf_text_compare" if compare_mode else "pdf_text_summary"
+            return {
+                "ok": True,
+                "answer_text": answer,
+                "answer_mode": "pdf_text_compare" if compare_mode else "pdf_text_summary",
+                "failure_reason": "",
+                "emit_after_steps": True,
+                "stream_after_steps": False,
+            }
 
         fallback = (
             build_compare_failure_message(
@@ -564,10 +739,25 @@ class PatentPdfService:
                 reason="模型未返回可用的比较结果",
             )
             if compare_mode
-            else build_extractive_fallback_summary(question=question, pdf_text=pdf_text)
+            else build_extractive_fallback_summary(question=question, pdf_text=prepared_pdf_text)
         )
+        if compare_mode:
+            return {
+                "ok": False,
+                "answer_text": fallback,
+                "answer_mode": "pdf_compare_unavailable",
+                "failure_reason": "模型未返回可用的比较结果",
+                "stream_after_steps": True,
+            }
         emit_text_chunks(fallback, content_callback=content_callback)
-        return fallback, "pdf_compare_unavailable" if compare_mode else "pdf_text_summary"
+        return {
+            "ok": True,
+            "answer_text": fallback,
+            "answer_mode": "pdf_text_summary",
+            "failure_reason": "",
+            "emit_after_steps": True,
+            "stream_after_steps": False,
+        }
 
     @staticmethod
     def _extract_pdf_text(pdf_path: str, *, max_pages: int = 10) -> str:
