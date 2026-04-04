@@ -320,6 +320,135 @@ def test_dispatch_pdf_route_uses_real_pdf_text_summary_when_local_path_is_availa
     assert "Patent PDF route answered" not in result["answer_text"]
 
 
+def test_dispatch_pdf_route_formats_two_selected_pdfs_for_compare_questions(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12]},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    captured: dict[str, str] = {}
+    texts = {
+        str(pdf_path_a): "Abstract A.\n\nResults A show 15% improvement.\n\nConclusion A supports route A.",
+        str(pdf_path_b): "Abstract B.\n\nResults B show 5% decline.\n\nConclusion B rejects route A.",
+    }
+
+    service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: texts[path],
+        answer_question_fn=lambda **kwargs: captured.update(
+            {
+                "pdf_text": str(kwargs["pdf_text"]),
+                "file_name": str(kwargs["file_name"]),
+            }
+        )
+        or "对比结果：文献 1 与文献 2 存在明显差异。",
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=service,
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_text_compare"
+    assert "==== 文献 1: paper-a.pdf ====" in captured["pdf_text"]
+    assert "==== 文献 2: paper-b.pdf ====" in captured["pdf_text"]
+    assert "paper-a.pdf" in captured["file_name"]
+    assert "paper-b.pdf" in captured["file_name"]
+
+
+def test_dispatch_pdf_route_returns_explicit_compare_failure_when_only_one_pdf_is_readable(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12]},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: (
+            "Abstract A.\n\nResults A show 15% improvement.\n\nConclusion A supports route A."
+            if path == str(pdf_path_a)
+            else ""
+        ),
+        answer_question_fn=lambda **kwargs: "",
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=service,
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+    assert "paper-b.pdf" in result["answer_text"]
+    assert "文档要点如下" not in result["answer_text"]
+
+
+def test_dispatch_pdf_route_returns_explicit_compare_failure_when_model_returns_no_answer(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12]},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: (
+            "Abstract A.\n\nResults A show 15% improvement.\n\nConclusion A supports route A."
+            if path == str(pdf_path_a)
+            else "Abstract B.\n\nResults B show 5% decline.\n\nConclusion B rejects route A."
+        ),
+        answer_question_fn=lambda **kwargs: "",
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=service,
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+    assert "模型未返回可用的比较结果" in result["answer_text"]
+    assert "文档要点如下" not in result["answer_text"]
+
+
 def test_dispatch_tabular_route_uses_patent_tabular_service():
     contract = build_patent_file_contract(
         route="tabular_qa",

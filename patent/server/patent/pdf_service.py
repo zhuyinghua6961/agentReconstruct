@@ -1,13 +1,25 @@
 from __future__ import annotations
 
 import os
-import re
 import json
+import re
 from pathlib import Path
 from typing import Any, Callable
 
 import httpx
 
+from server.patent.pdf_contract import (
+    CompareBudgetError,
+    PDF_QA_SYSTEM_MESSAGE,
+    build_compare_failure_message,
+    build_extractive_fallback_summary,
+    build_kb_section,
+    build_patent_pdf_answer_prompt,
+    format_multi_pdf_sections,
+    is_compare_question,
+    is_summary_question,
+    smart_truncate_pdf_content,
+)
 from server.patent.file_models import PatentFileContract
 from server.patent.streaming import emit_text_chunks, iter_text_output
 from server.services.mode_profiles import get_patent_mode_profile
@@ -33,8 +45,12 @@ def _first_env(*names: str, default: str = "") -> str:
     return str(default or "").strip()
 
 
+_WHITESPACE_PATTERN = re.compile(r"\s+")
+_KB_BOUNDARY_PLACEHOLDER = "当前无额外知识库验证结果。"
+
+
 def _collapse_whitespace(value: str) -> str:
-    return re.sub(r"\s+", " ", str(value or "")).strip()
+    return _WHITESPACE_PATTERN.sub(" ", str(value or "")).strip()
 
 
 def _truncate(value: str, limit: int) -> str:
@@ -44,47 +60,12 @@ def _truncate(value: str, limit: int) -> str:
     return text[: max(1, limit - 1)].rstrip() + "…"
 
 
-def _is_summary_question(question: str) -> bool:
-    lower = str(question or "").strip().lower()
-    hints = (
-        "总结",
-        "概括",
-        "摘要",
-        "summarize",
-        "summary",
-        "overview",
-        "main points",
-    )
-    return any(hint in lower for hint in hints)
+class _NoopLogger:
+    def info(self, *_args, **_kwargs) -> None:
+        return None
 
-
-def _extractive_fallback_summary(*, question: str, pdf_text: str) -> str:
-    cleaned = re.sub(r"\s+", " ", str(pdf_text or "")).strip()
-    if not cleaned:
-        return "当前未拿到可用的 PDF 正文内容，无法生成基于原文的总结。"
-
-    sentences = [
-        item.strip()
-        for item in re.split(r"(?<=[。！？.!?])\s+", cleaned)
-        if item.strip()
-    ]
-    picked: list[str] = []
-    for sentence in sentences:
-        if len(sentence) < 20:
-            continue
-        picked.append(_truncate(sentence, 220))
-        if len(picked) >= 4:
-            break
-
-    if not picked:
-        picked.append(_truncate(cleaned, 400))
-
-    if _is_summary_question(question):
-        lines = ["基于 PDF 原文提取，文档要点如下："]
-        lines.extend(f"{index}. {item}" for index, item in enumerate(picked, start=1))
-        return "\n".join(lines)
-
-    return "\n".join(picked)
+    def warning(self, *_args, **_kwargs) -> None:
+        return None
 
 
 class PatentPdfAnswerClient:
@@ -122,24 +103,26 @@ class PatentPdfAnswerClient:
     def close(self) -> None:
         self._client.close()
 
-    def _build_request_payload(self, *, question: str, pdf_text: str, file_name: str, include_kb: bool, stream: bool) -> dict[str, Any]:
-        kb_instruction = (
-            "可以结合专利领域背景做简短补充，但结论必须优先依据 PDF 原文。"
-            if include_kb
-            else "只允许基于 PDF 原文回答，不要引入外部知识。"
-        )
-        prompt = "\n".join(
-            [
-                f"用户问题: {str(question or '').strip() or '请总结这份PDF'}",
-                f"文件名: {str(file_name or '').strip() or 'unknown.pdf'}",
-                "要求:",
-                "1. 如果用户是在求总结，输出简洁但完整的中文总结。",
-                "2. 覆盖主题、方法/方案、关键结果、结论或贡献。",
-                "3. 不要说自己无法访问文件。",
-                f"4. {kb_instruction}",
-                "PDF正文:",
-                pdf_text,
-            ]
+    def _build_request_payload(
+        self,
+        *,
+        question: str,
+        pdf_text: str,
+        file_name: str,
+        include_kb: bool,
+        stream: bool,
+        selected_file_labels: list[str] | None = None,
+    ) -> dict[str, Any]:
+        labels = [str(item).strip() for item in list(selected_file_labels or []) if str(item).strip()]
+        compare_mode = is_compare_question(question, selected_pdf_count=len(labels) or 1)
+        kb_section = build_kb_section({"kb_answer": _KB_BOUNDARY_PLACEHOLDER}) if include_kb else ""
+        prompt = build_patent_pdf_answer_prompt(
+            question=question,
+            pdf_content=pdf_text,
+            kb_section=kb_section,
+            is_summary=is_summary_question(question),
+            is_compare=compare_mode,
+            selected_file_labels=labels or [str(file_name or "").strip() or "unknown.pdf"],
         )
         return {
             "model": self._model,
@@ -148,10 +131,7 @@ class PatentPdfAnswerClient:
             "messages": [
                 {
                     "role": "system",
-                    "content": (
-                        "你是专利模式下的文件问答助手。必须以给定 PDF 正文为主回答，"
-                        "不允许虚构未出现的事实。输出中文。"
-                    ),
+                    "content": PDF_QA_SYSTEM_MESSAGE,
                 },
                 {"role": "user", "content": prompt},
             ],
@@ -176,13 +156,22 @@ class PatentPdfAnswerClient:
                 pieces.append(text)
         return "".join(pieces)
 
-    def stream_answer(self, *, question: str, pdf_text: str, file_name: str, include_kb: bool) -> Any:
+    def stream_answer(
+        self,
+        *,
+        question: str,
+        pdf_text: str,
+        file_name: str,
+        include_kb: bool,
+        selected_file_labels: list[str] | None = None,
+    ) -> Any:
         request_payload = self._build_request_payload(
             question=question,
             pdf_text=pdf_text,
             file_name=file_name,
             include_kb=include_kb,
             stream=True,
+            selected_file_labels=selected_file_labels,
         )
         with self._client.stream(
             "POST",
@@ -212,7 +201,15 @@ class PatentPdfAnswerClient:
                 if text:
                     yield text
 
-    def answer(self, *, question: str, pdf_text: str, file_name: str, include_kb: bool) -> str:
+    def answer(
+        self,
+        *,
+        question: str,
+        pdf_text: str,
+        file_name: str,
+        include_kb: bool,
+        selected_file_labels: list[str] | None = None,
+    ) -> str:
         response = self._client.post(
             f"{self._base_url.rstrip('/')}/chat/completions",
             headers={
@@ -225,6 +222,7 @@ class PatentPdfAnswerClient:
                 file_name=file_name,
                 include_kb=include_kb,
                 stream=False,
+                selected_file_labels=selected_file_labels,
             ),
         )
         response.raise_for_status()
@@ -264,8 +262,11 @@ class PatentPdfService:
     ) -> dict[str, Any]:
         used_files = [item.as_payload() for item in contract.selected_execution_files if item.family == "pdf"]
         profile = get_patent_mode_profile(contract.route)
-        primary_file = used_files[0] if used_files else {}
-        primary_label = str(primary_file.get("file_name") or f"file:{primary_file.get('file_id') or 'unknown'}")
+        selected_labels = [
+            str(item.get("file_name") or f"file:{item.get('file_id') or 'unknown'}").strip()
+            for item in used_files
+        ]
+        compare_mode = is_compare_question(contract.question, selected_pdf_count=len(selected_labels))
         steps: list[dict[str, Any]] = []
 
         self._record_step(
@@ -280,7 +281,9 @@ class PatentPdfService:
             },
         )
 
-        pdf_text = self._load_pdf_text(contract=contract)
+        pdf_documents = self._load_pdf_documents(contract=contract)
+        pdf_text = format_multi_pdf_sections(pdf_documents)
+        available_labels = [str(item.get("label") or "").strip() for item in pdf_documents if str(item.get("label") or "").strip()]
         if pdf_text:
             self._record_step(
                 steps,
@@ -303,11 +306,14 @@ class PatentPdfService:
                     "status": "running",
                 },
             )
-            answer_text = self._build_answer(
+            answer_text, answer_mode = self._build_answer(
                 question=contract.question,
                 pdf_text=pdf_text,
-                file_name=primary_label,
+                file_name=", ".join(selected_labels) if len(selected_labels) > 1 else (selected_labels[0] if selected_labels else "unknown.pdf"),
+                selected_file_labels=selected_labels,
+                available_file_labels=available_labels,
                 include_kb=include_kb,
+                compare_mode=compare_mode,
                 content_callback=content_callback,
             )
             self._record_step(
@@ -320,9 +326,20 @@ class PatentPdfService:
                     "status": "success",
                 },
             )
-            answer_mode = "pdf_text_summary"
         else:
-            answer_text = "当前未拿到可读的 PDF 原文内容，无法生成基于正文的总结。请稍后重试或检查文件处理状态。"
+            answer_mode = "pdf_compare_unavailable" if compare_mode else "pdf_text_unavailable"
+            answer_text = (
+                build_compare_failure_message(
+                    question=contract.question,
+                    available_docs=[],
+                    missing_docs=selected_labels,
+                    reason="当前未拿到可读的 PDF 原文内容",
+                )
+                if compare_mode
+                else "当前未拿到可读的 PDF 原文内容，无法生成基于正文的总结。请稍后重试或检查文件处理状态。"
+            )
+            if callable(content_callback):
+                emit_text_chunks(answer_text, content_callback=content_callback)
             self._record_step(
                 steps,
                 progress_callback=progress_callback,
@@ -344,8 +361,6 @@ class PatentPdfService:
                     "status": "success",
                 },
             )
-            answer_mode = "pdf_text_unavailable"
-
         return {
             "handler": "pdf",
             "answer_text": answer_text,
@@ -393,8 +408,8 @@ class PatentPdfService:
         if callable(progress_callback):
             progress_callback(dict(normalized))
 
-    def _load_pdf_text(self, *, contract: PatentFileContract) -> str:
-        sections: list[str] = []
+    def _load_pdf_documents(self, *, contract: PatentFileContract) -> list[dict[str, str]]:
+        sections: list[dict[str, str]] = []
         for item in contract.selected_execution_files:
             if item.family != "pdf":
                 continue
@@ -414,8 +429,8 @@ class PatentPdfService:
             if not extracted:
                 continue
             label = str(item.file_name or resolved.name or f"file:{item.file_id}")
-            sections.append(f"文件: {label}\n{_truncate(extracted, self._max_pdf_chars)}")
-        return "\n\n".join(section for section in sections if section).strip()
+            sections.append({"label": label, "text": _truncate(extracted, self._max_pdf_chars)})
+        return sections
 
     def _build_answer(
         self,
@@ -423,11 +438,16 @@ class PatentPdfService:
         question: str,
         pdf_text: str,
         file_name: str,
+        selected_file_labels: list[str],
+        available_file_labels: list[str],
         include_kb: bool,
+        compare_mode: bool,
         content_callback: Callable[[str], None] | None = None,
-    ) -> str:
+    ) -> tuple[str, str]:
         answer_parts: list[str] = []
-        
+        summary_mode = is_summary_question(question)
+        missing_labels = [label for label in selected_file_labels if label not in set(available_file_labels)]
+
         def _emit_stream_piece(piece: str) -> None:
             text = str(piece or "")
             if not text:
@@ -444,18 +464,44 @@ class PatentPdfService:
                 emit_text_chunks(normalized, content_callback=content_callback)
             return normalized
 
-        truncated_pdf_text = _truncate(pdf_text, self._max_pdf_chars)
+        if compare_mode and (len(available_file_labels) < 2 or missing_labels):
+            message = build_compare_failure_message(
+                question=question,
+                available_docs=available_file_labels,
+                missing_docs=missing_labels,
+                reason="参与比较的文献正文不完整",
+            )
+            return _emit_buffered_text(message), "pdf_compare_unavailable"
+
+        try:
+            prepared_pdf_text = smart_truncate_pdf_content(
+                pdf_text,
+                self._max_pdf_chars,
+                logger=_NoopLogger(),
+                is_summary=summary_mode,
+                question=question,
+                is_compare=compare_mode,
+            )
+        except CompareBudgetError as exc:
+            message = build_compare_failure_message(
+                question=question,
+                available_docs=available_file_labels,
+                missing_docs=missing_labels,
+                reason=str(exc),
+            )
+            return _emit_buffered_text(message), "pdf_compare_unavailable"
+
         if callable(self._answer_question_fn):
             output = self._answer_question_fn(
                 question=question,
-                pdf_text=pdf_text,
+                pdf_text=prepared_pdf_text,
                 file_name=file_name,
                 include_kb=include_kb,
             )
             if isinstance(output, (str, bytes)):
                 answer = _emit_buffered_text(str(output or ""))
                 if answer:
-                    return answer
+                    return answer, "pdf_text_compare" if compare_mode else "pdf_text_summary"
             else:
                 for piece in iter_text_output(output):
                     _emit_stream_piece(piece)
@@ -466,9 +512,10 @@ class PatentPdfService:
                     for piece in iter_text_output(
                         stream_builder(
                             question=question,
-                            pdf_text=truncated_pdf_text,
+                            pdf_text=prepared_pdf_text,
                             file_name=file_name,
                             include_kb=include_kb,
+                            selected_file_labels=selected_file_labels,
                         )
                     ):
                         _emit_stream_piece(piece)
@@ -479,23 +526,33 @@ class PatentPdfService:
                     answer = _emit_buffered_text(
                         self._client.answer(
                             question=question,
-                            pdf_text=truncated_pdf_text,
+                            pdf_text=prepared_pdf_text,
                             file_name=file_name,
                             include_kb=include_kb,
+                            selected_file_labels=selected_file_labels,
                         )
                     )
                     if answer:
-                        return answer
+                        return answer, "pdf_text_compare" if compare_mode else "pdf_text_summary"
                 except Exception:
                     answer_parts = []
 
         answer = "".join(answer_parts).strip()
         if answer:
-            return answer
+            return answer, "pdf_text_compare" if compare_mode else "pdf_text_summary"
 
-        fallback = _extractive_fallback_summary(question=question, pdf_text=pdf_text)
+        fallback = (
+            build_compare_failure_message(
+                question=question,
+                available_docs=available_file_labels,
+                missing_docs=missing_labels,
+                reason="模型未返回可用的比较结果",
+            )
+            if compare_mode
+            else build_extractive_fallback_summary(question=question, pdf_text=pdf_text)
+        )
         emit_text_chunks(fallback, content_callback=content_callback)
-        return fallback
+        return fallback, "pdf_compare_unavailable" if compare_mode else "pdf_text_summary"
 
     @staticmethod
     def _extract_pdf_text(pdf_path: str, *, max_pages: int = 10) -> str:
