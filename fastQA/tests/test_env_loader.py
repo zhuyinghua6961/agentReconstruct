@@ -147,6 +147,15 @@ def test_config_conversation_rollout_flags_keep_execution_authority_coupled(monk
     assert settings.conversation_overlay_enabled is True
 
 
+def test_config_chat_persist_enabled_defaults_to_true(monkeypatch):
+    monkeypatch.delenv("CHAT_PERSIST_ENABLED", raising=False)
+
+    config = _reload_config_module()
+    settings = config.get_settings()
+
+    assert settings.chat_persist_enabled is True
+
+
 def test_config_split_execution_authority_is_rejected_in_production(monkeypatch):
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv("CONVERSATION_USER_WRITE_TARGET", "legacy")

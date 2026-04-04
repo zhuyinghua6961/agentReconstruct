@@ -81,3 +81,38 @@ class AuthorityAssistantAsyncRequest(_StrictAuthorityModel):
     actual_mode: Literal["patent"] = "patent"
     idempotency_key: str
     final_event: AuthorityAssistantFinalEvent
+
+
+class AuthorityAssistantTerminalFailure(_StrictAuthorityModel):
+    stage: str | None = None
+    message: str | None = None
+    code: str | None = None
+    retriable: bool | None = None
+
+
+class AuthorityAssistantTerminalEvent(_StrictAuthorityModel):
+    terminal_status: Literal["done", "failed", "canceled"]
+    done_seen: bool
+    answer_text: str = ""
+    steps: list[dict[str, Any]] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    references: list[dict[str, Any]] = Field(default_factory=list)
+    reference_objects: list[dict[str, Any]] = Field(default_factory=list)
+    reference_links: list[dict[str, Any]] = Field(default_factory=list)
+    original_links: list[dict[str, Any]] = Field(default_factory=list)
+    used_files: list[dict[str, Any]] = Field(default_factory=list)
+    timings: dict[str, Any] = Field(default_factory=dict)
+    failure: AuthorityAssistantTerminalFailure | None = None
+
+
+class AuthorityAssistantTerminalAsyncRequest(_StrictAuthorityModel):
+    conversation_id: int = Field(gt=0)
+    user_id: int = Field(gt=0)
+    trace_id: str
+    source_service: Literal["patentQA"] = "patentQA"
+    route: PatentRouteName = "kb_qa"
+    source_scope: PatentSourceScope = "kb"
+    requested_mode: Literal["patent"] = "patent"
+    actual_mode: Literal["patent"] = "patent"
+    idempotency_key: str
+    terminal_event: AuthorityAssistantTerminalEvent

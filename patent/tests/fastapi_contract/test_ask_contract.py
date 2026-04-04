@@ -1007,7 +1007,7 @@ def test_stream_ask_short_circuits_after_stage1_when_no_retrieval_claims_are_ava
     assert [event["type"] for event in events] == ["metadata", "step", "content", "done"]
     assert events[1]["step"] == "stage1"
     assert events[1]["status"] == "processing"
-    assert events[1]["message"] == "Stage 1 planning in progress."
+    assert events[1]["message"] == "阶段一：生成深度预回答与检索规划..."
     assert events[2]["content"] == "stage1 only:Explain the patent novelty."
     assert events[-1]["final_answer"] == "stage1 only:Explain the patent novelty."
     assert events[-1]["metadata"]["stage1_short_circuit"] is True
@@ -1124,7 +1124,7 @@ def test_sync_ask_rejects_failed_execution_payload():
                 "answer_text": "",
                 "route": "kb_qa",
                 "metadata": {"success": False, "failed_stage": "stage4"},
-                "steps": [{"step": "stage4", "title": "Stage 4", "message": "Stage 4 synthesis failed.", "status": "failed"}],
+                "steps": [{"step": "stage4", "title": "阶段四", "message": "阶段四：答案生成失败", "status": "failed"}],
                 "timings": {},
             }
 
@@ -1150,7 +1150,7 @@ def test_stream_rejects_failed_execution_payload_with_terminal_error():
                 "answer_text": "",
                 "route": "kb_qa",
                 "metadata": {"success": False, "failed_stage": "stage4"},
-                "steps": [{"step": "stage4", "title": "Stage 4", "message": "Stage 4 synthesis failed.", "status": "failed"}],
+                "steps": [{"step": "stage4", "title": "阶段四", "message": "阶段四：答案生成失败", "status": "failed"}],
                 "timings": {},
             }
 
@@ -2417,7 +2417,7 @@ def test_http_stream_hybrid_pdf_kb_route_emits_incremental_content_before_done(m
 
 def test_durable_sync_request_is_blocked_by_route_gate_before_auth_or_service(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", TEST_JWT_SECRET)
-    monkeypatch.delenv("PATENT_DURABLE_MODE_ENABLED", raising=False)
+    monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "false")
     app = create_app()
     fake = _RouteFakeAskService()
     app.state.ask_service = fake
@@ -2432,7 +2432,7 @@ def test_durable_sync_request_is_blocked_by_route_gate_before_auth_or_service(mo
 
 def test_durable_stream_request_is_blocked_by_route_gate_before_auth_or_service(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", TEST_JWT_SECRET)
-    monkeypatch.delenv("PATENT_DURABLE_MODE_ENABLED", raising=False)
+    monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "false")
     app = create_app()
     fake = _RouteFakeAskService()
     app.state.ask_service = fake

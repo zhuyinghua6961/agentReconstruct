@@ -51,6 +51,14 @@ def test_get_settings_reads_environment_at_call_time(monkeypatch):
     assert settings.auth.jwt_compatible_access_salts == ("agentcode.auth.access", "legacy.auth.access")
 
 
+def test_get_settings_enables_durable_mode_by_default(monkeypatch):
+    monkeypatch.delenv("PATENT_DURABLE_MODE_ENABLED", raising=False)
+
+    settings = patent_config.get_settings()
+
+    assert settings.durable_mode_enabled is True
+
+
 def test_get_settings_reads_patent_gunicorn_scaling_env(monkeypatch):
     monkeypatch.setenv("PATENT_GUNICORN_WORKERS", "2")
     monkeypatch.setenv("PATENT_GUNICORN_THREADS", "12")

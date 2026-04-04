@@ -73,6 +73,7 @@ class _FakeRedis:
 class _FakeAuthorityClient:
     snapshot_payload: dict[str, Any]
     fail_accept: bool = False
+    fail_terminal_accept: bool = False
     fail_user_write: bool = False
     fail_snapshot: bool = False
     assistant_accepted: bool = True
@@ -82,6 +83,7 @@ class _FakeAuthorityClient:
         self.user_writes: list[dict[str, Any]] = []
         self.snapshot_reads: list[dict[str, Any]] = []
         self.assistant_accepts: list[dict[str, Any]] = []
+        self.assistant_terminal_accepts: list[dict[str, Any]] = []
 
     def write_user_turn(self, **kwargs):
         self.calls.append("user_write")
@@ -125,6 +127,19 @@ class _FakeAuthorityClient:
             "trace_id": kwargs["trace_id"],
             "idempotency_key": f'{kwargs["conversation_id"]}:{kwargs["trace_id"]}:assistant',
             "status": "accepted" if self.assistant_accepted else "rejected",
+        }
+
+    def accept_assistant_terminal_async(self, **kwargs):
+        self.calls.append("assistant_terminal_accept")
+        self.assistant_terminal_accepts.append(dict(kwargs))
+        if self.fail_terminal_accept:
+            raise RuntimeError("assistant terminal accept failed")
+        return {
+            "accepted": True,
+            "event_id": "evt_terminal_1",
+            "trace_id": kwargs["trace_id"],
+            "idempotency_key": f'{kwargs["conversation_id"]}:{kwargs["trace_id"]}:assistant',
+            "status": "accepted",
         }
 
 
@@ -414,6 +429,8 @@ def test_durable_sync_rejects_invalid_result_payload_before_assistant_accept(fie
 
     assert exc_info.value.code == codes.INTERNAL_ERROR
     assert authority.assistant_accepts == []
+    assert authority.assistant_terminal_accepts[0]["terminal_status"] == "failed"
+    assert authority.assistant_terminal_accepts[0]["failure"]["code"] == codes.INTERNAL_ERROR
     assert persistence_service.execution_cache.get_turn_result(conversation_id=123, trace_id="req_123") is None
     assert redis.get("patent:test:coord:inflight:123:req_123") is None
     assert redis.get("patent:test:exec:conversation-lock:123") is None
@@ -440,6 +457,8 @@ def test_durable_stream_rejects_invalid_result_payload_before_assistant_accept()
 
     assert [event["type"] for event in events] == ["metadata", "error"]
     assert authority.assistant_accepts == []
+    assert authority.assistant_terminal_accepts[0]["terminal_status"] == "failed"
+    assert authority.assistant_terminal_accepts[0]["failure"]["code"] == codes.INTERNAL_ERROR
     assert persistence_service.execution_cache.get_turn_result(conversation_id=123, trace_id="req_123") is None
     assert redis.get("patent:test:coord:inflight:123:req_123") is None
     assert redis.get("patent:test:exec:conversation-lock:123") is None
@@ -458,8 +477,8 @@ def test_durable_sync_rejects_failed_execution_result_before_assistant_accept():
                 "steps": [
                     {
                         "step": "stage4",
-                        "title": "Stage 4",
-                        "message": "Stage 4 synthesis failed.",
+                        "title": "阶段四",
+                        "message": "阶段四：答案生成失败",
                         "status": "failed",
                     }
                 ],
@@ -478,6 +497,8 @@ def test_durable_sync_rejects_failed_execution_result_before_assistant_accept():
 
     assert exc_info.value.code == codes.INTERNAL_ERROR
     assert authority.assistant_accepts == []
+    assert authority.assistant_terminal_accepts[0]["terminal_status"] == "failed"
+    assert authority.assistant_terminal_accepts[0]["failure"]["stage"] == "stage4"
     assert persistence_service.execution_cache.get_turn_result(conversation_id=123, trace_id="req_123") is None
     assert redis.get("patent:test:coord:inflight:123:req_123") is None
     assert redis.get("patent:test:exec:conversation-lock:123") is None
@@ -541,6 +562,8 @@ def test_durable_sync_aborts_persistence_for_real_staged_runtime_failure():
 
     assert exc_info.value.code == codes.INTERNAL_ERROR
     assert authority.assistant_accepts == []
+    assert authority.assistant_terminal_accepts[0]["terminal_status"] == "failed"
+    assert authority.assistant_terminal_accepts[0]["failure"]["stage"] == "stage4"
     assert persistence_service.execution_cache.get_turn_result(conversation_id=123, trace_id="req_123") is None
     assert redis.get("patent:test:coord:inflight:123:req_123") is None
     assert redis.get("patent:test:exec:conversation-lock:123") is None
@@ -574,6 +597,8 @@ def test_durable_sync_rejects_mismatched_references_and_reference_objects_before
 
     assert exc_info.value.code == codes.INTERNAL_ERROR
     assert authority.assistant_accepts == []
+    assert authority.assistant_terminal_accepts[0]["terminal_status"] == "failed"
+    assert authority.assistant_terminal_accepts[0]["failure"]["code"] == codes.INTERNAL_ERROR
     assert persistence_service.execution_cache.get_turn_result(conversation_id=123, trace_id="req_123") is None
     assert redis.get("patent:test:coord:inflight:123:req_123") is None
     assert redis.get("patent:test:exec:conversation-lock:123") is None

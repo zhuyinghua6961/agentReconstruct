@@ -131,11 +131,11 @@ def _build_stage_steps(
     success: bool,
 ) -> list[dict[str, Any]]:
     ordered = [
-        ("stage1", "Stage 1", "Stage 1 planning completed.", "Stage 1 planning failed."),
-        ("stage2", "Stage 2", "Stage 2 dual-search retrieval completed.", "Stage 2 dual-search retrieval failed."),
-        ("stage25", "Stage 2.5", "Stage 2.5 patent evidence expansion completed.", "Stage 2.5 patent evidence expansion failed."),
-        ("stage3", "Stage 3", "Stage 3 table attachment completed.", "Stage 3 table attachment failed."),
-        ("stage4", "Stage 4", "Stage 4 synthesis completed.", "Stage 4 synthesis failed."),
+        ("stage1", "阶段一", "阶段一：已完成深度预回答与检索规划", "阶段一：深度预回答与检索规划失败"),
+        ("stage2", "阶段二", "阶段二：已完成专利双库检索与归并", "阶段二：专利双库检索失败"),
+        ("stage25", "阶段二点五", "阶段二点五：已完成MD原文扩展检索", "阶段二点五：MD原文扩展失败"),
+        ("stage3", "阶段三", "阶段三：已完成专利证据与表格组装", "阶段三：专利证据组装失败"),
+        ("stage4", "阶段四", "阶段四：已完成答案生成", "阶段四：答案生成失败"),
     ]
     resolved_stage25 = dict(stage25_result or {})
     last_completed_key = next(
@@ -154,7 +154,7 @@ def _build_stage_steps(
         status = "success"
         if key == "stage25" and resolved_stage25.get("skipped"):
             reason = str(resolved_stage25.get("skip_reason") or "").strip()
-            message = "Stage 2.5 skipped." if not reason else f"Stage 2.5 skipped: {reason}."
+            message = "阶段二点五：已跳过MD原文扩展" if not reason else f"阶段二点五：已跳过MD原文扩展（{reason}）"
             status = "skipped"
         elif not success and key == last_completed_key:
             message = failure_message
@@ -377,8 +377,8 @@ class PatentGenerationOrchestrator:
             _emit_progress_step(
                 progress_callback,
                 step="stage1",
-                title="Stage 1",
-                message="Stage 1 planning in progress.",
+                title="阶段一",
+                message="阶段一：生成深度预回答与检索规划...",
             )
             current_progress_step = "stage1"
             stage1_fingerprint = build_stage1_cache_fingerprint(
@@ -449,8 +449,8 @@ class PatentGenerationOrchestrator:
             _emit_progress_step(
                 progress_callback,
                 step="stage2",
-                title="Stage 2",
-                message="Stage 2 dual-search retrieval in progress.",
+                title="阶段二",
+                message="阶段二：检索高相关专利摘要与片段...",
             )
             current_progress_step = "stage2"
             stage2_fingerprint = build_stage2_cache_fingerprint(
@@ -492,8 +492,8 @@ class PatentGenerationOrchestrator:
             _emit_progress_step(
                 progress_callback,
                 step="stage25",
-                title="Stage 2.5",
-                message="Stage 2.5 patent evidence expansion in progress.",
+                title="阶段二点五",
+                message="阶段二点五：尝试MD原文扩展检索...",
                 data={"count": len(source_ids)},
             )
             current_progress_step = "stage25"
@@ -532,8 +532,8 @@ class PatentGenerationOrchestrator:
             _emit_progress_step(
                 progress_callback,
                 step="stage3",
-                title="Stage 3",
-                message="Stage 3 evidence loading in progress.",
+                title="阶段三",
+                message=f"阶段三：组装 {len(stage_source_ids)} 个专利的证据片段与表格...",
                 data={"count": len(stage_source_ids)},
             )
             current_progress_step = "stage3"
@@ -569,8 +569,8 @@ class PatentGenerationOrchestrator:
             _emit_progress_step(
                 progress_callback,
                 step="stage4",
-                title="Stage 4",
-                message="Stage 4 synthesis in progress.",
+                title="阶段四",
+                message="阶段四：综合预回答与证据生成答案...",
                 data={"count": len(stage_source_ids)},
             )
             current_progress_step = "stage4"
@@ -644,17 +644,17 @@ class PatentGenerationOrchestrator:
         except Exception as exc:
             failed_stage = current_progress_step or next((key for key in ("stage4", "stage3", "stage25", "stage2", "stage1") if key in timings), "stage1")
             failed_title = {
-                "stage1": "Stage 1",
-                "stage2": "Stage 2",
-                "stage25": "Stage 2.5",
-                "stage3": "Stage 3",
-                "stage4": "Stage 4",
+                "stage1": "阶段一",
+                "stage2": "阶段二",
+                "stage25": "阶段二点五",
+                "stage3": "阶段三",
+                "stage4": "阶段四",
             }.get(failed_stage, failed_stage)
             _emit_progress_step(
                 progress_callback,
                 step=failed_stage,
                 title=failed_title,
-                message=f"{failed_title} failed.",
+                message=f"{failed_title}失败",
                 status="error",
                 error=str(exc),
             )

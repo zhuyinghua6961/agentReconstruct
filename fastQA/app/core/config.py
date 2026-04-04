@@ -259,7 +259,7 @@ def get_settings() -> Settings:
             minimum=5,
             maximum=120,
         ),
-        chat_persist_enabled=_get_bool("CHAT_PERSIST_ENABLED", False),
+        chat_persist_enabled=_get_bool("CHAT_PERSIST_ENABLED", True),
         chat_persist_async=_get_bool("CHAT_PERSIST_ASYNC", True),
         conversation_execution_authority_target=conversation_execution_authority_target,
         conversation_execution_user_write_target=conversation_execution_user_write_target,

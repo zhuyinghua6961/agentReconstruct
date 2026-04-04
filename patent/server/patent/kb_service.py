@@ -142,11 +142,11 @@ def _supports_staged_runtime(runtime: Any | None) -> bool:
 def _build_steps_from_metadata(*, result: PatentQaExecutionResult) -> list[dict[str, Any]]:
     timings = dict(result.metadata.stage_timings_ms or {})
     ordered = [
-        ("stage1", "Stage 1", "Stage 1 planning completed.", "Stage 1 planning failed."),
-        ("stage2", "Stage 2", "Stage 2 dual-search retrieval completed.", "Stage 2 dual-search retrieval failed."),
-        ("stage25", "Stage 2.5", "Stage 2.5 patent evidence expansion completed.", "Stage 2.5 patent evidence expansion failed."),
-        ("stage3", "Stage 3", "Stage 3 table attachment completed.", "Stage 3 table attachment failed."),
-        ("stage4", "Stage 4", "Stage 4 synthesis completed.", "Stage 4 synthesis failed."),
+        ("stage1", "阶段一", "阶段一：已完成深度预回答与检索规划", "阶段一：深度预回答与检索规划失败"),
+        ("stage2", "阶段二", "阶段二：已完成专利双库检索与归并", "阶段二：专利双库检索失败"),
+        ("stage25", "阶段二点五", "阶段二点五：已完成MD原文扩展检索", "阶段二点五：MD原文扩展失败"),
+        ("stage3", "阶段三", "阶段三：已完成专利证据与表格组装", "阶段三：专利证据组装失败"),
+        ("stage4", "阶段四", "阶段四：已完成答案生成", "阶段四：答案生成失败"),
     ]
     last_completed_key = next(
         (
@@ -164,7 +164,7 @@ def _build_steps_from_metadata(*, result: PatentQaExecutionResult) -> list[dict[
         status = "success"
         if key == "stage25" and result.metadata.stage25_skipped:
             reason = str(result.metadata.stage25_skip_reason or "").strip()
-            message = "Stage 2.5 skipped." if not reason else f"Stage 2.5 skipped: {reason}."
+            message = "阶段二点五：已跳过MD原文扩展" if not reason else f"阶段二点五：已跳过MD原文扩展（{reason}）"
             status = "skipped"
         elif not result.success and key == last_completed_key:
             message = failure_message
@@ -197,6 +197,11 @@ def _build_execution_failure_error(result: PatentQaExecutionResult) -> APIError:
         status_code=500,
         error="internal_error",
         retriable=False,
+        extra={
+            "failed_stage": failed_step,
+            "steps": steps,
+            "timings": dict(result.metadata.stage_timings_ms or {}),
+        },
     )
 
 

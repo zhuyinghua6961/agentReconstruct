@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from config import get_settings
 from server.schemas.authority_models import (
     AuthorityAssistantAsyncRequest,
+    AuthorityAssistantTerminalAsyncRequest,
     AuthorityContextSnapshotQuery,
     AuthorityContextSnapshotResponse,
     AuthorityUserWriteRequest,
@@ -184,6 +185,61 @@ class ConversationAuthorityClient:
         response = self._request(
             method="POST",
             path=f"/internal/conversations/{int(conversation_id)}/messages/assistant-async",
+            trace_id=trace_id,
+            json=payload.model_dump(exclude_none=True),
+        )
+        return _AssistantAsyncResponse.model_validate(response).model_dump()
+
+    def accept_assistant_terminal_async(
+        self,
+        *,
+        user_id: int,
+        conversation_id: int,
+        trace_id: str,
+        route: str,
+        requested_mode: str,
+        actual_mode: str,
+        source_scope: str = "kb",
+        terminal_status: str,
+        answer_text: str = "",
+        metadata: dict[str, Any] | None = None,
+        steps: list[dict[str, Any]] | None = None,
+        references: list[dict[str, Any]] | None = None,
+        reference_objects: list[dict[str, Any]] | None = None,
+        reference_links: list[dict[str, Any]] | None = None,
+        original_links: list[dict[str, Any]] | None = None,
+        used_files: list[dict[str, Any]] | None = None,
+        timings: dict[str, Any] | None = None,
+        failure: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self._ensure_durable_authority_enabled()
+        payload = AuthorityAssistantTerminalAsyncRequest(
+            conversation_id=int(conversation_id),
+            user_id=int(user_id),
+            trace_id=str(trace_id),
+            route=str(route),
+            source_scope=str(source_scope),
+            requested_mode=str(requested_mode),
+            actual_mode=str(actual_mode),
+            idempotency_key=self._idempotency_key(conversation_id=conversation_id, trace_id=trace_id, operation="assistant"),
+            terminal_event={
+                "terminal_status": str(terminal_status),
+                "done_seen": str(terminal_status).strip().lower() == "done",
+                "answer_text": str(answer_text or ""),
+                "steps": list(steps or []),
+                "metadata": dict(metadata or {}),
+                "references": list(references or []),
+                "reference_objects": list(reference_objects or []),
+                "reference_links": list(reference_links or []),
+                "original_links": list(original_links or []),
+                "used_files": list(used_files or []),
+                "timings": dict(timings or {}),
+                "failure": dict(failure or {}) or None,
+            },
+        )
+        response = self._request(
+            method="POST",
+            path=f"/internal/conversations/{int(conversation_id)}/messages/assistant-terminal-async",
             trace_id=trace_id,
             json=payload.model_dump(exclude_none=True),
         )

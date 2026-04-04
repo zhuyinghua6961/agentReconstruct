@@ -33,11 +33,11 @@ class _FakeOrchestrator:
                 "original_links": [],
                 "metadata": {"retrieval_backend": "vector_hybrid"},
                 "steps": [
-                    {"step": "stage1", "title": "Stage 1", "message": "Stage 1 planned.", "status": "success"},
-                    {"step": "stage2", "title": "Stage 2", "message": "Stage 2 retrieved.", "status": "success"},
-                    {"step": "stage25", "title": "Stage 2.5", "message": "Stage 2.5 skipped: patent_mode_no_md_expansion.", "status": "skipped"},
-                    {"step": "stage3", "title": "Stage 3", "message": "Stage 3 attached tables.", "status": "success"},
-                    {"step": "stage4", "title": "Stage 4", "message": "Stage 4 synthesized.", "status": "success"},
+                    {"step": "stage1", "title": "阶段一", "message": "阶段一：已完成深度预回答与检索规划", "status": "success"},
+                    {"step": "stage2", "title": "阶段二", "message": "阶段二：已完成专利双库检索与归并", "status": "success"},
+                    {"step": "stage25", "title": "阶段二点五", "message": "阶段二点五：已跳过MD原文扩展（patent_mode_no_md_expansion）", "status": "skipped"},
+                    {"step": "stage3", "title": "阶段三", "message": "阶段三：已完成专利证据与表格组装", "status": "success"},
+                    {"step": "stage4", "title": "阶段四", "message": "阶段四：已完成答案生成", "status": "success"},
                 ],
             },
         )
@@ -113,11 +113,11 @@ def test_kb_service_returns_shell_compatible_execution_result_from_orchestrator(
     assert execution_result["metadata"]["stage25_skipped"] is True
     assert execution_result["timings"] == {"stage1": 5.0, "stage2": 8.0}
     assert execution_result["steps"] == [
-        {"step": "stage1", "title": "Stage 1", "message": "Stage 1 planned.", "status": "success"},
-        {"step": "stage2", "title": "Stage 2", "message": "Stage 2 retrieved.", "status": "success"},
-        {"step": "stage25", "title": "Stage 2.5", "message": "Stage 2.5 skipped: patent_mode_no_md_expansion.", "status": "skipped"},
-        {"step": "stage3", "title": "Stage 3", "message": "Stage 3 attached tables.", "status": "success"},
-        {"step": "stage4", "title": "Stage 4", "message": "Stage 4 synthesized.", "status": "success"},
+        {"step": "stage1", "title": "阶段一", "message": "阶段一：已完成深度预回答与检索规划", "status": "success"},
+        {"step": "stage2", "title": "阶段二", "message": "阶段二：已完成专利双库检索与归并", "status": "success"},
+        {"step": "stage25", "title": "阶段二点五", "message": "阶段二点五：已跳过MD原文扩展（patent_mode_no_md_expansion）", "status": "skipped"},
+        {"step": "stage3", "title": "阶段三", "message": "阶段三：已完成专利证据与表格组装", "status": "success"},
+        {"step": "stage4", "title": "阶段四", "message": "阶段四：已完成答案生成", "status": "success"},
     ]
 
 
@@ -223,11 +223,11 @@ def test_kb_service_builds_semantic_stage_messages_when_raw_steps_missing():
     )
 
     assert [step["message"] for step in execution_result["steps"]] == [
-        "Stage 1 planning completed.",
-        "Stage 2 dual-search retrieval completed.",
-        "Stage 2.5 skipped: patent_mode_no_md_expansion.",
-        "Stage 3 table attachment completed.",
-        "Stage 4 synthesis completed.",
+        "阶段一：已完成深度预回答与检索规划",
+        "阶段二：已完成专利双库检索与归并",
+        "阶段二点五：已跳过MD原文扩展（patent_mode_no_md_expansion）",
+        "阶段三：已完成专利证据与表格组装",
+        "阶段四：已完成答案生成",
     ]
 
 
@@ -258,8 +258,8 @@ def test_kb_service_builds_stage25_completion_message_when_not_skipped():
 
     assert execution_result["steps"][2] == {
         "step": "stage25",
-        "title": "Stage 2.5",
-        "message": "Stage 2.5 patent evidence expansion completed.",
+        "title": "阶段二点五",
+        "message": "阶段二点五：已完成MD原文扩展检索",
         "status": "success",
     }
 
@@ -283,7 +283,7 @@ def test_kb_service_preserves_stage1_short_circuit_answer_without_later_stage_st
                     "original_links": [],
                     "metadata": {"stage1_short_circuit": True},
                     "steps": [
-                        {"step": "stage1", "title": "Stage 1", "message": "Stage 1 planning completed.", "status": "success"}
+                        {"step": "stage1", "title": "阶段一", "message": "阶段一：已完成深度预回答与检索规划", "status": "success"}
                     ],
                 },
             )
@@ -298,6 +298,6 @@ def test_kb_service_preserves_stage1_short_circuit_answer_without_later_stage_st
 
     assert execution_result["answer_text"] == "stage1 only answer"
     assert execution_result["steps"] == [
-        {"step": "stage1", "title": "Stage 1", "message": "Stage 1 planning completed.", "status": "success"}
+        {"step": "stage1", "title": "阶段一", "message": "阶段一：已完成深度预回答与检索规划", "status": "success"}
     ]
     assert execution_result["metadata"]["stage1_short_circuit"] is True

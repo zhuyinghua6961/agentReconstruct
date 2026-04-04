@@ -109,16 +109,16 @@ def test_orchestrator_runs_patent_stages_in_order_and_marks_stage25_skip():
     assert result.raw["stage3"]["source_ids"] == ["CN115132975B"]
     assert result.raw["steps"][2] == {
         "step": "stage25",
-        "title": "Stage 2.5",
-        "message": "Stage 2.5 skipped: patent_mode_no_md_expansion.",
+        "title": "阶段二点五",
+        "message": "阶段二点五：已跳过MD原文扩展（patent_mode_no_md_expansion）",
         "status": "skipped",
     }
     assert [step["message"] for step in result.raw["steps"]] == [
-        "Stage 1 planning completed.",
-        "Stage 2 dual-search retrieval completed.",
-        "Stage 2.5 skipped: patent_mode_no_md_expansion.",
-        "Stage 3 table attachment completed.",
-        "Stage 4 synthesis completed.",
+        "阶段一：已完成深度预回答与检索规划",
+        "阶段二：已完成专利双库检索与归并",
+        "阶段二点五：已跳过MD原文扩展（patent_mode_no_md_expansion）",
+        "阶段三：已完成专利证据与表格组装",
+        "阶段四：已完成答案生成",
     ]
 
 
@@ -723,8 +723,8 @@ def test_orchestrator_marks_empty_stage4_payload_as_unsuccessful():
     assert result.final_answer == ""
     assert result.raw["steps"][-1] == {
         "step": "stage4",
-        "title": "Stage 4",
-        "message": "Stage 4 synthesis failed.",
+        "title": "阶段四",
+        "message": "阶段四：答案生成失败",
         "status": "failed",
     }
 
@@ -746,8 +746,8 @@ def test_orchestrator_reports_stage25_completion_when_not_skipped():
 
     assert result.raw["steps"][2] == {
         "step": "stage25",
-        "title": "Stage 2.5",
-        "message": "Stage 2.5 patent evidence expansion completed.",
+        "title": "阶段二点五",
+        "message": "阶段二点五：已完成MD原文扩展检索",
         "status": "success",
     }
 
@@ -1034,8 +1034,8 @@ def test_orchestrator_short_circuits_to_stage1_answer_when_no_retrieval_claims_a
     assert result.raw["steps"] == [
         {
             "step": "stage1",
-            "title": "Stage 1",
-            "message": "Stage 1 planning completed.",
+            "title": "阶段一",
+            "message": "阶段一：已完成深度预回答与检索规划",
             "status": "success",
         }
     ]

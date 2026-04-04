@@ -158,6 +158,58 @@ def test_assistant_accept_uses_patent_idempotency_key(monkeypatch):
     assert captured["json"]["final_event"]["original_links"][0]["section"] == "claim"
 
 
+def test_assistant_terminal_accept_uses_patent_terminal_contract(monkeypatch):
+    monkeypatch.setenv("PATENT_DURABLE_AUTHORITY_ENABLED", "true")
+    monkeypatch.setenv("PATENT_AUTHORITY_INTERNAL_TOKEN", "secret-token")
+
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        captured["json"] = __import__("json").loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "accepted": True,
+                "event_id": "evt_terminal_1",
+                "trace_id": "req_123",
+                "idempotency_key": "123:req_123:assistant",
+                "status": "accepted",
+            },
+        )
+
+    client = ConversationAuthorityClient(base_url="http://authority", transport=_transport(handler))
+    result = client.accept_assistant_terminal_async(
+        user_id=42,
+        conversation_id=123,
+        trace_id="req_123",
+        route="kb_qa",
+        requested_mode="patent",
+        actual_mode="patent",
+        terminal_status="failed",
+        answer_text="",
+        steps=[{"step": "stage4", "status": "failed"}],
+        timings={"stage4_ms": 21},
+        failure={
+            "stage": "stage4",
+            "message": "patent execution failed at stage4",
+            "code": "INTERNAL_ERROR",
+            "retriable": False,
+        },
+    )
+
+    assert result["accepted"] is True
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://authority/internal/conversations/123/messages/assistant-terminal-async"
+    assert captured["json"]["idempotency_key"] == "123:req_123:assistant"
+    assert captured["json"]["terminal_event"]["terminal_status"] == "failed"
+    assert captured["json"]["terminal_event"]["done_seen"] is False
+    assert captured["json"]["terminal_event"]["failure"]["stage"] == "stage4"
+    assert captured["json"]["terminal_event"]["failure"]["message"] == "patent execution failed at stage4"
+    assert captured["json"]["terminal_event"]["failure"]["code"] == "INTERNAL_ERROR"
+    assert captured["json"]["terminal_event"]["failure"]["retriable"] is False
+
 
 def test_durable_authority_mode_is_blocked_when_feature_gate_is_off(monkeypatch):
     monkeypatch.setenv("PATENT_DURABLE_AUTHORITY_ENABLED", "false")

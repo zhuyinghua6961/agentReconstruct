@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import re
 import threading
 from typing import Any, Callable, Iterator
 
@@ -51,6 +52,7 @@ class AskService:
                 )
             except Exception as exc:
                 self._logger.exception("sync_ask failed trace=%s error=%s", request.trace_id, exc)
+                self._persist_terminal_failure(request=request, prepared_turn=prepared, exc=exc)
                 self._abort_turn(prepared)
                 raise self._result_builder.to_api_error(exc) from exc
         finally:
@@ -185,6 +187,7 @@ class AskService:
             )
         except Exception as exc:
             self._logger.exception("stream_ask failed trace=%s error=%s", trace_id, exc)
+            self._persist_terminal_failure(request=request, prepared_turn=prepared, exc=exc)
             self._abort_turn(prepared)
             yield self._build_error_event(trace_id=trace_id, seq=seq, exc=exc)
         finally:
@@ -287,6 +290,77 @@ class AskService:
                 "ts": "1970-01-01T00:00:00Z",
             }
 
+    def _persist_terminal_failure(
+        self,
+        *,
+        request: PatentAskRequest,
+        prepared_turn: dict[str, Any],
+        exc: Exception,
+    ) -> None:
+        accept_terminal_turn = getattr(self._persistence_service, "accept_assistant_terminal_turn", None)
+        if not callable(accept_terminal_turn):
+            return
+        prepared = dict(prepared_turn or {})
+        if not prepared:
+            return
+        api_error = self._result_builder.to_api_error(exc)
+        failed_stage = self._infer_failed_stage(exc, api_error=api_error)
+        try:
+            accept_terminal_turn(
+                prepared,
+                request=request,
+                terminal_status="failed",
+                answer_text="",
+                metadata={},
+                steps=self._extract_failure_steps(exc, failed_stage=failed_stage),
+                timings=self._extract_failure_timings(exc),
+                failure={
+                    "stage": failed_stage or None,
+                    "message": str(api_error.message),
+                    "code": str(api_error.code),
+                    "retriable": bool(api_error.retriable),
+                },
+            )
+        except Exception as persist_exc:
+            self._logger.exception(
+                "terminal failure persistence failed trace=%s error=%s",
+                prepared.get("trace_id") or request.trace_id,
+                persist_exc,
+            )
+
+    @staticmethod
+    def _infer_failed_stage(exc: Exception, *, api_error: APIError) -> str:
+        if isinstance(exc, APIError):
+            stage_from_extra = str(exc.extra.get("failed_stage") or "").strip()
+            if stage_from_extra:
+                return stage_from_extra
+        message = str(api_error.message or "").strip()
+        match = re.search(r"\bat\s+([A-Za-z0-9_.-]+)\s*$", message)
+        return str(match.group(1) if match else "").strip()
+
+    @staticmethod
+    def _extract_failure_steps(exc: Exception, *, failed_stage: str) -> list[dict[str, Any]]:
+        if isinstance(exc, APIError):
+            raw_steps = exc.extra.get("steps")
+            if isinstance(raw_steps, list):
+                return [dict(item) for item in raw_steps if isinstance(item, dict)]
+        if not failed_stage:
+            return []
+        return [
+            {
+                "step": failed_stage,
+                "title": failed_stage.replace("stage", "Stage ").strip().title(),
+                "message": f"{failed_stage} failed.",
+                "status": "failed",
+            }
+        ]
+
+    @staticmethod
+    def _extract_failure_timings(exc: Exception) -> dict[str, Any]:
+        if isinstance(exc, APIError) and isinstance(exc.extra.get("timings"), dict):
+            return dict(exc.extra.get("timings") or {})
+        return {}
+
     def _ensure_done_allowed(self, turn_result: dict[str, Any]) -> None:
         assistant_accept_required = bool(turn_result.get("assistant_accept_required"))
         if not assistant_accept_required:
@@ -360,6 +434,11 @@ class AskService:
                 status_code=500,
                 error="internal_error",
                 retriable=False,
+                extra={
+                    "failed_stage": failed_stage,
+                    "steps": [dict(item) for item in list(normalized_result.get("steps") or []) if isinstance(item, dict)],
+                    "timings": dict(normalized_result.get("timings") or {}),
+                },
             )
         self._result_builder.build_sync_success(
             request=request,

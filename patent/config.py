@@ -147,7 +147,7 @@ def get_settings() -> Settings:
     redis_key_prefix = str(os.getenv("PATENT_REDIS_KEY_PREFIX", "patent") or "patent").strip() or "patent"
     return Settings(
         service_name="patent",
-        durable_mode_enabled=_read_bool("PATENT_DURABLE_MODE_ENABLED", False),
+        durable_mode_enabled=_read_bool("PATENT_DURABLE_MODE_ENABLED", True),
         patent_file_routes_enabled=_read_bool("PATENT_FILE_ROUTES_ENABLED", True),
         runtime_env=runtime_env,
         http=HttpSettings(

@@ -558,6 +558,72 @@ class ChatPersistenceService:
         runtime_state = prepared.get("_state") if isinstance(prepared.get("_state"), dict) else {}
         self._cleanup_runtime_state(runtime_state)
 
+    def accept_assistant_terminal_turn(
+        self,
+        prepared_turn: PreparedTurn,
+        *,
+        request: PatentAskRequest,
+        terminal_status: str,
+        failure: dict[str, Any],
+        answer_text: str = "",
+        metadata: dict[str, Any] | None = None,
+        steps: list[dict[str, Any]] | None = None,
+        references: list[dict[str, Any]] | None = None,
+        reference_objects: list[dict[str, Any]] | None = None,
+        reference_links: list[dict[str, Any]] | None = None,
+        original_links: list[dict[str, Any]] | None = None,
+        used_files: list[dict[str, Any]] | None = None,
+        timings: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        prepared = dict(prepared_turn or {})
+        if prepared.get("assistant_accept_skipped"):
+            return None
+        if not bool(prepared.get("assistant_accept_required", request.is_durable)):
+            return None
+
+        runtime_state = prepared.get("_state") if isinstance(prepared.get("_state"), dict) else {}
+        if not runtime_state:
+            return None
+
+        self._assert_runtime_state_healthy(runtime_state)
+        trace_id = str(prepared.get("trace_id") or self._resolve_trace_id(request.trace_id))
+        assistant_terminal_accept = self._accept_assistant_terminal_turn(
+            request=request,
+            user_id=int(runtime_state.get("user_id") or 0),
+            trace_id=trace_id,
+            terminal_status=terminal_status,
+            answer_text=answer_text,
+            metadata=dict(metadata or {}),
+            steps=list(steps or []),
+            references=list(references or []),
+            reference_objects=[dict(item) for item in list(reference_objects or []) if isinstance(item, dict)],
+            reference_links=[dict(item) for item in list(reference_links or []) if isinstance(item, dict)],
+            original_links=[dict(item) for item in list(original_links or []) if isinstance(item, dict)],
+            used_files=[dict(item) for item in list(used_files or []) if isinstance(item, dict)],
+            timings=dict(timings or {}),
+            failure=dict(failure or {}),
+        )
+        if not isinstance(assistant_terminal_accept, dict) or not bool(assistant_terminal_accept.get("accepted")):
+            raise APIError(
+                code=codes.AUTHORITY_UNAVAILABLE,
+                message="assistant terminal accept not confirmed",
+                status_code=503,
+                error="authority_unavailable",
+                retriable=True,
+            )
+        if not self.execution_cache.clear_pending_turn(
+            conversation_id=int(runtime_state.get("conversation_id") or request.conversation_id or 0),
+            trace_id=trace_id,
+        ):
+            raise APIError(
+                code=codes.SERVICE_NOT_READY,
+                message="durable patent pending turn clear failed after terminal accept",
+                status_code=503,
+                error="service_not_ready",
+                retriable=True,
+            )
+        return assistant_terminal_accept
+
     def run_turn(
         self,
         *,
@@ -881,6 +947,61 @@ class ChatPersistenceService:
             raise APIError(
                 code=codes.AUTHORITY_UNAVAILABLE,
                 message=f"assistant accept failed: {exc}",
+                status_code=503,
+                error="authority_unavailable",
+                retriable=True,
+            ) from exc
+
+    def _accept_assistant_terminal_turn(
+        self,
+        *,
+        request: PatentAskRequest,
+        user_id: int,
+        trace_id: str,
+        terminal_status: str,
+        answer_text: str,
+        metadata: dict[str, Any],
+        steps: list[dict[str, Any]],
+        references: list[dict[str, Any]],
+        reference_objects: list[dict[str, Any]],
+        reference_links: list[dict[str, Any]],
+        original_links: list[dict[str, Any]],
+        used_files: list[dict[str, Any]],
+        timings: dict[str, Any],
+        failure: dict[str, Any],
+    ) -> dict[str, Any]:
+        mode_origin = _normalize_mode_origin(request, {"metadata": metadata})
+        if mode_origin:
+            existing_mode_origin = metadata.get("mode_origin")
+            merged_mode_origin = dict(existing_mode_origin) if isinstance(existing_mode_origin, dict) else {}
+            for key, value in mode_origin.items():
+                merged_mode_origin[key] = value
+            metadata["mode_origin"] = merged_mode_origin
+        try:
+            return self.authority_client.accept_assistant_terminal_async(
+                user_id=user_id,
+                conversation_id=int(request.conversation_id),
+                trace_id=trace_id,
+                route=request.route,
+                source_scope=request.source_scope,
+                requested_mode=request.requested_mode,
+                actual_mode=request.actual_mode,
+                terminal_status=terminal_status,
+                answer_text=answer_text,
+                metadata=metadata,
+                steps=steps,
+                references=references,
+                reference_objects=reference_objects,
+                reference_links=reference_links,
+                original_links=original_links,
+                used_files=used_files,
+                timings=timings,
+                failure=failure,
+            )
+        except Exception as exc:
+            raise APIError(
+                code=codes.AUTHORITY_UNAVAILABLE,
+                message=f"assistant terminal accept failed: {exc}",
                 status_code=503,
                 error="authority_unavailable",
                 retriable=True,
