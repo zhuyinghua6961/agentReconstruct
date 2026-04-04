@@ -23,6 +23,7 @@ def test_document_routes_registered():
     paths = {route.path for route in app.routes if hasattr(route, "path")}
     assert "/api/view_pdf/{doi:path}" in paths
     assert "/api/translate" in paths
+    assert "/api/translate_document" in paths
     assert "/api/reference_preview" in paths
     assert "/api/patent/original/{canonical_patent_id}" in paths
 
@@ -317,6 +318,102 @@ def test_translate_route_preserves_success_when_quota_finalize_fails(monkeypatch
     assert payload["success"] is True
     assert payload["quota_counted"] is False
     assert payload["quota_warning"] == "redis_down"
+
+
+def test_translate_document_route_uses_doc_assist_quota(monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    with TestClient(app) as client:
+        client.app.dependency_overrides[require_auth_context] = lambda: AuthContext(
+            user_id=7,
+            role="user",
+            username="alice",
+        )
+        monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+        monkeypatch.setattr(
+            quota_service_module.quota_service,
+            "check_quota",
+            lambda **kwargs: calls.append(("check", kwargs["quota_type"])) or {"success": True, "allowed": True},
+        )
+        monkeypatch.setattr(
+            quota_service_module.quota_service,
+            "increment_quota",
+            lambda **kwargs: calls.append(("increment", kwargs["quota_type"])) or {"success": True},
+        )
+        monkeypatch.setattr(
+            documents_service,
+            "translate_document",
+            lambda **kwargs: (
+                {
+                    "success": True,
+                    "document_type": kwargs["document_type"],
+                    "document_id": kwargs["document_id"],
+                    "translated_text": "译文正文",
+                },
+                200,
+            ),
+        )
+
+        response = client.post(
+            "/api/v1/translate_document",
+            json={"document_type": "doi", "document_id": "10.1000/test"},
+        )
+        client.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["translated_text"] == "译文正文"
+    assert calls == [("check", "doc_assist"), ("increment", "doc_assist")]
+
+
+def test_translate_document_route_supports_sse_streaming(monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    with TestClient(app) as client:
+        client.app.dependency_overrides[require_auth_context] = lambda: AuthContext(
+            user_id=7,
+            role="user",
+            username="alice",
+        )
+        monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+        monkeypatch.setattr(
+            quota_service_module.quota_service,
+            "check_quota",
+            lambda **kwargs: calls.append(("check", kwargs["quota_type"])) or {"success": True, "allowed": True},
+        )
+        monkeypatch.setattr(
+            quota_service_module.quota_service,
+            "increment_quota",
+            lambda **kwargs: calls.append(("increment", kwargs["quota_type"])) or {"success": True},
+        )
+        monkeypatch.setattr(
+            documents_service,
+            "stream_translate_document",
+            lambda **kwargs: {
+                "status_code": 200,
+                "headers": {"cache-control": "no-cache"},
+                "media_type": "text/event-stream",
+                "body_iter": iter(
+                    [
+                        b'data: {"type":"start","segment_count":2}\n\n',
+                        b'data: {"type":"segment","index":0,"translation":"\xe7\xac\xac\xe4\xb8\x80\xe6\xae\xb5"}\n\n',
+                        b'data: {"type":"done","translated_text":"\xe7\xac\xac\xe4\xb8\x80\xe6\xae\xb5","cache_status":"miss"}\n\n',
+                    ]
+                ),
+            },
+        )
+
+        response = client.post(
+            "/api/v1/translate_document",
+            headers={"Accept": "text/event-stream"},
+            json={"document_type": "doi", "document_id": "10.1000/test"},
+        )
+        client.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert b'"type":"start"' in response.content
+    assert b'"type":"done"' in response.content
+    assert calls == [("check", "doc_assist"), ("increment", "doc_assist")]
 
 
 def test_reference_preview_authenticated_uses_doc_assist_quota(monkeypatch):

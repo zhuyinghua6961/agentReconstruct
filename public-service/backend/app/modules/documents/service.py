@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from html import escape
 from itertools import chain
+import json
 import os
 import re
 import tempfile
@@ -77,6 +78,9 @@ def format_material_content(node_data: dict[str, Any]) -> str:
 
 
 class DocumentsService:
+    _MAX_TRANSLATION_SEGMENT_CHARS = 1400
+    _MAX_TRANSLATION_SEGMENTS = 80
+
     @staticmethod
     def _retrieval_dependency_payload(
         runtime: PublicServiceRuntime | None,
@@ -196,6 +200,179 @@ class DocumentsService:
                 f"served_object_key: {content.get('served_object_key') or ''}"
             ).strip()
         return str(content or "")
+
+    @staticmethod
+    def _normalize_document_translation_type(document_type: str) -> str:
+        normalized = str(document_type or "").strip().lower()
+        if normalized in {"doi", "paper", "literature"}:
+            return "doi"
+        if normalized in {"patent", "patent_id"}:
+            return "patent"
+        return ""
+
+    def _append_translation_segments(self, segments: list[str], text: Any) -> None:
+        normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not normalized:
+            return
+        max_chars = self._MAX_TRANSLATION_SEGMENT_CHARS
+        if len(normalized) <= max_chars:
+            segments.append(normalized)
+            return
+
+        remaining = normalized
+        while remaining:
+            if len(remaining) <= max_chars:
+                segments.append(remaining.strip())
+                break
+            split_at = max(
+                remaining.rfind("\n\n", 0, max_chars),
+                remaining.rfind("\n", 0, max_chars),
+                remaining.rfind(". ", 0, max_chars),
+                remaining.rfind("? ", 0, max_chars),
+                remaining.rfind("! ", 0, max_chars),
+                remaining.rfind("。", 0, max_chars),
+                remaining.rfind("；", 0, max_chars),
+                remaining.rfind(";", 0, max_chars),
+            )
+            if split_at <= 0:
+                split_at = max_chars
+            chunk = remaining[:split_at].strip()
+            if chunk:
+                segments.append(chunk)
+            remaining = remaining[split_at:].strip()
+
+    def _trim_translation_segments(self, segments: list[str]) -> tuple[list[str], bool]:
+        if len(segments) <= self._MAX_TRANSLATION_SEGMENTS:
+            return segments, False
+        return segments[: self._MAX_TRANSLATION_SEGMENTS], True
+
+    @staticmethod
+    def _resolve_document_translation_cache_status(*, segment_count: int, cache_hits: int) -> str:
+        if segment_count > 0 and cache_hits >= segment_count:
+            return "hit"
+        if cache_hits > 0:
+            return "partial"
+        return "miss"
+
+    @staticmethod
+    def _encode_sse_payload(payload: dict[str, Any]) -> bytes:
+        return f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n".encode("utf-8")
+
+    def _build_doi_translation_segments(self, *, doi: str, logger: Any) -> tuple[list[str], dict[str, Any], int]:
+        normalized = storage_service.normalize_doi(doi)
+        pdf_path = self._ensure_local_pdf(doi=normalized, logger=logger)
+        if not pdf_path:
+            return [], {"success": False, "error": f"PDF文件不存在: {normalized or doi}", "code": "PDF_NOT_FOUND"}, 404
+
+        full_text = self._extract_pdf_body(
+            pdf_path=pdf_path,
+            logger=logger,
+            max_pages=self._max_pdf_pages,
+            exclude_references=True,
+        )
+        if not full_text or str(full_text).startswith("[错误]"):
+            return [], {"success": False, "error": str(full_text or "未能提取到PDF正文"), "code": "PDF_TEXT_EXTRACTION_FAILED"}, 500
+
+        base_segments = self._segment_paragraphs(str(full_text or ""))
+        segments: list[str] = []
+        for item in base_segments:
+            self._append_translation_segments(segments, item)
+        trimmed_segments, truncated = self._trim_translation_segments(segments)
+        return trimmed_segments, {
+            "success": True,
+            "document_type": "doi",
+            "document_id": normalized,
+            "segment_count": len(trimmed_segments),
+            "truncated": truncated,
+        }, 200
+
+    def _build_patent_translation_segments(self, *, canonical_patent_id: str) -> tuple[list[str], dict[str, Any], int]:
+        store = self._get_patent_original_store()
+        try:
+            manifest = store.load_manifest(canonical_patent_id)
+            abstract = store.resolve_section(
+                canonical_patent_id=manifest.canonical_patent_id,
+                section="abstract",
+                manifest=manifest,
+            )
+            claims = store.resolve_section(
+                canonical_patent_id=manifest.canonical_patent_id,
+                section="claim",
+                manifest=manifest,
+            )
+            description = store.resolve_section(
+                canonical_patent_id=manifest.canonical_patent_id,
+                section="description",
+                manifest=manifest,
+            )
+        except PatentOriginalNotFoundError as exc:
+            return [], {"success": False, "error": str(exc), "code": "PATENT_NOT_FOUND"}, 404
+        except PatentOriginalUnavailableError as exc:
+            return [], {"success": False, "error": str(exc), "code": "ORIGINAL_NOT_AVAILABLE"}, 404
+        except PatentOriginalStoreBackendError as exc:
+            return [], {"success": False, "error": str(exc), "code": "OBJECT_STORE_UNAVAILABLE"}, 503
+
+        segments: list[str] = []
+        abstract_text = str(dict(abstract.content or {}).get("abstract_text") or "").strip() if isinstance(abstract.content, dict) else ""
+        if abstract_text:
+            self._append_translation_segments(segments, f"Abstract\n{abstract_text}")
+
+        claim_lines = []
+        if isinstance(claims.content, dict):
+            for item in list(claims.content.get("claims") or []):
+                if not isinstance(item, dict):
+                    continue
+                claim_text = str(item.get("text") or "").strip()
+                if not claim_text:
+                    continue
+                claim_number = int(item.get("claim_number") or 0)
+                prefix = f"{claim_number}. " if claim_number > 0 else ""
+                claim_lines.append(f"{prefix}{claim_text}")
+        if claim_lines:
+            self._append_translation_segments(segments, "Claims\n" + "\n".join(claim_lines))
+
+        description_lines = []
+        if isinstance(description.content, dict):
+            for item in list(description.content.get("paragraphs") or []):
+                if not isinstance(item, dict):
+                    continue
+                paragraph_text = str(item.get("text") or "").strip()
+                if paragraph_text:
+                    description_lines.append(paragraph_text)
+        if description_lines:
+            self._append_translation_segments(segments, "Description\n" + "\n\n".join(description_lines))
+
+        trimmed_segments, truncated = self._trim_translation_segments(segments)
+        return trimmed_segments, {
+            "success": True,
+            "document_type": "patent",
+            "document_id": manifest.canonical_patent_id,
+            "title": manifest.title,
+            "segment_count": len(trimmed_segments),
+            "truncated": truncated,
+        }, 200
+
+    def _prepare_document_translation(self, *, document_type: str, document_id: str, logger: Any) -> tuple[list[str], dict[str, Any], int]:
+        normalized_type = self._normalize_document_translation_type(document_type)
+        normalized_id = str(document_id or "").strip()
+        if not normalized_type or not normalized_id:
+            return [], {"success": False, "error": "invalid_document_request", "code": "INVALID_ARGUMENT"}, 400
+
+        if normalized_type == "doi":
+            segments, payload, status_code = self._build_doi_translation_segments(doi=normalized_id, logger=logger)
+        else:
+            segments, payload, status_code = self._build_patent_translation_segments(canonical_patent_id=normalized_id.upper())
+
+        if status_code != 200:
+            return [], payload, status_code
+        if not segments:
+            return [], {
+                **payload,
+                "success": False,
+                "error": "document_text_unavailable",
+                "code": "DOCUMENT_TEXT_UNAVAILABLE",
+            }, 404
+        return segments, payload, 200
 
     def patent_original_view(
         self,
@@ -473,6 +650,132 @@ class DocumentsService:
 
     def translate(self, *, texts: list[Any], logger: Any) -> tuple[dict[str, Any], int]:
         return documents_translation_service.translate_batch(texts=texts, logger=logger)
+
+    def translate_document(self, *, document_type: str, document_id: str, logger: Any) -> tuple[dict[str, Any], int]:
+        segments, payload, status_code = self._prepare_document_translation(
+            document_type=document_type,
+            document_id=document_id,
+            logger=logger,
+        )
+        if status_code != 200:
+            return payload, status_code
+
+        translation_payload, translation_status = self.translate(texts=segments, logger=logger)
+        if translation_status != 200 or translation_payload.get("success") is False:
+            return translation_payload, translation_status
+
+        translated_segments = [str(item or "").strip() for item in list(translation_payload.get("translations") or [])]
+        translated_text = "\n\n".join(item for item in translated_segments if item)
+        payload_segment_count = int(payload.get("segment_count") or 0)
+        segment_count = payload_segment_count if payload_segment_count > 0 else len(segments)
+        translation_data = translation_payload.get("data", {}) if isinstance(translation_payload.get("data"), dict) else {}
+        cache_hits = int(translation_payload.get("cache_hits") or translation_data.get("cache_hits") or 0)
+        cache_status = self._resolve_document_translation_cache_status(segment_count=segment_count, cache_hits=cache_hits)
+        return {
+            **payload,
+            "success": True,
+            "translated_text": translated_text,
+            "translations": translated_segments,
+            "source_segments": segments,
+            "translation_count": len(translated_segments),
+            "cache_hits": cache_hits,
+            "cache_status": cache_status,
+            "provider": translation_data.get("provider") if translation_data else translation_payload.get("provider"),
+        }, 200
+
+    def stream_translate_document(self, *, document_type: str, document_id: str, logger: Any) -> dict[str, Any]:
+        segments, payload, status_code = self._prepare_document_translation(
+            document_type=document_type,
+            document_id=document_id,
+            logger=logger,
+        )
+        if status_code != 200:
+            return {
+                "status_code": status_code,
+                "media_type": "application/json",
+                "body": payload,
+            }
+
+        payload_segment_count = int(payload.get("segment_count") or 0)
+        segment_count = payload_segment_count if payload_segment_count > 0 else len(segments)
+
+        def _body_iter() -> Iterable[bytes]:
+            translated_segments: list[str] = []
+            cache_hits = 0
+            provider = ""
+
+            yield self._encode_sse_payload(
+                {
+                    "type": "start",
+                    "document_type": payload.get("document_type"),
+                    "document_id": payload.get("document_id"),
+                    "title": payload.get("title"),
+                    "segment_count": segment_count,
+                    "truncated": bool(payload.get("truncated")),
+                }
+            )
+
+            for index, segment in enumerate(segments):
+                translation_payload, translation_status = self.translate(texts=[segment], logger=logger)
+                if translation_status != 200 or translation_payload.get("success") is False:
+                    yield self._encode_sse_payload(
+                        {
+                            "type": "error",
+                            "index": index,
+                            "segment_count": segment_count,
+                            "code": str(translation_payload.get("code") or "TRANSLATION_FAILED"),
+                            "error": str(translation_payload.get("error") or "translation_failed"),
+                            "message": str(translation_payload.get("message") or translation_payload.get("error") or "translation_failed"),
+                            "status_code": translation_status,
+                        }
+                    )
+                    return
+
+                translation_data = translation_payload.get("data", {}) if isinstance(translation_payload.get("data"), dict) else {}
+                translated_segment = str(next(iter(list(translation_payload.get("translations") or [""])), "") or "").strip()
+                segment_cache_hits = int(translation_payload.get("cache_hits") or translation_data.get("cache_hits") or 0)
+                cache_hits += 1 if segment_cache_hits > 0 else 0
+                provider = str(translation_data.get("provider") or translation_payload.get("provider") or provider)
+                translated_segments.append(translated_segment)
+
+                yield self._encode_sse_payload(
+                    {
+                        "type": "segment",
+                        "index": index,
+                        "progress": index + 1,
+                        "segment_count": segment_count,
+                        "translation": translated_segment,
+                        "cache_hit": segment_cache_hits > 0,
+                    }
+                )
+
+            translated_text = "\n\n".join(item for item in translated_segments if item)
+            yield self._encode_sse_payload(
+                {
+                    "type": "done",
+                    "success": True,
+                    "document_type": payload.get("document_type"),
+                    "document_id": payload.get("document_id"),
+                    "title": payload.get("title"),
+                    "segment_count": segment_count,
+                    "translation_count": len(translated_segments),
+                    "translated_text": translated_text,
+                    "cache_hits": cache_hits,
+                    "cache_status": self._resolve_document_translation_cache_status(segment_count=segment_count, cache_hits=cache_hits),
+                    "provider": provider,
+                    "truncated": bool(payload.get("truncated")),
+                }
+            )
+
+        return {
+            "status_code": 200,
+            "headers": {
+                "cache-control": "no-cache",
+                "x-accel-buffering": "no",
+            },
+            "media_type": "text/event-stream",
+            "body_iter": _body_iter(),
+        }
 
     def check_pdf(self, doi: str) -> tuple[dict[str, Any], int]:
         normalized = storage_service.normalize_doi(doi)

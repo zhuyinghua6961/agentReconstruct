@@ -2,6 +2,7 @@
 // This adapter normalizes current backend contracts to the shape expected by the UI.
 
 import { getRouteModeLabel } from '../utils/routingStatus.js'
+import { streamSseJson } from '../utils/sse.js'
 
 function resolveBackendBase() {
   const viteEnv = (typeof import.meta !== 'undefined' && import.meta?.env) ? import.meta.env : {};
@@ -655,6 +656,55 @@ export const api = {
             normalizedTranslations.length
         ) || 0,
     };
+  },
+
+  async translateDocument(documentType, documentId) {
+    return await requestJson(`${API_BASE}${V1}/translate_document`, {
+      method: 'POST',
+      headers: authHeaders(true),
+      body: JSON.stringify({
+        document_type: String(documentType || ''),
+        document_id: String(documentId || ''),
+      }),
+    });
+  },
+
+  async translateDocumentStream(documentType, documentId, options = {}) {
+    const onEvent = typeof options.onEvent === 'function' ? options.onEvent : () => {}
+    const response = await fetch(`${API_BASE}${V1}/translate_document`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders(true),
+        Accept: 'text/event-stream',
+      },
+      body: JSON.stringify({
+        document_type: String(documentType || ''),
+        document_id: String(documentId || ''),
+      }),
+      signal: options.signal,
+    })
+
+    const contentType = String(response.headers.get('content-type') || '').toLowerCase()
+    if (!response.ok && !contentType.includes('text/event-stream')) {
+      const payload = await response.json().catch(() => ({}))
+      handleApiError(payload, response)
+      const error = new Error(payload?.message || payload?.error || `HTTP ${response.status}`)
+      error.status = Number(response.status || 0)
+      error.code = payload?.code || ''
+      error.payload = payload
+      throw error
+    }
+
+    if (contentType.includes('application/json')) {
+      const payload = await response.json().catch(() => ({}))
+      onEvent({
+        type: payload?.success === false ? 'error' : 'done',
+        ...payload,
+      })
+      return
+    }
+
+    await streamSseJson({ response, onEvent })
   },
 
   viewPdf(doi) {

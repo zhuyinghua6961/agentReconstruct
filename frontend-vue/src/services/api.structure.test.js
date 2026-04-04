@@ -12,6 +12,22 @@ test('api normalizeMessage keeps rich reference fields instead of shrinking to d
   assert.match(source, /metadata\.reference_objects/)
 })
 
+test('api exposes document-level translation for the PdfReader full-document tab', () => {
+  assert.match(source, /async translateDocument\(documentType, documentId\)/)
+  assert.match(source, /requestJson\(`\$\{API_BASE\}\$\{V1\}\/translate_document`, \{/)
+  assert.match(source, /body: JSON\.stringify\(\{\s*document_type: String\(documentType \|\| ''\),\s*document_id: String\(documentId \|\| ''\),\s*\}\)/s)
+})
+
+test('api exposes streaming document translation for incremental full-document rendering', () => {
+  assert.match(source, /import \{ streamSseJson \} from '\.\.\/utils\/sse\.js'/)
+  assert.match(source, /async translateDocumentStream\(documentType, documentId, options = \{\}\)/)
+  assert.match(source, /const onEvent = typeof options\.onEvent === 'function' \? options\.onEvent : \(\) => \{\}/)
+  assert.match(source, /const response = await fetch\(`\$\{API_BASE\}\$\{V1\}\/translate_document`, \{/)
+  assert.match(source, /Accept:\s*'text\/event-stream'/)
+  assert.match(source, /signal:\s*options\.signal/)
+  assert.match(source, /await streamSseJson\(\{ response, onEvent \}\)/)
+})
+
 test('api normalizeMessage preserves terminal failure fields from conversation detail payloads', () => {
   assert.match(source, /const terminalStatus = String\(item\?\.terminalStatus \|\| item\?\.terminal_status \|\| item\?\.status \|\| metadata\?\.terminal_status \|\| metadata\?\.status \|\| ''\)\.trim\(\)/)
   assert.match(source, /const failureMessage = String\(item\?\.failureMessage \|\| item\?\.failure_message \|\| metadata\?\.failure_message \|\| ''\)\.trim\(\)/)

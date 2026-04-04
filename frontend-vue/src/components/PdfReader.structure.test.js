@@ -13,9 +13,6 @@ test('PdfReader keeps only the three target tabs and no stale split-panel logic'
   assert.match(source, /panelMode === 'translation'/)
 
   assert.doesNotMatch(source, /panelMode === 'both'/)
-  assert.doesNotMatch(source, /assist-splitter/)
-  assert.doesNotMatch(source, /stopVerticalResize\(/)
-  assert.doesNotMatch(source, /startVerticalResize/)
   assert.doesNotMatch(source, /summaryHeight/)
 })
 
@@ -23,6 +20,8 @@ test('PdfReader exposes the handlers used by the current template', () => {
   assert.match(source, /function setPanelMode\(mode\)/)
   assert.match(source, /function startResize\(e\)/)
   assert.match(source, /function stopResize\(\)/)
+  assert.match(source, /function startTranslationResize\(e\)/)
+  assert.match(source, /function stopTranslationResize\(\)/)
 })
 
 
@@ -41,6 +40,15 @@ test('PdfReader uses the shared quota card and single-request pdf open flow', ()
 })
 
 test('PdfReader translation panel exposes paste-and-translate structure', () => {
+  assert.match(source, /translationSubTab === 'snippet'/)
+  assert.match(source, /translationSubTab === 'document'/)
+  assert.match(source, /@click="setTranslationSubTab\('snippet'\)"/)
+  assert.match(source, /@click="setTranslationSubTab\('document'\)"/)
+  assert.match(source, /ref="translationBodyRef"/)
+  assert.match(source, /class="translation-splitter"/)
+  assert.match(source, /@mousedown\.prevent="startTranslationResize"/)
+  assert.match(source, /@touchstart\.prevent="startTranslationResize"/)
+  assert.match(source, /:style="\{ height: translationInputHeight \+ 'px' \}"/)
   assert.match(source, /粘贴并翻译/)
   assert.match(source, /clipboardFeedback/)
   assert.match(source, /@click="pasteAndTranslate"/)
@@ -59,6 +67,27 @@ test('PdfReader translation panel exposes paste-and-translate structure', () => 
   assert.match(source, /async function pasteAndTranslate\(\)[\s\S]*?const sessionId = translationSessionId\.value[\s\S]*?isTranslating\.value = true[\s\S]*?translationQuotaCard\.value = null/)
   assert.match(source, /await clipboardApi\.readText\(\)[\s\S]*?if \(!isActiveTranslationSession\(sessionId\)\) return/)
   assert.match(source, /await api\.translate\(buildTranslatePayload\(text\)\)[\s\S]*?if \(!isActiveTranslationSession\(sessionId\)\) return/)
+  assert.match(source, /async function translateFullDocument\(force = false\)/)
+  assert.match(source, /await api\.translateDocumentStream\(request\.documentType, request\.documentId, \{/)
+  assert.match(source, /onEvent:\s*\(event\)\s*=>/)
+  assert.match(source, /const currentPatentId = ref\(''\)/)
+  assert.match(source, /const fullDocumentTranslationCacheStatus = ref\(''\)/)
+  assert.match(source, /function getFullDocumentTranslationStatusLabel\(\)/)
+  assert.match(source, /const fullDocumentTranslationMessage = ref\(\{ content: '' \}\)/)
+  assert.match(source, /const renderFullDocumentTranslationHtml = createStreamingHtmlRenderer\(\)/)
+  assert.match(source, /function getFullDocumentTranslationHtml\(\)/)
+  assert.match(source, /fullDocumentTranslationMessage\.value\.content = fullDocumentTranslation\.value/)
+  assert.match(source, /fullDocumentTranslationCacheStatus\.value = String\(event\?\.cache_status \|\| ''\)/)
+  assert.match(source, /全文翻译状态：{{ getFullDocumentTranslationStatusLabel\(\) }}/)
+  assert.match(source, /v-html="getFullDocumentTranslationHtml\(\)"/)
+  assert.match(source, /function setTranslationSubTab\(mode\)/)
+})
+
+test('PdfReader styles the translation panel as a vertically resizable split layout', () => {
+  assert.match(source, /\.translation-body\s*\{/)
+  assert.match(source, /\.translation-splitter\s*\{/)
+  assert.match(source, /cursor:\s*row-resize;/)
+  assert.match(source, /\.translation-actions\s*\{[\s\S]*?flex:\s*0 0 auto;/)
 })
 
 test('PdfReader clears clipboard feedback when manual translation text changes', () => {

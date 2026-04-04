@@ -172,66 +172,118 @@
             <div v-show="isTranslationVisible" class="translation-panel">
               <div class="translation-panel-header">
                 <h3>🌐 翻译助手</h3>
-                <p>粘贴英文文本后点击翻译按钮</p>
+                <p>支持片段翻译，也支持整篇文档翻译</p>
+                <div class="translation-subtab-switch">
+                  <button
+                    class="translation-subtab-btn"
+                    :class="{ active: translationSubTab === 'snippet' }"
+                    @click="setTranslationSubTab('snippet')"
+                  >
+                    片段翻译
+                  </button>
+                  <button
+                    class="translation-subtab-btn"
+                    :class="{ active: translationSubTab === 'document' }"
+                    @click="setTranslationSubTab('document')"
+                  >
+                    全文翻译
+                  </button>
+                </div>
               </div>
 
-              <div class="translation-panel-content">
-                <QuotaLimitCard v-if="translationQuotaCard" :card="translationQuotaCard" />
-                <p v-if="clipboardFeedback && !translationQuotaCard" class="translation-feedback">
-                  {{ clipboardFeedback }}
-                </p>
-                <!-- 欢迎页 -->
-                <div v-if="!translationQuotaCard && translations.length === 0" class="translation-welcome">
-                  <div class="welcome-icon">📖</div>
-                  <p class="welcome-title">欢迎使用翻译助手</p>
-                  <p class="welcome-desc">在下方输入框粘贴英文文本，点击翻译按钮即可</p>
-                </div>
-
-                <!-- 翻译历史 -->
-                <div v-for="(item, index) in translations" :key="index" class="translation-item">
-                  <div class="translation-item-header">
-                    <span class="translation-time">{{ item.time }}</span>
+              <div v-if="translationSubTab === 'snippet'" ref="translationBodyRef" class="translation-body">
+                <div class="translation-panel-content">
+                  <QuotaLimitCard v-if="translationQuotaCard" :card="translationQuotaCard" />
+                  <p v-if="clipboardFeedback && !translationQuotaCard" class="translation-feedback">
+                    {{ clipboardFeedback }}
+                  </p>
+                  <!-- 欢迎页 -->
+                  <div v-if="!translationQuotaCard && translations.length === 0" class="translation-welcome">
+                    <div class="welcome-icon">📖</div>
+                    <p class="welcome-title">欢迎使用翻译助手</p>
+                    <p class="welcome-desc">在下方输入框粘贴英文文本，点击翻译按钮即可</p>
                   </div>
-                  <div class="translation-item-content">
-                    <div class="translation-source">
-                      <div class="lang-label">🇬🇧 英文</div>
-                      <div class="text-content">{{ item.source }}</div>
+
+                  <!-- 翻译历史 -->
+                  <div v-for="(item, index) in translations" :key="index" class="translation-item">
+                    <div class="translation-item-header">
+                      <span class="translation-time">{{ item.time }}</span>
                     </div>
-                    <div class="translation-target">
-                      <div class="lang-label">🇨🇳 中文</div>
-                      <div class="text-content" :class="{ loading: item.loading }">
-                        {{ item.loading ? '翻译中...' : item.translation }}
+                    <div class="translation-item-content">
+                      <div class="translation-source">
+                        <div class="lang-label">🇬🇧 英文</div>
+                        <div class="text-content">{{ item.source }}</div>
+                      </div>
+                      <div class="translation-target">
+                        <div class="lang-label">🇨🇳 中文</div>
+                        <div class="text-content" :class="{ loading: item.loading }">
+                          {{ item.loading ? '翻译中...' : item.translation }}
+                        </div>
                       </div>
                     </div>
                   </div>
                 </div>
+
+                <div
+                  class="translation-splitter"
+                  @mousedown.prevent="startTranslationResize"
+                  @touchstart.prevent="startTranslationResize"
+                ></div>
+
+                <!-- 翻译按钮 -->
+                <div class="translation-actions" :style="{ height: translationInputHeight + 'px' }">
+                  <!-- 手动输入框 (备用方案) -->
+                  <textarea
+                    v-model="manualText"
+                    class="manual-input"
+                    placeholder="在此粘贴要翻译的英文文本..."
+                    rows="3"
+                  ></textarea>
+                  <p class="translation-hint">读取系统剪贴板内容，不是当前 PDF 划选内容</p>
+                  <div class="translation-button-row">
+                    <button
+                      class="translate-btn"
+                      :disabled="!hasManualTranslateText || isTranslating"
+                      @click="translateSelected"
+                    >
+                      {{ isTranslating ? '⏳ 翻译中...' : '🌐 翻译文本' }}
+                    </button>
+                    <button
+                      class="translate-btn secondary"
+                      :disabled="isTranslating"
+                      @click="pasteAndTranslate"
+                    >
+                      {{ isTranslating ? '⏳ 翻译中...' : '📋 粘贴并翻译' }}
+                    </button>
+                  </div>
+                </div>
               </div>
 
-              <!-- 翻译按钮 -->
-              <div class="translation-actions">
-                <!-- 手动输入框 (备用方案) -->
-                <textarea
-                  v-model="manualText"
-                  class="manual-input"
-                  placeholder="在此粘贴要翻译的英文文本..."
-                  rows="3"
-                ></textarea>
-                <p class="translation-hint">读取系统剪贴板内容，不是当前 PDF 划选内容</p>
-                <div class="translation-button-row">
+              <div v-else class="translation-document-panel">
+                <div class="translation-document-actions">
                   <button
-                    class="translate-btn"
-                    :disabled="!hasManualTranslateText || isTranslating"
-                    @click="translateSelected"
+                    class="summary-generate-btn"
+                    :disabled="isDocumentTranslating || !canTranslateCurrentDocument"
+                    @click="translateFullDocument(true)"
                   >
-                    {{ isTranslating ? '⏳ 翻译中...' : '🌐 翻译文本' }}
+                    {{ isDocumentTranslating ? '翻译中...' : (fullDocumentTranslation ? '重新翻译全文' : '翻译全文') }}
                   </button>
-                  <button
-                    class="translate-btn secondary"
-                    :disabled="isTranslating"
-                    @click="pasteAndTranslate"
-                  >
-                    {{ isTranslating ? '⏳ 翻译中...' : '📋 粘贴并翻译' }}
-                  </button>
+                  <p class="translation-document-hint">
+                    {{ canTranslateCurrentDocument ? '按当前打开的 DOI / 专利原文生成整篇中文译文。' : '当前文档暂不支持全文翻译。' }}
+                  </p>
+                </div>
+                <div class="translation-document-content">
+                  <QuotaLimitCard v-if="fullDocumentTranslationQuotaCard" :card="fullDocumentTranslationQuotaCard" />
+                  <p v-else-if="fullDocumentTranslationError" class="summary-error">{{ fullDocumentTranslationError }}</p>
+                  <template v-else-if="fullDocumentTranslation || isDocumentTranslating">
+                    <p v-if="isDocumentTranslating" class="summary-loading">正在提取文档正文并流式生成全文翻译，请稍候...</p>
+                    <p v-if="getFullDocumentTranslationStatusLabel()" class="translation-document-status">
+                      全文翻译状态：{{ getFullDocumentTranslationStatusLabel() }}
+                    </p>
+                    <div v-if="fullDocumentTranslation" class="translation-document-text translation-document-rendered" v-html="getFullDocumentTranslationHtml()"></div>
+                    <p v-else class="summary-placeholder">正在等待首段译文...</p>
+                  </template>
+                  <p v-else class="summary-placeholder">点击“翻译全文”可生成当前文档的整篇中文译文。</p>
                 </div>
               </div>
             </div>
@@ -248,6 +300,7 @@ import QuotaLimitCard from './QuotaLimitCard.vue'
 import { fetchPdfDocument, fetchPdfDocumentByUrl } from '../api/literature'
 import { api } from '../services/api'
 import { buildQuotaErrorCardModel } from '../services/quota-error-formatting.js'
+import { formatAnswer } from '../utils'
 import {
   buildTranslatePayload,
   classifyClipboardFailure,
@@ -257,6 +310,7 @@ import {
 import { resolvePdfReaderInitialPanelMode, isPdfReaderPanelActive } from '../utils/pdfReaderPanelMode'
 import { buildPdfReaderOpenState, releasePdfBlobUrl } from '../utils/pdfReaderOpenFlow'
 import { resolveLocationBadge, resolveLocationSentence, resolveLocationSource, resolveLocationTitle } from '../utils/referenceLocation'
+import { createStreamingHtmlRenderer } from '../utils/streamingRender'
 
 // Props & Emits
 const emit = defineEmits(['close'])
@@ -264,6 +318,7 @@ const emit = defineEmits(['close'])
 // State
 const isOpen = ref(false)
 const currentDoi = ref('')
+const currentPatentId = ref('')
 const currentDocumentLabel = ref('')
 const pdfUrl = ref('')
 const pdfError = ref(null)
@@ -277,6 +332,7 @@ const isPdfLoading = ref(false)
 const sidebarWidth = ref(360)
 const isResizing = ref(false)
 const layoutRef = ref(null)
+const translationBodyRef = ref(null)
 const panelMode = ref('summary')
 const summaryText = ref('')
 const summaryError = ref('')
@@ -286,13 +342,28 @@ const clipboardFeedback = ref('')
 const isSummarizing = ref(false)
 const activeBlobUrl = ref('')
 const translationSessionId = ref(0)
+const translationInputHeight = ref(240)
+const isTranslationResizing = ref(false)
+const translationSubTab = ref('snippet')
+const fullDocumentTranslation = ref('')
+const fullDocumentTranslationError = ref('')
+const fullDocumentTranslationQuotaCard = ref(null)
+const isDocumentTranslating = ref(false)
+const fullDocumentTranslationCacheStatus = ref('')
+const fullDocumentTranslationMessage = ref({ content: '' })
+const documentTranslationSessionId = ref(0)
+const documentTranslationAbortController = ref(null)
+const renderFullDocumentTranslationHtml = createStreamingHtmlRenderer()
 
 const MIN_SIDEBAR_WIDTH = 260
 const MIN_LEFT_WIDTH = 420
+const MIN_TRANSLATION_INPUT_HEIGHT = 140
+const MIN_TRANSLATION_HISTORY_HEIGHT = 120
 const isCitationsVisible = computed(() => isPdfReaderPanelActive(panelMode.value, 'citations'))
 const isSummaryVisible = computed(() => isPdfReaderPanelActive(panelMode.value, 'summary'))
 const isTranslationVisible = computed(() => isPdfReaderPanelActive(panelMode.value, 'translation'))
 const hasManualTranslateText = computed(() => normalizeClipboardText(manualText.value).length > 0)
+const canTranslateCurrentDocument = computed(() => Boolean(currentDoi.value || currentPatentId.value))
 
 function withPdfPageAnchor(url, page = null) {
   if (!url || !page) return url
@@ -317,10 +388,75 @@ function isActiveTranslationSession(sessionId) {
   return sessionId === translationSessionId.value
 }
 
+function resetDocumentTranslationState() {
+  documentTranslationSessionId.value += 1
+  documentTranslationAbortController.value?.abort?.()
+  documentTranslationAbortController.value = null
+  fullDocumentTranslation.value = ''
+  fullDocumentTranslationError.value = ''
+  fullDocumentTranslationQuotaCard.value = null
+  isDocumentTranslating.value = false
+  fullDocumentTranslationCacheStatus.value = ''
+  fullDocumentTranslationMessage.value.content = ''
+}
+
+function resolvePatentId(label, documentUrl) {
+  const fromUrl = String(documentUrl || '').match(/\/api\/(?:v1\/)?patent\/original\/([^/?#]+)/i)
+  if (fromUrl?.[1]) {
+    try {
+      return decodeURIComponent(fromUrl[1]).trim().toUpperCase()
+    } catch {
+      return String(fromUrl[1] || '').trim().toUpperCase()
+    }
+  }
+  const fromLabel = String(label || '').trim().toUpperCase()
+  return /^[A-Z]{2}[A-Z0-9]+$/.test(fromLabel) ? fromLabel : ''
+}
+
+function setTranslationSubTab(mode) {
+  translationSubTab.value = mode === 'document' ? 'document' : 'snippet'
+}
+
+function resolveDocumentTranslationRequest() {
+  if (currentDoi.value) {
+    return {
+      documentType: 'doi',
+      documentId: currentDoi.value,
+    }
+  }
+  if (currentPatentId.value) {
+    return {
+      documentType: 'patent',
+      documentId: currentPatentId.value,
+    }
+  }
+  return null
+}
+
+function getFullDocumentTranslationStatusLabel() {
+  if (fullDocumentTranslationCacheStatus.value === 'hit') return '缓存命中'
+  if (fullDocumentTranslationCacheStatus.value === 'partial') return '部分缓存命中'
+  if (fullDocumentTranslationCacheStatus.value === 'miss') return '本次新翻译'
+  return ''
+}
+
+function isActiveDocumentTranslationSession(sessionId) {
+  return sessionId === documentTranslationSessionId.value
+}
+
+function getFullDocumentTranslationHtml() {
+  if (!fullDocumentTranslation.value) return ''
+  if (isDocumentTranslating.value) {
+    return renderFullDocumentTranslationHtml(fullDocumentTranslationMessage.value)
+  }
+  return formatAnswer(fullDocumentTranslation.value)
+}
+
 // Methods
 async function openReader(doi, locations = []) {
   resetTranslationInteractionSession()
   currentDoi.value = doi
+  currentPatentId.value = ''
   currentDocumentLabel.value = doi
   locationHints.value = locations
   isPdfLoading.value = true
@@ -331,6 +467,8 @@ async function openReader(doi, locations = []) {
   clipboardFeedback.value = ''
   isSummarizing.value = false
   panelMode.value = resolvePdfReaderInitialPanelMode(locations)
+  translationSubTab.value = 'snippet'
+  resetDocumentTranslationState()
   
   // 如果有位置信息，添加页码锚点
   if (locations.length > 0) {
@@ -384,6 +522,7 @@ async function openReader(doi, locations = []) {
 async function openUrlReader(label, documentUrl, locations = []) {
   resetTranslationInteractionSession()
   currentDoi.value = ''
+  currentPatentId.value = resolvePatentId(label, documentUrl)
   currentDocumentLabel.value = String(label || '')
   locationHints.value = locations
   isPdfLoading.value = true
@@ -394,6 +533,8 @@ async function openUrlReader(label, documentUrl, locations = []) {
   clipboardFeedback.value = ''
   isSummarizing.value = false
   panelMode.value = resolvePdfReaderInitialPanelMode(locations)
+  translationSubTab.value = 'snippet'
+  resetDocumentTranslationState()
 
   if (locations.length > 0) {
     targetPage.value = locations[0].page || 1
@@ -452,6 +593,11 @@ function getClientX(e) {
   return e.clientX
 }
 
+function getClientY(e) {
+  if (e.touches && e.touches.length) return e.touches[0].clientY
+  return e.clientY
+}
+
 function setPanelMode(mode) {
   panelMode.value = mode
 }
@@ -486,16 +632,60 @@ function stopResize() {
   window.removeEventListener('touchend', stopResize)
 }
 
+function startTranslationResize(e) {
+  if (!isTranslationVisible.value) return
+  isTranslationResizing.value = true
+  window.addEventListener('mousemove', handleTranslationResize)
+  window.addEventListener('mouseup', stopTranslationResize)
+  window.addEventListener('touchmove', handleTranslationResize, { passive: false })
+  window.addEventListener('touchend', stopTranslationResize)
+  handleTranslationResize(e)
+}
+
+function handleTranslationResize(e) {
+  if (!isTranslationResizing.value) return
+  e.preventDefault?.()
+  const bodyRect = translationBodyRef.value?.getBoundingClientRect?.()
+  if (!bodyRect) return
+
+  const bodyHeight = Number(bodyRect.height || 0)
+  if (bodyHeight <= 0) return
+
+  const splitterHeight = 8
+  const maxInputHeight = Math.max(
+    MIN_TRANSLATION_INPUT_HEIGHT,
+    bodyHeight - MIN_TRANSLATION_HISTORY_HEIGHT - splitterHeight,
+  )
+  const pointerOffset = getClientY(e) - bodyRect.top
+  const nextHeight = bodyHeight - pointerOffset - splitterHeight / 2
+  translationInputHeight.value = Math.min(
+    Math.max(nextHeight, MIN_TRANSLATION_INPUT_HEIGHT),
+    maxInputHeight,
+  )
+}
+
+function stopTranslationResize() {
+  if (!isTranslationResizing.value) return
+  isTranslationResizing.value = false
+  window.removeEventListener('mousemove', handleTranslationResize)
+  window.removeEventListener('mouseup', stopTranslationResize)
+  window.removeEventListener('touchmove', handleTranslationResize)
+  window.removeEventListener('touchend', stopTranslationResize)
+}
+
 function closeReader() {
   resetTranslationInteractionSession()
+  resetDocumentTranslationState()
   releasePdfBlobUrl(activeBlobUrl.value)
   activeBlobUrl.value = ''
   isOpen.value = false
   currentDoi.value = ''
+  currentPatentId.value = ''
   currentDocumentLabel.value = ''
   pdfUrl.value = ''
   pdfError.value = null
   stopResize()
+  stopTranslationResize()
   isPdfLoading.value = false
   summaryText.value = ''
   summaryError.value = ''
@@ -648,10 +838,92 @@ async function translateSelected() {
   await runTranslation(text, sessionId)
 }
 
+async function translateFullDocument(force = false) {
+  const request = resolveDocumentTranslationRequest()
+  if (!request || isDocumentTranslating.value) return
+  if (!force && fullDocumentTranslation.value) return
+
+  documentTranslationSessionId.value += 1
+  const sessionId = documentTranslationSessionId.value
+  documentTranslationAbortController.value?.abort?.()
+  documentTranslationAbortController.value = new AbortController()
+  isDocumentTranslating.value = true
+  fullDocumentTranslation.value = ''
+  fullDocumentTranslationError.value = ''
+  fullDocumentTranslationQuotaCard.value = null
+  fullDocumentTranslationCacheStatus.value = ''
+  const translatedSegments = []
+
+  try {
+    await api.translateDocumentStream(request.documentType, request.documentId, {
+      signal: documentTranslationAbortController.value?.signal,
+      onEvent: (event) => {
+        if (!isActiveDocumentTranslationSession(sessionId)) return
+
+        const eventType = String(event?.type || '').trim().toLowerCase()
+        if (eventType === 'segment') {
+          const segmentText = String(event?.translation || '').trim()
+          if (segmentText) {
+            translatedSegments.push(segmentText)
+            fullDocumentTranslation.value = translatedSegments.join('\n\n')
+          }
+          if (event?.cache_status) {
+            fullDocumentTranslationCacheStatus.value = String(event?.cache_status || '')
+          }
+          return
+        }
+
+        if (eventType === 'done') {
+          const translatedText = String(event?.translated_text || '').trim()
+          if (translatedText) {
+            fullDocumentTranslation.value = translatedText
+          }
+          fullDocumentTranslationError.value = ''
+          fullDocumentTranslationCacheStatus.value = String(event?.cache_status || '')
+          return
+        }
+
+        if (eventType === 'error') {
+          fullDocumentTranslationError.value = String(event?.message || event?.error || '全文翻译失败')
+          return
+        }
+
+        if (eventType === 'start' && event?.cache_status) {
+          fullDocumentTranslationCacheStatus.value = String(event?.cache_status || '')
+        }
+      },
+    })
+
+    if (!isActiveDocumentTranslationSession(sessionId)) return
+    if (!fullDocumentTranslation.value && !fullDocumentTranslationError.value) {
+      fullDocumentTranslationError.value = '全文翻译失败'
+    }
+  } catch (error) {
+    if (!isActiveDocumentTranslationSession(sessionId)) return
+    if (error?.name === 'AbortError') return
+    const quotaCard = buildDocAssistQuotaCard(error, '全文翻译')
+    if (quotaCard) {
+      fullDocumentTranslationQuotaCard.value = quotaCard
+      fullDocumentTranslationError.value = ''
+    } else {
+      fullDocumentTranslationError.value = `全文翻译失败: ${error.message || '未知错误'}`
+    }
+  } finally {
+    if (isActiveDocumentTranslationSession(sessionId)) {
+      documentTranslationAbortController.value = null
+      isDocumentTranslating.value = false
+    }
+  }
+}
+
 watch(manualText, () => {
   if (clipboardFeedback.value) {
     clipboardFeedback.value = ''
   }
+})
+
+watch(fullDocumentTranslation, () => {
+  fullDocumentTranslationMessage.value.content = fullDocumentTranslation.value
 })
 
 // Expose methods
@@ -664,6 +936,7 @@ defineExpose({
 onBeforeUnmount(() => {
   releasePdfBlobUrl(activeBlobUrl.value)
   stopResize()
+  stopTranslationResize()
 })
 </script>
 
@@ -1176,10 +1449,63 @@ onBeforeUnmount(() => {
   color: #6b7280;
 }
 
-.translation-panel-content {
+.translation-subtab-switch {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.translation-subtab-btn {
   flex: 1;
+  padding: 7px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.translation-subtab-btn.active {
+  border-color: #6366f1;
+  background: #eef2ff;
+  color: #4338ca;
+}
+
+.translation-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.translation-panel-content {
+  flex: 1 1 auto;
   overflow-y: auto;
   padding: 20px;
+  min-height: 0;
+}
+
+.translation-splitter {
+  flex: 0 0 auto;
+  height: 8px;
+  cursor: row-resize;
+  background: linear-gradient(180deg, #e5e7eb, #cbd5e1, #e5e7eb);
+  position: relative;
+}
+
+.translation-splitter::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 48px;
+  height: 2px;
+  background: #94a3b8;
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
 }
 
 .translation-welcome {
@@ -1358,7 +1684,110 @@ onBeforeUnmount(() => {
   background: #f9fafb;
   display: flex;
   flex-direction: column;
+  flex: 0 0 auto;
   gap: 12px;
+  min-height: 140px;
+  overflow: auto;
+}
+
+.translation-document-panel {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.translation-document-actions {
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid #e5e7eb;
+  background: #f9fafb;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.translation-document-hint {
+  margin: 0;
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.5;
+}
+
+.translation-document-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px 20px 20px;
+}
+
+.translation-document-status {
+  margin: 0 0 12px 0;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.translation-document-text {
+  margin: 0;
+  color: #334155;
+  line-height: 1.75;
+  white-space: pre-wrap;
+}
+
+.translation-document-rendered {
+  white-space: normal;
+}
+
+.translation-document-rendered :deep(h1),
+.translation-document-rendered :deep(h2),
+.translation-document-rendered :deep(h3),
+.translation-document-rendered :deep(h4) {
+  margin: 18px 0 10px;
+  color: #0f172a;
+  line-height: 1.35;
+}
+
+.translation-document-rendered :deep(p),
+.translation-document-rendered :deep(ul),
+.translation-document-rendered :deep(ol),
+.translation-document-rendered :deep(blockquote),
+.translation-document-rendered :deep(table) {
+  margin: 10px 0;
+}
+
+.translation-document-rendered :deep(ul),
+.translation-document-rendered :deep(ol) {
+  padding-left: 20px;
+}
+
+.translation-document-rendered :deep(li) {
+  margin: 6px 0;
+}
+
+.translation-document-rendered :deep(table) {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.translation-document-rendered :deep(th),
+.translation-document-rendered :deep(td) {
+  border: 1px solid #cbd5e1;
+  padding: 8px 10px;
+  vertical-align: top;
+}
+
+.translation-document-rendered :deep(th) {
+  background: #e2e8f0;
+  color: #0f172a;
+}
+
+.translation-document-rendered :deep(code) {
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: #e2e8f0;
+  font-size: 12px;
 }
 
 .manual-input {

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from importlib import import_module
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -632,3 +633,154 @@ def test_patent_original_store_resolves_fulltext_pdf_reference():
     assert fulltext.object_key == "patent/originals/CN123456789A/fulltext/original.pdf"
     assert fulltext.media_type == "application/pdf"
     assert fulltext.original_version == "2026-03-31T12:00:00Z#sha256:test"
+
+
+def test_documents_service_translate_document_for_doi_uses_extracted_paragraphs(monkeypatch, tmp_path):
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+
+    monkeypatch.setattr(documents_service, "_ensure_local_pdf", lambda **kwargs: pdf_path)
+    monkeypatch.setattr(
+        documents_service,
+        "_extract_pdf_body",
+        lambda **kwargs: "First paragraph. Second sentence.\n\nThird paragraph.",
+    )
+    monkeypatch.setattr(
+        documents_service,
+        "_segment_paragraphs",
+        lambda full_text: ["First paragraph. Second sentence.", "Third paragraph."],
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_translate(*, texts, logger):
+        captured["texts"] = list(texts)
+        return (
+            {
+                "success": True,
+                "translations": ["第一段。", "第二段。"],
+                "count": 2,
+                "cache_hits": 2,
+            },
+            200,
+        )
+
+    monkeypatch.setattr(documents_service, "translate", _fake_translate)
+
+    payload, status_code = documents_service.translate_document(
+        document_type="doi",
+        document_id="10.1000/test",
+        logger=SimpleNamespace(info=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+    )
+
+    assert status_code == 200
+    assert captured["texts"] == ["First paragraph. Second sentence.", "Third paragraph."]
+    assert payload["translated_text"] == "第一段。\n\n第二段。"
+    assert payload["segment_count"] == 2
+    assert payload["cache_hits"] == 2
+    assert payload["cache_status"] == "hit"
+
+
+def test_documents_service_translate_document_for_patent_assembles_structured_sections(monkeypatch):
+    class _FakeManifest:
+        canonical_patent_id = CANONICAL_PATENT_ID
+        title = "一种电池热管理系统"
+        original_version = "2026-03-31T12:00:00Z#sha256:test"
+
+    class _FakeStore:
+        def load_manifest(self, canonical_patent_id: str):
+            assert canonical_patent_id == CANONICAL_PATENT_ID
+            return _FakeManifest()
+
+        def resolve_section(self, *, canonical_patent_id: str, section: str, manifest=None, **kwargs):
+            _ = canonical_patent_id, manifest, kwargs
+            if section == "abstract":
+                return SimpleNamespace(content={"abstract_text": "An English patent abstract."})
+            if section == "claim":
+                return SimpleNamespace(content={"claims": [{"claim_number": 1, "text": "Claim one."}, {"claim_number": 2, "text": "Claim two."}]})
+            if section == "description":
+                return SimpleNamespace(content={"paragraphs": [{"paragraph_id": "p-001", "text": "Description paragraph one."}, {"paragraph_id": "p-002", "text": "Description paragraph two."}]})
+            raise AssertionError(f"unexpected section: {section}")
+
+    monkeypatch.setattr(documents_service, "_get_patent_original_store", lambda: _FakeStore())
+
+    captured: dict[str, object] = {}
+
+    def _fake_translate(*, texts, logger):
+        captured["texts"] = list(texts)
+        return (
+            {
+                "success": True,
+                "translations": ["摘要译文", "权利要求译文", "说明书译文"],
+                "count": 3,
+                "cache_hits": 0,
+            },
+            200,
+        )
+
+    monkeypatch.setattr(documents_service, "translate", _fake_translate)
+
+    payload, status_code = documents_service.translate_document(
+        document_type="patent",
+        document_id=CANONICAL_PATENT_ID,
+        logger=SimpleNamespace(info=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+    )
+
+    assert status_code == 200
+    assert captured["texts"] == [
+        "Abstract\nAn English patent abstract.",
+        "Claims\n1. Claim one.\n2. Claim two.",
+        "Description\nDescription paragraph one.\n\nDescription paragraph two.",
+    ]
+    assert payload["translated_text"] == "摘要译文\n\n权利要求译文\n\n说明书译文"
+    assert payload["segment_count"] == 3
+    assert payload["cache_hits"] == 0
+    assert payload["cache_status"] == "miss"
+
+
+def test_documents_service_stream_translate_document_emits_sse_events(monkeypatch):
+    monkeypatch.setattr(
+        documents_service,
+        "_prepare_document_translation",
+        lambda **kwargs: (
+            ["Heading\n- item 1", "Paragraph body."],
+            {
+                "success": True,
+                "document_type": "patent",
+                "document_id": CANONICAL_PATENT_ID,
+                "segment_count": 2,
+                "truncated": False,
+            },
+            200,
+        ),
+    )
+
+    call_index = {"value": 0}
+
+    def _fake_translate(*, texts, logger):
+        _ = logger
+        idx = call_index["value"]
+        call_index["value"] += 1
+        payloads = [
+            ({"success": True, "translations": ["标题\n- 条目1"], "cache_hits": 1, "data": {"provider": "dashscope"}}, 200),
+            ({"success": True, "translations": ["段落正文。"], "cache_hits": 0, "data": {"provider": "dashscope"}}, 200),
+        ]
+        assert len(texts) == 1
+        return payloads[idx]
+
+    monkeypatch.setattr(documents_service, "translate", _fake_translate)
+
+    result = documents_service.stream_translate_document(
+        document_type="patent",
+        document_id=CANONICAL_PATENT_ID,
+        logger=SimpleNamespace(info=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+    )
+
+    body = b"".join(result["body_iter"])
+
+    assert result["status_code"] == 200
+    assert result["media_type"] == "text/event-stream"
+    assert b'"type":"start"' in body
+    assert b'"type":"segment"' in body
+    assert b'"type":"done"' in body
+    assert b'"cache_status":"partial"' in body

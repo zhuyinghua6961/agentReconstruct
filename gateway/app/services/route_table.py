@@ -36,6 +36,7 @@ _PUBLIC_ROUTE_GROUPS = (
     _paths("/api/upload_excel"),
     _paths("/api/clear_pdf"),
     _paths("/api/translate"),
+    _paths("/api/translate_document"),
     _paths("/api/kb_info"),
     _paths("/api/refresh_kb"),
     _paths("/api/clear_cache"),

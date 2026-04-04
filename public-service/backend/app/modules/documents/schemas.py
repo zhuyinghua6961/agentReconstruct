@@ -9,6 +9,11 @@ class TranslateRequest(BaseModel):
     texts: list[Any] = Field(default_factory=list)
 
 
+class TranslateDocumentRequest(BaseModel):
+    document_type: str = Field(default="")
+    document_id: str = Field(default="")
+
+
 class ReferencePreviewRequest(BaseModel):
     dois_text: str = Field(default="")
     doi_list: list[str] = Field(default_factory=list)

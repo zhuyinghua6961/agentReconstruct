@@ -403,6 +403,25 @@ def test_public_proxy_forwards_post_body_and_content_type():
     assert response.json()["translated"] == "你好"
 
 
+def test_public_proxy_forwards_translate_document_request():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/v1/translate_document"
+        assert request.headers["content-type"].startswith("application/json")
+        assert request.content == b'{"document_type":"patent","document_id":"CN123456789A"}'
+        return httpx.Response(200, json={"translated_text": "专利译文"})
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        response = client.post(
+            "/api/v1/translate_document",
+            json={"document_type": "patent", "document_id": "CN123456789A"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["translated_text"] == "专利译文"
+
+
 @pytest.mark.parametrize(
     ("path", "expected_upstream_path"),
     [

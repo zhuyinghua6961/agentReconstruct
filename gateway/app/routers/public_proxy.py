@@ -13,6 +13,7 @@ _STREAMING_ROUTE_PATHS = {
     "/api/conversations/{conversation_id}/files/{file_id}/download",
     "/api/upload_pdf",
     "/api/upload_excel",
+    "/api/translate_document",
     "/api/view_pdf/{doi:path}",
 }
 
@@ -86,6 +87,7 @@ _ROUTE_SPECS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (_paths("/api/upload_excel"), ("POST",)),
     (_paths("/api/clear_pdf"), ("POST",)),
     (_paths("/api/translate"), ("POST",)),
+    (_paths("/api/translate_document"), ("POST",)),
     (_paths("/api/kb_info"), ("GET",)),
     (_paths("/api/refresh_kb"), ("POST",)),
     (_paths("/api/clear_cache"), ("POST",)),

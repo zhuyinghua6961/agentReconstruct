@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from app.core.deps import AuthContext
 from app.core.errors import AppError
 from app.modules.auth.deps import get_optional_auth_context, require_auth_context
-from app.modules.documents.schemas import ReferencePreviewRequest, TranslateRequest
+from app.modules.documents.schemas import ReferencePreviewRequest, TranslateDocumentRequest, TranslateRequest
 from app.modules.documents.service import documents_service
 from app.modules.quota.deps import finalize_quota, precheck_quota, require_quota
 from app.modules.quota.service import QuotaGrant
@@ -195,6 +195,33 @@ def translate_text(
     _quota: QuotaGrant | None = Depends(require_quota("doc_assist", strict_config=True)),
 ):
     result, status_code = documents_service.translate(texts=payload.texts, logger=_logger(request))
+    response = _json(result, status_code)
+    return _finalize_quota_softly(grant=_quota, result=response, logger=_logger(request))
+
+
+@router.post("/api/v1/translate_document")
+@router.post("/api/translate_document")
+def translate_document(
+    payload: TranslateDocumentRequest,
+    request: Request,
+    _context: AuthContext = Depends(require_auth_context),
+    _quota: QuotaGrant | None = Depends(require_quota("doc_assist", strict_config=True)),
+):
+    accept_header = str(request.headers.get("accept") or "").lower()
+    if "text/event-stream" in accept_header:
+        result = documents_service.stream_translate_document(
+            document_type=payload.document_type,
+            document_id=payload.document_id,
+            logger=_logger(request),
+        )
+        response = _patent_original_response(result=dict(result or {}), head_only=False)
+        return _finalize_quota_softly(grant=_quota, result=response, logger=_logger(request))
+
+    result, status_code = documents_service.translate_document(
+        document_type=payload.document_type,
+        document_id=payload.document_id,
+        logger=_logger(request),
+    )
     response = _json(result, status_code)
     return _finalize_quota_softly(grant=_quota, result=response, logger=_logger(request))
 
