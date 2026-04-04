@@ -53,3 +53,15 @@ deploy/minio-seed/*
 !deploy/minio-seed/README.md
 !deploy/minio-seed/*/
 deploy/minio-seed/*/*
+
+# Local developer artifacts
+.codex
+*.egg-info/
+
+# Local service config overlays
+resource/config/services/patent/config.shared.env
+
+# Accidental local scratch files
+, d.route, d.turn_mode, d.strategy, d.selected_file_ids)
+, d.route, d.turn_mode, d.strategy, d.needs_clarification, d.selected_file_ids, d.clarification_message)
+/PY

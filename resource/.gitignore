@@ -4,10 +4,12 @@
 !.gitignore
 !config/
 !config/**
+config/**/*.secret.env
+config/**/config.secret.env
+config/services/patent/config.shared.env
 !assets/
 !assets/**
 !mounts/
 !mounts/**
 !scripts/
 !scripts/**
-
