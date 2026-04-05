@@ -110,6 +110,13 @@ class PatentKbService:
         metadata["stage25_skipped"] = bool(result.metadata.stage25_skipped)
         if result.metadata.stage25_skip_reason:
             metadata["stage25_skip_reason"] = str(result.metadata.stage25_skip_reason)
+        metadata["kb_evidence_context"] = str(result.final_answer or "")[:1200]
+        metadata["kb_reference_instruction"] = (
+            "引用知识库结论时仅可使用这些专利号："
+            + "、".join(str(item) for item in list(raw.get("references") or []) if str(item).strip())
+            if list(raw.get("references") or [])
+            else ""
+        )
         return {
             "answer_text": str(result.final_answer or ""),
             "route": str(profile.route),

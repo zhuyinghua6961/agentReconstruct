@@ -12,7 +12,78 @@ from server.patent.executor import PatentExecutor
 from server.patent.result_builder import PatentResultBuilder, default_now_factory
 from server.runtime.request_context import clear_trace_id, set_trace_id
 from server.schemas.request_models import PatentAskRequest
+from server.services.conversation_context_builder import (
+    build_patent_conversation_context,
+    normalize_patent_conversation_context,
+)
 from server.services.mode_profiles import PatentModeProfile, get_patent_mode_profile
+
+
+def _build_context_ready_steps(*, request: PatentAskRequest, raw_context: dict[str, Any] | None) -> list[dict[str, Any]]:
+    context_payload = dict(raw_context or {})
+    if any(key in context_payload for key in ("recent_turns_for_llm", "summary_for_llm", "source_selection")):
+        normalized_context = normalize_patent_conversation_context(
+            recent_turns_for_llm=context_payload.get("recent_turns_for_llm"),
+            summary_for_llm=context_payload.get("summary_for_llm"),
+            conversation_state=context_payload.get("conversation_state"),
+            source_selection=context_payload.get("source_selection"),
+        )
+    else:
+        normalized_context = build_patent_conversation_context(
+            request=request,
+            raw_context=context_payload,
+        )
+    context_turns = len(list(normalized_context.get("recent_turns_for_llm") or []))
+    summary_available = bool(normalized_context.get("summary_for_llm"))
+    message = f"已完成上下文整理（最近 {context_turns} 条消息）"
+    if summary_available:
+        message += "并加载会话摘要"
+    return [
+        {
+            "step": "context_ready",
+            "message": message,
+            "status": "success",
+            "data": {
+                "count": context_turns,
+                "context_turns": context_turns,
+                "summary_available": summary_available,
+            },
+        }
+    ]
+
+
+def _prepend_steps(*, steps: list[dict[str, Any]], leading_steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in list(leading_steps or []) + list(steps or []):
+        if not isinstance(item, dict):
+            continue
+        payload = dict(item)
+        step_key = str(payload.get("step") or "").strip()
+        if step_key and step_key in seen:
+            continue
+        if step_key:
+            seen.add(step_key)
+        merged.append(payload)
+    return merged
+
+
+def _attach_preflight_steps(
+    *,
+    execution_result: dict[str, Any],
+    preflight_steps: list[dict[str, Any]],
+) -> dict[str, Any]:
+    payload = dict(execution_result or {})
+    merged_steps = _prepend_steps(
+        steps=list(payload.get("steps") or []),
+        leading_steps=preflight_steps,
+    )
+    payload["steps"] = merged_steps
+    metadata = dict(payload.get("metadata") or {})
+    if merged_steps:
+        metadata["steps"] = [dict(item) for item in merged_steps]
+    payload["metadata"] = metadata
+    return payload
 
 
 class AskService:
@@ -38,17 +109,25 @@ class AskService:
         try:
             self._logger.info("sync_ask start trace=%s durable=%s", request.trace_id, request.is_durable)
             prepared = self._prepare_turn(request=request, user_id=user_id)
+            preflight_steps = _build_context_ready_steps(
+                request=request,
+                raw_context=dict(prepared.get("context") or {}),
+            )
             try:
                 turn_result = self._complete_turn(request=request, prepared_turn=prepared)
+                execution_result = _attach_preflight_steps(
+                    execution_result=dict(turn_result.get("execution_result") or {}),
+                    preflight_steps=preflight_steps,
+                )
                 self._logger.info(
                     "sync_ask complete trace=%s answer_chars=%s",
                     turn_result.get("trace_id") or request.trace_id,
-                    len(str(dict(turn_result.get("execution_result") or {}).get("answer_text") or "")),
+                    len(str(execution_result.get("answer_text") or "")),
                 )
                 return self._result_builder.build_sync_success(
                     request=request,
                     trace_id=str(turn_result.get("trace_id") or prepared.get("trace_id") or request.trace_id),
-                    execution_result=dict(turn_result.get("execution_result") or {}),
+                    execution_result=execution_result,
                 )
             except Exception as exc:
                 self._logger.exception("sync_ask failed trace=%s error=%s", request.trace_id, exc)
@@ -67,6 +146,10 @@ class AskService:
         try:
             prepared = self._prepare_turn(request=request, user_id=user_id)
             trace_id = str(prepared.get("trace_id") or trace_id)
+            preflight_steps = _build_context_ready_steps(
+                request=request,
+                raw_context=dict(prepared.get("context") or {}),
+            )
             yield self._result_builder.build_metadata_event(
                 trace_id=trace_id,
                 seq=seq,
@@ -76,10 +159,13 @@ class AskService:
             )
             seq += 1
             if prepared.get("assistant_accept_skipped") and isinstance(prepared.get("execution_result"), dict):
-                execution_result = self._validate_execution_result(
-                    request=request,
-                    trace_id=trace_id,
-                    execution_result=dict(prepared.get("execution_result") or {}),
+                execution_result = _attach_preflight_steps(
+                    execution_result=self._validate_execution_result(
+                        request=request,
+                        trace_id=trace_id,
+                        execution_result=dict(prepared.get("execution_result") or {}),
+                    ),
+                    preflight_steps=preflight_steps,
                 )
                 progress_events = list(
                     self._result_builder.iter_progress_events(
@@ -100,7 +186,11 @@ class AskService:
                 return
 
             progress_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
-            streamed_step_count = 0
+            for step in preflight_steps:
+                yield self._result_builder.build_step_event(seq=seq, step=step)
+                seq += 1
+
+            streamed_step_count = len(preflight_steps)
             streamed_content_count = 0
 
             def _progress_callback(step: dict[str, Any]) -> None:
@@ -154,7 +244,10 @@ class AskService:
                 if event_type == "exception":
                     raise payload
                 if event_type == "result":
-                    execution_result = dict(payload or {})
+                    execution_result = _attach_preflight_steps(
+                        execution_result=dict(payload or {}),
+                        preflight_steps=preflight_steps,
+                    )
                     break
 
             if streamed_step_count == 0:
@@ -235,11 +328,18 @@ class AskService:
         }
 
     def _complete_turn(self, *, request: PatentAskRequest, prepared_turn: dict[str, Any]) -> dict[str, Any]:
+        preflight_steps = _build_context_ready_steps(
+            request=request,
+            raw_context=dict(prepared_turn.get("context") or {}),
+        )
         if prepared_turn.get("_completed_turn") and isinstance(prepared_turn.get("execution_result"), dict):
-            execution_result = self._validate_execution_result(
-                request=request,
-                trace_id=str(prepared_turn.get("trace_id") or request.trace_id),
-                execution_result=dict(prepared_turn.get("execution_result") or {}),
+            execution_result = _attach_preflight_steps(
+                execution_result=self._validate_execution_result(
+                    request=request,
+                    trace_id=str(prepared_turn.get("trace_id") or request.trace_id),
+                    execution_result=dict(prepared_turn.get("execution_result") or {}),
+                ),
+                preflight_steps=preflight_steps,
             )
             self._ensure_done_allowed(prepared_turn)
             return {
@@ -247,20 +347,26 @@ class AskService:
                 "execution_result": execution_result,
             }
         if prepared_turn.get("assistant_accept_skipped") and isinstance(prepared_turn.get("execution_result"), dict):
-            execution_result = self._validate_execution_result(
-                request=request,
-                trace_id=str(prepared_turn.get("trace_id") or request.trace_id),
-                execution_result=dict(prepared_turn.get("execution_result") or {}),
+            execution_result = _attach_preflight_steps(
+                execution_result=self._validate_execution_result(
+                    request=request,
+                    trace_id=str(prepared_turn.get("trace_id") or request.trace_id),
+                    execution_result=dict(prepared_turn.get("execution_result") or {}),
+                ),
+                preflight_steps=preflight_steps,
             )
             self._ensure_done_allowed(prepared_turn)
             return {
                 **dict(prepared_turn or {}),
                 "execution_result": execution_result,
             }
-        execution_result = self._validate_execution_result(
-            request=request,
-            trace_id=str(prepared_turn.get("trace_id") or request.trace_id),
-            execution_result=self._execute_turn(request=request, context=dict(prepared_turn.get("context") or {})),
+        execution_result = _attach_preflight_steps(
+            execution_result=self._validate_execution_result(
+                request=request,
+                trace_id=str(prepared_turn.get("trace_id") or request.trace_id),
+                execution_result=self._execute_turn(request=request, context=dict(prepared_turn.get("context") or {})),
+            ),
+            preflight_steps=preflight_steps,
         )
         turn_result = self._finalize_turn(
             request=request,

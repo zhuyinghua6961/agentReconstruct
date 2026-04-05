@@ -623,7 +623,7 @@ def test_executor_pdf_unreadable_fallback_emits_final_steps_before_failure_body(
     assert final_step_index < first_content_index
 
 
-def test_executor_pdf_streaming_generator_success_emits_final_step_before_first_content(tmp_path):
+def test_executor_pdf_streaming_generator_emits_content_before_final_success(tmp_path):
     pdf_path = tmp_path / "spec.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
 
@@ -655,10 +655,16 @@ def test_executor_pdf_streaming_generator_success_emits_final_step_before_first_
 
     assert result["metadata"]["answer_mode"] == "pdf_text_summary"
     first_content_index = next(index for index, item in enumerate(events) if item[0] == "content")
+    running_index = min(
+        index for index, item in enumerate(events) if item[0] == "step" and item[1] == "pdf_answer" and item[2] == "running"
+    )
     final_success_index = max(
         index for index, item in enumerate(events) if item[0] == "step" and item[1] == "pdf_answer" and item[2] == "success"
     )
-    assert final_success_index < first_content_index
+    last_content_index = max(index for index, item in enumerate(events) if item[0] == "content")
+    assert running_index < first_content_index
+    assert first_content_index < final_success_index
+    assert last_content_index < final_success_index
 
 
 def test_executor_pdf_compare_route_records_compare_steps_and_metadata_parity(tmp_path):
@@ -758,6 +764,56 @@ def test_executor_pdf_compare_success_emits_final_step_before_first_content(tmp_
         for index, item in enumerate(events)
         if item[0] == "step" and item[1] == "pdf_answer" and item[2] == "success"
     )
+    assert final_success_index < first_content_index
+
+
+def test_executor_pdf_compare_streaming_generator_emits_content_before_final_success(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+
+    def _streaming_compare(**kwargs):
+        yield "对比结果：文献 1 更强调效率提升，"
+        yield "文献 2 更强调循环保持。"
+
+    executor = PatentExecutor(
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "Abstract A.\n\nResults A observed.\n\nConclusion A final."
+                if path == str(pdf_path_a)
+                else "Abstract B.\n\nResults B observed.\n\nConclusion B final."
+            ),
+            answer_question_fn=_streaming_compare,
+        )
+    )
+    events: list[tuple[str, str, str]] = []
+
+    result = executor.execute_with_progress(
+        request=_make_file_request(
+            route="pdf_qa",
+            source_scope="pdf",
+            turn_mode="file_only",
+            question="对比一下这两篇文献的内容",
+            execution_files=[
+                {"file_id": 11, "file_type": "pdf", "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+                {"file_id": 12, "file_type": "pdf", "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+            ],
+            selected_file_ids=[11, 12],
+            trace_id="req_compare_pdf_streaming",
+        ),
+        context={"recent_turns_for_llm": []},
+        progress_callback=lambda step: events.append(("step", str(step.get("step") or ""), str(step.get("status") or ""))),
+        content_callback=lambda chunk: events.append(("content", str(chunk or ""), "")),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_text_compare"
+    final_success_index = max(
+        index
+        for index, item in enumerate(events)
+        if item[0] == "step" and item[1] == "pdf_answer" and item[2] == "success"
+    )
+    first_content_index = next(index for index, item in enumerate(events) if item[0] == "content")
     assert final_success_index < first_content_index
 
 
@@ -1104,6 +1160,7 @@ def test_executor_kb_enabled_hybrid_routes_invoke_patent_kb_participation(
         }
     ]
     assert "kb contribution" in result["answer_text"]
+    assert "Patent KB participation:" not in result["answer_text"]
     assert result["references"] == ["CN123456789A"]
     assert result["metadata"]["retrieval_backend"] == "patent-local-kb"
     assert result["timings"]["kb_ms"] == 7
@@ -1153,7 +1210,9 @@ def test_executor_hybrid_merge_uses_kb_answer_when_file_answer_is_empty():
         context={"recent_turns_for_llm": []},
     )
 
-    assert result["answer_text"] == "kb contribution"
+    assert "kb contribution" in result["answer_text"]
+    assert "Patent KB participation:" not in result["answer_text"]
+    assert "文件证据不足" in result["answer_text"]
     assert result["metadata"]["kb_participated"] is True
 
 
@@ -1210,6 +1269,7 @@ def test_executor_kb_enabled_hybrid_routes_merge_file_and_kb_evidence():
 
     assert "file contribution" in result["answer_text"]
     assert "kb contribution" in result["answer_text"]
+    assert "Patent KB participation:" not in result["answer_text"]
     assert result["references"] == ["CN123456789A"]
     assert result["reference_objects"] == [{"canonical_patent_id": "CN123456789A"}]
     assert result["reference_links"] == [
@@ -1253,7 +1313,7 @@ def test_executor_pdf_kb_hybrid_route_streams_file_and_kb_answer_in_final_order(
             answer_question_fn=lambda **kwargs: pdf_answer,
         ),
     )
-    streamed_chunks: list[str] = []
+    events: list[tuple[str, str, str]] = []
 
     result = executor.execute_with_progress(
         request=_make_file_request(
@@ -1265,13 +1325,21 @@ def test_executor_pdf_kb_hybrid_route_streams_file_and_kb_answer_in_final_order(
             trace_id="req_stream_pdf_kb",
         ),
         context={"recent_turns_for_llm": []},
-        progress_callback=None,
-        content_callback=streamed_chunks.append,
+        progress_callback=lambda step: events.append(("step", str(step.get("step") or ""), str(step.get("status") or ""))),
+        content_callback=lambda chunk: events.append(("content", str(chunk or ""), "")),
     )
 
+    streamed_chunks = [item[1] for item in events if item[0] == "content"]
     assert len(streamed_chunks) >= 3
     assert "".join(streamed_chunks) == result["answer_text"]
-    assert "Patent KB participation:" in "".join(streamed_chunks)
+    assert "Patent KB participation:" not in "".join(streamed_chunks)
+    first_content_index = next(index for index, item in enumerate(events) if item[0] == "content")
+    final_hybrid_success_index = max(
+        index
+        for index, item in enumerate(events)
+        if item[0] == "step" and item[1] == "hybrid_answer" and item[2] == "success"
+    )
+    assert first_content_index < final_hybrid_success_index
 
 
 def test_executor_dispatches_file_only_hybrid_route_to_patent_file_scaffold():
@@ -1336,9 +1404,11 @@ def test_executor_hybrid_route_uses_real_pdf_and_table_content_when_local_paths_
         context={"recent_turns_for_llm": []},
     )
 
-    assert result["metadata"]["answer_mode"] == "hybrid_file_synthesis"
-    assert "真实 PDF 总结" in result["answer_text"]
-    assert "真实表格总结" in result["answer_text"]
+    assert result["metadata"]["answer_mode"] == "hybrid_unified_synthesis"
+    assert "LMFP/LFP" in result["answer_text"]
+    assert "120mAh" in result["answer_text"]
+    assert "PDF 部分：" not in result["answer_text"]
+    assert "表格部分：" not in result["answer_text"]
     assert "Patent hybrid route combined selected PDF and table files" not in result["answer_text"]
 
 
@@ -1379,5 +1449,247 @@ def test_executor_hybrid_file_route_streams_composed_pdf_and_table_answer(tmp_pa
 
     assert len(streamed_chunks) >= 3
     assert "".join(streamed_chunks) == result["answer_text"]
-    assert "PDF 部分：" in "".join(streamed_chunks)
-    assert "表格部分：" in "".join(streamed_chunks)
+    assert "PDF 部分：" not in "".join(streamed_chunks)
+    assert "表格部分：" not in "".join(streamed_chunks)
+
+
+def test_executor_pdf_kb_hybrid_explicitly_reports_conflict_between_file_and_kb_evidence():
+    class _ConflictPdfService:
+        def execute(self, *, contract, include_kb: bool, progress_callback=None, content_callback=None):
+            return {
+                "answer_text": "文件结论：电芯容量为 120mAh。",
+                "route": contract.route,
+                "query_mode": "patent_hybrid_qa",
+                "source_scope": contract.source_scope,
+                "steps": [{"step": "pdf_answer", "title": "生成文件答案", "message": "ok", "status": "success"}],
+                "metadata": {
+                    "answer_mode": "pdf_text_summary",
+                    "pdf_evidence_context": "PDF 原文记录容量为 120mAh，循环稳定。",
+                },
+                "timings": {"pdf_ms": 3},
+                "used_files": [item.as_payload() for item in contract.selected_execution_files],
+                "file_selection": dict(contract.file_selection),
+            }
+
+    class _ConflictKbService(PatentKbService):
+        def run(self, *, request, runtime=None, conversation_context=None):
+            return {
+                "answer_text": "知识库结论：该体系容量为 90mAh。",
+                "route": request.route,
+                "query_mode": "patent_hybrid_qa",
+                "steps": [{"step": "stage4", "title": "阶段四", "message": "ok", "status": "success"}],
+                "references": ["CN123456789A"],
+                "reference_objects": [{"canonical_patent_id": "CN123456789A"}],
+                "reference_links": [],
+                "original_links": [],
+                "metadata": {
+                    "retrieval_backend": "patent-local-kb",
+                    "kb_evidence_context": "知识库证据显示容量为 90mAh。",
+                    "kb_reference_instruction": "引用知识库时使用 CN123456789A。",
+                },
+                "timings": {"kb_ms": 7},
+            }
+
+    executor = PatentExecutor(
+        kb_service=_ConflictKbService(),
+        pdf_service=_ConflictPdfService(),
+    )
+
+    result = executor.execute(
+        request=_make_file_request(
+            route="hybrid_qa",
+            source_scope="pdf+kb",
+            turn_mode="mixed",
+            execution_files=[{"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"}],
+            selected_file_ids=[11],
+            trace_id="req_pdf_kb_conflict",
+        ),
+        context={"recent_turns_for_llm": []},
+    )
+
+    assert "存在冲突" in result["answer_text"]
+    assert "120mAh" in result["answer_text"]
+    assert "90mAh" in result["answer_text"]
+    assert "source_scope=" not in result["answer_text"]
+
+
+def test_executor_pdf_kb_hybrid_does_not_report_conflict_for_same_metric_with_extra_year_number():
+    class _AlignedPdfService:
+        def execute(self, *, contract, include_kb: bool, progress_callback=None, content_callback=None):
+            return {
+                "answer_text": "文件结论：电芯容量为 120mAh。",
+                "route": contract.route,
+                "query_mode": "patent_hybrid_qa",
+                "source_scope": contract.source_scope,
+                "steps": [{"step": "pdf_answer", "title": "生成文件答案", "message": "ok", "status": "success"}],
+                "metadata": {
+                    "answer_mode": "pdf_text_summary",
+                    "pdf_evidence_context": "PDF 原文记录容量为 120mAh，循环稳定。",
+                },
+                "timings": {"pdf_ms": 3},
+                "used_files": [item.as_payload() for item in contract.selected_execution_files],
+                "file_selection": dict(contract.file_selection),
+            }
+
+    class _AlignedKbService(PatentKbService):
+        def run(self, *, request, runtime=None, conversation_context=None):
+            return {
+                "answer_text": "知识库结论：该体系容量为 120mAh，相关记录更新于 2024 年。",
+                "route": request.route,
+                "query_mode": "patent_hybrid_qa",
+                "steps": [{"step": "stage4", "title": "阶段四", "message": "ok", "status": "success"}],
+                "references": ["CN123456789A"],
+                "reference_objects": [{"canonical_patent_id": "CN123456789A"}],
+                "reference_links": [],
+                "original_links": [],
+                "metadata": {
+                    "retrieval_backend": "patent-local-kb",
+                    "kb_evidence_context": "知识库证据显示容量为 120mAh，相关年份为 2024。",
+                    "kb_reference_instruction": "引用知识库时使用 CN123456789A。",
+                },
+                "timings": {"kb_ms": 7},
+            }
+
+    executor = PatentExecutor(
+        kb_service=_AlignedKbService(),
+        pdf_service=_AlignedPdfService(),
+    )
+
+    result = executor.execute(
+        request=_make_file_request(
+            route="hybrid_qa",
+            source_scope="pdf+kb",
+            turn_mode="mixed",
+            execution_files=[{"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"}],
+            selected_file_ids=[11],
+            trace_id="req_pdf_kb_no_conflict",
+        ),
+        context={"recent_turns_for_llm": []},
+    )
+
+    assert "冲突说明" not in result["answer_text"]
+    assert "120mAh" in result["answer_text"]
+
+
+def test_executor_pdf_table_kb_hybrid_unifies_real_file_and_kb_evidence(tmp_path):
+    pdf_path = tmp_path / "spec.pdf"
+    csv_path = tmp_path / "claims.csv"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    _write_csv(csv_path)
+
+    class _HybridKbService(PatentKbService):
+        def run(self, *, request, runtime=None, conversation_context=None, progress_callback=None, content_callback=None):
+            return {
+                "answer_text": "知识库补充：相关专利族强调热稳定性和倍率性能的平衡。",
+                "route": request.route,
+                "query_mode": "patent_hybrid_qa",
+                "steps": [{"step": "stage4", "title": "阶段四", "message": "ok", "status": "success"}],
+                "references": ["CN123456789A"],
+                "reference_objects": [{"canonical_patent_id": "CN123456789A"}],
+                "reference_links": [],
+                "original_links": [],
+                "metadata": {
+                    "retrieval_backend": "patent-local-kb",
+                    "kb_evidence_context": "知识库证据指出该路线强调热稳定性与倍率性能平衡。",
+                    "kb_reference_instruction": "引用知识库时使用 CN123456789A。",
+                },
+                "timings": {"kb_ms": 7},
+            }
+
+    executor = PatentExecutor(
+        kb_service=_HybridKbService(),
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "This paper studies LMFP/LFP blending and reports safer charging behavior.",
+            answer_question_fn=lambda **kwargs: "真实 PDF 总结：LMFP/LFP 复配改善了充电安全性。",
+        ),
+        tabular_service=PatentTabularService(
+            answer_question_fn=lambda **kwargs: "真实表格总结：LMFP 120mAh，LFP 115mAh，NCM 140mAh。",
+        ),
+    )
+
+    result = executor.execute(
+        request=_make_file_request(
+            question="请结合 PDF、表格和知识库总结结论",
+            route="hybrid_qa",
+            source_scope="pdf+table+kb",
+            turn_mode="mixed",
+            execution_files=[
+                {"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf", "local_path": str(pdf_path)},
+                {"file_id": 33, "file_type": "csv", "file_name": "claims.csv", "local_path": str(csv_path)},
+            ],
+            selected_file_ids=[11, 33],
+            trace_id="req_pdf_table_kb_hybrid",
+        ),
+        context={"recent_turns_for_llm": []},
+    )
+
+    assert result["metadata"]["answer_mode"] == "hybrid_unified_synthesis"
+    assert "LMFP/LFP" in result["answer_text"]
+    assert "120mAh" in result["answer_text"]
+    assert "知识库补充" in result["answer_text"]
+    assert "CN123456789A" in result["answer_text"]
+    assert "Patent KB participation:" not in result["answer_text"]
+    assert result["metadata"]["synthesis_contract"]["source_scope"] == "pdf+table+kb"
+
+
+def test_executor_pdf_kb_hybrid_no_evidence_keeps_live_and_final_hybrid_step_in_error_state():
+    class _EmptyPdfService:
+        def execute(self, *, contract, include_kb: bool, progress_callback=None, content_callback=None):
+            return {
+                "answer_text": "当前未拿到可读的 PDF 原文内容，暂时无法生成基于文件的回答。",
+                "route": contract.route,
+                "query_mode": "patent_hybrid_qa",
+                "source_scope": contract.source_scope,
+                "steps": [{"step": "pdf_answer", "title": "生成文件答案", "message": "unavailable", "status": "error"}],
+                "metadata": {
+                    "answer_mode": "pdf_text_unavailable",
+                    "pdf_evidence_context": "",
+                },
+                "timings": {"pdf_ms": 1},
+                "used_files": [item.as_payload() for item in contract.selected_execution_files],
+                "file_selection": dict(contract.file_selection),
+            }
+
+    class _EmptyKbService(PatentKbService):
+        def run(self, *, request, runtime=None, conversation_context=None, progress_callback=None, content_callback=None):
+            return {
+                "answer_text": "",
+                "route": request.route,
+                "query_mode": "patent_hybrid_qa",
+                "steps": [{"step": "stage4", "title": "阶段四", "message": "no evidence", "status": "success"}],
+                "references": [],
+                "reference_objects": [],
+                "reference_links": [],
+                "original_links": [],
+                "metadata": {
+                    "retrieval_backend": "patent-local-kb",
+                    "kb_evidence_context": "",
+                    "kb_reference_instruction": "",
+                },
+                "timings": {"kb_ms": 1},
+            }
+
+    executor = PatentExecutor(
+        kb_service=_EmptyKbService(),
+        pdf_service=_EmptyPdfService(),
+    )
+    progress_steps: list[dict[str, object]] = []
+
+    result = executor.execute_with_progress(
+        request=_make_file_request(
+            route="hybrid_qa",
+            source_scope="pdf+kb",
+            turn_mode="mixed",
+            execution_files=[{"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"}],
+            selected_file_ids=[11],
+            trace_id="req_pdf_kb_no_evidence",
+        ),
+        context={"recent_turns_for_llm": []},
+        progress_callback=progress_steps.append,
+        content_callback=None,
+    )
+
+    hybrid_progress = [step for step in progress_steps if step.get("step") == "hybrid_answer"]
+    assert hybrid_progress[-1]["status"] == "error"
+    assert result["steps"][-1]["step"] == "hybrid_answer"
+    assert result["steps"][-1]["status"] == "error"

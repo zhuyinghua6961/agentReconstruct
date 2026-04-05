@@ -201,6 +201,7 @@ class PatentTabularService:
                 "kb_enabled": bool(include_kb),
                 "answer_mode": answer_mode,
                 "table_text_chars": len(table_text),
+                "table_evidence_context": _truncate(table_text, min(self._max_table_chars, 1200)),
             },
             "timings": {
                 "patent_tabular_route_ms": 1,

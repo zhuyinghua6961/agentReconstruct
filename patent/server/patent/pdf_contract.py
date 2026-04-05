@@ -88,6 +88,29 @@ MULTI_DOC_SCOPE_MARKERS = (
     "两篇文献",
 )
 MIN_COMPARE_DOC_CHARS = 180
+_CN_NUMERALS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+_ORDINAL_WORDS = {
+    "first": 1,
+    "second": 2,
+    "third": 3,
+    "fourth": 4,
+    "fifth": 5,
+    "sixth": 6,
+    "seventh": 7,
+    "eighth": 8,
+    "ninth": 9,
+    "tenth": 10,
+    "eleventh": 11,
+    "twelfth": 12,
+    "thirteenth": 13,
+    "fourteenth": 14,
+    "fifteenth": 15,
+    "sixteenth": 16,
+    "seventeenth": 17,
+    "eighteenth": 18,
+    "nineteenth": 19,
+    "twentieth": 20,
+}
 
 
 class CompareBudgetError(RuntimeError):
@@ -119,6 +142,64 @@ def is_compare_question(question: str, *, selected_pdf_count: int = 1) -> bool:
     if "两篇" in text and ("分别" in text or "一起" in text):
         return True
     return False
+
+
+def detect_targeted_document_index(
+    question: str,
+    *,
+    selected_pdf_count: int = 1,
+    selected_file_labels: list[str] | None = None,
+) -> int | None:
+    if int(selected_pdf_count or 0) < 2:
+        return None
+    text = str(question or "").strip().lower()
+    if not text:
+        return None
+    for index, label in enumerate(list(selected_file_labels or [])):
+        normalized_label = str(label or "").strip().lower()
+        normalized_stem = normalized_label.rsplit(".", 1)[0]
+        if normalized_label and normalized_label in text:
+            return index
+        if normalized_stem and normalized_stem in text:
+            return index
+
+    match = re.search(r"第\s*([0-9]+|[一二三四五六七八九十]+)\s*篇", text)
+    if match:
+        ordinal = _parse_ordinal_token(str(match.group(1) or ""))
+        if ordinal is not None and 1 <= ordinal <= int(selected_pdf_count):
+            return ordinal - 1
+
+    match = re.search(r"文献\s*([0-9]+|[一二三四五六七八九十]+)", text)
+    if match:
+        ordinal = _parse_ordinal_token(str(match.group(1) or ""))
+        if ordinal is not None and 1 <= ordinal <= int(selected_pdf_count):
+            return ordinal - 1
+
+    for word, ordinal in _ORDINAL_WORDS.items():
+        if re.search(rf"\b{word}\s+(?:paper|document)\b", text) and ordinal <= int(selected_pdf_count):
+            return ordinal - 1
+    return None
+
+
+def _parse_ordinal_token(token: str) -> int | None:
+    normalized = str(token or "").strip().lower()
+    if not normalized:
+        return None
+    if normalized.isdigit():
+        return int(normalized)
+    if normalized in _ORDINAL_WORDS:
+        return _ORDINAL_WORDS[normalized]
+    if normalized in _CN_NUMERALS:
+        return _CN_NUMERALS[normalized]
+    if "十" in normalized:
+        if normalized == "十":
+            return 10
+        parts = normalized.split("十", 1)
+        tens = _CN_NUMERALS.get(parts[0], 1 if parts[0] == "" else 0)
+        units = _CN_NUMERALS.get(parts[1], 0 if parts[1] == "" else 0)
+        value = tens * 10 + units
+        return value if value > 0 else None
+    return None
 
 
 def build_kb_section(kb_verification: dict | None) -> str:
@@ -780,6 +861,7 @@ __all__ = [
     "build_extractive_fallback_summary",
     "build_kb_section",
     "build_patent_pdf_answer_prompt",
+    "detect_targeted_document_index",
     "format_multi_pdf_sections",
     "is_compare_question",
     "is_summary_question",

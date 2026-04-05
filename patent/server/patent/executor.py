@@ -7,7 +7,12 @@ from typing import Any
 from server.errors import codes
 from server.errors.core import APIError
 from server.patent.file_contract import build_patent_file_contract
-from server.patent.file_routes import dispatch_patent_file_route
+from server.patent.file_routes import (
+    _has_usable_hybrid_evidence,
+    build_patent_hybrid_synthesis_contract,
+    dispatch_patent_file_route,
+    synthesize_patent_hybrid_answer,
+)
 from server.patent.kb_service import PatentKbService
 from server.patent.pdf_service import PatentPdfService
 from server.patent.retrieval_service import PatentRetrievalService
@@ -117,54 +122,115 @@ class PatentExecutor:
             pdf_service=self._pdf_service,
             tabular_service=self._tabular_service,
             progress_callback=progress_callback,
-            content_callback=content_callback,
+            content_callback=None if contract.includes_kb else content_callback,
         )
         if not contract.includes_kb:
             return file_result
-        file_answer = str(file_result.get("answer_text") or "").strip()
-        kb_stream_state = {"count": 0, "prefix": False}
 
-        def _kb_content_callback(chunk: str) -> None:
-            text = str(chunk or "")
-            if not text or not callable(content_callback):
-                return
-            if file_answer and not kb_stream_state["prefix"]:
-                emit_text_chunks("\n\nPatent KB participation: ", content_callback=content_callback)
-                kb_stream_state["prefix"] = True
-            content_callback(text)
-            kb_stream_state["count"] += 1
-
+        if callable(progress_callback):
+            progress_callback(
+                {
+                    "step": "kb_evidence",
+                    "title": "加载知识库证据",
+                    "message": "🧠 正在加载 patent 知识库证据...",
+                    "status": "running",
+                }
+            )
         kb_result = _call_with_supported_kwargs(
             self._kb_service.run,
             request=request,
             runtime=self._runtime,
             conversation_context=context,
             progress_callback=progress_callback,
-            content_callback=_kb_content_callback if callable(content_callback) else content_callback,
+            content_callback=None,
         )
-        kb_answer = str(kb_result.get("answer_text") or "").strip()
-        if callable(content_callback) and kb_answer and kb_stream_state["count"] == 0:
-            if file_answer and not kb_stream_state["prefix"]:
-                emit_text_chunks("\n\nPatent KB participation: ", content_callback=content_callback)
-                kb_stream_state["prefix"] = True
-            emit_text_chunks(kb_answer, content_callback=content_callback)
-        return self._merge_file_and_kb_results(file_result=file_result, kb_result=kb_result)
+        if callable(progress_callback):
+            progress_callback(
+                {
+                    "step": "kb_evidence",
+                    "title": "加载知识库证据",
+                    "message": "🧠 已完成 patent 知识库证据加载",
+                    "status": "success",
+                }
+            )
+            progress_callback(
+                {
+                    "step": "hybrid_answer",
+                    "title": "统一合成答案",
+                    "message": "🧩 正在统一合成文件与知识库答案...",
+                    "status": "running",
+                }
+            )
+        merged = self._merge_file_and_kb_results(file_result=file_result, kb_result=kb_result, source_scope=request.source_scope)
+        final_hybrid_step = next(
+            (
+                dict(item)
+                for item in reversed(list(merged.get("steps") or []))
+                if isinstance(item, dict) and str(item.get("step") or "").strip() == "hybrid_answer"
+            ),
+            {"step": "hybrid_answer", "title": "统一合成答案", "message": "🧩 已完成文件与知识库统一合成", "status": "success"},
+        )
+        if callable(content_callback):
+            emit_text_chunks(str(merged.get("answer_text") or ""), content_callback=content_callback)
+        if callable(progress_callback):
+            progress_callback(dict(final_hybrid_step))
+        return merged
 
     @staticmethod
     def _merge_file_and_kb_results(
         *,
         file_result: dict[str, Any],
         kb_result: dict[str, Any],
+        source_scope: str,
     ) -> dict[str, Any]:
         merged = dict(file_result or {})
         kb_payload = dict(kb_result or {})
         file_answer = str(merged.get("answer_text") or "").strip()
         kb_answer = str(kb_payload.get("answer_text") or "").strip()
-        if kb_answer:
-            merged["answer_text"] = kb_answer if not file_answer else f"{file_answer}\n\nPatent KB participation: {kb_answer}"
+        file_metadata = dict(merged.get("metadata") or {})
+        kb_metadata = dict(kb_payload.get("metadata") or {})
+        synthesis_contract = build_patent_hybrid_synthesis_contract(
+            question="",
+            source_scope=source_scope,
+            pdf_answer="" if merged.get("handler") == "tabular" else file_answer,
+            tabular_answer=file_answer if merged.get("handler") in {"tabular", "hybrid"} else "",
+            pdf_evidence_context=str(file_metadata.get("pdf_evidence_context") or ""),
+            table_execution_context=str(file_metadata.get("table_evidence_context") or ""),
+            kb_answer=kb_answer,
+            include_kb=True,
+            kb_evidence_context=str(kb_metadata.get("kb_evidence_context") or ""),
+            kb_reference_instruction=str(kb_metadata.get("kb_reference_instruction") or ""),
+        )
+        if merged.get("handler") == "hybrid":
+            existing_contract = file_metadata.get("synthesis_contract")
+            if isinstance(existing_contract, dict):
+                synthesis_contract.update(
+                    {
+                        "question": str(existing_contract.get("question") or ""),
+                        "source_scope": str(existing_contract.get("source_scope") or source_scope),
+                        "pdf_answer": str(existing_contract.get("pdf_answer") or ""),
+                        "tabular_answer": str(existing_contract.get("tabular_answer") or ""),
+                        "pdf_evidence_context": str(existing_contract.get("pdf_evidence_context") or ""),
+                        "table_execution_context": str(existing_contract.get("table_execution_context") or ""),
+                    }
+                )
+        merged["answer_text"] = synthesize_patent_hybrid_answer(synthesis_contract=synthesis_contract)
+        hybrid_success = _has_usable_hybrid_evidence(synthesis_contract=synthesis_contract)
+        prior_steps = [
+            dict(item)
+            for item in list(merged.get("steps") or [])
+            if isinstance(item, dict) and str(item.get("step") or "").strip() != "hybrid_answer"
+        ]
         merged["steps"] = [
-            *[dict(item) for item in list(merged.get("steps") or []) if isinstance(item, dict)],
+            *prior_steps,
             *[dict(item) for item in list(kb_payload.get("steps") or []) if isinstance(item, dict)],
+            {"step": "kb_evidence", "title": "加载知识库证据", "message": "🧠 已完成 patent 知识库证据加载", "status": "success"},
+            {
+                "step": "hybrid_answer",
+                "title": "统一合成答案",
+                "message": "🧩 已完成文件与知识库统一合成" if hybrid_success else "🧩 文件与知识库统一合成失败：当前没有可用于联合回答的证据",
+                "status": "success" if hybrid_success else "error",
+            },
         ]
         merged["references"] = [
             str(item).strip()
@@ -185,9 +251,12 @@ class PatentExecutor:
             kb_payload.get("original_links"),
         )
         merged["metadata"] = {
-            **dict(merged.get("metadata") or {}),
-            **dict(kb_payload.get("metadata") or {}),
+            **file_metadata,
+            **kb_metadata,
             "kb_participated": True,
+            "answer_mode": "hybrid_unified_synthesis",
+            "synthesis_contract": dict(synthesis_contract),
+            "steps": [dict(item) for item in merged["steps"]],
         }
         merged["timings"] = {
             **dict(merged.get("timings") or {}),

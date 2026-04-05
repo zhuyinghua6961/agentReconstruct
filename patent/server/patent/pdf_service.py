@@ -10,11 +10,13 @@ import httpx
 
 from server.patent.pdf_contract import (
     CompareBudgetError,
+    MULTI_DOC_HEADER_PATTERN,
     PDF_QA_SYSTEM_MESSAGE,
     build_compare_failure_message,
     build_extractive_fallback_summary,
     build_kb_section,
     build_patent_pdf_answer_prompt,
+    detect_targeted_document_index,
     format_multi_pdf_sections,
     is_compare_question,
     is_summary_question,
@@ -261,14 +263,26 @@ class PatentPdfService:
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         content_callback: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
-        used_files = [item.as_payload() for item in contract.selected_execution_files if item.family == "pdf"]
+        pdf_execution_files = [item for item in contract.selected_execution_files if item.family == "pdf"]
+        used_files = [item.as_payload() for item in pdf_execution_files]
         profile = get_patent_mode_profile(contract.route)
         selected_labels = [
             str(item.get("file_name") or f"file:{item.get('file_id') or 'unknown'}").strip()
             for item in used_files
         ]
         compare_mode = is_compare_question(contract.question, selected_pdf_count=len(selected_labels))
+        targeted_doc_index = None if compare_mode else detect_targeted_document_index(
+            contract.question,
+            selected_pdf_count=len(selected_labels),
+            selected_file_labels=selected_labels,
+        )
+        candidate_pdf_files = (
+            self._select_targeted_execution_files(pdf_execution_files=pdf_execution_files, target_index=targeted_doc_index)
+            if targeted_doc_index is not None
+            else list(pdf_execution_files)
+        )
         steps: list[dict[str, Any]] = []
+        prepared_for_generation = ""
 
         self._record_step(
             steps,
@@ -282,7 +296,9 @@ class PatentPdfService:
             },
         )
 
-        pdf_documents = self._load_pdf_documents(contract=contract)
+        pdf_documents = self._load_pdf_documents(execution_files=candidate_pdf_files)
+        if targeted_doc_index is not None:
+            selected_labels = self._select_targeted_labels(selected_labels=selected_labels, target_index=targeted_doc_index)
         pdf_text = format_multi_pdf_sections(pdf_documents)
         available_labels = [str(item.get("label") or "").strip() for item in pdf_documents if str(item.get("label") or "").strip()]
         if pdf_text:
@@ -317,6 +333,7 @@ class PatentPdfService:
                 available_file_labels=available_labels,
                 compare_mode=compare_mode,
             )
+            prepared_for_generation = str(prepared.get("prepared_pdf_text") or "")
             if compare_mode:
                 compare_status = "success" if prepared["ok"] else "error"
                 compare_message = (
@@ -497,6 +514,8 @@ class PatentPdfService:
                 "kb_enabled": bool(include_kb),
                 "answer_mode": answer_mode,
                 "pdf_text_chars": len(pdf_text),
+                "pdf_evidence_context": str(prepared_for_generation or pdf_text or "")[:1200],
+                "prepared_pdf_text": str(prepared_for_generation or ""),
                 "steps": [dict(item) for item in steps],
             },
             "timings": {
@@ -531,11 +550,9 @@ class PatentPdfService:
         if callable(progress_callback):
             progress_callback(dict(normalized))
 
-    def _load_pdf_documents(self, *, contract: PatentFileContract) -> list[dict[str, str]]:
+    def _load_pdf_documents(self, *, execution_files: list[Any]) -> list[dict[str, str]]:
         sections: list[dict[str, str]] = []
-        for item in contract.selected_execution_files:
-            if item.family != "pdf":
-                continue
+        for item in execution_files:
             local_path = str(item.payload.get("local_path") or "").strip()
             if not local_path:
                 continue
@@ -647,12 +664,19 @@ class PatentPdfService:
     ) -> dict[str, Any]:
         answer_parts: list[str] = []
         missing_labels = [label for label in selected_file_labels if label not in set(available_file_labels)]
+        live_streamed = False
 
         def _emit_stream_piece(piece: str) -> None:
+            nonlocal live_streamed
             text = str(piece or "")
             if not text:
                 return
             answer_parts.append(text)
+            # Compare answers stay buffered until completion so mid-stream failures
+            # cannot leak a misleading partial comparison body to the client.
+            if callable(content_callback) and not compare_mode:
+                content_callback(text)
+                live_streamed = True
 
         def _buffer_text(text: str) -> str:
             return str(text or "").strip()
@@ -667,12 +691,14 @@ class PatentPdfService:
             if isinstance(output, (str, bytes)):
                 answer = _buffer_text(str(output or ""))
                 if answer:
+                    if compare_mode:
+                        answer = _ensure_compare_answer_structure(answer=answer, prepared_pdf_text=prepared_pdf_text)
                     return {
                         "ok": True,
                         "answer_text": answer,
                         "answer_mode": "pdf_text_compare" if compare_mode else "pdf_text_summary",
                         "failure_reason": "",
-                        "emit_after_steps": True,
+                        "emit_after_steps": not live_streamed,
                         "stream_after_steps": False,
                     }
             else:
@@ -709,12 +735,14 @@ class PatentPdfService:
                         )
                     )
                     if answer:
+                        if compare_mode:
+                            answer = _ensure_compare_answer_structure(answer=answer, prepared_pdf_text=prepared_pdf_text)
                         return {
                             "ok": True,
                             "answer_text": answer,
                             "answer_mode": "pdf_text_compare" if compare_mode else "pdf_text_summary",
                             "failure_reason": "",
-                            "emit_after_steps": True,
+                            "emit_after_steps": not live_streamed,
                             "stream_after_steps": False,
                         }
                 except Exception:
@@ -722,12 +750,14 @@ class PatentPdfService:
 
         answer = "".join(answer_parts).strip()
         if answer:
+            if compare_mode:
+                answer = _ensure_compare_answer_structure(answer=answer, prepared_pdf_text=prepared_pdf_text)
             return {
                 "ok": True,
                 "answer_text": answer,
                 "answer_mode": "pdf_text_compare" if compare_mode else "pdf_text_summary",
                 "failure_reason": "",
-                "emit_after_steps": True,
+                "emit_after_steps": not live_streamed,
                 "stream_after_steps": False,
             }
 
@@ -779,3 +809,114 @@ class PatentPdfService:
             return "\n".join(chunks).strip()
         finally:
             doc.close()
+
+    @staticmethod
+    def _select_targeted_execution_files(*, pdf_execution_files: list[Any], target_index: int | None) -> list[Any]:
+        if target_index is None:
+            return list(pdf_execution_files)
+        if target_index < 0 or target_index >= len(pdf_execution_files):
+            return list(pdf_execution_files[:1])
+        return [pdf_execution_files[target_index]]
+
+    @staticmethod
+    def _select_targeted_labels(*, selected_labels: list[str], target_index: int) -> list[str]:
+        if target_index < 0 or target_index >= len(selected_labels):
+            return list(selected_labels[:1])
+        return [str(selected_labels[target_index]).strip()]
+
+
+def _ensure_compare_answer_structure(*, answer: str, prepared_pdf_text: str) -> str:
+    normalized_answer = str(answer or "").strip()
+    if not normalized_answer:
+        return normalized_answer
+    document_summaries = _extract_document_summaries(prepared_pdf_text=prepared_pdf_text)
+    if _has_ordered_compare_sections(normalized_answer) and _has_compare_document_coverage(
+        answer=normalized_answer,
+        document_summaries=document_summaries,
+    ):
+        return normalized_answer
+    if not document_summaries:
+        return normalized_answer
+
+    doc_count = len(document_summaries)
+    outlines = "\n".join(
+        f"{index}. {label}：{summary}"
+        for index, (label, summary) in enumerate(document_summaries, start=1)
+    )
+    shared_points = (
+        f"这 {doc_count} 篇文献都提供了可比较的原文证据，可围绕研究目标、方法、结果和结论进行对照。"
+        if doc_count > 1
+        else "该文献提供了可比较的原文证据。"
+    )
+    summary_line = _first_sentence(normalized_answer) or "综合来看，所选文献在关键结果和结论上存在可识别差异。"
+    return (
+        "各自概要：\n"
+        f"{outlines}\n\n"
+        "相同点：\n"
+        f"- {shared_points}\n\n"
+        "差异点：\n"
+        f"- {normalized_answer}\n\n"
+        "总结：\n"
+        f"{summary_line}"
+    ).strip()
+
+
+def _extract_document_summaries(*, prepared_pdf_text: str) -> list[tuple[str, str]]:
+    matches = list(MULTI_DOC_HEADER_PATTERN.finditer(str(prepared_pdf_text or "")))
+    if not matches:
+        return []
+    summaries: list[tuple[str, str]] = []
+    source_text = str(prepared_pdf_text or "")
+    for index, matched in enumerate(matches):
+        start = matched.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(source_text)
+        header = str(matched.group(0) or "").strip().strip("=")
+        label = header.split(":", 1)[1].strip() if ":" in header else f"文献 {index + 1}"
+        body = re.sub(r"\s+", " ", source_text[start:end]).strip()
+        body = re.sub(r"\[注意：.*?\]$", "", body).strip()
+        snippet = body[:180].rstrip("，,；; ")
+        if len(body) > 180:
+            snippet += "…"
+        if label and snippet:
+            summaries.append((label, snippet))
+    return summaries
+
+
+def _first_sentence(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not normalized:
+        return ""
+    parts = re.split(r"(?<=[。！？.!?])\s+", normalized, maxsplit=1)
+    return str(parts[0] or "").strip()
+
+
+def _has_ordered_compare_sections(text: str) -> bool:
+    normalized = str(text or "")
+    patterns = (
+        r"(^|\n)\s*各自概要\s*[：:]",
+        r"(^|\n)\s*相同点\s*[：:]",
+        r"(^|\n)\s*差异点\s*[：:]",
+        r"(^|\n)\s*总结\s*[：:]",
+    )
+    last_end = -1
+    for pattern in patterns:
+        matched = re.search(pattern, normalized, flags=re.MULTILINE)
+        if matched is None or matched.start() <= last_end:
+            return False
+        last_end = matched.start()
+    return True
+
+
+def _has_compare_document_coverage(*, answer: str, document_summaries: list[tuple[str, str]]) -> bool:
+    if not document_summaries:
+        return False
+    normalized_answer = str(answer or "")
+    for label, summary in document_summaries:
+        summary_snippet = str(summary or "").strip("…")
+        summary_tokens = [token for token in re.split(r"[\s,，。；;:：]+", summary_snippet) if len(token) >= 6]
+        label_present = bool(label and label in normalized_answer)
+        fact_present = any(token in normalized_answer for token in summary_tokens[:3])
+        if label_present and fact_present:
+            continue
+        return False
+    return True

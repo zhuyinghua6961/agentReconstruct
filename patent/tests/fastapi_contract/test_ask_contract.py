@@ -2298,6 +2298,8 @@ def test_http_stream_pdf_compare_route_emits_context_and_compare_steps_before_do
         "multi_pdf_compare",
         "pdf_answer",
     ]
+    assert "paper-a.pdf" in events[-1]["metadata"]["prepared_pdf_text"]
+    assert "paper-b.pdf" in events[-1]["metadata"]["prepared_pdf_text"]
     assert events[-1]["metadata"]["steps"] == [dict(step) for step in events[-1]["metadata"]["steps"]]
     assert events[-1]["type"] == "done"
 
@@ -2329,7 +2331,7 @@ def test_http_stream_pdf_unreadable_fallback_emits_final_steps_before_failure_bo
     assert final_step_index < first_content_index
 
 
-def test_http_stream_pdf_generator_success_emits_final_step_before_first_content(monkeypatch, tmp_path):
+def test_http_stream_pdf_generator_emits_content_before_final_success(monkeypatch, tmp_path):
     monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
     app = create_app()
     pdf_path = tmp_path / "spec.pdf"
@@ -2353,12 +2355,20 @@ def test_http_stream_pdf_generator_success_emits_final_step_before_first_content
     assert response.status_code == 200
     events = _stream_events(response)
     first_content_index = next(index for index, event in enumerate(events) if event["type"] == "content")
+    running_index = min(
+        index
+        for index, event in enumerate(events)
+        if event["type"] == "step" and event["step"] == "pdf_answer" and event["status"] == "running"
+    )
     final_success_index = max(
         index
         for index, event in enumerate(events)
         if event["type"] == "step" and event["step"] == "pdf_answer" and event["status"] == "success"
     )
-    assert final_success_index < first_content_index
+    last_content_index = max(index for index, event in enumerate(events) if event["type"] == "content")
+    assert running_index < first_content_index
+    assert first_content_index < final_success_index
+    assert last_content_index < final_success_index
 
 
 def test_http_stream_pdf_compare_success_emits_final_step_before_first_content(monkeypatch, tmp_path):
@@ -2393,6 +2403,46 @@ def test_http_stream_pdf_compare_success_emits_final_step_before_first_content(m
         for index, event in enumerate(events)
         if event["type"] == "step" and event["step"] == "pdf_answer" and event["status"] == "success"
     )
+    assert final_success_index < first_content_index
+
+
+def test_http_stream_pdf_compare_generator_emits_content_before_final_success(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+
+    def _streaming_compare(**kwargs):
+        yield "对比结果：文献 1 更强调效率提升，"
+        yield "文献 2 更强调循环保持。"
+
+    app.state.ask_service._patent_executor._pdf_service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: (
+            "Abstract A.\n\nResults A observed.\n\nConclusion A final."
+            if path == str(pdf_path_a)
+            else "Abstract B.\n\nResults B observed.\n\nConclusion B final."
+        ),
+        answer_question_fn=_streaming_compare,
+    )
+    payload = _pdf_compare_payload()
+    payload["execution_files"][0]["local_path"] = str(pdf_path_a)
+    payload["execution_files"][1]["local_path"] = str(pdf_path_b)
+    payload["used_files"][0]["local_path"] = str(pdf_path_a)
+    payload["used_files"][1]["local_path"] = str(pdf_path_b)
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask_stream", json=payload)
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    final_success_index = max(
+        index
+        for index, event in enumerate(events)
+        if event["type"] == "step" and event["step"] == "pdf_answer" and event["status"] == "success"
+    )
+    first_content_index = next(index for index, event in enumerate(events) if event["type"] == "content")
     assert final_success_index < first_content_index
 
 
@@ -2629,10 +2679,104 @@ def test_http_sync_hybrid_route_uses_real_pdf_and_table_content_instead_of_stub(
 
     assert response.status_code == 200
     body = response.json()
-    assert "真实 PDF 总结" in body["final_answer"]
-    assert "真实表格总结" in body["final_answer"]
+    assert "LMFP/LFP" in body["final_answer"]
+    assert "120mAh" in body["final_answer"]
+    assert "PDF 部分：" not in body["final_answer"]
+    assert "表格部分：" not in body["final_answer"]
     assert "Patent hybrid route combined selected PDF and table files" not in body["final_answer"]
-    assert body["metadata"]["answer_mode"] == "hybrid_file_synthesis"
+    assert body["metadata"]["answer_mode"] == "hybrid_unified_synthesis"
+
+
+def test_http_sync_hybrid_pdf_table_kb_route_keeps_context_dispatch_and_unified_answer(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    pdf_path = tmp_path / "spec.pdf"
+    csv_path = tmp_path / "claims.csv"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    _write_csv(csv_path)
+    app.state.ask_service._patent_executor._pdf_service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: "This paper studies LMFP/LFP blending and reports safer charging behavior.",
+        answer_question_fn=lambda **kwargs: "真实 PDF 总结：LMFP/LFP 复配改善了充电安全性。",
+    )
+    app.state.ask_service._patent_executor._tabular_service = PatentTabularService(
+        answer_question_fn=lambda **kwargs: "真实表格总结：LMFP 120mAh，LFP 115mAh，NCM 140mAh。",
+    )
+
+    class _HybridKbService:
+        def run(self, *, request, runtime=None, conversation_context=None, progress_callback=None, content_callback=None):
+            return {
+                "answer_text": "知识库补充：相关专利族强调热稳定性和倍率性能的平衡。",
+                "route": request.route,
+                "query_mode": "patent_hybrid_qa",
+                "steps": [{"step": "stage4", "title": "阶段四", "message": "ok", "status": "success"}],
+                "references": ["CN123456789A"],
+                "reference_objects": [{"canonical_patent_id": "CN123456789A"}],
+                "reference_links": [],
+                "original_links": [],
+                "metadata": {
+                    "retrieval_backend": "patent-local-kb",
+                    "kb_evidence_context": "知识库证据指出该路线强调热稳定性与倍率性能平衡。",
+                    "kb_reference_instruction": "引用知识库时使用 CN123456789A。",
+                },
+                "timings": {"kb_ms": 7},
+            }
+
+    app.state.ask_service._patent_executor._kb_service = _HybridKbService()
+    payload = _hybrid_payload("pdf+table+kb")
+    payload["execution_files"][0]["local_path"] = str(pdf_path)
+    payload["used_files"][0]["local_path"] = str(pdf_path)
+    payload["execution_files"][1].update({"file_type": "csv", "file_name": "claims.csv", "local_path": str(csv_path)})
+    payload["used_files"][1].update({"file_type": "csv", "file_name": "claims.csv", "local_path": str(csv_path)})
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["metadata"]["answer_mode"] == "hybrid_unified_synthesis"
+    assert "LMFP/LFP" in body["final_answer"]
+    assert "120mAh" in body["final_answer"]
+    assert "知识库补充" in body["final_answer"]
+    assert "CN123456789A" in body["final_answer"]
+    assert [step["step"] for step in body["metadata"]["steps"][:2]] == ["context_ready", "dispatch"]
+    assert body["metadata"]["steps"][-1]["step"] == "hybrid_answer"
+    assert body["metadata"]["steps"][-1]["status"] == "success"
+
+
+def test_http_sync_pdf_route_with_two_selected_files_and_single_target_question_uses_only_first_document(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    seen_inputs: list[str] = []
+    app.state.ask_service._patent_executor._pdf_service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: (
+            "Abstract A unique fact.\n\nResults A report 15% efficiency improvement."
+            if path == str(pdf_path_a)
+            else "Abstract B unique fact.\n\nResults B report 200-cycle retention."
+        ),
+        answer_question_fn=lambda **kwargs: seen_inputs.append(str(kwargs.get("pdf_text") or "")) or "第一篇文献总结：聚焦效率提升。",
+    )
+    payload = _pdf_compare_payload()
+    payload["question"] = "请总结第一篇文献的研究内容"
+    payload["execution_files"][0]["local_path"] = str(pdf_path_a)
+    payload["execution_files"][1]["local_path"] = str(pdf_path_b)
+    payload["used_files"][0]["local_path"] = str(pdf_path_a)
+    payload["used_files"][1]["local_path"] = str(pdf_path_b)
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["metadata"]["answer_mode"] == "pdf_text_summary"
+    assert len(seen_inputs) == 1
+    assert "paper-a.pdf" in seen_inputs[0]
+    assert "15% efficiency improvement" in seen_inputs[0]
+    assert "paper-b.pdf" not in seen_inputs[0]
+    assert "200-cycle retention" not in seen_inputs[0]
 
 
 def test_http_stream_hybrid_route_emits_file_progress_steps_before_done(monkeypatch, tmp_path):
@@ -2722,8 +2866,14 @@ def test_http_stream_hybrid_pdf_kb_route_emits_incremental_content_before_done(m
 
     assert len(content_events) >= 3
     assert "".join(event["content"] for event in content_events) == events[-1]["final_answer"]
-    assert "Patent KB participation:" in "".join(event["content"] for event in content_events)
+    assert "Patent KB participation:" not in "".join(event["content"] for event in content_events)
     assert events.index(content_events[0]) < len(events) - 1
+    final_hybrid_success_index = max(
+        index
+        for index, event in enumerate(events)
+        if event["type"] == "step" and event["step"] == "hybrid_answer" and event["status"] == "success"
+    )
+    assert events.index(content_events[0]) < final_hybrid_success_index
     assert events[-1]["type"] == "done"
 
 

@@ -11,6 +11,7 @@ from server.patent.pdf_contract import (
     build_compare_failure_message,
     build_kb_section,
     build_patent_pdf_answer_prompt,
+    detect_targeted_document_index,
     format_multi_pdf_sections,
     is_compare_question,
     is_summary_question,
@@ -135,6 +136,17 @@ def test_compare_detection_rejects_single_document_questions_even_with_multiple_
     assert is_compare_question("第一篇文献的方法是什么", selected_pdf_count=2) is False
     assert is_compare_question("比较第一篇文献中的方法和结果", selected_pdf_count=2) is False
     assert is_compare_question("对比第一篇文献里两种工艺的差异", selected_pdf_count=2) is False
+
+
+def test_detect_targeted_document_index_supports_ordinals_and_file_names():
+    labels = ["paper-a.pdf", "paper-b.pdf", "paper-c.pdf"]
+
+    assert detect_targeted_document_index("请总结第三篇文献", selected_pdf_count=3, selected_file_labels=labels) == 2
+    assert detect_targeted_document_index("只看 paper-b.pdf 的方法", selected_pdf_count=3, selected_file_labels=labels) == 1
+    assert detect_targeted_document_index("Summarize the third document only", selected_pdf_count=3, selected_file_labels=labels) == 2
+    long_labels = [f"paper-{index}.pdf" for index in range(1, 15)]
+    assert detect_targeted_document_index("请总结第十四篇文献", selected_pdf_count=14, selected_file_labels=long_labels) == 13
+    assert detect_targeted_document_index("Summarize the eleventh document only", selected_pdf_count=14, selected_file_labels=long_labels) == 10
 
 
 def test_multi_pdf_format_uses_fastqa_compatible_headers():
