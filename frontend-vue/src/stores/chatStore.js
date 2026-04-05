@@ -8,11 +8,13 @@ export const useChatStore = defineStore('chat', () => {
   const DEFAULT_CHAT_TITLE = '新对话'
   const CHATS_STORAGE_KEY = 'lfp_chats'
   const ACTIVE_CHAT_STORAGE_KEY = 'lfp_current_chat_id'
+  const MAX_CONCURRENT_BUSY_CHATS = 5
 
   // 状态
   const chats = ref([])
   const currentChatId = ref(null)
-  const isStreaming = ref(false)
+  const legacyStreamingState = ref(false)
+  const chatBusyRuntime = ref({})
   const kbInfo = ref({
     loading: true,
     size: 0,
@@ -41,11 +43,163 @@ export const useChatStore = defineStore('chat', () => {
     currentChat.value?.messages || []
   )
 
+  const activeBusyCount = computed(() => Object.keys(chatBusyRuntime.value || {}).length)
+  const hasBusyCapacity = computed(() => activeBusyCount.value < MAX_CONCURRENT_BUSY_CHATS)
+  const isStreaming = computed(() => legacyStreamingState.value || activeBusyCount.value > 0)
+
   function toTimestamp(value) {
     if (!value) return 0
     if (value instanceof Date) return value.getTime()
     const parsed = Date.parse(String(value))
     return Number.isFinite(parsed) ? parsed : 0
+  }
+
+  function normalizeBusyChatId(chatId) {
+    return String(chatId || '').trim()
+  }
+
+  function countBusyRuntimeEntries(runtimeMap = {}) {
+    return Object.keys(runtimeMap || {}).length
+  }
+
+  function applyBusyRuntimeMutation(mutator, options = {}) {
+    const previousIsStreaming = Boolean(legacyStreamingState.value || countBusyRuntimeEntries(chatBusyRuntime.value) > 0)
+    const nextRuntimeMap = { ...(chatBusyRuntime.value || {}) }
+    mutator(nextRuntimeMap)
+    chatBusyRuntime.value = nextRuntimeMap
+    const nextIsStreaming = Boolean(legacyStreamingState.value || countBusyRuntimeEntries(nextRuntimeMap) > 0)
+    if (options?.persist !== false && shouldForcePersistForStreamingTransition({ previousIsStreaming, nextIsStreaming })) {
+      saveChats({ force: true })
+    }
+  }
+
+  function getChatBusyRuntime(chatId) {
+    const normalizedChatId = normalizeBusyChatId(chatId)
+    if (!normalizedChatId) return null
+    return chatBusyRuntime.value[normalizedChatId] || null
+  }
+
+  function isChatBusy(chatId) {
+    return Boolean(getChatBusyRuntime(chatId))
+  }
+
+  function isChatStreaming(chatId) {
+    return getChatBusyRuntime(chatId)?.phase === 'streaming'
+  }
+
+  function isChatStopRequested(chatId) {
+    return Boolean(getChatBusyRuntime(chatId)?.stopRequested)
+  }
+
+  function startChatBusyRuntime(chatId, options = {}) {
+    const normalizedChatId = normalizeBusyChatId(chatId)
+    if (!normalizedChatId) {
+      return { ok: false, reason: 'invalid_chat' }
+    }
+    if (isChatBusy(normalizedChatId)) {
+      return { ok: false, reason: 'chat_busy' }
+    }
+    if (!hasBusyCapacity.value) {
+      return { ok: false, reason: 'capacity_reached' }
+    }
+
+    const nextPhase = String(options?.phase || 'dispatching').trim().toLowerCase() === 'streaming'
+      ? 'streaming'
+      : 'dispatching'
+
+    applyBusyRuntimeMutation((runtimeMap) => {
+      runtimeMap[normalizedChatId] = {
+        chatId: normalizedChatId,
+        phase: nextPhase,
+        stopRequested: false,
+        requestId: String(options?.requestId || '').trim(),
+        targetMessageIndex: Number.isInteger(options?.targetMessageIndex) ? options.targetMessageIndex : -1,
+        startedAt: new Date().toISOString(),
+      }
+    })
+
+    return { ok: true, reason: '' }
+  }
+
+  function markChatBusyStreaming(chatId, options = {}) {
+    const normalizedChatId = normalizeBusyChatId(chatId)
+    const currentRuntime = getChatBusyRuntime(normalizedChatId)
+    if (!currentRuntime) return false
+
+    applyBusyRuntimeMutation((runtimeMap) => {
+      runtimeMap[normalizedChatId] = {
+        ...currentRuntime,
+        phase: 'streaming',
+        stopRequested: Boolean(currentRuntime?.stopRequested),
+        ...(options?.requestId !== undefined ? { requestId: String(options.requestId || '').trim() } : {}),
+        ...(options?.targetMessageIndex !== undefined
+          ? { targetMessageIndex: Number.isInteger(options.targetMessageIndex) ? options.targetMessageIndex : -1 }
+          : {}),
+      }
+    })
+
+    return true
+  }
+
+  function removeChatBusyRuntime(chatId, options = {}) {
+    const normalizedChatId = normalizeBusyChatId(chatId)
+    if (!getChatBusyRuntime(normalizedChatId)) return false
+
+    applyBusyRuntimeMutation((runtimeMap) => {
+      delete runtimeMap[normalizedChatId]
+    }, options)
+
+    return true
+  }
+
+  function moveChatBusyRuntime(chatId, nextChatId) {
+    const normalizedChatId = normalizeBusyChatId(chatId)
+    const normalizedNextChatId = normalizeBusyChatId(nextChatId)
+    if (!normalizedChatId || !normalizedNextChatId || normalizedChatId === normalizedNextChatId) return false
+
+    const currentRuntime = getChatBusyRuntime(normalizedChatId)
+    if (!currentRuntime) return false
+
+    applyBusyRuntimeMutation((runtimeMap) => {
+      delete runtimeMap[normalizedChatId]
+      runtimeMap[normalizedNextChatId] = {
+        ...currentRuntime,
+        chatId: normalizedNextChatId,
+      }
+    }, { persist: false })
+
+    return true
+  }
+
+  function finishChatBusyRuntime(chatId) {
+    return removeChatBusyRuntime(chatId)
+  }
+
+  function requestChatBusyStop(chatId) {
+    const normalizedChatId = normalizeBusyChatId(chatId)
+    const currentRuntime = getChatBusyRuntime(normalizedChatId)
+    if (!currentRuntime) return false
+
+    applyBusyRuntimeMutation((runtimeMap) => {
+      runtimeMap[normalizedChatId] = {
+        ...currentRuntime,
+        stopRequested: true,
+      }
+    }, { persist: false })
+
+    return true
+  }
+
+  function stopChatBusyRuntime(chatId) {
+    return requestChatBusyStop(chatId)
+  }
+
+  function clearChatBusyRuntime(options = {}) {
+    applyBusyRuntimeMutation((runtimeMap) => {
+      Object.keys(runtimeMap).forEach((chatId) => {
+        delete runtimeMap[chatId]
+      })
+    }, options)
   }
 
   function sortChatsInPlace() {
@@ -563,6 +717,9 @@ export const useChatStore = defineStore('chat', () => {
   // ==================== 对话加载（服务器优先）====================
   
   async function loadChats() {
+    legacyStreamingState.value = false
+    clearChatBusyRuntime({ persist: false })
+
     const uid = getUserId()
     const saved = localStorage.getItem(CHATS_STORAGE_KEY)
     let cachedChats = []
@@ -743,6 +900,7 @@ export const useChatStore = defineStore('chat', () => {
     if (chat && chat.synced) {
       const uid = getUserId()
       if (uid) {
+        const wasBusyAtSwitchStart = isChatBusy(normalizedChatId)
         try {
           console.log('[switchChat] 从服务器加载对话详情...')
           const response = await api.getConversationDetail(parseInt(chat.id), uid)
@@ -754,41 +912,47 @@ export const useChatStore = defineStore('chat', () => {
           }
           
           if (response.messages) {
-            const cachedMessages = Array.isArray(chat.messages) ? [...chat.messages] : []
-            const mergedMessages = response.messages.map((message, index) => {
-              const cached = cachedMessages[index]
-              const sameMessage = cached
-                && normalizeComparableRole(cached?.role || '') === normalizeComparableRole(message?.role || '')
-                && String(cached?.content || '') === String(message?.content || '')
-              if (!sameMessage) {
-                return normalizeMessage(message)
-              }
-              const mergedSameMessage = {
-                ...cached,
-                ...message,
-                metadata: {
-                  ...(cached?.metadata && typeof cached.metadata === 'object' ? cached.metadata : {}),
-                  ...(message?.metadata && typeof message.metadata === 'object' ? message.metadata : {}),
-                },
-              }
+            const shouldPreserveBusyMessages = wasBusyAtSwitchStart || isChatBusy(normalizedChatId)
+            if (!shouldPreserveBusyMessages) {
+              const cachedMessages = Array.isArray(chat.messages) ? [...chat.messages] : []
+              const mergedMessages = response.messages.map((message, index) => {
+                const cached = cachedMessages[index]
+                const sameMessage = cached
+                  && normalizeComparableRole(cached?.role || '') === normalizeComparableRole(message?.role || '')
+                  && String(cached?.content || '') === String(message?.content || '')
+                if (!sameMessage) {
+                  return normalizeMessage(message)
+                }
+                const mergedSameMessage = {
+                  ...cached,
+                  ...message,
+                  metadata: {
+                    ...(cached?.metadata && typeof cached.metadata === 'object' ? cached.metadata : {}),
+                    ...(message?.metadata && typeof message.metadata === 'object' ? message.metadata : {}),
+                  },
+                }
 
-              // Preserve locally restored incomplete/expanded UI state when the server
-              // detail payload does not carry the corresponding state for the same message.
-              const serverProvidedIsComplete = Object.prototype.hasOwnProperty.call(message || {}, 'isComplete')
-              const serverProvidedStepsCollapsed = Object.prototype.hasOwnProperty.call(message || {}, 'stepsCollapsed')
+                // Preserve locally restored incomplete/expanded UI state when the server
+                // detail payload does not carry the corresponding state for the same message.
+                const serverProvidedIsComplete = Object.prototype.hasOwnProperty.call(message || {}, 'isComplete')
+                const serverProvidedStepsCollapsed = Object.prototype.hasOwnProperty.call(message || {}, 'stepsCollapsed')
 
-              if (cached?.isComplete === false && !serverProvidedIsComplete) {
-                mergedSameMessage.isComplete = false
-              }
-              if (cached?.stepsCollapsed === true && !serverProvidedStepsCollapsed) {
-                mergedSameMessage.stepsCollapsed = true
-              }
+                if (cached?.isComplete === false && !serverProvidedIsComplete) {
+                  mergedSameMessage.isComplete = false
+                }
+                if (cached?.stepsCollapsed === true && !serverProvidedStepsCollapsed) {
+                  mergedSameMessage.stepsCollapsed = true
+                }
 
-              return normalizeMessage(mergedSameMessage)
-            })
-            // 使用 Vue 3 的响应式方式更新数组
-            chat.messages = mergedMessages
-            chat.messageCount = Number(response.message_count || mergedMessages.length)
+                return normalizeMessage(mergedSameMessage)
+              })
+              // 使用 Vue 3 的响应式方式更新数组
+              chat.messages = mergedMessages
+              chat.messageCount = Number(response.message_count || mergedMessages.length)
+            } else {
+              const localMessageCount = Array.isArray(chat.messages) ? chat.messages.length : 0
+              chat.messageCount = Math.max(Number(response.message_count || 0), localMessageCount)
+            }
             chat.updatedAt = response.updated_at || chat.updatedAt
             chat.syncStatus = 'synced'
             
@@ -830,6 +994,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   async function deleteChat(chatId) {
+    removeChatBusyRuntime(chatId, { persist: false })
     const chat = chats.value.find(c => c.id === chatId)
     const uid = getUserId()
     
@@ -854,6 +1019,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function clearAllChats() {
+    clearChatBusyRuntime({ persist: false })
     chats.value = []
     currentChatId.value = null
     saveChats()
@@ -861,32 +1027,34 @@ export const useChatStore = defineStore('chat', () => {
 
   // ==================== 消息管理 ====================
   
-  async function addUserMessage(content) {
+  async function addUserMessage(content, options = {}) {
     console.log('[addUserMessage] 开始添加用户消息')
-    console.log('[addUserMessage] currentChat.value:', currentChat.value)
+    const requestedChatId = String(options?.chatId || currentChatId.value || '').trim()
+    let targetChat = chats.value.find(c => c.id === requestedChatId) || null
+    console.log('[addUserMessage] targetChat:', targetChat)
     console.log('[addUserMessage] currentChatId.value:', currentChatId.value)
     
-    if (!currentChat.value) {
-      console.error('[addUserMessage] ❌ currentChat.value 为空，无法添加消息')
-      return
+    if (!targetChat) {
+      console.error('[addUserMessage] ❌ 目标对话为空，无法添加消息')
+      return null
     }
     
     const uid = getUserId()
     console.log('[addUserMessage] userId:', uid)
     
     // 如果是第一次发送消息且对话未同步，先在服务器创建对话
-    if (!currentChat.value.synced && currentChat.value.messages.length === 0 && uid) {
+    if (!targetChat.synced && targetChat.messages.length === 0 && uid) {
       console.log('[addUserMessage] 检测到首次发送消息，准备创建服务器对话')
       try {
         syncStatus.value = 'syncing'
-        currentChat.value.syncStatus = 'syncing'
+        targetChat.syncStatus = 'syncing'
         const title = buildAutoTitleFromText(content)
         console.log('[addUserMessage] 调用 api.createConversation, title:', title)
         const response = await api.createConversation(uid, title)
         console.log('[addUserMessage] 服务器返回:', response)
         
         // 保存旧的本地id
-        const oldId = currentChatId.value
+        const oldId = requestedChatId
         console.log('[addUserMessage] 旧的本地id:', oldId)
         
         // 🔧 关键修复：直接在 chats 数组中找到并更新对话对象
@@ -901,15 +1069,19 @@ export const useChatStore = defineStore('chat', () => {
           chats.value[chatIndex].updatedAt = response.updated_at
           chats.value[chatIndex].synced = true
           chats.value[chatIndex].syncStatus = 'synced'
+          moveChatBusyRuntime(oldId, newId)
           
-          // 同步更新 currentChatId
-          currentChatId.value = newId
+          // 仅在用户仍停留在原会话时切换当前会话ID
+          if (currentChatId.value === oldId) {
+            currentChatId.value = newId
+          }
+          targetChat = chats.value[chatIndex]
           
           console.log('[addUserMessage] ✅ 对话ID已更新:', oldId, '->', newId)
           console.log('[addUserMessage] ✅ currentChatId已同步:', currentChatId.value)
           
           // 验证更新后的状态
-          const verifyChat = chats.value.find(c => c.id === currentChatId.value)
+          const verifyChat = chats.value.find(c => c.id === newId)
           console.log('[addUserMessage] 验证 currentChat:', verifyChat ? '✅ 找到' : '❌ 找不到')
           if (verifyChat) {
             console.log('[addUserMessage] 验证详情 - id:', verifyChat.id, 'synced:', verifyChat.synced, 'messages:', verifyChat.messages.length)
@@ -922,9 +1094,7 @@ export const useChatStore = defineStore('chat', () => {
       } catch (e) {
         console.error('[addUserMessage] ❌ 创建服务器对话失败:', e)
         syncStatus.value = 'failed'
-        if (currentChat.value) {
-          currentChat.value.syncStatus = 'failed'
-        }
+        targetChat.syncStatus = 'failed'
         // 即使创建失败，也继续添加消息到本地
       }
     }
@@ -935,13 +1105,14 @@ export const useChatStore = defineStore('chat', () => {
       timestamp: new Date()
     }
     
-    currentChat.value.messages.push(message)
-    touchChat(currentChat.value, message.timestamp)
+    targetChat.messages.push(message)
+    touchChat(targetChat, message.timestamp)
     
     // 自动生成标题（如果还没有自定义标题）
-    const userMessageCount = countMessagesByRole(currentChat.value.messages, 'user')
-    if (userMessageCount === 1 && isPlaceholderTitle(currentChat.value.title)) {
-      void updateCurrentChatTitle(content, { persist: !!currentChat.value.synced })
+    const userMessageCount = countMessagesByRole(targetChat.messages, 'user')
+    if (userMessageCount === 1 && isPlaceholderTitle(targetChat.title)) {
+      targetChat.title = buildAutoTitleFromText(content)
+      saveChats()
     } else {
       saveChats()
     }
@@ -949,13 +1120,16 @@ export const useChatStore = defineStore('chat', () => {
     // 注意：不在这里同步用户消息到服务器
     // 用户消息会在 ask_stream 接口中统一保存，避免重复
     console.log('[addUserMessage] ✅ 用户消息已添加到本地，等待 ask_stream 保存到服务器')
+    return targetChat
   }
 
-  async function addBotMessage(message) {
-    if (!currentChat.value) {
-      console.error('[addBotMessage] ❌ currentChat.value 为空，无法添加Bot消息')
+  async function addBotMessage(message, options = {}) {
+    const targetChatId = String(options?.chatId || currentChatId.value || '').trim()
+    const targetChat = chats.value.find(c => c.id === targetChatId) || null
+    if (!targetChat) {
+      console.error('[addBotMessage] ❌ 目标对话为空，无法添加Bot消息')
       console.error('[addBotMessage] chats.value:', chats.value)
-      console.error('[addBotMessage] 尝试查找对话:', chats.value.find(c => c.id === currentChatId.value))
+      console.error('[addBotMessage] 尝试查找对话:', chats.value.find(c => c.id === targetChatId))
       return
     }
     
@@ -965,8 +1139,8 @@ export const useChatStore = defineStore('chat', () => {
       timestamp: new Date()
     }
     
-    currentChat.value.messages.push(botMessage)
-    touchChat(currentChat.value, botMessage.timestamp)
+    targetChat.messages.push(botMessage)
+    touchChat(targetChat, botMessage.timestamp)
     saveChats()
     
     // 注意：不在这里同步到服务器，因为消息可能还不完整
@@ -1045,8 +1219,9 @@ export const useChatStore = defineStore('chat', () => {
   
   function setStreaming(value) {
     const previousIsStreaming = isStreaming.value
-    isStreaming.value = value
-    if (shouldForcePersistForStreamingTransition({ previousIsStreaming, nextIsStreaming: value })) {
+    legacyStreamingState.value = Boolean(value)
+    const nextIsStreaming = isStreaming.value
+    if (shouldForcePersistForStreamingTransition({ previousIsStreaming, nextIsStreaming })) {
       saveChats({ force: true })
     }
   }
@@ -1405,6 +1580,8 @@ export const useChatStore = defineStore('chat', () => {
     currentChatId,
     currentChat,
     currentMessages,
+    activeBusyCount,
+    hasBusyCapacity,
     isStreaming,
     kbInfo,
     userId,
@@ -1417,6 +1594,16 @@ export const useChatStore = defineStore('chat', () => {
     buildAutoTitleFromFileName,
     updateCurrentChatTitle,
     switchChat,
+    getChatBusyRuntime,
+    isChatBusy,
+    isChatStreaming,
+    isChatStopRequested,
+    startChatBusyRuntime,
+    markChatBusyStreaming,
+    finishChatBusyRuntime,
+    requestChatBusyStop,
+    stopChatBusyRuntime,
+    clearChatBusyRuntime,
     togglePinned,
     persistLocalState,
     deleteChat,

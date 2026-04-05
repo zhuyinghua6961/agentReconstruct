@@ -41,7 +41,7 @@ def test_build_admission_status_exposes_infra_only_defaults(monkeypatch):
     assert payload["worker_script_supported"] is True
     assert payload["request_path_cutover_enabled"] is False
     assert payload["backend_specific_ceilings"]["fast_or_patent"] == 10
-    assert payload["backend_specific_ceilings"]["thinking"] == 2
+    assert payload["backend_specific_ceilings"]["thinking"] == 5
     assert payload["queue_metrics"]["backlog"] == 0
     assert payload["slot_metrics"]["active_leases"] == 0
     assert payload["shared_state_ready"] is True

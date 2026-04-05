@@ -84,3 +84,46 @@ test('Home ignores late stream errors after a done event has already completed t
   assert.match(source, /if \(shouldIgnoreLateStreamError\(targetMessage\)\) \{\s*continue\s*\}/)
   assert.match(source, /if \(shouldIgnoreLateStreamError\(targetMessage\)\) \{\s*return\s*\}/)
 })
+
+test('Home scopes busy controls to the current chat instead of globally locking the page', () => {
+  assert.match(source, /const isCurrentChatBusy = computed\(\(\) => store\.isChatBusy\(store\.currentChatId\)\)/)
+  assert.match(source, /const canSend = computed\(\(\) => inputMessage\.value\.trim\(\) && !isCurrentChatBusy\.value\)/)
+  assert.match(source, /<button class="new-chat-btn" type="button" @click="createNewChat">新建对话<\/button>/)
+  assert.match(source, /<button class="collapsed-new-chat-btn" type="button" @click="createNewChat" title="新建对话">＋<\/button>/)
+  assert.match(source, /:disabled="selectedAskMode === option\.value \|\| isCurrentChatBusy"/)
+  assert.match(source, /:disabled="uploading \|\| isCurrentChatBusy"/)
+  assert.match(source, /<button class="send-btn" :disabled="!canToggleStreaming" @click="sendMessage">{{ isCurrentChatBusy \? '⏹' : '➤' }}<\/button>/)
+  assert.doesNotMatch(source, /<button class="new-chat-btn" type="button" :disabled="store\.isStreaming"/)
+  assert.doesNotMatch(source, /<button class="collapsed-new-chat-btn" type="button" :disabled="store\.isStreaming"/)
+  assert.doesNotMatch(source, /if \(store\.isStreaming\) return\s*\n\s*stopFileStatusPolling\(\)\s*\n\s*clearSelectedFiles\(\)\s*\n\s*resetQuestionOutlineState\(\)\s*\n\s*store\.createChat\(\)/s)
+  assert.doesNotMatch(source, /async function switchChat\(chatId\) \{[\s\S]*if \(store\.isStreaming\) return/)
+})
+
+test('Home renders per-chat busy badges with sidebar stop and delete guards', () => {
+  assert.match(source, /<span v-if="isChatBusy\(chat\.id\)" class="history-status-badge">生成中<\/span>/)
+  assert.match(source, /<button\s+v-if="isChatBusy\(chat\.id\)"\s+class="history-stop-btn"/)
+  assert.match(source, /@click\.stop="stopStreaming\(chat\.id\)"/)
+  assert.match(source, /<button\s+class="history-delete-btn"/)
+  assert.match(source, /:disabled="isChatBusy\(chat\.id\)"/)
+  assert.match(source, /:title="isChatBusy\(chat\.id\) \? '生成中不可删除' : '删除对话'"/)
+})
+
+test('Home keeps current-chat file deletion disabled while that chat is busy', () => {
+  assert.match(source, /<button class="pdf-remove-btn" @click\.stop="file\.type === 'pdf' \? handleRemovePdf\(file\.file_id\) : handleRemoveExcel\(file\.file_id\)" :disabled="isCurrentChatBusy" :title="isCurrentChatBusy \? '生成中不可删除文件' : '删除'">×<\/button>/)
+})
+
+test('Home stop flow can cancel a chat during dispatch before streaming runtime fully starts', () => {
+  assert.match(source, /const messageChat = await store\.addUserMessage\(message, \{ chatId: requestedChatId \}\)/)
+  assert.match(source, /if \(!store\.isChatBusy\(streamChatId\) \|\| store\.isChatStopRequested\(streamChatId\)\) return/)
+  assert.match(source, /const runtime = createStreamRuntime\(streamChatId, streamRequestId, -1\)/)
+  assert.match(source, /if \(runtime\?\.abortController\?\.signal\.aborted \|\| !store\.isChatBusy\(streamChatId\) \|\| store\.isChatStopRequested\(streamChatId\)\) \{\s*return\s*\}/)
+  assert.match(source, /store\.addBotMessage\([\s\S]*\{ chatId: streamChatId \}\)/)
+})
+
+test('Home snapshots per-chat request context before async chat promotion and reuses it for askStream', () => {
+  assert.match(source, /import \{ buildChatRequestContext \} from '\.\.\/utils\/chatRequestContext'/)
+  assert.match(source, /const requestChatContext = buildChatRequestContext\(\{\s*chat: requestContextChat,\s*sessionState: store\.sessionState,\s*selectedFileIds: selectedFileIds\.value,\s*\}\)/s)
+  assert.match(source, /const messageChat = await store\.addUserMessage\(message, \{ chatId: requestedChatId \}\)/)
+  assert.match(source, /const pdfContext = requestChatContext/)
+  assert.doesNotMatch(source, /const pdfContext = \{\s*newly_uploaded_ids: store\.getNewlyUploadedFileIds\(\),\s*all_available_ids: store\.getAllUploadedFileIds\(\),\s*selected_ids: \[\.\.\.selectedFileIds\.value\],\s*last_focus_ids: getLastFocusFileIds\(\),\s*last_turn_route: getLastTurnRoute\(\)\s*\}/s)
+})

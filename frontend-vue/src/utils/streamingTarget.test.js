@@ -133,3 +133,24 @@ test('resolveStreamingTarget returns null when no assistant-like message exists'
 
   assert.equal(target, null)
 })
+
+test('resolveStreamingTarget does not fall back to a previous assistant when strict request matching is enabled', async () => {
+  const { resolveStreamingTarget } = await loadStreamingTargetUtils()
+
+  assert.equal(typeof resolveStreamingTarget, 'function')
+
+  const messages = [
+    { role: 'user', content: 'q1' },
+    { role: 'assistant', content: 'previous answer' },
+    { role: 'user', content: 'q2' },
+  ]
+
+  const target = resolveStreamingTarget({
+    messages,
+    requestId: 'stream_pending',
+    cachedTargetIndex: -1,
+    strictRequestMatch: true,
+  })
+
+  assert.equal(target, null)
+})

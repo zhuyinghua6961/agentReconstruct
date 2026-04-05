@@ -137,6 +137,35 @@ test('prepareChatsForPersistence serializes Date timestamps into durable ISO str
   assert.equal(prepared[0].messages[0].timestamp, '2026-03-31T10:00:00.000Z')
 })
 
+test('prepareChatsForPersistence strips chat-level busy runtime snapshots', async () => {
+  const { prepareChatsForPersistence } = await loadChatPersistenceUtils()
+
+  assert.equal(typeof prepareChatsForPersistence, 'function')
+
+  const prepared = prepareChatsForPersistence([
+    {
+      id: 'busy-chat',
+      title: '运行中会话',
+      busyRuntime: {
+        phase: 'streaming',
+        requestId: 'stream_busy',
+        abortController: { fake: true },
+        pendingContent: 'partial answer',
+      },
+      messages: [
+        {
+          role: 'assistant',
+          content: 'partial answer',
+          timestamp: '2026-03-31T10:00:00.000Z',
+        },
+      ],
+    },
+  ])
+
+  assert.equal('busyRuntime' in prepared[0], false)
+  assert.equal(prepared[0].messages[0].content, 'partial answer')
+})
+
 function installLocalStorageMock(initial = {}) {
   const data = new Map(Object.entries(initial).map(([key, value]) => [String(key), String(value)]))
   global.localStorage = {
@@ -185,6 +214,52 @@ test('chat store reload path restores durable content and does not revive stale 
   assert.equal(persistedChats[0].messages[0].content, '第一个问题')
   assert.equal(persistedChats[0].messages[1].content, '未完成回答片段')
   assert.equal(persistedChats[0].messages[2].metadata.terminal_status, 'failed')
+})
+
+test('chat store loadChats clears runtime-only busy state before restoring durable content', async () => {
+  installLocalStorageMock({
+    lfp_chats: JSON.stringify([
+      {
+        id: 'runtime-chat',
+        title: '运行中恢复',
+        synced: false,
+        syncStatus: 'local',
+        createdAt: '2026-03-31T10:00:00.000Z',
+        updatedAt: '2026-03-31T10:05:00.000Z',
+        messages: [
+          {
+            role: 'assistant',
+            content: 'local partial answer',
+            timestamp: '2026-03-31T10:00:05.000Z',
+            isComplete: false,
+          },
+        ],
+      },
+    ]),
+    lfp_current_chat_id: 'runtime-chat',
+  })
+
+  const { createPinia, setActivePinia } = await import('pinia')
+  const { useChatStore } = await import('./chatStore.js')
+
+  setActivePinia(createPinia())
+  const store = useChatStore()
+
+  assert.deepEqual(
+    store.startChatBusyRuntime('runtime-chat', { phase: 'dispatching', requestId: 'stream_runtime' }),
+    { ok: true, reason: '' }
+  )
+  assert.equal(store.activeBusyCount, 1)
+  assert.equal(store.isStreaming, true)
+
+  await store.loadChats()
+
+  assert.equal(store.activeBusyCount, 0)
+  assert.equal(store.isChatBusy('runtime-chat'), false)
+  assert.equal(store.isStreaming, false)
+  assert.equal(store.currentMessages.length, 1)
+  assert.equal(store.currentMessages[0].content, 'local partial answer')
+  assert.equal(store.currentMessages[0].isComplete, false)
 })
 
 test('synced chat reload lets explicit server completion state override stale local recovery state', async () => {

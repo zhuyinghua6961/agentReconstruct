@@ -11,7 +11,7 @@ function normalizeIndex(index) {
   return Number.isInteger(index) ? index : -1
 }
 
-export function resolveStreamingTarget({ messages, requestId = '', cachedTargetIndex = -1 } = {}) {
+export function resolveStreamingTarget({ messages, requestId = '', cachedTargetIndex = -1, strictRequestMatch = false } = {}) {
   if (!Array.isArray(messages) || messages.length === 0) return null
 
   const normalizedRequestId = normalizeRequestId(requestId)
@@ -39,6 +39,10 @@ export function resolveStreamingTarget({ messages, requestId = '', cachedTargetI
         }
       }
     }
+  }
+
+  if (strictRequestMatch && normalizedRequestId) {
+    return null
   }
 
   for (let index = messages.length - 1; index >= 0; index -= 1) {

@@ -152,7 +152,7 @@ class GatewaySettings:
                 poll_interval_seconds=max(1, _env_int("GATEWAY_ADMISSION_POLL_INTERVAL_SECONDS", 5)),
                 max_concurrent=max(1, _env_int("INTERACTIVE_EXECUTION_MAX_CONCURRENT", 10)),
                 fast_or_patent_max_concurrent=max(1, _env_int("INTERACTIVE_EXECUTION_FAST_OR_PATENT_MAX_CONCURRENT", 10)),
-                thinking_max_concurrent=max(1, _env_int("INTERACTIVE_EXECUTION_THINKING_MAX_CONCURRENT", 2)),
+                thinking_max_concurrent=max(1, _env_int("INTERACTIVE_EXECUTION_THINKING_MAX_CONCURRENT", 5)),
                 queued_ttl_seconds=max(60, _env_int("INTERACTIVE_QUEUED_TTL_SECONDS", 900)),
                 post_admit_attach_ttl_seconds=max(60, _env_int("INTERACTIVE_POST_ADMIT_ATTACH_TTL_SECONDS", 600)),
             ),

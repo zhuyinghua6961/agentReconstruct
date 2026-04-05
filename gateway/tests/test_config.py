@@ -89,7 +89,7 @@ def test_gateway_settings_expose_admission_defaults(monkeypatch):
     assert settings.admission.runtime_role == "web"
     assert settings.admission.max_concurrent == 10
     assert settings.admission.fast_or_patent_max_concurrent == 10
-    assert settings.admission.thinking_max_concurrent == 2
+    assert settings.admission.thinking_max_concurrent == 5
     assert settings.admission.queued_ttl_seconds == 900
     assert settings.admission.post_admit_attach_ttl_seconds == 600
 

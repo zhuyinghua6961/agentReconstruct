@@ -1,4 +1,5 @@
 const RUNTIME_ONLY_MESSAGE_FIELDS = ['streamRequestId']
+const RUNTIME_ONLY_CHAT_FIELDS = ['busyRuntime', 'chatBusyRuntime']
 
 function cloneValue(value) {
   if (value instanceof Date) {
@@ -26,6 +27,9 @@ function sanitizeMessage(message = {}) {
 
 function sanitizeChat(chat = {}) {
   const sanitized = cloneValue(chat)
+  for (const field of RUNTIME_ONLY_CHAT_FIELDS) {
+    delete sanitized[field]
+  }
   sanitized.messages = Array.isArray(chat?.messages) ? chat.messages.map((message) => sanitizeMessage(message)) : []
   return sanitized
 }
@@ -40,4 +44,4 @@ export function prepareChatsForPersistence(rawChats = []) {
   return rawChats.map((chat) => sanitizeChat(chat))
 }
 
-export { RUNTIME_ONLY_MESSAGE_FIELDS }
+export { RUNTIME_ONLY_MESSAGE_FIELDS, RUNTIME_ONLY_CHAT_FIELDS }

@@ -7,6 +7,7 @@ import { createStreamingHtmlRenderer } from '../utils/streamingRender'
 import { buildMessageRenderMemoKey } from '../utils/messageRenderMemo'
 import { buildVisibleMessageWindow, resolveHiddenHistoryReveal } from '../utils/messageWindowing'
 import { resolveStreamingTarget } from '../utils/streamingTarget'
+import { buildChatRequestContext } from '../utils/chatRequestContext'
 import { buildQuestionOutlineItems, buildQuestionOutlineSignature, getQuestionAnchorId } from '../utils/questionOutline'
 import { DEFAULT_NEAR_BOTTOM_THRESHOLD_PX, isNearBottom, shouldAutoScroll } from '../utils/scrollFollow'
 import { mergeSelectedFileIdsAfterUpload, resolveUploadedFileDisplayNumber } from '../utils/fileSelection'
@@ -30,19 +31,14 @@ const messagesArea = ref(null)
 const fileInput = ref(null)
 const uploading = ref(false)
 const uploadProgress = ref(0)
-const streamingAbortController = ref(null)
-const streamingChatId = ref('')
-const streamingMessageRequestId = ref('')
-const streamingTargetIndex = ref(-1)
+const streamRuntimeByChatId = new Map()
 const selectedFileIds = ref([])
 const selectedAskMode = ref(localStorage.getItem(ASK_MODE_STORAGE_KEY) || 'thinking')
 const leftSidebarCollapsed = ref(false)
 const leftSidebarWidth = ref(280)
 const leftSidebarLastExpandedWidth = ref(280)
 let fileStatusPollTimer = null
-let streamContentFlushFrame = null
 let scrollFrame = null
-let pendingStreamContent = ''
 const FILE_POLL_BASE_MS = 2000
 const FILE_POLL_MAX_MS = 30000
 const FILE_POLL_MAX_FAILURES = 6
@@ -76,9 +72,10 @@ const DEFAULT_VISIBLE_MESSAGE_COUNT = 24
 const HISTORY_REVEAL_BATCH_SIZE = 20
 
 const hasMessages = computed(() => store.currentMessages.length > 0)
-const canSend = computed(() => inputMessage.value.trim() && !store.isStreaming)
+const isCurrentChatBusy = computed(() => store.isChatBusy(store.currentChatId))
+const canSend = computed(() => inputMessage.value.trim() && !isCurrentChatBusy.value)
 const canToggleStreaming = computed(() => {
-  if (store.isStreaming) return true
+  if (isCurrentChatBusy.value) return true
   return Boolean(canSend.value)
 })
 const askModeOptions = [
@@ -117,7 +114,6 @@ const kbSummaryText = computed(() => {
   const graphPart = graphConnected ? `${Number(store.kbInfo.graphSize ?? 0)} 条` : '未连接'
   return `向量库: ${vectorSize} 条 | 知识图谱: ${graphPart}`
 })
-const isHistoryLocked = computed(() => store.isStreaming && Boolean(streamingChatId.value))
 const questionOutlineSignature = computed(() => buildQuestionOutlineSignature(store.currentMessages))
 const isNearBottomRef = ref(true)
 const pendingAutoScroll = ref(false)
@@ -147,38 +143,67 @@ function getChatSyncStatus(chat) {
   return 'local'
 }
 
-function startStreamingSession(chatId, requestId, targetIndex = -1) {
-  streamingChatId.value = normalizeChatId(chatId)
-  streamingMessageRequestId.value = String(requestId || '').trim()
-  streamingTargetIndex.value = Number.isInteger(targetIndex) ? targetIndex : -1
+function getStreamRuntime(chatId) {
+  const normalizedChatId = normalizeChatId(chatId)
+  if (!normalizedChatId) return null
+  return streamRuntimeByChatId.get(normalizedChatId) || null
 }
 
-function clearStreamingSession() {
-  streamingChatId.value = ''
-  streamingMessageRequestId.value = ''
-  streamingTargetIndex.value = -1
+function createStreamRuntime(chatId, requestId, targetIndex = -1) {
+  const normalizedChatId = normalizeChatId(chatId)
+  if (!normalizedChatId) return null
+
+  const runtime = {
+    chatId: normalizedChatId,
+    requestId: String(requestId || '').trim(),
+    targetIndex: Number.isInteger(targetIndex) ? targetIndex : -1,
+    abortController: new AbortController(),
+    pendingContent: '',
+    flushFrame: null,
+  }
+  streamRuntimeByChatId.set(normalizedChatId, runtime)
+  return runtime
 }
 
-function getStreamingTargetMessage() {
-  const chat = getChatById(streamingChatId.value)
+function resetStreamFlushState(chatId) {
+  const runtime = getStreamRuntime(chatId)
+  if (!runtime) return
+  runtime.pendingContent = ''
+  if (runtime.flushFrame !== null) {
+    window.cancelAnimationFrame(runtime.flushFrame)
+    runtime.flushFrame = null
+  }
+}
+
+function clearStreamRuntime(chatId) {
+  const runtime = getStreamRuntime(chatId)
+  if (!runtime) return
+  resetStreamFlushState(chatId)
+  streamRuntimeByChatId.delete(runtime.chatId)
+}
+
+function getStreamingTargetMessage(chatId) {
+  const runtime = getStreamRuntime(chatId)
+  const chat = getChatById(runtime?.chatId)
   if (!chat || !Array.isArray(chat.messages) || chat.messages.length === 0) return null
 
   const target = resolveStreamingTarget({
     messages: chat.messages,
-    requestId: streamingMessageRequestId.value,
-    cachedTargetIndex: streamingTargetIndex.value,
+    requestId: runtime?.requestId,
+    cachedTargetIndex: runtime?.targetIndex,
+    strictRequestMatch: Boolean(runtime?.requestId),
   })
   if (!target) {
-    streamingTargetIndex.value = -1
+    runtime.targetIndex = -1
     return null
   }
 
-  streamingTargetIndex.value = target.index
-  return { chat, message: target.message, index: target.index }
+  runtime.targetIndex = target.index
+  return { chat, message: target.message, index: target.index, runtime }
 }
 
-function updateStreamingTargetMessage(updates) {
-  const target = getStreamingTargetMessage()
+function updateStreamingTargetMessage(chatId, updates) {
+  const target = getStreamingTargetMessage(chatId)
   if (!target?.message) return null
 
   if (updates.references !== undefined) {
@@ -198,21 +223,20 @@ function updateStreamingTargetMessage(updates) {
   return target.message
 }
 
+function isChatBusy(chatId) {
+  return store.isChatBusy(chatId)
+}
+
 function isStreamingChat(chatId) {
-  return isHistoryLocked.value && normalizeChatId(chatId) === streamingChatId.value
+  return store.isChatStreaming(chatId)
 }
 
 function isHistoryItemDisabled(chatId) {
-  const normalizedChatId = normalizeChatId(chatId)
-  if (!isHistoryLocked.value) return false
-  return normalizedChatId !== streamingChatId.value
+  return false
 }
 
 function getHistoryItemTitle(chatId) {
-  if (isHistoryItemDisabled(chatId)) {
-    return '回答生成中，当前不能切换到其他会话'
-  }
-  if (isStreamingChat(chatId)) {
+  if (isChatBusy(chatId)) {
     return '当前会话正在生成回答'
   }
   return ''
@@ -558,8 +582,8 @@ function getCollapsedStepSummary(msg) {
   return current || getLastStep(msg)
 }
 
-function upsertStreamingStep(stepPayload, activeStepKey, { markPreviousActiveSuccess = false } = {}) {
-  return updateStreamingSteps((steps) => {
+function upsertStreamingStep(chatId, stepPayload, activeStepKey, { markPreviousActiveSuccess = false } = {}) {
+  return updateStreamingSteps(chatId, (steps) => {
     const nextKey = String(stepPayload?.step || '').trim()
     if (markPreviousActiveSuccess && activeStepKey && nextKey && activeStepKey !== nextKey) {
       const activeIdx = steps.findIndex((step) => step.step === activeStepKey)
@@ -593,12 +617,12 @@ function normalizeStepStatus(status, fallback = 'processing') {
   return fallback
 }
 
-function updateStreamingSteps(mutator) {
-  const target = getStreamingTargetMessage()
+function updateStreamingSteps(chatId, mutator) {
+  const target = getStreamingTargetMessage(chatId)
   if (!target?.message) return []
   const steps = Array.isArray(target.message.steps) ? [...target.message.steps] : []
   mutator(steps)
-  updateStreamingTargetMessage({ steps })
+  updateStreamingTargetMessage(chatId, { steps })
   return steps
 }
 
@@ -617,7 +641,7 @@ function getRenderedMessageHtml(msg) {
 function isStreamingTextMessage(msg) {
   if (!msg) return false
   if (!(msg.role === 'bot' || msg.role === 'assistant')) return false
-  return store.isStreaming && msg.isComplete !== true
+  return isCurrentChatBusy.value && msg.isComplete !== true
 }
 
 function getStreamingMessageHtml(msg) {
@@ -634,29 +658,25 @@ function getFallbackQueryModeLabel(data, existingMeta = {}) {
   return getRouteModeLabel(data?.route || existingMeta?.route || '')
 }
 
-function flushPendingStreamContent() {
-  if (!pendingStreamContent) return
-  const target = getStreamingTargetMessage()
+function flushPendingStreamContent(chatId) {
+  const runtime = getStreamRuntime(chatId)
+  if (!runtime?.pendingContent) return
+  const target = getStreamingTargetMessage(chatId)
   const existingContent = String(target?.message?.content || '')
-  updateStreamingTargetMessage({ content: existingContent + pendingStreamContent })
-  pendingStreamContent = ''
-  scrollToBottom()
-}
-
-function scheduleStreamContentFlush() {
-  if (streamContentFlushFrame !== null) return
-  streamContentFlushFrame = window.requestAnimationFrame(() => {
-    streamContentFlushFrame = null
-    flushPendingStreamContent()
-  })
-}
-
-function resetStreamFlushState() {
-  pendingStreamContent = ''
-  if (streamContentFlushFrame !== null) {
-    window.cancelAnimationFrame(streamContentFlushFrame)
-    streamContentFlushFrame = null
+  updateStreamingTargetMessage(chatId, { content: existingContent + runtime.pendingContent })
+  runtime.pendingContent = ''
+  if (normalizeChatId(store.currentChatId) === normalizeChatId(chatId)) {
+    scrollToBottom()
   }
+}
+
+function scheduleStreamContentFlush(chatId) {
+  const runtime = getStreamRuntime(chatId)
+  if (!runtime || runtime.flushFrame !== null) return
+  runtime.flushFrame = window.requestAnimationFrame(() => {
+    runtime.flushFrame = null
+    flushPendingStreamContent(chatId)
+  })
 }
 
 // 合并PDF和Excel文件，按file_id统一排序
@@ -966,12 +986,11 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  if (store.isStreaming) {
-    stopStreaming()
-  }
+  Array.from(streamRuntimeByChatId.keys()).forEach((chatId) => {
+    stopStreaming(chatId)
+  })
   stopFileStatusPolling()
   stopPanelResize()
-  resetStreamFlushState()
   resetQuestionOutlineState()
   if (scrollFrame !== null) {
     window.cancelAnimationFrame(scrollFrame)
@@ -1003,7 +1022,6 @@ async function fetchKbInfo() {
 }
 
 function createNewChat() {
-  if (store.isStreaming) return
   stopFileStatusPolling()
   clearSelectedFiles()
   resetQuestionOutlineState()
@@ -1014,7 +1032,6 @@ function createNewChat() {
 async function switchChat(chatId) {
   const nextChatId = normalizeChatId(chatId)
   if (!nextChatId || nextChatId === normalizeChatId(store.currentChatId)) return
-  if (store.isStreaming) return
 
   const requestSeq = ++switchChatRequestSeq
   stopFileStatusPolling()
@@ -1033,13 +1050,14 @@ function handleHistoryItemClick(chatId) {
 }
 
 function deleteChat(chatId) {
+  if (isChatBusy(chatId)) return
   if (confirm('确定要删除这个对话吗？')) {
     store.deleteChat(chatId)
   }
 }
 
 function toggleChatPinned(chatId) {
-  if (store.isStreaming) return
+  if (isChatBusy(chatId)) return
   store.togglePinned(chatId)
 }
 
@@ -1058,95 +1076,109 @@ function toggleFileListSection() {
   localStorage.setItem(FILE_LIST_COLLAPSED_KEY, fileListCollapsed.value ? '1' : '0')
 }
 
-function getLatestBotMessage() {
-  const messages = Array.isArray(store.currentMessages) ? [...store.currentMessages].reverse() : []
-  return messages.find(msg => msg?.role === 'bot' || msg?.role === 'assistant') || null
-}
-
-function getLastFocusFileIds() {
-  const latestBot = getLatestBotMessage()
-  if (!latestBot) return []
-  const usedFiles = latestBot?.metadata?.used_files
-  if (!Array.isArray(usedFiles) || usedFiles.length === 0) return []
-  const uniqueIds = []
-  const seen = new Set()
-  usedFiles.forEach((item) => {
-    const id = Number(item?.file_id || 0)
-    if (!id || seen.has(id)) return
-    seen.add(id)
-    uniqueIds.push(id)
-  })
-  if (uniqueIds.length > 0) return uniqueIds
-  return []
-}
-
-function getLastTurnRoute() {
-  const latestBot = getLatestBotMessage()
-  if (!latestBot) return ''
-  return String(latestBot?.metadata?.route || '').trim().toLowerCase()
-}
-
 async function sendMessage() {
+  const requestedChatId = normalizeChatId(store.currentChatId)
+  if (!requestedChatId) return
+
   if (!canSend.value) {
-    if (store.isStreaming) stopStreaming()
+    if (isCurrentChatBusy.value) stopStreaming(requestedChatId)
     return
   }
 
   const message = inputMessage.value.trim()
   if (!message) return
 
-  const chat = store.currentChat
-  if (!chat) return
+  const busyStart = store.startChatBusyRuntime(requestedChatId, { phase: 'dispatching' })
+  if (!busyStart.ok) {
+    if (busyStart.reason === 'capacity_reached') {
+      alert('最多同时生成 5 个对话，请先停止一个正在生成的会话。')
+    }
+    return
+  }
 
-  await store.addUserMessage(message)
-  inputMessage.value = ''
-  scrollToBottom({ force: true })
-
-  const streamRequestId = `stream_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
-  store.addBotMessage({
-    role: 'assistant',
-    content: '',
-    queryMode: '',
-    expert: '',
-    references: [],
-    referenceLinks: [],
-    steps: [],
-    stepsCollapsed: false,
-    isComplete: false,
-    streamRequestId
+  let streamChatId = requestedChatId
+  const requestContextChat = getChatById(requestedChatId)
+  const requestChatContext = buildChatRequestContext({
+    chat: requestContextChat,
+    sessionState: store.sessionState,
+    selectedFileIds: selectedFileIds.value,
   })
-  const streamChatId = normalizeChatId(store.currentChatId || chat.id)
-  startStreamingSession(streamChatId, streamRequestId, store.currentMessages.length - 1)
-  scrollToBottom({ force: true })
-
-  store.setStreaming(true)
-  streamingAbortController.value = new AbortController()
+  const requestAskMode = selectedAskMode.value
 
   try {
-    const chatHistory = store.currentMessages
+    const messageChat = await store.addUserMessage(message, { chatId: requestedChatId })
+    streamChatId = normalizeChatId(messageChat?.id || requestedChatId)
+    if (!store.isChatBusy(streamChatId) || store.isChatStopRequested(streamChatId)) return
+    inputMessage.value = ''
+    if (normalizeChatId(store.currentChatId) === streamChatId) {
+      scrollToBottom({ force: true })
+    }
+
+    const streamRequestId = `stream_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    const runtime = createStreamRuntime(streamChatId, streamRequestId, -1)
+    if (runtime?.abortController?.signal.aborted || !store.isChatBusy(streamChatId) || store.isChatStopRequested(streamChatId)) {
+      return
+    }
+
+    store.addBotMessage({
+      role: 'assistant',
+      content: '',
+      queryMode: '',
+      expert: '',
+      references: [],
+      referenceLinks: [],
+      steps: [],
+      stepsCollapsed: false,
+      isComplete: false,
+      streamRequestId
+    }, { chatId: streamChatId })
+
+    const targetChat = getChatById(streamChatId)
+    const targetIndex = Array.isArray(targetChat?.messages) ? targetChat.messages.length - 1 : -1
+    if (runtime) {
+      runtime.targetIndex = targetIndex
+    }
+    store.markChatBusyStreaming(streamChatId, { requestId: streamRequestId, targetMessageIndex: targetIndex })
+    if (runtime?.abortController?.signal.aborted || !store.isChatBusy(streamChatId) || store.isChatStopRequested(streamChatId)) {
+      updateStreamingTargetMessage(streamChatId, {
+        terminalStatus: 'canceled',
+        status: 'canceled',
+        failureMessage: '用户已停止生成',
+        failureCode: 'ASK_CANCELLED',
+        retriable: false,
+        doneSeen: false,
+        metadata: {
+          terminal_status: 'canceled',
+          status: 'canceled',
+          failure_message: '用户已停止生成',
+          failure_code: 'ASK_CANCELLED',
+          retriable: false,
+          done_seen: false,
+          streaming_terminal_event: 'canceled',
+        },
+        isComplete: true
+      })
+      return
+    }
+
+    if (normalizeChatId(store.currentChatId) === streamChatId) {
+      scrollToBottom({ force: true })
+    }
+
+    const chatHistory = (targetChat?.messages || [])
       .filter(m => String(m?.content || '').trim().length > 0)
       .slice(-10)
       .map(m => ({ role: m.role, content: m.content }))
 
-    // 传递 conversationId 到 askStream
-    // 注意：userId 从后端 JWT token 中获取，不需要前端传递
-    const conversationId = store.currentChat.synced ? parseInt(store.currentChat.id) : null
-
-    // 构建文件上下文（PDF + Excel/CSV）
-    const pdfContext = {
-      newly_uploaded_ids: store.getNewlyUploadedFileIds(),
-      all_available_ids: store.getAllUploadedFileIds(),
-      selected_ids: [...selectedFileIds.value],
-      last_focus_ids: getLastFocusFileIds(),
-      last_turn_route: getLastTurnRoute()
-    }
+    const conversationId = targetChat?.synced ? parseInt(targetChat.id) : null
+    const pdfContext = requestChatContext
 
     let thinkingIndex = 0
     let activeStepKey = ''
 
     const markActiveStep = (status, error = '') => {
       if (!activeStepKey) return
-      updateStreamingSteps((steps) => {
+      updateStreamingSteps(streamChatId, (steps) => {
         const idx = steps.findIndex((step) => step.step === activeStepKey)
         if (idx < 0) return
         steps[idx] = {
@@ -1163,28 +1195,28 @@ async function sendMessage() {
       chatHistory,
       conversationId,
       pdfContext,
-      streamingAbortController.value?.signal,
-      selectedAskMode.value
+      runtime?.abortController?.signal,
+      requestAskMode
     )) {
       if (data.type === 'thinking') {
-        flushPendingStreamContent()
+        flushPendingStreamContent(streamChatId)
         const thinkingMessage = String(data.content || data.message || '').trim()
         if (thinkingMessage) {
           thinkingIndex += 1
           const stepPayload = buildStepPayload(data, `thinking_${thinkingIndex}`, 'processing')
-          upsertStreamingStep(stepPayload, activeStepKey, { markPreviousActiveSuccess: true })
+          upsertStreamingStep(streamChatId, stepPayload, activeStepKey, { markPreviousActiveSuccess: true })
           activeStepKey = stepPayload.step
         }
       } else if (data.type === 'step') {
-        flushPendingStreamContent()
+        flushPendingStreamContent(streamChatId)
         const stepPayload = buildStepPayload(data, `step_${Date.now()}`, 'processing')
-        upsertStreamingStep(stepPayload, activeStepKey, {
+        upsertStreamingStep(streamChatId, stepPayload, activeStepKey, {
           markPreviousActiveSuccess:
             stepPayload.step !== activeStepKey && normalizeStepStatus(stepPayload.status) === 'processing'
         })
         activeStepKey = stepPayload.step
       } else if (data.type === 'metadata') {
-        const targetMessage = getStreamingTargetMessage()?.message || {}
+        const targetMessage = getStreamingTargetMessage(streamChatId)?.message || {}
         const existingMeta = (targetMessage.metadata && typeof targetMessage.metadata === 'object') ? targetMessage.metadata : {}
         const mergedMeta = mergeRoutingMetadata(existingMeta, data)
         const modeFromExpert = data.expert === 'neo4j'
@@ -1194,17 +1226,19 @@ async function sendMessage() {
             : data.expert === 'tabular'
               ? '表格问答'
               : '文献检索'
-        updateStreamingTargetMessage({
+        updateStreamingTargetMessage(streamChatId, {
           expert: data.expert,
           queryMode: getFallbackQueryModeLabel(data, mergedMeta) || modeFromExpert,
           metadata: mergedMeta
         })
       } else if (data.type === 'content') {
-        pendingStreamContent += String(data.content || '')
-        scheduleStreamContentFlush()
+        const activeRuntime = getStreamRuntime(streamChatId)
+        if (!activeRuntime) continue
+        activeRuntime.pendingContent += String(data.content || '')
+        scheduleStreamContentFlush(streamChatId)
       } else if (data.type === 'done') {
-        flushPendingStreamContent()
-        const targetMessage = getStreamingTargetMessage()?.message || {}
+        flushPendingStreamContent(streamChatId)
+        const targetMessage = getStreamingTargetMessage(streamChatId)?.message || {}
         const existingMeta = (targetMessage.metadata && typeof targetMessage.metadata === 'object') ? targetMessage.metadata : {}
         const doneMeta = (data.metadata && typeof data.metadata === 'object') ? data.metadata : {}
         const referenceLinks = data.reference_links || data.pdf_links || data.referenceLinks || data.pdfLinks || []
@@ -1212,7 +1246,7 @@ async function sendMessage() {
           ? data.reference_objects
           : (Array.isArray(data.references) ? data.references : [])
         const mergedMeta = mergeRoutingMetadata({ ...existingMeta, ...doneMeta }, data)
-        const finalizedSteps = updateStreamingSteps((steps) => {
+        const finalizedSteps = updateStreamingSteps(streamChatId, (steps) => {
           if (activeStepKey) {
             const activeIdx = steps.findIndex((step) => step.step === activeStepKey)
             if (activeIdx >= 0) {
@@ -1244,10 +1278,10 @@ async function sendMessage() {
           updates.queryMode = getFallbackQueryModeLabel(data, mergedMeta)
         }
 
-        updateStreamingTargetMessage(updates)
+        updateStreamingTargetMessage(streamChatId, updates)
       } else if (data.type === 'error') {
-        flushPendingStreamContent()
-        const targetMessage = getStreamingTargetMessage()?.message || {}
+        flushPendingStreamContent(streamChatId)
+        const targetMessage = getStreamingTargetMessage(streamChatId)?.message || {}
         if (shouldIgnoreLateStreamError(targetMessage)) {
           continue
         }
@@ -1271,7 +1305,7 @@ async function sendMessage() {
         if (activeStepKey) {
           markActiveStep('error', errorText)
         } else {
-          updateStreamingSteps((steps) => {
+          updateStreamingSteps(streamChatId, (steps) => {
             steps.push({
               step: 'error',
               title: '处理失败',
@@ -1284,7 +1318,7 @@ async function sendMessage() {
           })
         }
         const existingContent = String(targetMessage.content || '').trim()
-        updateStreamingTargetMessage({
+        updateStreamingTargetMessage(streamChatId, {
           content: existingContent ? `${existingContent}\n\n${renderedError}` : renderedError,
           queryMode: getFallbackQueryModeLabel(data, mergedMeta) || targetMessage.queryMode || '',
           metadata: {
@@ -1296,11 +1330,11 @@ async function sendMessage() {
       }
     }
   } catch (e) {
-    flushPendingStreamContent()
+    flushPendingStreamContent(streamChatId)
     if (e?.name === 'AbortError') {
       return
     }
-    const targetMessage = getStreamingTargetMessage()?.message || {}
+    const targetMessage = getStreamingTargetMessage(streamChatId)?.message || {}
     if (shouldIgnoreLateStreamError(targetMessage)) {
       return
     }
@@ -1322,7 +1356,7 @@ async function sendMessage() {
     const renderedError = presentation.kind === 'markdown'
       ? presentation.markdown
       : errorMessage
-    updateStreamingTargetMessage({
+    updateStreamingTargetMessage(streamChatId, {
       content: renderedError,
       queryMode: getFallbackQueryModeLabel(payload, mergedMeta) || targetMessage.queryMode || '',
       metadata: {
@@ -1332,27 +1366,49 @@ async function sendMessage() {
       isComplete: true
     })
   } finally {
-    streamingAbortController.value = null
-    resetStreamFlushState()
-    store.setStreaming(false)
-    clearStreamingSession()
-    scrollToBottom()
+    resetStreamFlushState(streamChatId)
+    clearStreamRuntime(streamChatId)
+    store.finishChatBusyRuntime(streamChatId)
+    if (normalizeChatId(store.currentChatId) === streamChatId) {
+      scrollToBottom()
+    }
   }
 }
 
-function stopStreaming() {
-  streamingAbortController.value?.abort()
-  streamingAbortController.value = null
-  flushPendingStreamContent()
-  resetStreamFlushState()
-  const targetMessage = getStreamingTargetMessage()?.message
-  const existingContent = String(targetMessage?.content || '')
-  updateStreamingTargetMessage({
-    content: existingContent.includes('[对话已中断]') ? existingContent : `${existingContent}\n\n[对话已中断]`,
+function stopStreaming(chatId = store.currentChatId) {
+  const targetChatId = normalizeChatId(chatId)
+  if (!targetChatId) return
+  store.requestChatBusyStop(targetChatId)
+  const runtime = getStreamRuntime(targetChatId)
+  runtime?.abortController?.abort()
+  flushPendingStreamContent(targetChatId)
+  const targetMessage = getStreamingTargetMessage(targetChatId)?.message
+  if (!targetMessage) {
+    return
+  }
+  const existingMeta = (targetMessage?.metadata && typeof targetMessage.metadata === 'object') ? targetMessage.metadata : {}
+  updateStreamingTargetMessage(targetChatId, {
+    terminalStatus: 'canceled',
+    status: 'canceled',
+    failureMessage: '用户已停止生成',
+    failureCode: 'ASK_CANCELLED',
+    retriable: false,
+    doneSeen: false,
+    metadata: {
+      ...existingMeta,
+      terminal_status: 'canceled',
+      status: 'canceled',
+      failure_message: '用户已停止生成',
+      failure_code: 'ASK_CANCELLED',
+      retriable: false,
+      done_seen: false,
+      streaming_terminal_event: 'canceled',
+    },
     isComplete: true
   })
-  store.setStreaming(false)
-  clearStreamingSession()
+  if (normalizeChatId(store.currentChatId) === targetChatId) {
+    scrollToBottom()
+  }
 }
 
 function revealHiddenHistory(targetAbsoluteIndex = null) {
@@ -1638,7 +1694,7 @@ watch(
       <div class="sidebar-header" :class="{ collapsed: leftSidebarCollapsed }">
         <div v-if="!leftSidebarCollapsed" class="sidebar-title-group">
           <div class="sidebar-title">对话历史</div>
-          <button class="new-chat-btn" type="button" :disabled="store.isStreaming" @click="createNewChat">新建对话</button>
+          <button class="new-chat-btn" type="button" @click="createNewChat">新建对话</button>
         </div>
         <button class="sidebar-toggle-btn" type="button" @click="toggleLeftSidebar">
           {{ leftSidebarCollapsed ? '展开' : '收起' }}
@@ -1682,16 +1738,34 @@ watch(
                   <div class="history-title">
                     <span class="history-title-text">{{ chat.title }}</span>
                     <div class="history-title-actions">
-                      <span v-if="isStreamingChat(chat.id)" class="history-status-badge">生成中</span>
+                      <span v-if="isChatBusy(chat.id)" class="history-status-badge">生成中</span>
+                      <button
+                        v-if="isChatBusy(chat.id)"
+                        class="history-stop-btn"
+                        type="button"
+                        title="停止生成"
+                        @click.stop="stopStreaming(chat.id)"
+                      >
+                        停止
+                      </button>
                       <button
                         class="pin-chat-btn"
                         :class="{ pinned: chat.isPinned }"
                         type="button"
-                        :disabled="store.isStreaming"
-                        :title="store.isStreaming ? '生成中不可置顶/取消置顶' : (chat.isPinned ? '取消置顶' : '置顶对话')"
+                        :disabled="isChatBusy(chat.id)"
+                        :title="isChatBusy(chat.id) ? '生成中不可置顶/取消置顶' : (chat.isPinned ? '取消置顶' : '置顶对话')"
                         @click.stop="toggleChatPinned(chat.id)"
                       >
                         {{ chat.isPinned ? '★' : '☆' }}
+                      </button>
+                      <button
+                        class="history-delete-btn"
+                        type="button"
+                        :disabled="isChatBusy(chat.id)"
+                        :title="isChatBusy(chat.id) ? '生成中不可删除' : '删除对话'"
+                        @click.stop="deleteChat(chat.id)"
+                      >
+                        删除
                       </button>
                       <span v-if="getChatSyncStatus(chat) === 'failed'" class="sync-icon sync-failed" title="同步失败">⚠️</span>
                       <span v-else-if="getChatSyncStatus(chat) === 'syncing'" class="sync-icon sync-syncing" title="同步中">🔄</span>
@@ -1730,16 +1804,34 @@ watch(
                   <div class="history-title">
                     <span class="history-title-text">{{ chat.title }}</span>
                     <div class="history-title-actions">
-                      <span v-if="isStreamingChat(chat.id)" class="history-status-badge">生成中</span>
+                      <span v-if="isChatBusy(chat.id)" class="history-status-badge">生成中</span>
+                      <button
+                        v-if="isChatBusy(chat.id)"
+                        class="history-stop-btn"
+                        type="button"
+                        title="停止生成"
+                        @click.stop="stopStreaming(chat.id)"
+                      >
+                        停止
+                      </button>
                       <button
                         class="pin-chat-btn"
                         :class="{ pinned: chat.isPinned }"
                         type="button"
-                        :disabled="store.isStreaming"
-                        :title="store.isStreaming ? '生成中不可置顶/取消置顶' : (chat.isPinned ? '取消置顶' : '置顶对话')"
+                        :disabled="isChatBusy(chat.id)"
+                        :title="isChatBusy(chat.id) ? '生成中不可置顶/取消置顶' : (chat.isPinned ? '取消置顶' : '置顶对话')"
                         @click.stop="toggleChatPinned(chat.id)"
                       >
                         {{ chat.isPinned ? '★' : '☆' }}
+                      </button>
+                      <button
+                        class="history-delete-btn"
+                        type="button"
+                        :disabled="isChatBusy(chat.id)"
+                        :title="isChatBusy(chat.id) ? '生成中不可删除' : '删除对话'"
+                        @click.stop="deleteChat(chat.id)"
+                      >
+                        删除
                       </button>
                       <span v-if="getChatSyncStatus(chat) === 'failed'" class="sync-icon sync-failed" title="同步失败">⚠️</span>
                       <span v-else-if="getChatSyncStatus(chat) === 'syncing'" class="sync-icon sync-syncing" title="同步中">🔄</span>
@@ -1755,7 +1847,7 @@ watch(
       </template>
 
       <div v-else class="sidebar-collapsed-body">
-        <button class="collapsed-new-chat-btn" type="button" :disabled="store.isStreaming" @click="createNewChat" title="新建对话">＋</button>
+        <button class="collapsed-new-chat-btn" type="button" @click="createNewChat" title="新建对话">＋</button>
         <div class="collapsed-chat-count" :title="`当前共有 ${store.chats.length} 个对话`">
           {{ store.chats.length }}
         </div>
@@ -1825,7 +1917,7 @@ watch(
               </span>
               <span v-if="store.sessionState.newlyUploadedPdfIds.includes(file.file_id)" class="pdf-new-badge">新</span>
               <button class="file-download-btn" @click.stop="downloadUploadedFile(file)" title="下载文件">下载</button>
-              <button class="pdf-remove-btn" @click.stop="file.type === 'pdf' ? handleRemovePdf(file.file_id) : handleRemoveExcel(file.file_id)" title="删除">×</button>
+              <button class="pdf-remove-btn" @click.stop="file.type === 'pdf' ? handleRemovePdf(file.file_id) : handleRemoveExcel(file.file_id)" :disabled="isCurrentChatBusy" :title="isCurrentChatBusy ? '生成中不可删除文件' : '删除'">×</button>
             </div>
           </template>
         </div>
@@ -1947,7 +2039,7 @@ watch(
               class="ask-mode-btn"
               :class="{ active: selectedAskMode === option.value }"
               @click="setAskMode(option.value)"
-              :disabled="store.isStreaming"
+              :disabled="selectedAskMode === option.value || isCurrentChatBusy"
             >
               {{ option.label }}
             </button>
@@ -1965,13 +2057,13 @@ watch(
           <button 
             class="upload-btn" 
             @click="triggerFileUpload" 
-            :disabled="uploading || store.isStreaming"
+            :disabled="uploading || isCurrentChatBusy"
             title="上传文件（PDF/Excel/CSV）"
           >
             📎
           </button>
           <textarea v-model="inputMessage" placeholder="问我任何关于磷酸铁锂的问题..." rows="1" @keydown.enter.prevent="sendMessage" @input="autoResize($event)"></textarea>
-          <button class="send-btn" :disabled="!canToggleStreaming" @click="sendMessage">{{ store.isStreaming ? '⏹' : '➤' }}</button>
+          <button class="send-btn" :disabled="!canToggleStreaming" @click="sendMessage">{{ isCurrentChatBusy ? '⏹' : '➤' }}</button>
         </div>
       </div>
     </main>
@@ -2374,6 +2466,38 @@ watch(
   color: #1d4ed8;
   font-size: 11px;
   font-weight: 700;
+}
+
+.history-stop-btn,
+.history-delete-btn {
+  border: 1px solid #dbe4f0;
+  border-radius: 999px;
+  background: #fff;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  padding: 5px 9px;
+  transition: border-color 0.2s, color 0.2s, background-color 0.2s, opacity 0.2s;
+}
+
+.history-stop-btn:hover:not(:disabled) {
+  border-color: #93c5fd;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.history-delete-btn:hover:not(:disabled) {
+  border-color: #fecdd3;
+  background: #fff1f2;
+  color: #be123c;
+}
+
+.history-stop-btn:disabled,
+.history-delete-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .sync-icon {
@@ -3066,6 +3190,11 @@ watch(
 
 .pdf-remove-btn:hover {
   color: #e11d48;
+}
+
+.pdf-remove-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .pdf-delete-btn {
