@@ -13,7 +13,6 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from app.core.config import get_settings
-from app.core.errors import AppError
 from app.integrations.redis import RedisLockHandle, RedisLockManager, RedisRenewingLock, RedisService, build_redis_bindings
 from app.modules.auth import service as auth_service_module
 from app.modules.quota.cache import (
@@ -225,19 +224,17 @@ class QuotaGrant:
     lease: RedisRenewingLock | None = None
 
 
-class _InternalQuotaGrantRenewer:
+class _QuotaGrantLockRenewer:
     def __init__(
         self,
         *,
         service: "QuotaService",
-        grant_id: str,
-        lease: dict[str, Any],
+        lock_handle: dict[str, Any],
         ttl_seconds: int,
         refresh_interval_seconds: float | None = None,
     ) -> None:
         self._service = service
-        self._grant_id = str(grant_id or "").strip()
-        self._lease = dict(lease or {})
+        self._lock_handle = dict(lock_handle or {})
         self._ttl_seconds = max(1, int(ttl_seconds))
         default_interval = max(0.5, float(self._ttl_seconds) / 3.0)
         self._refresh_interval_seconds = max(0.5, float(refresh_interval_seconds or default_interval))
@@ -249,20 +246,16 @@ class _InternalQuotaGrantRenewer:
     def lost(self) -> bool:
         return bool(self._lost)
 
-    def start(self) -> "_InternalQuotaGrantRenewer":
+    def start(self) -> "_QuotaGrantLockRenewer":
         if self._thread is not None:
             return self
         self._thread = threading.Thread(
             target=self._run,
-            name=f"quota-grant-renew-{self._grant_id[:8] or 'unknown'}",
+            name="quota-grant-lock-renew",
             daemon=True,
         )
         self._thread.start()
         return self
-
-    def ensure_healthy(self) -> None:
-        if self._lost:
-            raise AppError(message="quota_grant_lease_lost", code="DB_UNAVAILABLE", status_code=503)
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -271,13 +264,7 @@ class _InternalQuotaGrantRenewer:
 
     def _run(self) -> None:
         while not self._stop_event.wait(self._refresh_interval_seconds):
-            if not self._service._internal_quota_grant_exists(grant_id=self._grant_id):
-                return
-            if self._service._refresh_internal_quota_grant_state(
-                grant_id=self._grant_id,
-                lease=self._lease,
-                ttl_seconds=self._ttl_seconds,
-            ):
+            if self._service._extend_quota_grant_lock_handle(self._lock_handle, ttl_seconds=self._ttl_seconds):
                 continue
             self._lost = True
             return
@@ -288,8 +275,6 @@ class QuotaService:
         self._repo = repo or UnavailableQuotaRepository()
         self._redis_service = redis_service
         self._redis_service_resolved = redis_service is not None
-        self._internal_quota_grant_renewers: dict[str, _InternalQuotaGrantRenewer] = {}
-        self._internal_quota_grant_renewers_lock = threading.Lock()
 
     @staticmethod
     def _json_safe_value(value: Any) -> Any:
@@ -373,10 +358,6 @@ class QuotaService:
     def _quota_grant_file_path(self, *, grant_id: str, finalized: bool) -> Path:
         bucket = "finalized" if finalized else "pending"
         return self._quota_grants_root_dir() / bucket / f"{str(grant_id).strip()}.json"
-
-    def _quota_grant_lock_file_path(self, *, user_id: int, quota_type: str) -> Path:
-        safe_type = re.sub(r"[^a-z0-9_]+", "_", str(quota_type or "").strip().lower())
-        return self._quota_grants_root_dir() / "locks" / f"{int(user_id)}__{safe_type}.lock.json"
 
     def _iter_redis_keys(self, pattern: str) -> list[str]:
         redis_service = self._get_redis_service()
@@ -523,14 +504,37 @@ class QuotaService:
         file_payload["expires_at_ts"] = float(time.time() + ttl_seconds)
         self._write_json_file(self._quota_grant_file_path(grant_id=grant_id, finalized=True), file_payload)
 
-    def _acquire_internal_quota_grant_lease(self, *, grant_id: str, user_id: int, quota_type: str) -> dict[str, Any] | None:
+    def _quota_grant_decision_lock_file_path(self, *, user_id: int, quota_type: str, period_key: str) -> Path:
+        safe_type = re.sub(r"[^a-z0-9_]+", "_", str(quota_type or "").strip().lower())
+        safe_period_key = re.sub(r"[^a-z0-9_:-]+", "_", str(period_key or "").strip().lower())
+        return self._quota_grants_root_dir() / "locks" / f"{int(user_id)}__{safe_type}__{safe_period_key}.lock.json"
+
+    def _quota_grant_finalize_lock_file_path(self, *, grant_id: str) -> Path:
+        safe_grant_id = re.sub(r"[^a-z0-9_:-]+", "_", str(grant_id or "").strip().lower())
+        return self._quota_grants_root_dir() / "locks" / f"finalize__{safe_grant_id}.lock.json"
+
+    def _acquire_internal_quota_grant_decision_lock(
+        self,
+        *,
+        user_id: int,
+        quota_type: str,
+        period_key: str,
+    ) -> dict[str, Any] | None:
         redis_service = self._get_redis_service()
-        ttl_seconds = self.quota_grant_ttl_seconds()
+        ttl_seconds = self.quota_lock_ttl_seconds()
         deadline = time.monotonic() + float(self.quota_lock_wait_seconds())
         retry_interval_seconds = max(0.01, float(self.quota_lock_retry_interval_ms()) / 1000.0)
         normalized_quota_type = normalize_quota_type(quota_type)
+        normalized_period_key = str(period_key or "").strip()
         if redis_service is not None and redis_service.available:
-            key = redis_service.key_factory.lock("quota", int(user_id), normalized_quota_type)
+            key = redis_service.key_factory.lock(
+                "quota",
+                "grant",
+                "decision",
+                int(user_id),
+                normalized_quota_type,
+                normalized_period_key,
+            )
             lock_manager = RedisLockManager(redis_service.client)
             while True:
                 handle = lock_manager.acquire(key, ttl_seconds=ttl_seconds)
@@ -545,7 +549,11 @@ class QuotaService:
                     return None
                 time.sleep(retry_interval_seconds)
 
-        path = self._quota_grant_lock_file_path(user_id=user_id, quota_type=normalized_quota_type)
+        path = self._quota_grant_decision_lock_file_path(
+            user_id=user_id,
+            quota_type=normalized_quota_type,
+            period_key=normalized_period_key,
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
         while True:
             self._cleanup_file_grant(path=path)
@@ -559,117 +567,224 @@ class QuotaService:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(
                     {
-                        "grant_id": grant_id,
                         "user_id": int(user_id),
                         "quota_type": normalized_quota_type,
+                        "period_key": normalized_period_key,
                         "expires_at_ts": float(time.time() + ttl_seconds),
                     },
                     handle,
                     ensure_ascii=False,
                     separators=(",", ":"),
                 )
-            return {"backend": "file", "path": str(path)}
+            return {"backend": "file", "path": str(path), "ttl_seconds": int(ttl_seconds)}
 
-    def _release_internal_quota_grant_lease(self, lease: dict[str, Any] | None) -> None:
-        if not isinstance(lease, dict):
+    def _acquire_internal_quota_grant_finalize_lock(self, *, grant_id: str) -> dict[str, Any] | None:
+        redis_service = self._get_redis_service()
+        ttl_seconds = self.quota_lock_ttl_seconds()
+        deadline = time.monotonic() + float(self.quota_lock_wait_seconds())
+        retry_interval_seconds = max(0.01, float(self.quota_lock_retry_interval_ms()) / 1000.0)
+        normalized_grant_id = str(grant_id or "").strip()
+        if redis_service is not None and redis_service.available:
+            key = redis_service.key_factory.lock("quota", "grant", "finalize", normalized_grant_id)
+            lock_manager = RedisLockManager(redis_service.client)
+            while True:
+                handle = lock_manager.acquire(key, ttl_seconds=ttl_seconds)
+                if handle is not None:
+                    return {
+                        "backend": "redis",
+                        "key": handle.key,
+                        "token": handle.token,
+                        "ttl_seconds": int(handle.ttl_seconds),
+                    }
+                if time.monotonic() >= deadline:
+                    return None
+                time.sleep(retry_interval_seconds)
+
+        path = self._quota_grant_finalize_lock_file_path(grant_id=normalized_grant_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        while True:
+            self._cleanup_file_grant(path=path)
+            try:
+                fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                if time.monotonic() >= deadline:
+                    return None
+                time.sleep(retry_interval_seconds)
+                continue
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "grant_id": normalized_grant_id,
+                        "expires_at_ts": float(time.time() + ttl_seconds),
+                    },
+                    handle,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            return {"backend": "file", "path": str(path), "ttl_seconds": int(ttl_seconds)}
+
+    def _extend_quota_grant_lock_handle(self, lock_handle: dict[str, Any] | None, *, ttl_seconds: int) -> bool:
+        if not isinstance(lock_handle, dict):
+            return False
+        normalized_ttl = max(1, int(ttl_seconds))
+        backend = str(lock_handle.get("backend") or "").strip().lower()
+        if backend == "redis":
+            redis_service = self._get_redis_service()
+            if redis_service is None or not redis_service.available:
+                return False
+            return bool(
+                RedisLockManager(redis_service.client).extend(
+                    RedisLockHandle(
+                        key=str(lock_handle.get("key") or ""),
+                        token=str(lock_handle.get("token") or ""),
+                        ttl_seconds=max(1, int(lock_handle.get("ttl_seconds") or normalized_ttl)),
+                    ),
+                    ttl_seconds=normalized_ttl,
+                )
+            )
+        if backend == "file":
+            lock_path = Path(str(lock_handle.get("path") or "")).expanduser()
+            return self._touch_json_file_ttl(lock_path, ttl_seconds=normalized_ttl)
+        return False
+
+    def _release_quota_grant_lock_handle(self, lock_handle: dict[str, Any] | None) -> None:
+        if not isinstance(lock_handle, dict):
             return
-        backend = str(lease.get("backend") or "").strip().lower()
+        backend = str(lock_handle.get("backend") or "").strip().lower()
         if backend == "redis":
             redis_service = self._get_redis_service()
             if redis_service is None or not redis_service.available:
                 return
             RedisLockManager(redis_service.client).release(
                 RedisLockHandle(
-                    key=str(lease.get("key") or ""),
-                    token=str(lease.get("token") or ""),
-                    ttl_seconds=max(1, int(lease.get("ttl_seconds") or self.quota_grant_ttl_seconds())),
+                    key=str(lock_handle.get("key") or ""),
+                    token=str(lock_handle.get("token") or ""),
+                    ttl_seconds=max(1, int(lock_handle.get("ttl_seconds") or self.quota_lock_ttl_seconds())),
                 )
             )
             return
         if backend == "file":
-            path = Path(str(lease.get("path") or "")).expanduser()
+            path = Path(str(lock_handle.get("path") or "")).expanduser()
             try:
                 path.unlink(missing_ok=True)
             except Exception:
                 return
 
-    def _internal_quota_grant_exists(self, *, grant_id: str) -> bool:
-        return self._get_internal_quota_grant(grant_id=grant_id, finalized=False) is not None
+    def _release_internal_quota_grant_decision_lock(self, lock_handle: dict[str, Any] | None) -> None:
+        self._release_quota_grant_lock_handle(lock_handle)
 
-    def _refresh_internal_quota_grant_state(self, *, grant_id: str, lease: dict[str, Any], ttl_seconds: int) -> bool:
-        normalized_grant_id = str(grant_id or "").strip()
-        if not normalized_grant_id:
-            return False
-        normalized_ttl = max(1, int(ttl_seconds))
-        backend = str(lease.get("backend") or "").strip().lower()
-        if backend == "redis":
-            redis_service = self._get_redis_service()
-            if redis_service is None or not redis_service.available:
-                return False
-            lock_handle = RedisLockHandle(
-                key=str(lease.get("key") or ""),
-                token=str(lease.get("token") or ""),
-                ttl_seconds=max(1, int(lease.get("ttl_seconds") or normalized_ttl)),
-            )
-            if not RedisLockManager(redis_service.client).extend(lock_handle, ttl_seconds=normalized_ttl):
-                return False
-            if redis_service.expire(self._quota_grant_pending_key(normalized_grant_id), normalized_ttl):
-                return True
-        elif backend == "file":
-            lock_path = Path(str(lease.get("path") or "")).expanduser()
-            if not self._touch_json_file_ttl(lock_path, ttl_seconds=normalized_ttl):
-                return False
+    def _release_internal_quota_grant_finalize_lock(self, lock_handle: dict[str, Any] | None) -> None:
+        self._release_quota_grant_lock_handle(lock_handle)
 
-        pending_path = self._quota_grant_file_path(grant_id=normalized_grant_id, finalized=False)
-        if self._touch_json_file_ttl(pending_path, ttl_seconds=normalized_ttl):
-            return True
+    def _checked_primary_window(self, checked: dict[str, Any]) -> dict[str, Any]:
+        windows = checked.get("windows") if isinstance(checked.get("windows"), list) else []
+        primary = self._select_primary_window([dict(item) for item in windows if isinstance(item, dict)])
+        if isinstance(primary, dict):
+            return primary
+        period = normalize_period(str(checked.get("period") or "daily"))
+        period_days = checked.get("period_days")
+        return {
+            "period": period,
+            "period_days": period_days,
+            "period_key": period_key(period, period_days),
+            "current": int(checked.get("current") or 0),
+            "limit": int(checked.get("limit") or 0),
+            "remaining": int(checked.get("remaining") or 0),
+            "allowed": bool(checked.get("allowed", True)),
+            "reset_hint": str(checked.get("reset_hint") or period_reset_hint(period, period_days)),
+        }
 
-        redis_service = self._get_redis_service()
-        if redis_service is not None and redis_service.available:
-            return bool(redis_service.expire(self._quota_grant_pending_key(normalized_grant_id), normalized_ttl))
-        return False
+    def _count_active_pending_internal_quota_reservations(
+        self,
+        *,
+        user_id: int,
+        quota_type: str,
+        period_key: str,
+    ) -> int:
+        normalized_quota_type = normalize_quota_type(quota_type)
+        normalized_period_key = str(period_key or "").strip()
+        count = 0
+        for _grant_id, payload in self._iter_pending_internal_quota_grants():
+            if not isinstance(payload, dict):
+                continue
+            if int(payload.get("user_id") or 0) != int(user_id):
+                continue
+            if normalize_quota_type(str(payload.get("quota_type") or "")) != normalized_quota_type:
+                continue
+            if str(payload.get("period_key") or "").strip() != normalized_period_key:
+                continue
+            if bool(payload.get("noop")):
+                continue
+            if not bool(payload.get("config_active", False)):
+                continue
+            count += 1
+        return count
 
-    def _register_internal_quota_grant_renewer(
+    def _build_internal_quota_grant_payload(
         self,
         *,
         grant_id: str,
-        lease: dict[str, Any] | None,
-        ttl_seconds: int,
-    ) -> None:
-        if not isinstance(lease, dict):
-            return
-        renewer = _InternalQuotaGrantRenewer(
-            service=self,
-            grant_id=grant_id,
-            lease=lease,
-            ttl_seconds=ttl_seconds,
-        ).start()
-        with self._internal_quota_grant_renewers_lock:
-            previous = self._internal_quota_grant_renewers.get(grant_id)
-            self._internal_quota_grant_renewers[grant_id] = renewer
-        if previous is not None:
-            previous.stop()
+        user_id: int,
+        quota_type: str,
+        storage_quota_type: str,
+        noop: bool,
+        checked: dict[str, Any],
+        config_active: bool,
+        period: str | None,
+        period_days: int | None,
+        period_key: str | None,
+    ) -> dict[str, Any]:
+        payload = {
+            "grant_id": grant_id,
+            "user_id": int(user_id),
+            "quota_type": normalize_quota_type(quota_type),
+            "storage_quota_type": str(storage_quota_type or normalize_quota_type(quota_type)),
+            "noop": bool(noop),
+            "checked": checked,
+            "config_active": bool(config_active),
+            "period": str(period or ""),
+            "period_days": period_days,
+            "period_key": str(period_key or ""),
+            "reserved_at": datetime.utcnow().isoformat(),
+        }
+        return payload
 
-    def _get_internal_quota_grant_renewer(self, *, grant_id: str) -> _InternalQuotaGrantRenewer | None:
-        with self._internal_quota_grant_renewers_lock:
-            return self._internal_quota_grant_renewers.get(grant_id)
-
-    def _unregister_internal_quota_grant_renewer(self, *, grant_id: str) -> None:
-        with self._internal_quota_grant_renewers_lock:
-            renewer = self._internal_quota_grant_renewers.pop(grant_id, None)
-        if renewer is not None:
-            renewer.stop()
+    def _checked_with_pending_reservations(
+        self,
+        *,
+        checked: dict[str, Any],
+        period_key: str,
+        effective_used: int,
+        limit: int,
+    ) -> dict[str, Any]:
+        payload = dict(checked)
+        payload["current"] = int(effective_used)
+        payload["limit"] = int(limit)
+        payload["remaining"] = max(0, int(limit) - int(effective_used))
+        payload["allowed"] = bool(int(effective_used) < int(limit))
+        windows = payload.get("windows") if isinstance(payload.get("windows"), list) else []
+        normalized_windows: list[dict[str, Any]] = []
+        for item in windows:
+            if not isinstance(item, dict):
+                continue
+            next_item = dict(item)
+            if str(next_item.get("period_key") or "") == str(period_key):
+                next_item["current"] = int(effective_used)
+                next_item["limit"] = int(limit)
+                next_item["remaining"] = max(0, int(limit) - int(effective_used))
+                next_item["allowed"] = bool(int(effective_used) < int(limit))
+            normalized_windows.append(next_item)
+        if normalized_windows:
+            payload["windows"] = normalized_windows
+        return payload
 
     def cleanup_pending_internal_quota_grants(self) -> dict[str, Any]:
         cleaned = 0
         failed = 0
         errors: list[str] = []
-        for grant_id, payload in self._iter_pending_internal_quota_grants():
-            lease = payload.get("lease") if isinstance(payload.get("lease"), dict) else None
+        for grant_id, _payload in self._iter_pending_internal_quota_grants():
             try:
-                self._release_internal_quota_grant_lease(lease)
                 self._delete_internal_quota_grant(grant_id=grant_id, finalized=False)
-                self._unregister_internal_quota_grant_renewer(grant_id=grant_id)
                 cleaned += 1
             except Exception as exc:
                 failed += 1
@@ -939,29 +1054,48 @@ class QuotaService:
                 return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
             return {"success": False, "error": str(exc), "code": "QUOTA_CHECK_ERROR"}
 
-    def increment_quota(self, *, user_id: int, quota_type: str) -> dict[str, Any]:
+    def increment_quota(
+        self,
+        *,
+        user_id: int,
+        quota_type: str,
+        anchored_window: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         try:
             normalized_quota_type, storage_quota_type, config = self._resolve_primary_quota_config(quota_type)
             if not config:
                 return {"success": False, "error": "quota_not_found", "code": "NOT_FOUND"}
             if int(config.get("is_active", 0)) != 1:
                 return {"success": True, "skipped": True, "reason": "quota_inactive", "data": {"used_count": 0}}
-            limits = self._resolve_multi_period_limits(config=config, override_limit=None)
-            windows = self._build_multi_windows(user_id=user_id, quota_type=storage_quota_type, limits=limits)
             period_usage: list[dict[str, Any]] = []
-            if windows:
-                for item in windows:
-                    period = str(item.get("period") or "daily")
-                    period_days = item.get("period_days")
-                    key = str(item.get("period_key") or period_key(period, period_days))
+            anchor = dict(anchored_window or {})
+            anchored_storage_quota_type = str(anchor.get("storage_quota_type") or storage_quota_type or "")
+            if anchor:
+                period = normalize_period(str(anchor.get("period") or config.get("period") or "daily"))
+                period_days = anchor.get("period_days")
+                key = str(anchor.get("period_key") or period_key(period, period_days))
+                used = self._repo.increment_usage(
+                    user_id=user_id,
+                    quota_type=anchored_storage_quota_type,
+                    period_key=key,
+                )
+                period_usage.append({"period": period, "period_days": period_days, "period_key": key, "used_count": int(used)})
+            else:
+                limits = self._resolve_multi_period_limits(config=config, override_limit=None)
+                windows = self._build_multi_windows(user_id=user_id, quota_type=storage_quota_type, limits=limits)
+                if windows:
+                    for item in windows:
+                        period = str(item.get("period") or "daily")
+                        period_days = item.get("period_days")
+                        key = str(item.get("period_key") or period_key(period, period_days))
+                        used = self._repo.increment_usage(user_id=user_id, quota_type=storage_quota_type, period_key=key)
+                        period_usage.append({"period": period, "period_days": period_days, "period_key": key, "used_count": int(used)})
+                else:
+                    period = normalize_period(str(config.get("period") or "daily"))
+                    period_days = to_valid_period_days(config.get("period_days"), default=7) if period == "custom_days" else None
+                    key = period_key(period, period_days)
                     used = self._repo.increment_usage(user_id=user_id, quota_type=storage_quota_type, period_key=key)
                     period_usage.append({"period": period, "period_days": period_days, "period_key": key, "used_count": int(used)})
-            else:
-                period = normalize_period(str(config.get("period") or "daily"))
-                period_days = to_valid_period_days(config.get("period_days"), default=7) if period == "custom_days" else None
-                key = period_key(period, period_days)
-                used = self._repo.increment_usage(user_id=user_id, quota_type=storage_quota_type, period_key=key)
-                period_usage.append({"period": period, "period_days": period_days, "period_key": key, "used_count": int(used)})
             primary = self._select_primary_window(period_usage)
             return {"success": True, "data": {"used_count": int((primary or {}).get("used_count") or 0), "period_usage": period_usage}}
         except Exception as exc:
@@ -1242,8 +1376,15 @@ class QuotaService:
             return {"success": False, "error": str(exc), "code": "QUOTA_GRANT_ERROR"}
 
         normalized_quota_type = normalize_quota_type(quota_type)
+        grant_id = uuid4().hex
+        ttl_seconds = self.quota_grant_ttl_seconds()
         noop = _is_quota_exempt_user(user)
         checked: dict[str, Any]
+        period: str | None = None
+        period_days: int | None = None
+        checked_period_key: str | None = None
+        config_active = False
+        storage_quota_type = normalized_quota_type
         if noop:
             checked = {
                 "success": True,
@@ -1270,39 +1411,94 @@ class QuotaService:
                     "code": "QUOTA_EXCEEDED",
                     "data": checked,
                 }
+            config_active = bool(checked.get("config_active", True))
+            _resolved_quota_type, storage_quota_type, _config = self._resolve_primary_quota_config(normalized_quota_type)
+            storage_quota_type = str(storage_quota_type or normalized_quota_type)
+            primary_window = self._checked_primary_window(checked)
+            period = str(primary_window.get("period") or "")
+            period_days = primary_window.get("period_days")
+            checked_period_key = str(primary_window.get("period_key") or "")
 
-        grant_id = uuid4().hex
-        ttl_seconds = self.quota_grant_ttl_seconds()
-        lease = self._acquire_internal_quota_grant_lease(
-            grant_id=grant_id,
+        if noop or not config_active:
+            payload = self._build_internal_quota_grant_payload(
+                grant_id=grant_id,
+                user_id=int(user_id),
+                quota_type=normalized_quota_type,
+                storage_quota_type=storage_quota_type,
+                noop=bool(noop),
+                checked=checked,
+                config_active=bool(config_active),
+                period=period,
+                period_days=period_days,
+                period_key=checked_period_key,
+            )
+            self._store_internal_quota_grant(grant_id=grant_id, payload=payload, ttl_seconds=ttl_seconds)
+            return {
+                "success": True,
+                "data": {
+                    "grant_id": grant_id,
+                    "quota_type": normalized_quota_type,
+                    "noop": bool(noop),
+                    "checked": checked,
+                    "ttl_seconds": ttl_seconds,
+                },
+            }
+
+        decision_lock = self._acquire_internal_quota_grant_decision_lock(
             user_id=int(user_id),
             quota_type=normalized_quota_type,
+            period_key=str(checked_period_key or ""),
         )
-        if lease is None:
-            return {
-                "success": False,
-                "error": "grant_already_active",
-                "code": "GRANT_ALREADY_ACTIVE",
-            }
-        payload = {
-            "grant_id": grant_id,
-            "user_id": int(user_id),
-            "quota_type": normalized_quota_type,
-            "noop": bool(noop),
-            "checked": checked,
-            "config_active": bool(checked.get("config_active", True)),
-            "lease": lease,
-        }
+        if decision_lock is None:
+            return {"success": False, "error": "quota_check_timeout", "code": "QUOTA_LOCK_TIMEOUT"}
         try:
+            primary_window = self._checked_primary_window(checked)
+            period = str(primary_window.get("period") or "")
+            period_days = primary_window.get("period_days")
+            checked_period_key = str(primary_window.get("period_key") or "")
+            limit = int(primary_window.get("limit") or checked.get("limit") or 0)
+            completed_usage = int(
+                self._repo.get_usage(
+                    user_id=int(user_id),
+                    quota_type=storage_quota_type,
+                    period_key=checked_period_key,
+                )
+            )
+            pending_count = self._count_active_pending_internal_quota_reservations(
+                user_id=int(user_id),
+                quota_type=normalized_quota_type,
+                period_key=checked_period_key,
+            )
+            effective_used = int(completed_usage) + int(pending_count)
+            checked = self._checked_with_pending_reservations(
+                checked=checked,
+                period_key=checked_period_key,
+                effective_used=effective_used,
+                limit=limit,
+            )
+            if int(effective_used) >= int(limit):
+                return {
+                    "success": False,
+                    "error": "quota_exceeded",
+                    "code": "QUOTA_EXCEEDED",
+                    "data": checked,
+                }
+
+            payload = self._build_internal_quota_grant_payload(
+                grant_id=grant_id,
+                user_id=int(user_id),
+                quota_type=normalized_quota_type,
+                storage_quota_type=storage_quota_type,
+                noop=False,
+                checked=checked,
+                config_active=True,
+                period=period,
+                period_days=period_days,
+                period_key=checked_period_key,
+            )
             self._store_internal_quota_grant(grant_id=grant_id, payload=payload, ttl_seconds=ttl_seconds)
-        except Exception:
-            self._release_internal_quota_grant_lease(lease)
-            raise
-        self._register_internal_quota_grant_renewer(
-            grant_id=grant_id,
-            lease=lease,
-            ttl_seconds=ttl_seconds,
-        )
+        finally:
+            self._release_internal_quota_grant_decision_lock(decision_lock)
         return {
             "success": True,
             "data": {
@@ -1319,49 +1515,61 @@ class QuotaService:
         if not normalized_grant_id:
             return {"success": False, "error": "invalid_grant_id", "code": "VALIDATION_ERROR"}
 
-        prior = self._get_internal_quota_grant(grant_id=normalized_grant_id, finalized=True)
-        if prior:
-            payload = dict(prior)
-            payload["idempotent"] = True
-            return {"success": True, "data": payload}
+        finalize_lock = self._acquire_internal_quota_grant_finalize_lock(grant_id=normalized_grant_id)
+        if finalize_lock is None:
+            return {"success": False, "error": "quota_finalize_timeout", "code": "QUOTA_LOCK_TIMEOUT"}
+        finalize_lock_ttl = max(1, int(finalize_lock.get("ttl_seconds") or self.quota_lock_ttl_seconds()))
+        finalize_lock_renewer = _QuotaGrantLockRenewer(
+            service=self,
+            lock_handle=finalize_lock,
+            ttl_seconds=finalize_lock_ttl,
+        ).start()
+        try:
+            prior = self._get_internal_quota_grant(grant_id=normalized_grant_id, finalized=True)
+            if prior:
+                payload = dict(prior)
+                payload["idempotent"] = True
+                return {"success": True, "data": payload}
 
-        pending = self._get_internal_quota_grant(grant_id=normalized_grant_id, finalized=False)
-        if not pending:
-            return {"success": False, "error": "grant_not_found", "code": "NOT_FOUND"}
+            pending = self._get_internal_quota_grant(grant_id=normalized_grant_id, finalized=False)
+            if not pending:
+                return {"success": False, "error": "grant_not_found", "code": "NOT_FOUND"}
 
-        lease = pending.get("lease") if isinstance(pending.get("lease"), dict) else None
-        renewer = self._get_internal_quota_grant_renewer(grant_id=normalized_grant_id)
-        if renewer is not None:
-            try:
-                renewer.ensure_healthy()
-            except AppError as exc:
-                return {"success": False, "error": str(exc.message or exc), "code": str(exc.code or "DB_UNAVAILABLE")}
-        result_payload = {
-            "grant_id": normalized_grant_id,
-            "quota_type": str(pending.get("quota_type") or ""),
-            "noop": bool(pending.get("noop")),
-            "counted": False,
-            "idempotent": False,
-        }
-        if bool(success) and not bool(pending.get("noop")) and bool(pending.get("config_active", True)):
-            incremented = self.increment_quota(
-                user_id=int(pending.get("user_id") or 0),
-                quota_type=str(pending.get("quota_type") or ""),
+            result_payload = {
+                "grant_id": normalized_grant_id,
+                "quota_type": str(pending.get("quota_type") or ""),
+                "noop": bool(pending.get("noop")),
+                "counted": False,
+                "idempotent": False,
+            }
+            if bool(success) and not bool(pending.get("noop")) and bool(pending.get("config_active", True)):
+                incremented = self.increment_quota(
+                    user_id=int(pending.get("user_id") or 0),
+                    quota_type=str(pending.get("quota_type") or ""),
+                    anchored_window={
+                        "period": pending.get("period"),
+                        "period_days": pending.get("period_days"),
+                        "period_key": pending.get("period_key"),
+                        "storage_quota_type": pending.get("storage_quota_type"),
+                    },
+                )
+                if not incremented.get("success"):
+                    return incremented
+                result_payload["counted"] = True
+                result_payload["increment"] = incremented.get("data")
+
+            self._persist_internal_quota_grant_result(
+                grant_id=normalized_grant_id,
+                payload=result_payload,
+                ttl_seconds=self.quota_grant_ttl_seconds(),
             )
-            if not incremented.get("success"):
-                return incremented
-            result_payload["counted"] = True
-            result_payload["increment"] = incremented.get("data")
-
-        self._persist_internal_quota_grant_result(
-            grant_id=normalized_grant_id,
-            payload=result_payload,
-            ttl_seconds=self.quota_grant_ttl_seconds(),
-        )
-        self._delete_internal_quota_grant(grant_id=normalized_grant_id, finalized=False)
-        self._release_internal_quota_grant_lease(lease)
-        self._unregister_internal_quota_grant_renewer(grant_id=normalized_grant_id)
-        return {"success": True, "data": result_payload}
+            self._delete_internal_quota_grant(grant_id=normalized_grant_id, finalized=False)
+            if finalize_lock_renewer.lost:
+                return {"success": False, "error": "quota_finalize_lock_lost", "code": "DB_UNAVAILABLE"}
+            return {"success": True, "data": result_payload}
+        finally:
+            finalize_lock_renewer.stop()
+            self._release_internal_quota_grant_finalize_lock(finalize_lock)
 
 
 def _is_quota_exempt_user(user: dict[str, Any] | None) -> bool:

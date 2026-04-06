@@ -1,4 +1,5 @@
 import json
+import threading
 from dataclasses import replace
 import anyio
 
@@ -293,6 +294,166 @@ def test_mode_ask_stream_appends_quota_warning_when_finalize_fails(monkeypatch):
     assert b'"type":"done"' in body
     assert b'"quota"' in body
     assert b'"warning"' in body
+
+
+def test_mode_patent_inflight_request_does_not_block_fast_quota_flow(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    original_files = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
+    patent_upstream_started = threading.Event()
+    release_patent_upstream = threading.Event()
+    fast_completed = threading.Event()
+    errors: dict[str, Exception] = {}
+    responses: dict[str, object] = {}
+    precheck_index = {"value": 0}
+    calls: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = _json_request_body(request)
+        calls.append((request.url.path, payload))
+        if request.url.path == "/internal/quota/grants/precheck":
+            precheck_index["value"] += 1
+            grant_id = "grant-patent-inflight" if precheck_index["value"] == 1 else "grant-fast-followup"
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"grant_id": grant_id, "quota_type": payload["quota_type"], "noop": False}},
+            )
+        if request.url.path == "/internal/quota/grants/grant-patent-inflight/finalize":
+            finalize_payload = _json_request_body(request)
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-patent-inflight", "counted": finalize_payload["success"], "idempotent": False}})
+        if request.url.path == "/internal/quota/grants/grant-fast-followup/finalize":
+            finalize_payload = _json_request_body(request)
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-fast-followup", "counted": finalize_payload["success"], "idempotent": False}})
+        if request.url.path == "/api/patent/ask":
+            patent_upstream_started.set()
+            assert release_patent_upstream.wait(timeout=2.0)
+            return httpx.Response(200, json={"success": True, "data": {"final_answer": "patent ok"}})
+        if request.url.path == "/api/fast/ask":
+            return httpx.Response(200, json={"success": True, "data": {"final_answer": "fast ok"}})
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    def _run_patent(client: TestClient) -> None:
+        try:
+            responses["patent"] = client.post(
+                "/api/patent/ask",
+                json={
+                    "question": "磷酸铁锂电压范围是多少？",
+                    "requested_mode": "patent",
+                    "conversation_id": 210,
+                    "user_id": 42,
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            )
+        except Exception as exc:
+            errors["patent"] = exc
+
+    def _run_fast(client: TestClient) -> None:
+        try:
+            responses["fast"] = client.post(
+                "/api/fast/ask",
+                json={
+                    "question": "plain fast question",
+                    "requested_mode": "fast",
+                    "conversation_id": 211,
+                    "user_id": 42,
+                },
+            )
+            fast_completed.set()
+        except Exception as exc:
+            errors["fast"] = exc
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            patent_worker = threading.Thread(target=_run_patent, args=(client,), daemon=True)
+            fast_worker = threading.Thread(target=_run_fast, args=(client,), daemon=True)
+            patent_worker.start()
+            assert patent_upstream_started.wait(timeout=1.0)
+            fast_worker.start()
+            assert fast_completed.wait(timeout=1.0)
+            release_patent_upstream.set()
+            patent_worker.join(timeout=2.0)
+            fast_worker.join(timeout=2.0)
+    finally:
+        app.state.conversation_file_service = original_files
+
+    assert errors == {}
+    assert patent_worker.is_alive() is False
+    assert fast_worker.is_alive() is False
+    assert responses["patent"].status_code == 200
+    assert responses["fast"].status_code == 200
+    assert responses["patent"].json()["success"] is True
+    assert responses["fast"].json()["success"] is True
+    precheck_calls = [item for item in calls if item[0] == "/internal/quota/grants/precheck"]
+    assert len(precheck_calls) == 2
+    assert precheck_calls[0][1]["quota_type"] == "ask_query"
+    assert precheck_calls[1][1]["quota_type"] == "ask_query"
+
+
+def test_mode_ask_keeps_success_response_when_finalize_returns_not_found(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/internal/quota/grants/precheck":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-sync-not-found", "quota_type": "ask_query", "noop": False}})
+        if request.url.path == "/internal/quota/grants/grant-sync-not-found/finalize":
+            return httpx.Response(404, json={"success": False, "code": "NOT_FOUND", "error": "grant_not_found"})
+        if request.url.path == "/api/thinking/ask":
+            return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        response = client.post(
+            "/api/thinking/ask",
+            json={"question": "plain qa", "requested_mode": "thinking", "conversation_id": 212, "user_id": 42},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["quota"]["warning"]["code"] == "NOT_FOUND"
+    assert payload["quota"]["warning"]["error"] == "grant_not_found"
+
+
+def test_mode_ask_stream_appends_not_found_quota_warning_when_finalize_returns_not_found(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/internal/quota/grants/precheck":
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"grant_id": "grant-stream-not-found", "quota_type": "ask_query", "noop": False}},
+            )
+        if request.url.path == "/internal/quota/grants/grant-stream-not-found/finalize":
+            return httpx.Response(404, json={"success": False, "code": "NOT_FOUND", "error": "grant_not_found"})
+        if request.url.path == "/api/thinking/ask_stream":
+            return httpx.Response(
+                200,
+                content=(
+                    b'data: {"type":"metadata","query_mode":"thinking"}\n\n'
+                    b'data: {"type":"content","content":"hello"}\n\n'
+                    b'data: {"type":"done","final_answer":"hello"}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        with client.stream(
+            "POST",
+            "/api/thinking/ask_stream",
+            json={"question": "plain qa", "requested_mode": "thinking", "conversation_id": 213, "user_id": 42},
+        ) as response:
+            body = b"".join(response.iter_bytes())
+
+    assert response.status_code == 200
+    assert b'"type":"done"' in body
+    assert b'"quota"' in body
+    assert b'"warning"' in body
+    assert b'"code":"NOT_FOUND"' in body
+    assert b'"error":"grant_not_found"' in body
 
 
 @pytest.mark.parametrize(

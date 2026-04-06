@@ -266,6 +266,32 @@ class _ExpiringFakeRedis(_FakeRedis):
         return max(0, int(expires_at - time.monotonic()))
 
 
+def _set_quota_config(
+    repo: _FakeQuotaRepo,
+    *,
+    quota_type: str,
+    quota_name: str | None = None,
+    default_limit: int = 5,
+    daily_limit: int | None = None,
+    weekly_limit: int | None = None,
+    monthly_limit: int | None = None,
+    period: str = "daily",
+    period_days: int | None = None,
+    is_active: int = 1,
+) -> None:
+    repo.configs[quota_type] = {
+        "quota_type": quota_type,
+        "quota_name": quota_name or quota_type.replace("_", " ").title(),
+        "period": period,
+        "period_days": period_days,
+        "default_limit": default_limit,
+        "daily_limit": daily_limit if daily_limit is not None else (default_limit if period == "daily" else None),
+        "weekly_limit": weekly_limit,
+        "monthly_limit": monthly_limit,
+        "is_active": is_active,
+    }
+
+
 def test_quota_routes_registered():
     paths = {route.path for route in app.routes if hasattr(route, "path")}
     assert "/api/v1/quota/my" in paths
@@ -380,6 +406,110 @@ def test_service_finalize_internal_quota_grant_counts_success_once(monkeypatch):
     assert len(repo.last_increment_call) == 1
 
 
+def test_service_finalize_internal_quota_grant_is_concurrency_idempotent(monkeypatch):
+    monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+    repo = _FakeQuotaRepo()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    service = QuotaService(repo=repo, redis_service=redis_service)
+
+    created = service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+    grant_id = str(created["data"]["grant_id"])
+    original_increment = service.increment_quota
+    first_increment_entered = threading.Event()
+    release_increment = threading.Event()
+    first_thread_id: dict[str, int | None] = {"value": None}
+    results: dict[str, dict] = {}
+    errors: dict[str, Exception] = {}
+
+    def blocking_increment(*, user_id: int, quota_type: str, anchored_window=None):
+        current_thread_id = threading.get_ident()
+        if first_thread_id["value"] is None:
+            first_thread_id["value"] = current_thread_id
+        if current_thread_id == first_thread_id["value"]:
+            first_increment_entered.set()
+            assert release_increment.wait(timeout=1.0)
+        return original_increment(user_id=user_id, quota_type=quota_type, anchored_window=anchored_window)
+
+    service.increment_quota = blocking_increment  # type: ignore[assignment]
+
+    def _run(name: str) -> None:
+        try:
+            results[name] = service.finalize_internal_quota_grant(grant_id=grant_id, success=True)
+        except Exception as exc:
+            errors[name] = exc
+
+    first_worker = threading.Thread(target=_run, args=("first",), daemon=True)
+    second_worker = threading.Thread(target=_run, args=("second",), daemon=True)
+    first_worker.start()
+    assert first_increment_entered.wait(timeout=1.0)
+    second_worker.start()
+    time.sleep(0.05)
+    assert second_worker.is_alive() is True
+    release_increment.set()
+    first_worker.join(timeout=2.0)
+    second_worker.join(timeout=2.0)
+
+    assert errors == {}
+    assert first_worker.is_alive() is False
+    assert second_worker.is_alive() is False
+    assert set(results.keys()) == {"first", "second"}
+    assert all(item["success"] is True for item in results.values())
+    assert len(repo.last_increment_call) == 1
+    assert sum(1 for item in results.values() if item["data"]["idempotent"] is True) == 1
+
+
+def test_service_finalize_internal_quota_grant_keeps_finalize_lock_alive_past_ttl(monkeypatch):
+    monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+    monkeypatch.setattr(QuotaService, "quota_lock_ttl_seconds", staticmethod(lambda: 1))
+    repo = _FakeQuotaRepo()
+    redis_service = RedisService.from_prefix(client=_ExpiringFakeRedis(), key_prefix="agentcode")
+    service = QuotaService(repo=repo, redis_service=redis_service)
+
+    created = service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+    grant_id = str(created["data"]["grant_id"])
+    original_increment = service.increment_quota
+    first_increment_entered = threading.Event()
+    release_increment = threading.Event()
+    first_thread_id: dict[str, int | None] = {"value": None}
+    results: dict[str, dict] = {}
+    errors: dict[str, Exception] = {}
+
+    def blocking_increment(*, user_id: int, quota_type: str, anchored_window=None):
+        current_thread_id = threading.get_ident()
+        if first_thread_id["value"] is None:
+            first_thread_id["value"] = current_thread_id
+        if current_thread_id == first_thread_id["value"]:
+            first_increment_entered.set()
+            time.sleep(1.4)
+            release_increment.set()
+        else:
+            assert release_increment.wait(timeout=2.0)
+        return original_increment(user_id=user_id, quota_type=quota_type, anchored_window=anchored_window)
+
+    service.increment_quota = blocking_increment  # type: ignore[assignment]
+
+    def _run(name: str) -> None:
+        try:
+            results[name] = service.finalize_internal_quota_grant(grant_id=grant_id, success=True)
+        except Exception as exc:
+            errors[name] = exc
+
+    first_worker = threading.Thread(target=_run, args=("first",), daemon=True)
+    second_worker = threading.Thread(target=_run, args=("second",), daemon=True)
+    first_worker.start()
+    assert first_increment_entered.wait(timeout=1.0)
+    time.sleep(1.1)
+    second_worker.start()
+    first_worker.join(timeout=4.0)
+    second_worker.join(timeout=4.0)
+
+    assert errors == {}
+    assert first_worker.is_alive() is False
+    assert second_worker.is_alive() is False
+    assert all(item["success"] is True for item in results.values())
+    assert len(repo.last_increment_call) == 1
+
+
 def test_service_finalize_internal_quota_grant_releases_without_increment_on_failure(monkeypatch):
     monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
     repo = _FakeQuotaRepo()
@@ -394,11 +524,97 @@ def test_service_finalize_internal_quota_grant_releases_without_increment_on_fai
     assert repo.last_increment_call == []
 
 
-def test_service_create_internal_quota_grant_rejects_overlapping_active_grants(monkeypatch):
+def test_service_create_internal_quota_grant_allows_parallel_reservations_when_quota_has_capacity(monkeypatch):
     monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
     monkeypatch.setattr(QuotaService, "quota_lock_wait_seconds", staticmethod(lambda: 1))
     monkeypatch.setattr(QuotaService, "quota_lock_retry_interval_ms", staticmethod(lambda: 10))
     repo = _FakeQuotaRepo()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    service = QuotaService(repo=repo, redis_service=redis_service)
+
+    first = service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+    second = service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+
+    assert first["success"] is True
+    assert second["success"] is True
+    assert second["data"]["grant_id"] != first["data"]["grant_id"]
+
+
+def test_service_create_internal_quota_grant_allows_parallel_file_qa_reservations_when_quota_has_capacity(monkeypatch):
+    monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+    monkeypatch.setattr(QuotaService, "quota_lock_wait_seconds", staticmethod(lambda: 1))
+    monkeypatch.setattr(QuotaService, "quota_lock_retry_interval_ms", staticmethod(lambda: 10))
+    repo = _FakeQuotaRepo()
+    repo.configs["file_qa"] = {
+        "quota_type": "file_qa",
+        "quota_name": "File QA",
+        "period": "daily",
+        "period_days": None,
+        "default_limit": 5,
+        "daily_limit": 5,
+        "weekly_limit": None,
+        "monthly_limit": None,
+        "is_active": 1,
+    }
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    service = QuotaService(repo=repo, redis_service=redis_service)
+
+    first = service.create_internal_quota_grant(user_id=7, quota_type="file_qa")
+    second = service.create_internal_quota_grant(user_id=7, quota_type="file_qa")
+
+    assert first["success"] is True
+    assert second["success"] is True
+    assert second["data"]["grant_id"] != first["data"]["grant_id"]
+
+
+@pytest.mark.parametrize(("quota_type", "quota_name"), [("file_view", "File View"), ("doc_assist", "Doc Assist")])
+def test_service_create_internal_quota_grant_allows_parallel_reservations_for_remaining_canonical_buckets(
+    monkeypatch,
+    quota_type,
+    quota_name,
+):
+    monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+    monkeypatch.setattr(QuotaService, "quota_lock_wait_seconds", staticmethod(lambda: 1))
+    monkeypatch.setattr(QuotaService, "quota_lock_retry_interval_ms", staticmethod(lambda: 10))
+    repo = _FakeQuotaRepo()
+    _set_quota_config(repo, quota_type=quota_type, quota_name=quota_name, default_limit=5, period="daily")
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    service = QuotaService(repo=repo, redis_service=redis_service)
+
+    first = service.create_internal_quota_grant(user_id=7, quota_type=quota_type)
+    second = service.create_internal_quota_grant(user_id=7, quota_type=quota_type)
+
+    assert first["success"] is True
+    assert second["success"] is True
+    assert second["data"]["grant_id"] != first["data"]["grant_id"]
+
+
+def test_service_create_internal_quota_grant_noop_does_not_consume_reservation_capacity(monkeypatch):
+    repo = _FakeQuotaRepo()
+    repo.configs["ask_query"]["default_limit"] = 1
+    repo.configs["ask_query"]["daily_limit"] = 1
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    service = QuotaService(repo=repo, redis_service=redis_service)
+
+    monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 2})
+    noop_grant = service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+
+    monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+    second = service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+
+    assert noop_grant["success"] is True
+    assert noop_grant["data"]["noop"] is True
+    assert second["success"] is True
+    assert second["data"]["noop"] is False
+
+
+def test_service_create_internal_quota_grant_returns_quota_exceeded_when_reservations_fill_limit(monkeypatch):
+    monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+    monkeypatch.setattr(QuotaService, "quota_lock_wait_seconds", staticmethod(lambda: 1))
+    monkeypatch.setattr(QuotaService, "quota_lock_retry_interval_ms", staticmethod(lambda: 10))
+    repo = _FakeQuotaRepo()
+    repo.configs["ask_query"]["default_limit"] = 1
+    repo.configs["ask_query"]["daily_limit"] = 1
     redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
     service = QuotaService(repo=repo, redis_service=redis_service)
 
@@ -407,31 +623,129 @@ def test_service_create_internal_quota_grant_rejects_overlapping_active_grants(m
 
     assert first["success"] is True
     assert second["success"] is False
-    assert second["code"] == "GRANT_ALREADY_ACTIVE"
+    assert second["code"] == "QUOTA_EXCEEDED"
 
 
-def test_service_create_internal_quota_grant_waits_for_active_grant_release(monkeypatch):
+def test_service_create_internal_quota_grant_counts_completed_usage_plus_pending_reservations(monkeypatch):
     monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
-    monkeypatch.setattr(QuotaService, "quota_lock_wait_seconds", staticmethod(lambda: 1))
-    monkeypatch.setattr(QuotaService, "quota_lock_retry_interval_ms", staticmethod(lambda: 10))
     repo = _FakeQuotaRepo()
+    repo.configs["ask_query"]["default_limit"] = 2
+    repo.configs["ask_query"]["daily_limit"] = 2
+    repo.usage[(7, "ask_query", period_key("daily"))] = 1
     redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
     service = QuotaService(repo=repo, redis_service=redis_service)
 
     first = service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+    second = service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+
+    assert first["success"] is True
+    assert second["success"] is False
+    assert second["code"] == "QUOTA_EXCEEDED"
+
+
+def test_service_create_internal_quota_grant_enforces_atomic_reservation_decision_under_concurrent_prechecks(monkeypatch):
+    monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+    monkeypatch.setattr(QuotaService, "quota_lock_wait_seconds", staticmethod(lambda: 1))
+    monkeypatch.setattr(QuotaService, "quota_lock_retry_interval_ms", staticmethod(lambda: 10))
+    repo = _FakeQuotaRepo()
+    repo.configs["ask_query"]["default_limit"] = 1
+    repo.configs["ask_query"]["daily_limit"] = 1
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    service = QuotaService(repo=repo, redis_service=redis_service)
+
+    original_store = service._store_internal_quota_grant
+    first_store_entered = threading.Event()
+    release_first_store = threading.Event()
+    first_thread_id: dict[str, int | None] = {"value": None}
+    results: dict[str, dict] = {}
+    errors: dict[str, Exception] = {}
+
+    def blocking_store(*, grant_id: str, payload: dict[str, object], ttl_seconds: int) -> None:
+        current_thread_id = threading.get_ident()
+        if first_thread_id["value"] is None:
+            first_thread_id["value"] = current_thread_id
+        if current_thread_id == first_thread_id["value"]:
+            first_store_entered.set()
+            assert release_first_store.wait(timeout=1.0)
+        original_store(grant_id=grant_id, payload=payload, ttl_seconds=ttl_seconds)
+
+    monkeypatch.setattr(service, "_store_internal_quota_grant", blocking_store)
+
+    def _run(name: str) -> None:
+        try:
+            results[name] = service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+        except Exception as exc:
+            errors[name] = exc
+
+    first_worker = threading.Thread(target=_run, args=("first",), daemon=True)
+    second_worker = threading.Thread(target=_run, args=("second",), daemon=True)
+    first_worker.start()
+    assert first_store_entered.wait(timeout=1.0)
+    second_worker.start()
+    time.sleep(0.05)
+    release_first_store.set()
+    first_worker.join(timeout=2.0)
+    second_worker.join(timeout=2.0)
+
+    assert errors == {}
+    assert first_worker.is_alive() is False
+    assert second_worker.is_alive() is False
+    assert set(results.keys()) == {"first", "second"}
+    successes = [item for item in results.values() if item["success"]]
+    failures = [item for item in results.values() if not item["success"]]
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert failures[0]["code"] == "QUOTA_EXCEEDED"
+
+
+def test_service_create_internal_quota_grant_scopes_pending_reservations_by_period_key(monkeypatch):
+    monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+    repo = _FakeQuotaRepo()
+    repo.configs["ask_query"]["default_limit"] = 1
+    repo.configs["ask_query"]["daily_limit"] = 1
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    service = QuotaService(repo=repo, redis_service=redis_service)
+    state = {"period_key": "window-a"}
+
+    monkeypatch.setattr(quota_service_module, "period_key", lambda period, period_days=None: str(state["period_key"]))
+
+    first = service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+    state["period_key"] = "window-b"
+    second = service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+
+    assert first["success"] is True
+    assert second["success"] is True
+
+
+def test_service_create_internal_quota_grant_does_not_wait_for_reservation_release(monkeypatch):
+    monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+    monkeypatch.setattr(QuotaService, "quota_lock_wait_seconds", staticmethod(lambda: 1))
+    monkeypatch.setattr(QuotaService, "quota_lock_retry_interval_ms", staticmethod(lambda: 10))
+    repo = _FakeQuotaRepo()
+    repo.configs["ask_query"]["default_limit"] = 1
+    repo.configs["ask_query"]["daily_limit"] = 1
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    service = QuotaService(repo=repo, redis_service=redis_service)
+
+    first = service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+    release_started = threading.Event()
 
     def _release_first() -> None:
+        release_started.set()
         time.sleep(0.1)
         service.finalize_internal_quota_grant(grant_id=str(first["data"]["grant_id"]), success=False)
 
     releaser = threading.Thread(target=_release_first, daemon=True)
     releaser.start()
+    assert release_started.wait(timeout=1.0)
     second = service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+    release_still_pending = releaser.is_alive()
     releaser.join(timeout=1.0)
 
     assert first["success"] is True
-    assert second["success"] is True
-    assert second["data"]["grant_id"] != first["data"]["grant_id"]
+    assert second["success"] is False
+    assert second["code"] == "QUOTA_EXCEEDED"
+    assert release_still_pending is True
 
 
 def test_service_internal_quota_grant_uses_persistent_fallback_without_redis(monkeypatch, tmp_path):
@@ -462,11 +776,11 @@ def test_service_finalize_internal_quota_grant_keeps_pending_when_increment_temp
     original_increment = service.increment_quota
     state = {"count": 0}
 
-    def flaky_increment(*, user_id: int, quota_type: str):
+    def flaky_increment(*, user_id: int, quota_type: str, anchored_window=None):
         if state["count"] == 0:
             state["count"] += 1
             return {"success": False, "error": "temporary_failure", "code": "DB_UNAVAILABLE"}
-        return original_increment(user_id=user_id, quota_type=quota_type)
+        return original_increment(user_id=user_id, quota_type=quota_type, anchored_window=anchored_window)
 
     service.increment_quota = flaky_increment  # type: ignore[assignment]
     first = service.finalize_internal_quota_grant(grant_id=grant_id, success=True)
@@ -476,6 +790,94 @@ def test_service_finalize_internal_quota_grant_keeps_pending_when_increment_temp
     assert first["code"] == "DB_UNAVAILABLE"
     assert second["success"] is True
     assert second["data"]["counted"] is True
+    assert len(repo.last_increment_call) == 1
+
+
+def test_service_finalize_internal_quota_grant_counts_against_grant_period_key(monkeypatch):
+    monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+    repo = _FakeQuotaRepo()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    service = QuotaService(repo=repo, redis_service=redis_service)
+    state = {"period_key": "window-precheck"}
+
+    monkeypatch.setattr(quota_service_module, "period_key", lambda period, period_days=None: str(state["period_key"]))
+
+    created = service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+    state["period_key"] = "window-finalize"
+    finalized = service.finalize_internal_quota_grant(grant_id=str(created["data"]["grant_id"]), success=True)
+
+    assert created["success"] is True
+    assert finalized["success"] is True
+    assert repo.last_increment_call == [(7, "ask_query", "window-precheck")]
+
+
+def test_service_create_internal_quota_grant_persists_anchored_window_metadata(monkeypatch):
+    monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+    repo = _FakeQuotaRepo()
+    _set_quota_config(
+        repo,
+        quota_type="ask_query",
+        quota_name="Ask Query",
+        default_limit=3,
+        period="custom_days",
+        period_days=3,
+    )
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    service = QuotaService(repo=repo, redis_service=redis_service)
+
+    created = service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+    grant_id = str(created["data"]["grant_id"])
+    pending = service._get_internal_quota_grant(grant_id=grant_id, finalized=False)
+
+    assert created["success"] is True
+    assert pending is not None
+    assert pending["user_id"] == 7
+    assert pending["quota_type"] == "ask_query"
+    assert pending["period"] == "custom_days"
+    assert pending["period_days"] == 3
+    assert pending["period_key"] == period_key("custom_days", 3)
+    assert pending["reserved_at"]
+
+
+def test_service_finalize_internal_quota_grant_counts_two_parallel_successes(monkeypatch):
+    monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+    repo = _FakeQuotaRepo()
+    repo.configs["ask_query"]["default_limit"] = 2
+    repo.configs["ask_query"]["daily_limit"] = 2
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    service = QuotaService(repo=repo, redis_service=redis_service)
+
+    first = service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+    second = service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+    first_finalized = service.finalize_internal_quota_grant(grant_id=str(first["data"]["grant_id"]), success=True)
+    second_finalized = service.finalize_internal_quota_grant(grant_id=str(second["data"]["grant_id"]), success=True)
+
+    assert first["success"] is True
+    assert second["success"] is True
+    assert first_finalized["success"] is True
+    assert second_finalized["success"] is True
+    assert len(repo.last_increment_call) == 2
+
+
+def test_service_finalize_internal_quota_grant_counts_only_successful_parallel_grants(monkeypatch):
+    monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+    repo = _FakeQuotaRepo()
+    repo.configs["ask_query"]["default_limit"] = 2
+    repo.configs["ask_query"]["daily_limit"] = 2
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    service = QuotaService(repo=repo, redis_service=redis_service)
+
+    first = service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+    second = service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+    first_finalized = service.finalize_internal_quota_grant(grant_id=str(first["data"]["grant_id"]), success=True)
+    second_finalized = service.finalize_internal_quota_grant(grant_id=str(second["data"]["grant_id"]), success=False)
+
+    assert first["success"] is True
+    assert second["success"] is True
+    assert first_finalized["success"] is True
+    assert first_finalized["data"]["counted"] is True
+    assert second_finalized["success"] is True
+    assert second_finalized["data"]["counted"] is False
     assert len(repo.last_increment_call) == 1
 
 
@@ -525,7 +927,27 @@ def test_service_internal_quota_grant_falls_back_when_finalized_redis_write_retu
     get_settings.cache_clear()
 
 
-def test_service_internal_quota_grant_keeps_lease_alive_past_ttl(monkeypatch, tmp_path):
+def test_service_internal_quota_grant_expiry_releases_reservation_capacity(monkeypatch, tmp_path):
+    monkeypatch.setenv("PUBLIC_SERVICE_DATA_ROOT", str(tmp_path))
+    get_settings.cache_clear()
+    monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+    monkeypatch.setattr(QuotaService, "quota_grant_ttl_seconds", staticmethod(lambda: 1))
+    repo = _FakeQuotaRepo()
+    repo.configs["ask_query"]["default_limit"] = 1
+    repo.configs["ask_query"]["daily_limit"] = 1
+    redis_service = RedisService.from_prefix(client=_ExpiringFakeRedis(), key_prefix="agentcode")
+    service = QuotaService(repo=repo, redis_service=redis_service)
+
+    created = service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+    time.sleep(1.4)
+    retried = service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+
+    assert created["success"] is True
+    assert retried["success"] is True
+    get_settings.cache_clear()
+
+
+def test_service_finalize_internal_quota_grant_returns_not_found_after_expired_reservation(monkeypatch, tmp_path):
     monkeypatch.setenv("PUBLIC_SERVICE_DATA_ROOT", str(tmp_path))
     get_settings.cache_clear()
     monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
@@ -535,23 +957,21 @@ def test_service_internal_quota_grant_keeps_lease_alive_past_ttl(monkeypatch, tm
     service = QuotaService(repo=repo, redis_service=redis_service)
 
     created = service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
-    grant_id = str(created["data"]["grant_id"])
     time.sleep(1.4)
-    overlapping = service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
-    finalized = service.finalize_internal_quota_grant(grant_id=grant_id, success=True)
+    finalized = service.finalize_internal_quota_grant(grant_id=str(created["data"]["grant_id"]), success=True)
 
     assert created["success"] is True
-    assert overlapping["success"] is False
-    assert overlapping["code"] == "GRANT_ALREADY_ACTIVE"
-    assert finalized["success"] is True
-    assert finalized["data"]["counted"] is True
-    assert len(repo.last_increment_call) == 1
+    assert finalized["success"] is False
+    assert finalized["code"] == "NOT_FOUND"
+    assert repo.last_increment_call == []
     get_settings.cache_clear()
 
 
-def test_service_cleanup_pending_internal_quota_grants_releases_redis_lease(monkeypatch):
+def test_service_cleanup_pending_internal_quota_grants_releases_reservation_capacity(monkeypatch):
     monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
     repo = _FakeQuotaRepo()
+    repo.configs["ask_query"]["default_limit"] = 1
+    repo.configs["ask_query"]["daily_limit"] = 1
     redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
     first_service = QuotaService(repo=repo, redis_service=redis_service)
     second_service = QuotaService(repo=repo, redis_service=redis_service)
@@ -563,7 +983,7 @@ def test_service_cleanup_pending_internal_quota_grants_releases_redis_lease(monk
 
     assert created["success"] is True
     assert overlapping["success"] is False
-    assert overlapping["code"] == "GRANT_ALREADY_ACTIVE"
+    assert overlapping["code"] == "QUOTA_EXCEEDED"
     assert cleaned["success"] is True
     assert cleaned["data"]["cleaned"] == 1
     assert cleaned["data"]["failed"] == 0
