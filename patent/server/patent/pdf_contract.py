@@ -155,12 +155,16 @@ def detect_targeted_document_index(
     text = str(question or "").strip().lower()
     if not text:
         return None
+    candidate_refs: list[tuple[int, str]] = []
     for index, label in enumerate(list(selected_file_labels or [])):
         normalized_label = str(label or "").strip().lower()
         normalized_stem = normalized_label.rsplit(".", 1)[0]
-        if normalized_label and normalized_label in text:
-            return index
-        if normalized_stem and normalized_stem in text:
+        if normalized_label:
+            candidate_refs.append((index, normalized_label))
+        if normalized_stem and normalized_stem != normalized_label:
+            candidate_refs.append((index, normalized_stem))
+    for index, candidate in sorted(candidate_refs, key=lambda item: len(item[1]), reverse=True):
+        if _has_explicit_label_reference(text=text, candidate=candidate):
             return index
 
     match = re.search(r"第\s*([0-9]+|[一二三四五六七八九十]+)\s*篇", text)
@@ -179,6 +183,18 @@ def detect_targeted_document_index(
         if re.search(rf"\b{word}\s+(?:paper|document)\b", text) and ordinal <= int(selected_pdf_count):
             return ordinal - 1
     return None
+
+
+def _has_explicit_label_reference(*, text: str, candidate: str) -> bool:
+    normalized_text = str(text or "").strip().lower()
+    normalized_candidate = str(candidate or "").strip().lower()
+    if not normalized_text or not normalized_candidate:
+        return False
+    if normalized_candidate in normalized_text:
+        pattern = re.compile(rf"(?<![A-Za-z0-9]){re.escape(normalized_candidate)}(?![A-Za-z0-9])")
+        if pattern.search(normalized_text):
+            return True
+    return False
 
 
 def _parse_ordinal_token(token: str) -> int | None:

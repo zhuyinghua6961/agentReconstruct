@@ -5,6 +5,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any, Callable
+from collections import Counter
 
 import httpx
 
@@ -911,12 +912,29 @@ def _has_compare_document_coverage(*, answer: str, document_summaries: list[tupl
     if not document_summaries:
         return False
     normalized_answer = str(answer or "")
+    token_lists = [_extract_compare_summary_tokens(summary) for _label, summary in document_summaries]
+    token_counts = Counter(token.lower() for tokens in token_lists for token in dict.fromkeys(tokens))
     for label, summary in document_summaries:
-        summary_snippet = str(summary or "").strip("…")
-        summary_tokens = [token for token in re.split(r"[\s,，。；;:：]+", summary_snippet) if len(token) >= 6]
+        summary_tokens = _extract_compare_summary_tokens(summary)
+        unique_tokens = [token for token in summary_tokens if token_counts.get(token.lower(), 0) == 1]
         label_present = bool(label and label in normalized_answer)
-        fact_present = any(token in normalized_answer for token in summary_tokens[:3])
+        candidate_tokens = unique_tokens or summary_tokens
+        fact_present = any(token in normalized_answer for token in candidate_tokens[:5])
         if label_present and fact_present:
             continue
         return False
     return True
+
+
+def _extract_compare_summary_tokens(summary: str) -> list[str]:
+    summary_snippet = str(summary or "").strip("…")
+    tokens = [token for token in re.split(r"[\s,，。；;:：]+", summary_snippet) if len(token) >= 6]
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        marker = token.lower()
+        if marker in seen:
+            continue
+        seen.add(marker)
+        ordered.append(token)
+    return ordered

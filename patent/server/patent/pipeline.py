@@ -7,6 +7,80 @@ from server.schemas.request_models import PatentAskRequest
 from server.services.mode_profiles import PatentModeProfile, get_patent_mode_profile
 
 
+def build_patent_reference_instruction(references: list[Any] | None) -> str:
+    normalized = [str(item).strip() for item in list(references or []) if str(item).strip()]
+    if not normalized:
+        return ""
+    return "引用知识库结论时仅可使用这些专利号：" + "、".join(normalized)
+
+
+def build_retrieval_evidence_context(retrieval_outcome: PatentRetrievalOutcome) -> str:
+    lines: list[str] = []
+    for evidence in list(retrieval_outcome.evidences or [])[:3]:
+        patent_id = str(evidence.canonical_patent_id or evidence.publication_number or "").strip()
+        title = str(evidence.title or patent_id).strip()
+        segments: list[str] = []
+        if str(evidence.matched_section_label or "").strip() and str(evidence.matched_snippet or "").strip():
+            segments.append(f"{str(evidence.matched_section_label).strip()}：{_truncate(evidence.matched_snippet, limit=180)}")
+        elif str(evidence.matched_snippet or "").strip():
+            segments.append(f"命中片段：{_truncate(evidence.matched_snippet, limit=180)}")
+        if str(evidence.abstract_text or "").strip():
+            segments.append(f"摘要：{_truncate(evidence.abstract_text, limit=180)}")
+        if list(evidence.table_supplements or []):
+            segments.append(f"表格：{_summarize_table(evidence.table_supplements[0])}")
+        if not segments:
+            segments.append("当前仅命中专利元数据。")
+        lines.append(f"{patent_id}《{title}》；" + "；".join(segment for segment in segments if segment))
+    return _truncate("\n".join(line for line in lines if line), limit=1200)
+
+
+def build_stage3_evidence_context(stage3_payload: dict[str, Any] | None) -> str:
+    evidences = [dict(item) for item in list(dict(stage3_payload or {}).get("evidences") or []) if isinstance(item, dict)]
+    lines: list[str] = []
+    for evidence in evidences[:3]:
+        patent_id = str(evidence.get("canonical_patent_id") or dict(evidence.get("metadata") or {}).get("publication_number") or "").strip()
+        title = str(evidence.get("title") or patent_id).strip()
+        segments: list[str] = []
+        matched_evidence = [dict(item) for item in list(evidence.get("matched_evidence") or []) if isinstance(item, dict)]
+        for item in matched_evidence[:2]:
+            label = str(item.get("section_label") or item.get("section_type") or "命中片段").strip()
+            text = str(item.get("text") or "").strip()
+            if text:
+                segments.append(f"{label}：{_truncate(text, limit=180)}")
+        if not matched_evidence and str(evidence.get("abstract_text") or "").strip():
+            segments.append(f"摘要：{_truncate(str(evidence.get('abstract_text') or ''), limit=180)}")
+        table_supplements = [dict(item) for item in list(evidence.get("table_supplements") or []) if isinstance(item, dict)]
+        if table_supplements:
+            segments.append(f"表格：{_summarize_table(table_supplements[0])}")
+        if not segments:
+            continue
+        lines.append(f"{patent_id}《{title}》；" + "；".join(segment for segment in segments if segment))
+    return _truncate("\n".join(line for line in lines if line), limit=1200)
+
+
+def _summarize_table(table: Any) -> str:
+    payload = dict(table or {})
+    title = str(payload.get("table_title") or "表格证据").strip()
+    columns = [str(item).strip() for item in list(payload.get("columns") or []) if str(item).strip()]
+    rows = [dict(item) for item in list(payload.get("rows") or []) if isinstance(item, dict)]
+    if not rows:
+        return title
+    first_row = rows[0]
+    if columns:
+        values = [f"{column}={str(first_row.get(column) or '').strip()}" for column in columns if str(first_row.get(column) or "").strip()]
+    else:
+        values = [f"{str(key).strip()}={str(value).strip()}" for key, value in first_row.items() if str(key).strip() and str(value).strip()]
+    detail = "；".join(values[:4]).strip()
+    return title if not detail else f"{title}（{detail}）"
+
+
+def _truncate(value: Any, *, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(1, limit - 1)].rstrip() + "…"
+
+
 
 def build_stub_patent_result(
     *,
@@ -115,6 +189,8 @@ def build_retrieval_patent_result(
             "cache_hit": retrieval_outcome.cache_hit,
             "negative_cache_hit": retrieval_outcome.negative_cache_hit,
             "not_found": False,
+            "kb_evidence_context": build_retrieval_evidence_context(retrieval_outcome),
+            "kb_reference_instruction": build_patent_reference_instruction(retrieval_outcome.references),
         },
         "timings": dict(retrieval_outcome.timings),
     }

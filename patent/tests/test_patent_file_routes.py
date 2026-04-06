@@ -612,6 +612,50 @@ def test_dispatch_pdf_route_compare_answer_restructures_when_only_labels_exist_w
     assert "200-cycle retention" in result["answer_text"]
 
 
+def test_dispatch_pdf_route_compare_answer_restructures_when_only_shared_tokens_are_repeated(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "Abstract A keeps a shared compare anchor.\n\nResults A show 15% efficiency improvement.\n\nConclusion A favors route A."
+                if path == str(pdf_path_a)
+                else "Abstract B keeps a shared compare anchor.\n\nResults B keep 200-cycle retention.\n\nConclusion B favors route B."
+            ),
+            answer_question_fn=lambda **kwargs: (
+                "各自概要：\n"
+                "1. paper-a.pdf：shared compare anchor。\n"
+                "2. paper-b.pdf：shared compare anchor。\n\n"
+                "相同点：都有实验。\n\n"
+                "差异点：存在差异。\n\n"
+                "总结：略。"
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert "15% efficiency improvement" in result["answer_text"]
+    assert "200-cycle retention" in result["answer_text"]
+
+
 def test_dispatch_pdf_route_returns_explicit_compare_failure_when_only_one_pdf_is_readable(tmp_path):
     pdf_path_a = tmp_path / "paper-a.pdf"
     pdf_path_b = tmp_path / "paper-b.pdf"
@@ -1393,6 +1437,46 @@ def test_dispatch_hybrid_route_uses_real_pdf_and_table_content_when_local_paths_
     }.issubset(set(result["metadata"]["synthesis_contract"].keys()))
     assert "旧 pdf summary 壳子" not in result["answer_text"]
     assert "旧 table summary 壳子" not in result["answer_text"]
+
+
+def test_dispatch_hybrid_route_with_kb_defers_hybrid_step_until_executor_merge(tmp_path):
+    pdf_path = tmp_path / "battery-paper.pdf"
+    csv_path = tmp_path / "cells.csv"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    _write_csv(csv_path)
+    contract = build_patent_file_contract(
+        question="请结合 PDF、表格和知识库总结结论",
+        route="hybrid_qa",
+        source_scope="pdf+table+kb",
+        selected_file_ids=[11, 33],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "local_path": str(pdf_path)},
+            {"file_id": 33, "file_type": "csv", "file_name": "cells.csv", "local_path": str(csv_path)},
+        ],
+        file_selection={"strategy": "explicit_selection", "source_scope": "pdf+table+kb"},
+        kb_enabled=True,
+        allow_kb_verification=True,
+    )
+    progress_steps: list[dict[str, object]] = []
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "This paper studies LMFP/LFP blending and reports safer charging behavior.",
+            answer_question_fn=lambda **kwargs: "真实 PDF 总结：LMFP/LFP 复配改善了充电安全性。",
+        ),
+        tabular_service=PatentTabularService(
+            answer_question_fn=lambda **kwargs: "真实表格总结：LMFP 120mAh，LFP 115mAh，NCM 140mAh。",
+        ),
+        progress_callback=progress_steps.append,
+    )
+
+    assert result["handler"] == "hybrid"
+    assert all(step.get("step") != "hybrid_answer" for step in result["steps"])
+    assert all(step.get("step") != "hybrid_answer" for step in result["metadata"]["steps"])
+    assert all(step.get("step") != "hybrid_answer" for step in progress_steps)
+    assert result["metadata"]["synthesis_contract"]["source_scope"] == "pdf+table+kb"
 
 
 def test_dispatch_hybrid_route_marks_failure_when_no_usable_file_evidence_exists():

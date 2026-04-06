@@ -149,6 +149,20 @@ def test_detect_targeted_document_index_supports_ordinals_and_file_names():
     assert detect_targeted_document_index("Summarize the eleventh document only", selected_pdf_count=14, selected_file_labels=long_labels) == 10
 
 
+def test_detect_targeted_document_index_prefers_exact_filename_boundaries_over_overlapping_stems():
+    labels = ["paper-1.pdf", "paper-10.pdf"]
+
+    assert detect_targeted_document_index("只看 paper-10.pdf 的方法", selected_pdf_count=2, selected_file_labels=labels) == 1
+    assert detect_targeted_document_index("只看 paper-10 的方法", selected_pdf_count=2, selected_file_labels=labels) == 1
+
+
+def test_detect_targeted_document_index_prefers_longer_suffix_variants_before_shorter_stems():
+    labels = ["paper-a.pdf", "paper-a-v2.pdf"]
+
+    assert detect_targeted_document_index("只看 paper-a-v2.pdf 的方法", selected_pdf_count=2, selected_file_labels=labels) == 1
+    assert detect_targeted_document_index("只看 paper-a-v2 的方法", selected_pdf_count=2, selected_file_labels=labels) == 1
+
+
 def test_multi_pdf_format_uses_fastqa_compatible_headers():
     formatted = format_multi_pdf_sections(
         [

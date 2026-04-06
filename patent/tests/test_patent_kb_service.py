@@ -6,7 +6,14 @@ from server.errors import codes
 from server.errors.core import APIError
 from server.patent.kb_service import PatentKbService
 from server.patent.models import PatentQaExecutionMetadata, PatentQaExecutionResult
-from server.patent.retrieval_models import PatentCatalogRecord, PatentClaim, PatentDescriptionSnippet
+from server.patent.retrieval_models import (
+    PatentCatalogRecord,
+    PatentClaim,
+    PatentDescriptionSnippet,
+    PatentEvidence,
+    PatentRetrievalOutcome,
+    PatentTableSupplement,
+)
 from server.patent.retrieval_service import PatentRetrievalService
 from server.schemas.request_models import PatentAskRequest
 
@@ -166,6 +173,105 @@ def test_kb_service_falls_back_to_runtime_retrieval_service_when_runtime_is_not_
     assert execution_result["answer_text"].startswith("Patent retrieval answer:")
     assert execution_result["references"] == ["CN123456789A"]
     assert execution_result["metadata"]["retrieval_backend"] == "exact_id"
+    assert "CN123456789A" in execution_result["metadata"]["kb_evidence_context"]
+    assert "Battery thermal management system for electric vehicles" in execution_result["metadata"]["kb_evidence_context"]
+    assert execution_result["metadata"]["kb_reference_instruction"] == "引用知识库结论时仅可使用这些专利号：CN123456789A"
+
+
+def test_kb_service_uses_stage3_evidence_context_instead_of_final_answer_excerpt():
+    class _EvidenceOrchestrator:
+        def run(self, *, question: str, runtime, conversation_context=None) -> PatentQaExecutionResult:
+            return PatentQaExecutionResult(
+                success=True,
+                final_answer="最终答案：这是阶段四合成后的总结，不应直接拿来当证据上下文。",
+                metadata=PatentQaExecutionMetadata(
+                    route="kb_qa",
+                    query_mode="patent staged qa",
+                    source_ids=["CN115132975B"],
+                    stage_timings_ms={"stage1": 5.0, "stage2": 8.0, "stage3": 12.0, "stage4": 20.0},
+                ),
+                raw={
+                    "stage3": {
+                        "source_ids": ["CN115132975B"],
+                        "evidences": [
+                            {
+                                "canonical_patent_id": "CN115132975B",
+                                "title": "一种锂离子电池及动力车辆",
+                                "abstract_text": "通过 LMFP/LFP/三元复配改善充电安全与低 SOC 放电功率。",
+                                "matched_evidence": [
+                                    {
+                                        "section_type": "claim",
+                                        "section_label": "Claim 1",
+                                        "text": "一种锂离子电池，其正极活性材料包括 LMFP、LFP 与三元材料。",
+                                    }
+                                ],
+                                "table_supplements": [
+                                    {
+                                        "table_title": "性能表",
+                                        "columns": ["指标", "数值"],
+                                        "rows": [{"指标": "容量", "数值": "120mAh"}],
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    "references": ["CN115132975B"],
+                    "reference_objects": [{"canonical_patent_id": "CN115132975B"}],
+                    "reference_links": [],
+                    "original_links": [],
+                    "metadata": {"retrieval_backend": "vector_hybrid"},
+                    "steps": [],
+                },
+            )
+
+    service = PatentKbService(orchestrator=_EvidenceOrchestrator())
+
+    execution_result = service.run(
+        request=_make_request(),
+        runtime=_FakeStagedRuntime(),
+        conversation_context={"recent_turns_for_llm": []},
+    )
+
+    evidence_context = execution_result["metadata"]["kb_evidence_context"]
+    assert "Claim 1" in evidence_context
+    assert "LMFP、LFP 与三元材料" in evidence_context
+    assert "性能表" in evidence_context
+    assert "最终答案：这是阶段四合成后的总结" not in evidence_context
+    assert execution_result["metadata"]["kb_reference_instruction"] == "引用知识库结论时仅可使用这些专利号：CN115132975B"
+
+
+def test_kb_service_rejects_stub_fallback_for_file_kb_routes_without_live_kb_backend():
+    service = PatentKbService()
+
+    request = PatentAskRequest(
+        question="请结合 PDF 和知识库总结结论",
+        conversation_id=123,
+        chat_history=[],
+        requested_mode="patent",
+        actual_mode="patent",
+        route="hybrid_qa",
+        source_scope="pdf+kb",
+        turn_mode="mixed",
+        kb_enabled=True,
+        allow_kb_verification=True,
+        used_files=[{"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"}],
+        execution_files=[{"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"}],
+        selected_file_ids=[11],
+        primary_file_id=11,
+        file_selection={"strategy": "explicit_selection", "source_scope": "pdf+kb", "selected_file_ids": [11]},
+        trace_id="req_file_kb",
+        options={},
+    )
+
+    with pytest.raises(APIError) as exc_info:
+        service.run(
+            request=request,
+            runtime=None,
+            conversation_context={"recent_turns_for_llm": []},
+        )
+
+    assert exc_info.value.code == codes.SERVICE_NOT_READY
+    assert exc_info.value.error == "service_not_ready"
 
 
 def test_kb_service_raises_api_error_when_staged_execution_fails():

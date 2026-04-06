@@ -8,7 +8,12 @@ from server.errors import codes
 from server.errors.core import APIError
 from server.patent.models import PatentQaExecutionResult
 from server.patent.orchestrators.generation import PatentGenerationOrchestrator
-from server.patent.pipeline import build_retrieval_patent_result, build_stub_patent_result
+from server.patent.pipeline import (
+    build_patent_reference_instruction,
+    build_retrieval_patent_result,
+    build_stage3_evidence_context,
+    build_stub_patent_result,
+)
 from server.patent.retrieval_service import PatentRetrievalService
 from server.schemas.request_models import PatentAskRequest
 from server.services.mode_profiles import PatentModeProfile, get_patent_mode_profile
@@ -88,6 +93,14 @@ class PatentKbService:
                 retrieval_outcome=retrieval_outcome,
                 profile=profile,
             )
+        if _requires_live_kb_backend(request):
+            raise APIError(
+                code=codes.SERVICE_NOT_READY,
+                message="patent kb backend is not ready for file hybrid route",
+                status_code=503,
+                error="service_not_ready",
+                retriable=True,
+            )
         _LOGGER.warning("patent kb_service run falling back to stub trace=%s", request.trace_id)
         return build_stub_patent_result(
             request=request,
@@ -110,13 +123,8 @@ class PatentKbService:
         metadata["stage25_skipped"] = bool(result.metadata.stage25_skipped)
         if result.metadata.stage25_skip_reason:
             metadata["stage25_skip_reason"] = str(result.metadata.stage25_skip_reason)
-        metadata["kb_evidence_context"] = str(result.final_answer or "")[:1200]
-        metadata["kb_reference_instruction"] = (
-            "引用知识库结论时仅可使用这些专利号："
-            + "、".join(str(item) for item in list(raw.get("references") or []) if str(item).strip())
-            if list(raw.get("references") or [])
-            else ""
-        )
+        metadata["kb_evidence_context"] = build_stage3_evidence_context(dict(raw.get("stage3") or {}))
+        metadata["kb_reference_instruction"] = build_patent_reference_instruction(list(raw.get("references") or []))
         return {
             "answer_text": str(result.final_answer or ""),
             "route": str(profile.route),
@@ -144,6 +152,14 @@ def _supports_staged_runtime(runtime: Any | None) -> bool:
         "stage4_synthesis_with_patent_evidence",
     )
     return runtime is not None and all(callable(getattr(runtime, name, None)) for name in required)
+
+
+def _requires_live_kb_backend(request: PatentAskRequest) -> bool:
+    route = str(request.route or "").strip()
+    source_scope = str(request.source_scope or "").strip()
+    if route == "kb_qa":
+        return False
+    return "kb" in source_scope.split("+")
 
 
 def _build_steps_from_metadata(*, result: PatentQaExecutionResult) -> list[dict[str, Any]]:

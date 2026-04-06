@@ -118,7 +118,7 @@ def _build_hybrid_result(
         progress_callback=progress_callback,
         content_callback=None,
     )
-    if callable(progress_callback):
+    if callable(progress_callback) and not include_kb:
         progress_callback(
             {
                 "step": "hybrid_answer",
@@ -151,10 +151,12 @@ def _build_hybrid_result(
         "status": "success" if hybrid_success else "error",
         "data": {"count": len(used_files)},
     }
-    if callable(content_callback):
+    include_file_hybrid_step = not include_kb
+    if callable(content_callback) and include_file_hybrid_step:
         emit_text_chunks(answer_text, content_callback=content_callback)
-    if callable(progress_callback):
+    if callable(progress_callback) and include_file_hybrid_step:
         progress_callback(dict(hybrid_step))
+    hybrid_steps = [dict(hybrid_step)] if include_file_hybrid_step else []
     return {
         "handler": "hybrid",
         "answer_text": answer_text,
@@ -165,7 +167,7 @@ def _build_hybrid_result(
             dict(dispatch_step),
             *[dict(item) for item in list(pdf_result.get("steps") or []) if isinstance(item, dict)],
             *[dict(item) for item in list(tabular_result.get("steps") or []) if isinstance(item, dict)],
-            hybrid_step,
+            *hybrid_steps,
         ],
         "metadata": {
             "handler": "hybrid",
@@ -180,7 +182,7 @@ def _build_hybrid_result(
                 dict(dispatch_step),
                 *[dict(item) for item in list(pdf_result.get("steps") or []) if isinstance(item, dict)],
                 *[dict(item) for item in list(tabular_result.get("steps") or []) if isinstance(item, dict)],
-                dict(hybrid_step),
+                *hybrid_steps,
             ],
         },
         "timings": {
@@ -261,13 +263,14 @@ def synthesize_patent_hybrid_answer(*, synthesis_contract: dict[str, Any]) -> st
     table_execution_context = str(contract.get("table_execution_context") or "").strip()
     kb_evidence_context = str(contract.get("kb_evidence_context") or "").strip()
     kb_reference_instruction = str(contract.get("kb_reference_instruction") or "").strip()
+    usable_kb_answer = "" if _is_degraded_answer(kb_answer) else kb_answer
 
     lead = _select_hybrid_direct_conclusion(
         table_execution_context=table_execution_context,
         pdf_evidence_context=pdf_evidence_context,
         tabular_answer=tabular_answer,
         pdf_answer=pdf_answer,
-        kb_answer=kb_answer,
+        kb_answer=usable_kb_answer,
     )
     if not lead:
         return "当前未拿到可读的 PDF、表格或知识库证据，暂时无法生成联合回答。"
@@ -281,13 +284,13 @@ def synthesize_patent_hybrid_answer(*, synthesis_contract: dict[str, Any]) -> st
             file_lines.append(f"PDF 原文证据：{pdf_evidence_context or pdf_answer}")
         if file_lines:
             sections.append("文件依据：\n" + "\n".join(file_lines))
-    if kb_answer:
-        kb_lines = [f"知识库补充：{kb_answer}"]
+    if usable_kb_answer:
+        kb_lines = [f"知识库补充：{usable_kb_answer}"]
         if kb_reference_instruction:
             kb_lines.append(kb_reference_instruction)
         conflict_message = _detect_conflict_message(
             file_context="\n".join(part for part in (table_execution_context, pdf_evidence_context) if part),
-            kb_context=kb_evidence_context or kb_answer,
+            kb_context=kb_evidence_context or usable_kb_answer,
         )
         if conflict_message:
             kb_lines.append(conflict_message)
@@ -379,7 +382,10 @@ def _is_degraded_answer(text: str) -> bool:
     if not normalized:
         return True
     markers = (
+        "found no matching results",
         "未拿到可读",
+        "未找到可用的知识库",
+        "未找到匹配",
         "无法生成",
         "请稍后重试",
         "文件不可读",

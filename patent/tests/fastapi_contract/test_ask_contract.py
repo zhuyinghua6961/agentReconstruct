@@ -2877,6 +2877,74 @@ def test_http_stream_hybrid_pdf_kb_route_emits_incremental_content_before_done(m
     assert events[-1]["type"] == "done"
 
 
+def test_http_stream_hybrid_pdf_table_kb_route_emits_only_final_unified_hybrid_steps(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    pdf_path = tmp_path / "spec.pdf"
+    csv_path = tmp_path / "claims.csv"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    _write_csv(csv_path)
+    app.state.ask_service._patent_executor._pdf_service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: "This paper studies LMFP/LFP blending and reports safer charging behavior.",
+        answer_question_fn=lambda **kwargs: "真实 PDF 总结：LMFP/LFP 复配改善了充电安全性。",
+    )
+    app.state.ask_service._patent_executor._tabular_service = PatentTabularService(
+        answer_question_fn=lambda **kwargs: "真实表格总结：LMFP 120mAh，LFP 115mAh，NCM 140mAh。",
+    )
+
+    class _HybridKbService:
+        def run(self, *, request, runtime=None, conversation_context=None, progress_callback=None, content_callback=None):
+            return {
+                "answer_text": "知识库补充：相关专利族强调热稳定性和倍率性能的平衡。",
+                "route": request.route,
+                "query_mode": "patent_hybrid_qa",
+                "steps": [{"step": "stage4", "title": "阶段四", "message": "ok", "status": "success"}],
+                "references": ["CN123456789A"],
+                "reference_objects": [{"canonical_patent_id": "CN123456789A"}],
+                "reference_links": [],
+                "original_links": [],
+                "metadata": {
+                    "retrieval_backend": "patent-local-kb",
+                    "kb_evidence_context": "知识库证据指出该路线强调热稳定性与倍率性能平衡。",
+                    "kb_reference_instruction": "引用知识库时仅可使用这些专利号：CN123456789A",
+                },
+                "timings": {"kb_ms": 7},
+            }
+
+    app.state.ask_service._patent_executor._kb_service = _HybridKbService()
+    payload = _hybrid_payload("pdf+table+kb")
+    payload["execution_files"][0]["local_path"] = str(pdf_path)
+    payload["used_files"][0]["local_path"] = str(pdf_path)
+    payload["execution_files"][1].update({"file_type": "csv", "file_name": "claims.csv", "local_path": str(csv_path)})
+    payload["used_files"][1].update({"file_type": "csv", "file_name": "claims.csv", "local_path": str(csv_path)})
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask_stream", json=payload)
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    step_events = [event for event in events if event["type"] == "step"]
+
+    assert [event["step"] for event in step_events] == [
+        "context_ready",
+        "dispatch",
+        "pdf_extract",
+        "pdf_extract",
+        "pdf_answer",
+        "pdf_answer",
+        "tabular_load",
+        "tabular_load",
+        "tabular_answer",
+        "tabular_answer",
+        "kb_evidence",
+        "kb_evidence",
+        "hybrid_answer",
+        "hybrid_answer",
+    ]
+    assert sum(1 for event in step_events if event["step"] == "hybrid_answer") == 2
+    assert events[-1]["type"] == "done"
+
+
 def test_durable_sync_request_is_blocked_by_route_gate_before_auth_or_service(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", TEST_JWT_SECRET)
     monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "false")

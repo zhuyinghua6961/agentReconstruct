@@ -1,5 +1,7 @@
 import pytest
 
+from server.errors import codes
+from server.errors.core import APIError
 from server.patent.executor import PatentExecutor
 from server.patent.kb_service import PatentKbService
 from server.patent.pdf_service import PatentPdfService
@@ -1028,23 +1030,8 @@ def test_executor_tabular_route_uses_real_table_content_when_local_path_is_avail
 @pytest.mark.parametrize(
     ("source_scope", "execution_files", "selected_file_ids", "expected_handler", "expected_used_files"),
     [
-        ("pdf+kb", [{"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"}], [11], "pdf", [{"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"}]),
-        ("table+kb", [{"file_id": 33, "file_type": "xlsx", "file_name": "claims.xlsx"}], [33], "tabular", [{"file_id": 33, "file_type": "xlsx", "file_name": "claims.xlsx"}]),
         (
             "pdf+table",
-            [
-                {"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"},
-                {"file_id": 33, "file_type": "xlsx", "file_name": "claims.xlsx"},
-            ],
-            [11, 33],
-            "hybrid",
-            [
-                {"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"},
-                {"file_id": 33, "file_type": "xlsx", "file_name": "claims.xlsx"},
-            ],
-        ),
-        (
-            "pdf+table+kb",
             [
                 {"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"},
                 {"file_id": 33, "file_type": "xlsx", "file_name": "claims.xlsx"},
@@ -1085,6 +1072,41 @@ def test_executor_real_hybrid_routes_return_shared_ask_payload_shape(
     assert result["query_mode"] == "patent_hybrid_qa"
     assert result["answer_text"]
     assert result["used_files"] == expected_used_files
+
+
+@pytest.mark.parametrize(
+    ("source_scope", "execution_files", "selected_file_ids"),
+    [
+        ("pdf+kb", [{"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"}], [11]),
+        ("table+kb", [{"file_id": 33, "file_type": "xlsx", "file_name": "claims.xlsx"}], [33]),
+        (
+            "pdf+table+kb",
+            [
+                {"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"},
+                {"file_id": 33, "file_type": "xlsx", "file_name": "claims.xlsx"},
+            ],
+            [11, 33],
+        ),
+    ],
+)
+def test_executor_requires_live_kb_backend_for_kb_enabled_file_routes(source_scope, execution_files, selected_file_ids):
+    executor = PatentExecutor()
+
+    with pytest.raises(APIError) as exc_info:
+        executor.execute(
+            request=_make_file_request(
+                route="hybrid_qa",
+                source_scope=source_scope,
+                turn_mode="mixed",
+                execution_files=execution_files,
+                selected_file_ids=selected_file_ids,
+                trace_id=f"req_{source_scope.replace('+', '_')}",
+            ),
+            context={"trace_id": "req_hybrid_real"},
+        )
+
+    assert exc_info.value.code == codes.SERVICE_NOT_READY
+    assert exc_info.value.error == "service_not_ready"
 
 
 @pytest.mark.parametrize(
@@ -1691,5 +1713,66 @@ def test_executor_pdf_kb_hybrid_no_evidence_keeps_live_and_final_hybrid_step_in_
 
     hybrid_progress = [step for step in progress_steps if step.get("step") == "hybrid_answer"]
     assert hybrid_progress[-1]["status"] == "error"
+    assert result["steps"][-1]["step"] == "hybrid_answer"
+    assert result["steps"][-1]["status"] == "error"
+
+
+def test_executor_pdf_kb_hybrid_treats_kb_retrieval_miss_as_no_evidence(tmp_path):
+    class _EmptyPdfService:
+        def execute(self, *, contract, include_kb: bool, progress_callback=None, content_callback=None):
+            return {
+                "answer_text": "当前未拿到可读的 PDF 原文内容，暂时无法生成基于文件的回答。",
+                "route": contract.route,
+                "query_mode": "patent_hybrid_qa",
+                "source_scope": contract.source_scope,
+                "steps": [{"step": "pdf_answer", "title": "生成文件答案", "message": "unavailable", "status": "error"}],
+                "metadata": {
+                    "answer_mode": "pdf_text_unavailable",
+                    "pdf_evidence_context": "",
+                },
+                "timings": {"pdf_ms": 1},
+                "used_files": [item.as_payload() for item in contract.selected_execution_files],
+                "file_selection": dict(contract.file_selection),
+            }
+
+    class _NotFoundKbService(PatentKbService):
+        def run(self, *, request, runtime=None, conversation_context=None, progress_callback=None, content_callback=None):
+            return {
+                "answer_text": "Patent retrieval found no matching results.",
+                "route": request.route,
+                "query_mode": "patent_hybrid_qa",
+                "steps": [{"step": "retrieval_not_found", "title": "Patent Retrieval", "message": "miss", "status": "success"}],
+                "references": [],
+                "reference_objects": [],
+                "reference_links": [],
+                "original_links": [],
+                "metadata": {
+                    "retrieval_backend": "patent-local-kb",
+                    "not_found": True,
+                    "kb_evidence_context": "",
+                    "kb_reference_instruction": "",
+                },
+                "timings": {"kb_ms": 1},
+            }
+
+    executor = PatentExecutor(
+        kb_service=_NotFoundKbService(),
+        pdf_service=_EmptyPdfService(),
+    )
+
+    result = executor.execute(
+        request=_make_file_request(
+            route="hybrid_qa",
+            source_scope="pdf+kb",
+            turn_mode="mixed",
+            execution_files=[{"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"}],
+            selected_file_ids=[11],
+            trace_id="req_pdf_kb_not_found",
+        ),
+        context={"recent_turns_for_llm": []},
+    )
+
+    assert "Patent retrieval found no matching results." not in result["answer_text"]
+    assert "暂时无法生成联合回答" in result["answer_text"]
     assert result["steps"][-1]["step"] == "hybrid_answer"
     assert result["steps"][-1]["status"] == "error"
