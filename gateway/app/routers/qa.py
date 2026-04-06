@@ -96,8 +96,6 @@ def _log_route_decision(*, trace_id: str, route_decision) -> None:
 
 
 def _quota_type_for_route(route_decision) -> str | None:
-    if route_decision.requested_mode == "patent" or route_decision.actual_mode == "patent":
-        return None
     if str(route_decision.route or "").strip().lower() in _FILE_ROUTES:
         return "file_qa"
     return "ask_query"
@@ -223,6 +221,7 @@ async def _stream_with_quota(
     frame_buffer = SSEFrameBuffer()
     done_payload: dict | None = None
     done_prefix_lines: list[str] = []
+    saw_error_event = False
     finalized = False
     stream_error: Exception | None = None
     try:
@@ -230,10 +229,14 @@ async def _stream_with_quota(
             outbound_frames: list[str] = []
             for frame in frame_buffer.feed(chunk):
                 payload, prefix_lines = parse_sse_json_frame(frame)
-                if isinstance(payload, dict) and str(payload.get("type") or "").strip().lower() == "done":
-                    done_payload = payload
-                    done_prefix_lines = prefix_lines
-                    continue
+                if isinstance(payload, dict):
+                    payload_type = str(payload.get("type") or "").strip().lower()
+                    if payload_type == "error":
+                        saw_error_event = True
+                    if payload_type == "done":
+                        done_payload = payload
+                        done_prefix_lines = prefix_lines
+                        continue
                 outbound_frames.append(frame)
             for frame in outbound_frames:
                 yield f"{frame}\n\n".encode("utf-8")
@@ -245,7 +248,7 @@ async def _stream_with_quota(
                 request=request,
                 quota_proxy=quota_proxy,
                 grant_id=grant_id,
-                success=done_payload is not None,
+                success=done_payload is not None and not saw_error_event,
             )
             finalized = True
         raise
@@ -261,9 +264,15 @@ async def _stream_with_quota(
     buffer = frame_buffer.flush()
     if buffer is not None:
         payload, prefix_lines = parse_sse_json_frame(buffer)
-        if isinstance(payload, dict) and str(payload.get("type") or "").strip().lower() == "done":
-            done_payload = payload
-            done_prefix_lines = prefix_lines
+        if isinstance(payload, dict):
+            payload_type = str(payload.get("type") or "").strip().lower()
+            if payload_type == "error":
+                saw_error_event = True
+            if payload_type == "done":
+                done_payload = payload
+                done_prefix_lines = prefix_lines
+            else:
+                yield buffer.encode("utf-8")
         else:
             yield buffer.encode("utf-8")
 
@@ -271,7 +280,7 @@ async def _stream_with_quota(
         quota_proxy.finalize(
             request=request,
             grant_id=str(grant_id),
-            success=done_payload is not None,
+            success=done_payload is not None and not saw_error_event,
         )
     )
     finalized = True

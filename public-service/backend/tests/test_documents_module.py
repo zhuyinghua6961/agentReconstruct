@@ -564,6 +564,51 @@ def test_literature_content_route_contract(monkeypatch):
     assert payload["content"] == "<p>detail</p>"
 
 
+def test_literature_content_authenticated_uses_doc_assist_quota(monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    with TestClient(app) as client:
+        client.app.dependency_overrides[get_optional_auth_context] = lambda: AuthContext(
+            user_id=7,
+            role="user",
+            username="alice",
+        )
+        monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+        monkeypatch.setattr(
+            quota_service_module.quota_service,
+            "check_quota",
+            lambda **kwargs: calls.append(("check", kwargs["quota_type"])) or {"success": True, "allowed": True},
+        )
+        monkeypatch.setattr(
+            quota_service_module.quota_service,
+            "increment_quota",
+            lambda **kwargs: calls.append(("increment", kwargs["quota_type"])) or {"success": True},
+        )
+        monkeypatch.setattr(
+            documents_service,
+            "literature_content",
+            lambda **kwargs: (
+                {
+                    "doi": "10.1000/test",
+                    "title": "Test Paper",
+                    "authors": "Alice; Bob",
+                    "journal": "Journal X",
+                    "publication_date": "2025-01-01",
+                    "abstract": "abstract",
+                    "content": "<p>detail</p>",
+                },
+                200,
+            ),
+        )
+
+        response = client.get("/api/v1/literature_content", params={"doi": "10.1000/test"})
+        client.app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["doi"] == "10.1000/test"
+    assert calls == [("check", "doc_assist"), ("increment", "doc_assist")]
+
+
 def test_reference_preview_post_accepts_frontend_doi_payload(monkeypatch):
     captured = {}
 

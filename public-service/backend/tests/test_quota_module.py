@@ -1017,6 +1017,65 @@ def test_service_get_user_quotas_skips_bucket_when_canonical_row_is_inactive():
     assert checked["config_active"] is False
 
 
+def test_service_get_user_quotas_returns_only_canonical_buckets_when_legacy_alias_rows_exist():
+    repo = _FakeQuotaRepo()
+    repo.configs = {
+        "ask_query": {
+            "quota_type": "ask_query",
+            "quota_name": "Ask Query",
+            "period": "daily",
+            "period_days": None,
+            "default_limit": 10,
+            "daily_limit": 10,
+            "weekly_limit": None,
+            "monthly_limit": None,
+            "is_active": 1,
+        },
+        "pdf_qa": {
+            "quota_type": "pdf_qa",
+            "quota_name": "PDF QA",
+            "period": "daily",
+            "period_days": None,
+            "default_limit": 5,
+            "daily_limit": 5,
+            "weekly_limit": None,
+            "monthly_limit": None,
+            "is_active": 1,
+        },
+        "file_view": {
+            "quota_type": "file_view",
+            "quota_name": "File View",
+            "period": "daily",
+            "period_days": None,
+            "default_limit": 3,
+            "daily_limit": 3,
+            "weekly_limit": None,
+            "monthly_limit": None,
+            "is_active": 1,
+        },
+        "text_translate": {
+            "quota_type": "text_translate",
+            "quota_name": "Text Translate",
+            "period": "daily",
+            "period_days": None,
+            "default_limit": 4,
+            "daily_limit": 4,
+            "weekly_limit": None,
+            "monthly_limit": None,
+            "is_active": 1,
+        },
+    }
+    service = QuotaService(repo=repo)
+
+    result = service.get_user_quotas(user_id=7)
+
+    assert result["success"] is True
+    quota_types = {item["quota_type"] for item in result["data"]["quotas"]}
+    assert quota_types == {"ask_query", "file_qa", "file_view", "doc_assist"}
+    assert "pdf_qa" not in quota_types
+    assert "text_translate" not in quota_types
+
+
 def test_service_get_all_configs_prefers_inactive_canonical_row_over_active_legacy():
     repo = _FakeQuotaRepo()
     repo.configs = {

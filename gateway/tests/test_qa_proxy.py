@@ -3,6 +3,7 @@ from dataclasses import replace
 import anyio
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
@@ -294,25 +295,779 @@ def test_mode_ask_stream_appends_quota_warning_when_finalize_fails(monkeypatch):
     assert b'"warning"' in body
 
 
-def test_mode_ask_patent_route_skips_quota_calls(monkeypatch):
+@pytest.mark.parametrize(
+    ("label", "request_path", "payload", "rows", "expected_route", "expected_quota_type"),
+    [
+        (
+            "kb_sync",
+            "/api/patent/ask",
+            {
+                "question": "磷酸铁锂电压范围是多少？",
+                "requested_mode": "patent",
+                "conversation_id": 11,
+                "user_id": 42,
+                "pdf_context": {"selected_ids": [11]},
+            },
+            [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")],
+            "kb_qa",
+            "ask_query",
+        ),
+        (
+            "pdf_sync",
+            "/api/patent/ask",
+            {
+                "question": "请总结这篇文献",
+                "requested_mode": "patent",
+                "conversation_id": 12,
+                "user_id": 42,
+                "pdf_context": {"selected_ids": [11]},
+            },
+            [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")],
+            "pdf_qa",
+            "file_qa",
+        ),
+        (
+            "tabular_sync",
+            "/api/patent/ask",
+            {
+                "question": "请总结这个表格",
+                "requested_mode": "patent",
+                "conversation_id": 13,
+                "user_id": 42,
+                "pdf_context": {"selected_ids": [21]},
+            },
+            [ConversationFileRow(file_id=21, file_type="csv", file_name="assignee-table.csv")],
+            "tabular_qa",
+            "file_qa",
+        ),
+        (
+            "hybrid_sync",
+            "/api/patent/ask",
+            {
+                "question": "请结合知识库总结这篇文献",
+                "requested_mode": "patent",
+                "conversation_id": 14,
+                "user_id": 42,
+                "pdf_context": {"selected_ids": [11]},
+            },
+            [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")],
+            "hybrid_qa",
+            "file_qa",
+        ),
+        (
+            "kb_stream",
+            "/api/patent/ask_stream",
+            {
+                "question": "磷酸铁锂电压范围是多少？",
+                "requested_mode": "patent",
+                "conversation_id": 15,
+                "user_id": 42,
+                "pdf_context": {"selected_ids": [11]},
+            },
+            [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")],
+            "kb_qa",
+            "ask_query",
+        ),
+        (
+            "pdf_stream",
+            "/api/patent/ask_stream",
+            {
+                "question": "请总结这篇文献",
+                "requested_mode": "patent",
+                "conversation_id": 16,
+                "user_id": 42,
+                "pdf_context": {"selected_ids": [11]},
+            },
+            [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")],
+            "pdf_qa",
+            "file_qa",
+        ),
+        (
+            "tabular_stream",
+            "/api/patent/ask_stream",
+            {
+                "question": "请总结这个表格",
+                "requested_mode": "patent",
+                "conversation_id": 17,
+                "user_id": 42,
+                "pdf_context": {"selected_ids": [21]},
+            },
+            [ConversationFileRow(file_id=21, file_type="csv", file_name="assignee-table.csv")],
+            "tabular_qa",
+            "file_qa",
+        ),
+        (
+            "hybrid_stream",
+            "/api/patent/ask_stream",
+            {
+                "question": "请结合知识库总结这篇文献",
+                "requested_mode": "patent",
+                "conversation_id": 18,
+                "user_id": 42,
+                "pdf_context": {"selected_ids": [11]},
+            },
+            [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")],
+            "hybrid_qa",
+            "file_qa",
+        ),
+    ],
+)
+def test_mode_patent_routes_map_to_canonical_quota_buckets(
+    monkeypatch, label, request_path, payload, rows, expected_route, expected_quota_type
+):
     monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    original_files = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub(rows)
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(request.url.path)
+        calls.append((request.url.path, _json_request_body(request)))
+        if request.url.path == "/internal/quota/grants/precheck":
+            request_payload = _json_request_body(request)
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"grant_id": f"grant-{label}", "quota_type": request_payload["quota_type"], "noop": False}},
+            )
+        if request.url.path == f"/internal/quota/grants/grant-{label}/finalize":
+            request_payload = _json_request_body(request)
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"grant_id": f"grant-{label}", "counted": request_payload["success"], "idempotent": False}},
+            )
+        if request.url.path == "/api/patent/ask":
+            return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
+        if request.url.path == "/api/patent/ask_stream":
+            return httpx.Response(
+                200,
+                content=(
+                    b'data: {"type":"metadata","query_mode":"patent"}\n\n'
+                    b'data: {"type":"done","final_answer":"ok"}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            if request_path.endswith("ask_stream"):
+                with client.stream("POST", request_path, json=payload) as response:
+                    body = b"".join(response.iter_bytes())
+            else:
+                response = client.post(request_path, json=payload)
+                body = b""
+    finally:
+        app.state.conversation_file_service = original_files
+
+    assert response.status_code == 200
+    if body:
+        assert b'"type":"done"' in body
+    assert calls[0][0] == "/internal/quota/grants/precheck"
+    assert calls[0][1]["quota_type"] == expected_quota_type
+    assert calls[1][0] == request_path
+    assert calls[1][1]["route"] == expected_route
+    assert calls[2][0] == f"/internal/quota/grants/grant-{label}/finalize"
+    assert calls[2][1]["success"] is True
+
+
+@pytest.mark.parametrize("request_path", ["/api/patent/ask", "/api/patent/ask_stream"])
+@pytest.mark.parametrize(
+    "user_id",
+    [None, "", 0, -1, "abc"],
+)
+def test_mode_patent_skips_quota_calls_for_missing_or_invalid_user_id(monkeypatch, request_path, user_id):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    original_files = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, _json_request_body(request)))
+        if request.url.path == "/api/patent/ask":
+            return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
+        if request.url.path == "/api/patent/ask_stream":
+            return httpx.Response(
+                200,
+                content=(
+                    b'data: {"type":"metadata","query_mode":"patent"}\n\n'
+                    b'data: {"type":"done","final_answer":"ok"}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    payload = {
+        "question": "磷酸铁锂电压范围是多少？",
+        "requested_mode": "patent",
+        "conversation_id": 19,
+        "pdf_context": {"selected_ids": [11]},
+    }
+    if user_id is not None:
+        payload["user_id"] = user_id
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            if request_path.endswith("ask_stream"):
+                with client.stream("POST", request_path, json=payload) as response:
+                    body = b"".join(response.iter_bytes())
+            else:
+                response = client.post(request_path, json=payload)
+                body = b""
+    finally:
+        app.state.conversation_file_service = original_files
+
+    assert response.status_code == 200
+    if body:
+        assert b'"type":"done"' in body
+    assert [item[0] for item in calls] == [request_path]
+
+
+@pytest.mark.parametrize(
+    ("label", "payload", "rows", "expected_route", "expected_quota_type"),
+    [
+        (
+            "patent-sync-kb-quota",
+            {
+                "question": "磷酸铁锂电压范围是多少？",
+                "requested_mode": "patent",
+                "conversation_id": 21,
+                "user_id": 42,
+                "pdf_context": {"selected_ids": [11]},
+            },
+            [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")],
+            "kb_qa",
+            "ask_query",
+        ),
+        (
+            "patent-sync-file-quota",
+            {
+                "question": "请总结这篇文献",
+                "requested_mode": "patent",
+                "conversation_id": 22,
+                "user_id": 42,
+                "pdf_context": {"selected_ids": [11]},
+            },
+            [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")],
+            "pdf_qa",
+            "file_qa",
+        ),
+    ],
+)
+def test_mode_ask_patent_sync_surfaces_canonical_quota_payload(monkeypatch, label, payload, rows, expected_route, expected_quota_type):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    original_files = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub(rows)
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, _json_request_body(request)))
+        if request.url.path == "/internal/quota/grants/precheck":
+            request_payload = _json_request_body(request)
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"grant_id": label, "quota_type": request_payload["quota_type"], "noop": False}},
+            )
+        if request.url.path == f"/internal/quota/grants/{label}/finalize":
+            request_payload = _json_request_body(request)
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"grant_id": label, "counted": request_payload["success"], "idempotent": False}},
+            )
         if request.url.path == "/api/patent/ask":
             return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
         raise AssertionError(f"unexpected upstream path: {request.url.path}")
 
-    with _TransportGuard(handler):
-        client = TestClient(app)
-        response = client.post(
-            "/api/patent/ask",
-            json={"question": "patent qa", "requested_mode": "patent", "conversation_id": 11, "user_id": 42},
-        )
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            response = client.post("/api/patent/ask", json=payload)
+    finally:
+        app.state.conversation_file_service = original_files
 
     assert response.status_code == 200
-    assert calls == ["/api/patent/ask"]
+    response_payload = response.json()
+    assert response_payload["quota"]["quota_type"] == expected_quota_type
+    assert response_payload["quota"]["counted"] is True
+    assert calls[1][1]["route"] == expected_route
+    assert calls[2][0] == f"/internal/quota/grants/{label}/finalize"
+    assert calls[2][1]["success"] is True
+
+
+@pytest.mark.parametrize(
+    ("label", "payload", "rows", "expected_route", "expected_quota_type"),
+    [
+        (
+            "patent-stream-kb-quota",
+            {
+                "question": "磷酸铁锂电压范围是多少？",
+                "requested_mode": "patent",
+                "conversation_id": 23,
+                "user_id": 42,
+                "pdf_context": {"selected_ids": [11]},
+            },
+            [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")],
+            "kb_qa",
+            "ask_query",
+        ),
+        (
+            "patent-stream-file-quota",
+            {
+                "question": "请总结这篇文献",
+                "requested_mode": "patent",
+                "conversation_id": 24,
+                "user_id": 42,
+                "pdf_context": {"selected_ids": [11]},
+            },
+            [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")],
+            "pdf_qa",
+            "file_qa",
+        ),
+    ],
+)
+def test_mode_ask_patent_stream_done_event_surfaces_canonical_quota_payload(
+    monkeypatch, label, payload, rows, expected_route, expected_quota_type
+):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    original_files = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub(rows)
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, _json_request_body(request)))
+        if request.url.path == "/internal/quota/grants/precheck":
+            request_payload = _json_request_body(request)
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"grant_id": label, "quota_type": request_payload["quota_type"], "noop": False}},
+            )
+        if request.url.path == f"/internal/quota/grants/{label}/finalize":
+            request_payload = _json_request_body(request)
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"grant_id": label, "counted": request_payload["success"], "idempotent": False}},
+            )
+        if request.url.path == "/api/patent/ask_stream":
+            return httpx.Response(
+                200,
+                content=(
+                    b'data: {"type":"metadata","query_mode":"patent"}\n\n'
+                    + f'data: {{"type":"done","final_answer":"ok","route":"{expected_route}"}}\n\n'.encode("utf-8")
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            with client.stream("POST", "/api/patent/ask_stream", json=payload) as response:
+                body = b"".join(response.iter_bytes())
+    finally:
+        app.state.conversation_file_service = original_files
+
+    assert response.status_code == 200
+    assert f'"route":"{expected_route}"'.encode("utf-8") in body
+    assert f'"quota_type":"{expected_quota_type}"'.encode("utf-8") in body
+    assert b'"counted":true' in body
+    assert calls[1][1]["route"] == expected_route
+    assert calls[2][0] == f"/internal/quota/grants/{label}/finalize"
+    assert calls[2][1]["success"] is True
+
+
+def test_mode_ask_patent_aborts_quota_when_upstream_payload_is_unsuccessful(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    original_files = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, _json_request_body(request)))
+        if request.url.path == "/internal/quota/grants/precheck":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-patent-sync-fail", "quota_type": "ask_query", "noop": False}})
+        if request.url.path == "/internal/quota/grants/grant-patent-sync-fail/finalize":
+            request_payload = _json_request_body(request)
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-patent-sync-fail", "counted": request_payload["success"], "idempotent": False}})
+        if request.url.path == "/api/patent/ask":
+            return httpx.Response(200, json={"success": False, "error": "patent_failed"})
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            response = client.post(
+                "/api/patent/ask",
+                json={
+                    "question": "磷酸铁锂电压范围是多少？",
+                    "requested_mode": "patent",
+                    "conversation_id": 25,
+                    "user_id": 42,
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            )
+    finally:
+        app.state.conversation_file_service = original_files
+
+    assert response.status_code == 200
+    assert response.json()["success"] is False
+    assert calls[-1][0] == "/internal/quota/grants/grant-patent-sync-fail/finalize"
+    assert calls[-1][1]["success"] is False
+
+
+def test_mode_ask_patent_aborts_quota_when_upstream_payload_has_error_field(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    original_files = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, _json_request_body(request)))
+        if request.url.path == "/internal/quota/grants/precheck":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-patent-sync-error", "quota_type": "ask_query", "noop": False}})
+        if request.url.path == "/internal/quota/grants/grant-patent-sync-error/finalize":
+            request_payload = _json_request_body(request)
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-patent-sync-error", "counted": request_payload["success"], "idempotent": False}})
+        if request.url.path == "/api/patent/ask":
+            return httpx.Response(200, json={"success": True, "error": "patent_failed"})
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            response = client.post(
+                "/api/patent/ask",
+                json={
+                    "question": "磷酸铁锂电压范围是多少？",
+                    "requested_mode": "patent",
+                    "conversation_id": 251,
+                    "user_id": 42,
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            )
+    finally:
+        app.state.conversation_file_service = original_files
+
+    assert response.status_code == 200
+    assert response.json()["error"] == "patent_failed"
+    assert calls[-1][0] == "/internal/quota/grants/grant-patent-sync-error/finalize"
+    assert calls[-1][1]["success"] is False
+
+
+def test_mode_ask_patent_stream_aborts_quota_when_done_event_never_arrives(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    original_files = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, _json_request_body(request)))
+        if request.url.path == "/internal/quota/grants/precheck":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-patent-stream-abort", "quota_type": "ask_query", "noop": False}})
+        if request.url.path == "/internal/quota/grants/grant-patent-stream-abort/finalize":
+            request_payload = _json_request_body(request)
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-patent-stream-abort", "counted": request_payload["success"], "idempotent": False}})
+        if request.url.path == "/api/patent/ask_stream":
+            return httpx.Response(
+                200,
+                content=(
+                    b'data: {"type":"metadata","query_mode":"patent"}\n\n'
+                    b'data: {"type":"content","content":"partial"}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            with client.stream(
+                "POST",
+                "/api/patent/ask_stream",
+                json={
+                    "question": "磷酸铁锂电压范围是多少？",
+                    "requested_mode": "patent",
+                    "conversation_id": 26,
+                    "user_id": 42,
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            ) as response:
+                body = b"".join(response.iter_bytes())
+    finally:
+        app.state.conversation_file_service = original_files
+
+    assert response.status_code == 200
+    assert b'"type":"done"' not in body
+    assert calls[-1][0] == "/internal/quota/grants/grant-patent-stream-abort/finalize"
+    assert calls[-1][1]["success"] is False
+
+
+def test_mode_ask_patent_stream_aborts_quota_when_upstream_returns_http_error(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    original_files = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, _json_request_body(request)))
+        if request.url.path == "/internal/quota/grants/precheck":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-patent-stream-http-error", "quota_type": "ask_query", "noop": False}})
+        if request.url.path == "/internal/quota/grants/grant-patent-stream-http-error/finalize":
+            request_payload = _json_request_body(request)
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-patent-stream-http-error", "counted": request_payload["success"], "idempotent": False}})
+        if request.url.path == "/api/patent/ask_stream":
+            return httpx.Response(500, json={"detail": "backend exploded"})
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            with client.stream(
+                "POST",
+                "/api/patent/ask_stream",
+                json={
+                    "question": "磷酸铁锂电压范围是多少？",
+                    "requested_mode": "patent",
+                    "conversation_id": 261,
+                    "user_id": 42,
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            ) as response:
+                body = b"".join(response.iter_bytes())
+    finally:
+        app.state.conversation_file_service = original_files
+
+    assert response.status_code == 200
+    assert b'"code":"UPSTREAM_ERROR"' in body
+    assert calls[-1][0] == "/internal/quota/grants/grant-patent-stream-http-error/finalize"
+    assert calls[-1][1]["success"] is False
+
+
+def test_mode_ask_patent_stream_aborts_quota_when_upstream_emits_error_event(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    original_files = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, _json_request_body(request)))
+        if request.url.path == "/internal/quota/grants/precheck":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-patent-stream-sse-error", "quota_type": "ask_query", "noop": False}})
+        if request.url.path == "/internal/quota/grants/grant-patent-stream-sse-error/finalize":
+            request_payload = _json_request_body(request)
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-patent-stream-sse-error", "counted": request_payload["success"], "idempotent": False}})
+        if request.url.path == "/api/patent/ask_stream":
+            return httpx.Response(
+                200,
+                content=(
+                    b'data: {"type":"metadata","query_mode":"patent"}\n\n'
+                    b'data: {"type":"error","error":"patent_failed","message":"patent failed"}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            with client.stream(
+                "POST",
+                "/api/patent/ask_stream",
+                json={
+                    "question": "磷酸铁锂电压范围是多少？",
+                    "requested_mode": "patent",
+                    "conversation_id": 262,
+                    "user_id": 42,
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            ) as response:
+                body = b"".join(response.iter_bytes())
+    finally:
+        app.state.conversation_file_service = original_files
+
+    assert response.status_code == 200
+    assert b'"type":"error"' in body
+    assert b'"type":"done"' not in body
+    assert calls[-1][0] == "/internal/quota/grants/grant-patent-stream-sse-error/finalize"
+    assert calls[-1][1]["success"] is False
+
+
+def test_mode_ask_patent_stream_does_not_count_when_error_event_precedes_done(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    original_files = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, _json_request_body(request)))
+        if request.url.path == "/internal/quota/grants/precheck":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-patent-stream-error-then-done", "quota_type": "ask_query", "noop": False}})
+        if request.url.path == "/internal/quota/grants/grant-patent-stream-error-then-done/finalize":
+            request_payload = _json_request_body(request)
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-patent-stream-error-then-done", "counted": request_payload["success"], "idempotent": False}})
+        if request.url.path == "/api/patent/ask_stream":
+            return httpx.Response(
+                200,
+                content=(
+                    b'data: {"type":"metadata","query_mode":"patent"}\n\n'
+                    b'data: {"type":"error","error":"patent_failed","message":"patent failed"}\n\n'
+                    b'data: {"type":"done","final_answer":"partial"}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            with client.stream(
+                "POST",
+                "/api/patent/ask_stream",
+                json={
+                    "question": "磷酸铁锂电压范围是多少？",
+                    "requested_mode": "patent",
+                    "conversation_id": 263,
+                    "user_id": 42,
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            ) as response:
+                body = b"".join(response.iter_bytes())
+    finally:
+        app.state.conversation_file_service = original_files
+
+    assert response.status_code == 200
+    assert b'"type":"error"' in body
+    assert b'"type":"done"' in body
+    assert calls[-1][0] == "/internal/quota/grants/grant-patent-stream-error-then-done/finalize"
+    assert calls[-1][1]["success"] is False
+
+
+def test_mode_ask_patent_keeps_success_response_when_finalize_fails(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    original_files = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/internal/quota/grants/precheck":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-patent-sync-warn", "quota_type": "ask_query", "noop": False}})
+        if request.url.path == "/internal/quota/grants/grant-patent-sync-warn/finalize":
+            return httpx.Response(503, json={"success": False, "code": "DB_UNAVAILABLE", "error": "db_unavailable"})
+        if request.url.path == "/api/patent/ask":
+            return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            response = client.post(
+                "/api/patent/ask",
+                json={
+                    "question": "磷酸铁锂电压范围是多少？",
+                    "requested_mode": "patent",
+                    "conversation_id": 27,
+                    "user_id": 42,
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            )
+    finally:
+        app.state.conversation_file_service = original_files
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["quota"]["quota_type"] == "ask_query"
+    assert payload["quota"]["warning"]["code"] == "DB_UNAVAILABLE"
+
+
+def test_mode_ask_patent_stream_appends_quota_warning_when_finalize_fails(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    original_files = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/internal/quota/grants/precheck":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-patent-stream-warn", "quota_type": "ask_query", "noop": False}})
+        if request.url.path == "/internal/quota/grants/grant-patent-stream-warn/finalize":
+            return httpx.Response(503, json={"success": False, "code": "DB_UNAVAILABLE", "error": "db_unavailable"})
+        if request.url.path == "/api/patent/ask_stream":
+            return httpx.Response(
+                200,
+                content=(
+                    b'data: {"type":"metadata","query_mode":"patent"}\n\n'
+                    b'data: {"type":"done","final_answer":"ok"}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            with client.stream(
+                "POST",
+                "/api/patent/ask_stream",
+                json={
+                    "question": "磷酸铁锂电压范围是多少？",
+                    "requested_mode": "patent",
+                    "conversation_id": 28,
+                    "user_id": 42,
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            ) as response:
+                body = b"".join(response.iter_bytes())
+    finally:
+        app.state.conversation_file_service = original_files
+
+    assert response.status_code == 200
+    assert b'"type":"done"' in body
+    assert b'"quota"' in body
+    assert b'"warning"' in body
+    assert b'"quota_type":"ask_query"' in body
+
+
+def test_mode_ask_patent_kb_route_ignores_disabled_file_gate_and_still_counts_quota(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    original_files = app.state.conversation_file_service
+    original_settings = app.state.settings
+    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
+    app.state.settings = replace(original_settings, patent_file_routes_enabled=False)
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, _json_request_body(request)))
+        if request.url.path == "/internal/quota/grants/precheck":
+            request_payload = _json_request_body(request)
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-patent-kb-gate-off", "quota_type": request_payload["quota_type"], "noop": False}})
+        if request.url.path == "/internal/quota/grants/grant-patent-kb-gate-off/finalize":
+            request_payload = _json_request_body(request)
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-patent-kb-gate-off", "counted": request_payload["success"], "idempotent": False}})
+        if request.url.path == "/api/patent/ask":
+            return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            response = client.post(
+                "/api/patent/ask",
+                json={
+                    "question": "磷酸铁锂电压范围是多少？",
+                    "requested_mode": "patent",
+                    "conversation_id": 29,
+                    "user_id": 42,
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            )
+    finally:
+        app.state.conversation_file_service = original_files
+        app.state.settings = original_settings
+
+    assert response.status_code == 200
+    assert calls[0][0] == "/internal/quota/grants/precheck"
+    assert calls[0][1]["quota_type"] == "ask_query"
+    assert calls[1][0] == "/api/patent/ask"
+    assert calls[1][1]["route"] == "kb_qa"
+    assert calls[2][0] == "/internal/quota/grants/grant-patent-kb-gate-off/finalize"
+    assert calls[2][1]["success"] is True
 
 
 def test_mode_ask_clarification_skips_quota_calls(monkeypatch):
@@ -1182,6 +1937,7 @@ def test_mode_ask_routes_patent_file_question_to_patent_backend():
                     "question": "请总结这篇文献",
                     "requested_mode": "patent",
                     "conversation_id": 301,
+                    "user_id": 42,
                     "pdf_context": {"selected_ids": [11]},
                 },
             )
@@ -1275,6 +2031,7 @@ def test_mode_ask_patent_file_route_is_open_by_default():
                     "question": "请总结这篇文献",
                     "requested_mode": "patent",
                     "conversation_id": 301,
+                    "user_id": 42,
                     "pdf_context": {"selected_ids": [11]},
                 },
             )
@@ -1319,6 +2076,7 @@ def test_mode_ask_patent_file_route_returns_gated_error_when_disabled():
                     "question": "请总结这篇文献",
                     "requested_mode": "patent",
                     "conversation_id": 301,
+                    "user_id": 42,
                     "pdf_context": {"selected_ids": [11]},
                 },
             )
@@ -1432,6 +2190,7 @@ def test_mode_ask_stream_patent_file_route_returns_gated_error_when_disabled():
                 json={
                     "question": "请总结这篇文献",
                     "requested_mode": "patent",
+                    "user_id": 42,
                     "pdf_context": {"selected_ids": [11]},
                 },
             ) as response:
