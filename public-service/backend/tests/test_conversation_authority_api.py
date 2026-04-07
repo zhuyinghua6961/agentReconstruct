@@ -9,7 +9,7 @@ from app.main import app
 from app.integrations.redis import RedisService
 from app.integrations.storage.local import LocalStorageBackend
 from app.modules.auth.deps import require_auth_context
-from app.modules.conversation.internal_api import require_internal_authority
+from app.modules.conversation.internal_api import _require_gateway_internal_caller, require_internal_authority
 from app.modules.conversation.json_store import ConversationJsonStore
 from app.modules.conversation.service import ConversationService, conversation_service, set_conversation_service
 from test_conversation_module import _FakeRedis, _MemoryConversationRepo, _OutboxRecorder
@@ -158,21 +158,33 @@ def test_internal_authority_routes_registered_and_isolated_from_browser_auth():
     assert "/internal/conversations/{conversation_id}/context-snapshot" in paths
     assert "/internal/conversations/{conversation_id}/messages/assistant-async" in paths
     assert "/internal/conversations/{conversation_id}/messages/assistant-terminal-async" in paths
+    assert "/internal/conversations/{conversation_id}/tasks/{task_id}/assistant-start" in paths
+    assert "/internal/conversations/{conversation_id}/tasks/{task_id}/assistant-progress" in paths
+    assert "/internal/conversations/{conversation_id}/tasks/{task_id}/assistant-terminal" in paths
 
     user_write_route = _route_for("/internal/conversations/{conversation_id}/messages/user", "POST")
     snapshot_route = _route_for("/internal/conversations/{conversation_id}/context-snapshot", "GET")
     assistant_route = _route_for("/internal/conversations/{conversation_id}/messages/assistant-async", "POST")
     assistant_terminal_route = _route_for("/internal/conversations/{conversation_id}/messages/assistant-terminal-async", "POST")
+    task_start_route = _route_for("/internal/conversations/{conversation_id}/tasks/{task_id}/assistant-start", "POST")
+    task_progress_route = _route_for("/internal/conversations/{conversation_id}/tasks/{task_id}/assistant-progress", "POST")
+    task_terminal_route = _route_for("/internal/conversations/{conversation_id}/tasks/{task_id}/assistant-terminal", "POST")
 
     assert require_auth_context not in {dep.call for dep in user_write_route.dependant.dependencies}
     assert require_auth_context not in {dep.call for dep in snapshot_route.dependant.dependencies}
     assert require_auth_context not in {dep.call for dep in assistant_route.dependant.dependencies}
     assert require_auth_context not in {dep.call for dep in assistant_terminal_route.dependant.dependencies}
+    assert require_auth_context not in {dep.call for dep in task_start_route.dependant.dependencies}
+    assert require_auth_context not in {dep.call for dep in task_progress_route.dependant.dependencies}
+    assert require_auth_context not in {dep.call for dep in task_terminal_route.dependant.dependencies}
 
     assert require_internal_authority in {dep.call for dep in user_write_route.dependant.dependencies}
     assert require_internal_authority in {dep.call for dep in snapshot_route.dependant.dependencies}
     assert require_internal_authority in {dep.call for dep in assistant_route.dependant.dependencies}
     assert require_internal_authority in {dep.call for dep in assistant_terminal_route.dependant.dependencies}
+    assert _require_gateway_internal_caller in {dep.call for dep in task_start_route.dependant.dependencies}
+    assert _require_gateway_internal_caller in {dep.call for dep in task_progress_route.dependant.dependencies}
+    assert _require_gateway_internal_caller in {dep.call for dep in task_terminal_route.dependant.dependencies}
 
 
 def test_internal_context_snapshot_requires_trusted_headers(monkeypatch):
@@ -186,6 +198,156 @@ def test_internal_context_snapshot_requires_trusted_headers(monkeypatch):
 
     assert response.status_code == 401
     assert response.json()["code"] == "INTERNAL_AUTH_MISSING"
+
+
+def test_internal_task_progress_rejects_wrong_source_service(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="task progress wrong caller")
+        conversation_id = int(created["data"]["conversation_id"])
+        service.start_authority_task_assistant(
+            user_id=7,
+            conversation_id=conversation_id,
+            task_id="task_progress_001",
+            trace_id="task-progress-trace",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            status="queued",
+        )
+        response = client.post(
+            f"/internal/conversations/{conversation_id}/tasks/task_progress_001/assistant-progress",
+            json={
+                "conversation_id": conversation_id,
+                "user_id": 7,
+                "task_id": "task_progress_001",
+                "status": "running",
+                "content_delta": "blocked",
+                "steps": [],
+                "last_seq": 1,
+            },
+            headers=_internal_headers("highThinkingQA"),
+        )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "INTERNAL_SOURCE_SERVICE_FORBIDDEN"
+
+
+def test_internal_task_terminal_rejects_wrong_source_service(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="task terminal wrong caller")
+        conversation_id = int(created["data"]["conversation_id"])
+        service.start_authority_task_assistant(
+            user_id=7,
+            conversation_id=conversation_id,
+            task_id="task_terminal_001",
+            trace_id="task-terminal-trace",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            status="queued",
+        )
+        response = client.post(
+            f"/internal/conversations/{conversation_id}/tasks/task_terminal_001/assistant-terminal",
+            json={
+                "conversation_id": conversation_id,
+                "user_id": 7,
+                "task_id": "task_terminal_001",
+                "terminal_status": "failed",
+                "last_seq": 1,
+                "answer_text": "",
+                "steps": [],
+                "failure": {"message": "blocked"},
+            },
+            headers=_internal_headers("highThinkingQA"),
+        )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "INTERNAL_SOURCE_SERVICE_FORBIDDEN"
+
+
+def test_internal_task_routes_allow_gateway_caller_for_gateway_owned_task_runtime(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="gateway owned task runtime")
+        conversation_id = int(created["data"]["conversation_id"])
+
+        start_response = client.post(
+            f"/internal/conversations/{conversation_id}/tasks/task_gateway_001/assistant-start",
+            json={
+                "conversation_id": conversation_id,
+                "user_id": 7,
+                "trace_id": "task-gateway-trace",
+                "source_service": "fastQA",
+                "route": "kb_qa",
+                "requested_mode": "fast",
+                "actual_mode": "fast",
+                "task_id": "task_gateway_001",
+                "status": "queued",
+                "last_seq": 0,
+            },
+            headers=_internal_headers("gateway"),
+        )
+
+        progress_response = client.post(
+            f"/internal/conversations/{conversation_id}/tasks/task_gateway_001/assistant-progress",
+            json={
+                "conversation_id": conversation_id,
+                "user_id": 7,
+                "task_id": "task_gateway_001",
+                "status": "running",
+                "content_delta": "hello",
+                "steps": [],
+                "last_seq": 1,
+            },
+            headers=_internal_headers("gateway"),
+        )
+
+        terminal_response = client.post(
+            f"/internal/conversations/{conversation_id}/tasks/task_gateway_001/assistant-terminal",
+            json={
+                "conversation_id": conversation_id,
+                "user_id": 7,
+                "task_id": "task_gateway_001",
+                "terminal_status": "completed",
+                "last_seq": 2,
+                "answer_text": "hello",
+                "steps": [],
+                "failure": {},
+            },
+            headers=_internal_headers("gateway"),
+        )
+
+    assert start_response.status_code == 200
+    assert progress_response.status_code == 200
+    assert terminal_response.status_code == 200
+
+
+def test_internal_user_write_allows_gateway_caller_for_gateway_owned_task_runtime(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="gateway owned user write")
+        conversation_id = int(created["data"]["conversation_id"])
+        response = client.post(
+            f"/internal/conversations/{conversation_id}/messages/user",
+            json=_user_write_body(
+                conversation_id=conversation_id,
+                idempotency_key=f"{conversation_id}:trc_fast_001:user",
+            ),
+            headers=_internal_headers("gateway"),
+        )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["conversation_id"] == conversation_id
 
 
 def test_internal_context_snapshot_rejects_invalid_source_service_policy(monkeypatch):
@@ -217,6 +379,102 @@ def test_internal_context_snapshot_allows_fastqa_rerouted_thinking_request(monke
     assert response.status_code == 200
     payload = response.json()
     assert payload["conversation_id"] == conversation_id
+
+
+def test_internal_context_snapshot_allows_expired_recent_turns(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="authority expired snapshot")
+        conversation_id = int(created["data"]["conversation_id"])
+        service.add_authority_user_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="expired-snapshot-user",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key=f"{conversation_id}:expired-snapshot-user:user",
+            content="hello expired snapshot",
+            context_hints={},
+        )
+        service.start_authority_task_assistant(
+            user_id=7,
+            conversation_id=conversation_id,
+            task_id="task_expired_snapshot",
+            trace_id="task-expired-snapshot",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            status="running",
+            last_seq=2,
+        )
+        service.terminal_authority_task_assistant(
+            user_id=7,
+            conversation_id=conversation_id,
+            task_id="task_expired_snapshot",
+            terminal_status="expired",
+            last_seq=3,
+        )
+
+        response = client.get(
+            f"/internal/conversations/{conversation_id}/context-snapshot",
+            params=_snapshot_query(conversation_id=conversation_id),
+            headers=_internal_headers("fastQA"),
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["conversation_id"] == conversation_id
+    assert payload["recent_turns"][-1]["status"] == "expired"
+    assert payload["recent_turns"][-1]["terminal_status"] == "expired"
+    assert payload["user_id"] == 7
+
+
+def test_internal_context_snapshot_allows_running_recent_turns(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="authority running snapshot")
+        conversation_id = int(created["data"]["conversation_id"])
+        service.add_authority_user_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="running-snapshot-user",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key=f"{conversation_id}:running-snapshot-user:user",
+            content="hello running snapshot",
+            context_hints={},
+        )
+        service.start_authority_task_assistant(
+            user_id=7,
+            conversation_id=conversation_id,
+            task_id="task_running_snapshot",
+            trace_id="task-running-snapshot",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            status="running",
+            last_seq=2,
+        )
+
+        response = client.get(
+            f"/internal/conversations/{conversation_id}/context-snapshot",
+            params=_snapshot_query(conversation_id=conversation_id),
+            headers=_internal_headers("fastQA"),
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["conversation_id"] == conversation_id
+    assert payload["recent_turns"][-1]["status"] == "running"
+    assert payload["recent_turns"][-1]["terminal_status"] == "running"
     assert payload["user_id"] == 7
 
 

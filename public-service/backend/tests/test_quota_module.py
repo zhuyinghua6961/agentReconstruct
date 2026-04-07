@@ -967,6 +967,31 @@ def test_service_finalize_internal_quota_grant_returns_not_found_after_expired_r
     get_settings.cache_clear()
 
 
+def test_service_default_internal_quota_grant_survives_long_running_task(monkeypatch, tmp_path):
+    monkeypatch.setenv("PUBLIC_SERVICE_DATA_ROOT", str(tmp_path))
+    monkeypatch.delenv("QUOTA_GRANT_TTL_SECONDS", raising=False)
+    get_settings.cache_clear()
+    monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
+
+    fake_now = {"value": 1_000.0}
+    original_monotonic = time.monotonic
+    monkeypatch.setattr(time, "monotonic", lambda: fake_now["value"])
+    repo = _FakeQuotaRepo()
+    redis_service = RedisService.from_prefix(client=_ExpiringFakeRedis(), key_prefix="agentcode")
+    service = QuotaService(repo=repo, redis_service=redis_service)
+
+    created = service.create_internal_quota_grant(user_id=7, quota_type="ask_query")
+    fake_now["value"] += 180.0
+    finalized = service.finalize_internal_quota_grant(grant_id=str(created["data"]["grant_id"]), success=True)
+
+    assert created["success"] is True
+    assert finalized["success"] is True
+    assert finalized["data"]["counted"] is True
+    assert repo.last_increment_call != []
+    monkeypatch.setattr(time, "monotonic", original_monotonic)
+    get_settings.cache_clear()
+
+
 def test_service_cleanup_pending_internal_quota_grants_releases_reservation_capacity(monkeypatch):
     monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", lambda user_id: {"id": user_id, "user_type": 3})
     repo = _FakeQuotaRepo()

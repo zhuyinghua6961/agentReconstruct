@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import threading
+from dataclasses import dataclass
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Iterator
+from typing import Any, Iterator
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -22,6 +25,7 @@ from server.schemas.request_models import (
 )
 from server.services.ask_service import (
     AskServiceError,
+    AskCancelledError,
     AskTimeoutError,
     ModeNotImplementedError,
     ModeNotSupportedError,
@@ -33,6 +37,17 @@ from server_fastapi.auth.deps import AuthContext, require_auth_context
 from server_fastapi.http import read_json_payload
 
 router = APIRouter()
+
+
+@dataclass(frozen=True)
+class _SyncStreamItem:
+    kind: str
+    payload: Any = None
+
+
+_SYNC_STREAM_EVENT = "event"
+_SYNC_STREAM_DONE = "done"
+_SYNC_STREAM_ERROR = "error"
 
 
 def _acquire_slot_or_raise(request: Request):
@@ -65,6 +80,14 @@ def _to_sse_line(payload: dict, *, seq: int) -> str:
 
 
 def _handle_service_error(exc: Exception) -> APIError:
+    if isinstance(exc, AskCancelledError):
+        return APIError(
+            code="ASK_CANCELLED",
+            message="cancelled",
+            status_code=499,
+            error="cancelled",
+            retriable=False,
+        )
     if isinstance(exc, ModeNotImplementedError):
         return APIError(
             code=codes.NOT_IMPLEMENTED,
@@ -144,6 +167,34 @@ def _chat_persist_async_enabled(request: Request) -> bool:
     return bool(request.app.state.config.get("CHAT_PERSIST_ASYNC", True))
 
 
+def _header_truthy(value) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _request_header(request: Request, header_name: str):
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return None
+    getter = getattr(headers, "get", None)
+    if callable(getter):
+        return getter(header_name)
+    return None
+
+
+def _gateway_owned_persistence(request: Request) -> bool:
+    expected_token = str(os.getenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "") or "").strip()
+    if not expected_token:
+        return False
+    internal_service_name = str(_request_header(request, "X-Internal-Service-Name") or "").strip().lower()
+    internal_service_token = str(_request_header(request, "X-Internal-Service-Token") or "").strip()
+    return (
+        _header_truthy(_request_header(request, "X-Gateway-Task-Execution"))
+        and _header_truthy(_request_header(request, "X-Gateway-Owned-Persistence"))
+        and internal_service_name == "gateway"
+        and internal_service_token == expected_token
+    )
+
+
 def _conversation_id_int(value) -> int | None:
     if value is None:
         return None
@@ -162,6 +213,8 @@ def _persistence_key(*, user_id: int, conversation_id: int) -> str:
 
 
 def _persist_user_message_if_needed(*, request: Request, ask_request) -> None:
+    if _gateway_owned_persistence(request):
+        return
     if not _chat_persist_enabled(request):
         return
     user_id = int(ask_request.user_id) if ask_request.user_id else None
@@ -182,6 +235,8 @@ def _persist_user_message_if_needed(*, request: Request, ask_request) -> None:
 
 
 def _persist_assistant_message_if_needed(*, request: Request, ask_request, summary: dict) -> None:
+    if _gateway_owned_persistence(request):
+        return
     if not _chat_persist_enabled(request):
         return
     user_id = int(ask_request.user_id) if ask_request.user_id else None
@@ -272,6 +327,8 @@ def _persist_assistant_terminal_if_needed(
     terminal_status: str,
     error_payload: dict | None = None,
 ) -> None:
+    if _gateway_owned_persistence(request):
+        return
     if not _chat_persist_enabled(request):
         return
     user_id = int(ask_request.user_id) if ask_request.user_id else None
@@ -304,8 +361,73 @@ def _persist_assistant_terminal_if_needed(
         request.app.logger.warning("assistant terminal persistence failed: %s", exc, exc_info=True)
 
 
+def _start_sync_stream_producer(*, iterator: Iterator[dict], queue: asyncio.Queue[_SyncStreamItem], loop: asyncio.AbstractEventLoop, stop_event: threading.Event) -> threading.Thread:
+    def _publish(item: _SyncStreamItem) -> None:
+        loop.call_soon_threadsafe(queue.put_nowait, item)
+
+    def _run() -> None:
+        try:
+            for item in iterator:
+                if stop_event.is_set():
+                    break
+                _publish(_SyncStreamItem(kind=_SYNC_STREAM_EVENT, payload=item))
+        except Exception as exc:  # pragma: no cover - defensive isolation
+            _publish(_SyncStreamItem(kind=_SYNC_STREAM_ERROR, payload=exc))
+        finally:
+            close = getattr(iterator, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+            _publish(_SyncStreamItem(kind=_SYNC_STREAM_DONE))
+
+    thread = threading.Thread(target=_run, daemon=True, name="thinkingqa-stream-producer")
+    thread.start()
+    return thread
+
+
+async def _monitor_request_disconnect(*, request: Request, cancel_event: threading.Event, stop_event: threading.Event) -> None:
+    try:
+        while not stop_event.is_set():
+            if await request.is_disconnected():
+                cancel_event.set()
+                return
+            await asyncio.sleep(0.05)
+    except Exception:  # pragma: no cover - defensive isolation
+        return
+
+
+async def _execute_sync_ask_with_disconnect_support(*, request: Request, ask_request, trace_id: str) -> dict:
+    if not _gateway_owned_persistence(request):
+        return execute_ask(
+            request=ask_request,
+            timeout_seconds=int(request.app.state.config["ASK_TIMEOUT_SECONDS"]),
+            trace_id=trace_id,
+        )
+    cancel_event = threading.Event()
+    stop_event = threading.Event()
+    monitor_task = asyncio.create_task(
+        _monitor_request_disconnect(request=request, cancel_event=cancel_event, stop_event=stop_event)
+    )
+    try:
+        return await asyncio.to_thread(
+            execute_ask,
+            request=ask_request,
+            timeout_seconds=int(request.app.state.config["ASK_TIMEOUT_SECONDS"]),
+            trace_id=trace_id,
+            cancel_event=cancel_event,
+        )
+    finally:
+        stop_event.set()
+        await monitor_task
+
+
 def _build_stream_response(*, request: Request, ask_request, trace_id: str, slot) -> StreamingResponse:
-    def _generate():
+    gateway_task_mode = _gateway_owned_persistence(request)
+    cancel_event = threading.Event() if gateway_task_mode else None
+
+    async def _generate():
         seq = 0
         summary_lock = threading.Lock()
         assistant_persisted = False
@@ -390,20 +512,44 @@ def _build_stream_response(*, request: Request, ask_request, trace_id: str, slot
                 error_payload=error_payload,
             )
             assistant_persisted = True
-
         def _completion_callback(payload: dict) -> None:
+            if cancel_event is not None and cancel_event.is_set():
+                return
             with summary_lock:
                 _ingest_done_payload(payload)
                 _persist_summary_once()
 
-        try:
-            for payload in stream_ask_events(
+        source = iter(
+            stream_ask_events(
                 request=ask_request,
                 timeout_seconds=int(request.app.state.config["ASK_TIMEOUT_SECONDS"]),
                 heartbeat_seconds=int(request.app.state.config["SSE_HEARTBEAT_SECONDS"]),
                 trace_id=trace_id,
                 completion_callback=_completion_callback,
-            ):
+                cancel_event=cancel_event,
+            )
+        )
+        queue: asyncio.Queue[_SyncStreamItem] = asyncio.Queue()
+        stop_event = threading.Event()
+        producer = _start_sync_stream_producer(iterator=source, queue=queue, loop=asyncio.get_running_loop(), stop_event=stop_event)
+        disconnected = False
+        try:
+            while True:
+                if gateway_task_mode and await request.is_disconnected():
+                    disconnected = True
+                    stop_event.set()
+                    if cancel_event is not None:
+                        cancel_event.set()
+                    break
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=0.05)
+                except asyncio.TimeoutError:
+                    continue
+                if item.kind == _SYNC_STREAM_DONE:
+                    break
+                if item.kind == _SYNC_STREAM_ERROR:
+                    raise item.payload
+                payload = dict(item.payload or {})
                 event_type = str(payload.get("type") or "")
                 if event_type == "content":
                     with summary_lock:
@@ -442,11 +588,16 @@ def _build_stream_response(*, request: Request, ask_request, trace_id: str, slot
                 seq=seq + 1,
             )
         finally:
+            stop_event.set()
+            if cancel_event is not None and disconnected:
+                cancel_event.set()
             try:
-                with summary_lock:
-                    _persist_summary_once()
+                if not disconnected:
+                    with summary_lock:
+                        _persist_summary_once()
             except Exception as exc:  # pragma: no cover
                 request.app.logger.warning("assistant persistence hook failed: %s", exc)
+            await asyncio.to_thread(producer.join, 0.5)
             slot.release()
 
     return StreamingResponse(
@@ -469,9 +620,9 @@ async def ask_v1(request: Request, context: AuthContext = Depends(require_auth_c
     with _ask_slot_guard(request):
         _persist_user_message_if_needed(request=request, ask_request=ask_request)
         try:
-            data = execute_ask(
-                request=ask_request,
-                timeout_seconds=int(request.app.state.config["ASK_TIMEOUT_SECONDS"]),
+            data = await _execute_sync_ask_with_disconnect_support(
+                request=request,
+                ask_request=ask_request,
                 trace_id=trace_id,
             )
         except Exception as exc:  # pragma: no cover - transport-level mapping
@@ -520,9 +671,9 @@ async def ask_v1_mode(
     with _ask_slot_guard(request):
         _persist_user_message_if_needed(request=request, ask_request=ask_request)
         try:
-            data = execute_ask(
-                request=ask_request,
-                timeout_seconds=int(request.app.state.config["ASK_TIMEOUT_SECONDS"]),
+            data = await _execute_sync_ask_with_disconnect_support(
+                request=request,
+                ask_request=ask_request,
                 trace_id=trace_id,
             )
         except Exception as exc:  # pragma: no cover - transport-level mapping

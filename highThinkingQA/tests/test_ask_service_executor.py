@@ -1,4 +1,6 @@
 import concurrent.futures
+import threading
+import time
 from types import SimpleNamespace
 
 from server.services.ask_service import (
@@ -44,6 +46,24 @@ class PendingFuture:
 
     def done(self):
         return False
+
+    def cancel(self):
+        self.cancel_called = True
+        return True
+
+
+class DelayedResultFuture:
+    def __init__(self, *, result, delay_sec=0.1):
+        self._result = result
+        self._delay_sec = delay_sec
+        self.cancel_called = False
+
+    def result(self, timeout=None):
+        time.sleep(min(self._delay_sec, float(timeout or self._delay_sec)))
+        return self._result
+
+    def done(self):
+        return True
 
     def cancel(self):
         self.cancel_called = True
@@ -420,6 +440,41 @@ def test_stream_ask_events_adapts_doi_links_before_done(monkeypatch):
     assert frames[-1]["doi_locations"] == {}
 
 
+def test_stream_ask_events_does_not_replay_full_content_when_adapter_rewrites_prefix(monkeypatch):
+    state = type("State", (), {"final_answer": "ab", "timings": {"total": 0.1}, "error": ""})()
+
+    def fake_run_agent(question, profile, **callbacks):
+        callbacks["stream_callback"]("a")
+        callbacks["stream_callback"]("b")
+        return state
+
+    def fake_adapt_answer(text):
+        mapping = {
+            "a": "甲",
+            "ab": "乙",
+        }
+        return mapping.get(text, str(text or ""))
+
+    monkeypatch.setattr("server.services.ask_service._get_agent_executor", lambda: InlineExecutor())
+    monkeypatch.setattr("server.services.ask_service._run_agent_for_profile", fake_run_agent)
+    monkeypatch.setattr("server.services.ask_service._adapt_answer_for_frontend", fake_adapt_answer)
+    monkeypatch.setattr("server.services.ask_service._safe_stream_adapt_prefix_length", lambda text: len(str(text or "")))
+
+    frames = list(
+        stream_ask_events(
+            request=AskRequest(question="demo", mode="thinking", user_id=None, conversation_id=None, chat_history=[], options={}),
+            timeout_seconds=10,
+            heartbeat_seconds=1,
+            trace_id="req_test",
+        )
+    )
+
+    content_frames = [frame["content"] for frame in frames if frame["type"] == "content"]
+    assert content_frames == ["甲"]
+    assert frames[-1]["type"] == "done"
+    assert frames[-1]["final_answer"] == "乙"
+
+
 def test_build_doi_locations_keeps_section_when_page_missing():
     assert _build_doi_locations(
         [
@@ -692,6 +747,95 @@ def test_execute_ask_timeout_sets_cancel_event(monkeypatch):
 
     submitted_kwargs = executor.calls[0][2]
     assert submitted_kwargs["cancel_event"].is_set() is True
+    assert future.cancel_called is True
+
+
+def test_stream_ask_events_external_cancel_emits_cancel_error_without_done(monkeypatch):
+    future = PendingFuture()
+    executor = DummyExecutor(future)
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    monkeypatch.setattr("server.services.ask_service._get_agent_executor", lambda: executor)
+
+    frames = list(
+        stream_ask_events(
+            request=AskRequest(question="demo", mode="thinking", user_id=None, conversation_id=None, chat_history=[], options={}),
+            timeout_seconds=10,
+            heartbeat_seconds=1,
+            trace_id="req_test",
+            cancel_event=cancel_event,
+        )
+    )
+
+    assert executor.calls
+    assert executor.calls[0][2]["cancel_event"] is cancel_event
+    assert future.cancel_called is True
+    assert frames[-1]["type"] == "error"
+    assert frames[-1]["code"] == "ASK_CANCELLED"
+    assert all(frame["type"] != "done" for frame in frames)
+
+
+def test_execute_ask_external_cancel_after_submission_raises_cancelled(monkeypatch):
+    future = PendingFuture()
+    executor = DummyExecutor(future)
+    cancel_event = threading.Event()
+
+    monkeypatch.setattr("server.services.ask_service._get_agent_executor", lambda: executor)
+
+    def _trigger_cancel():
+        time.sleep(0.05)
+        cancel_event.set()
+
+    cancel_thread = threading.Thread(target=_trigger_cancel, daemon=True)
+    cancel_thread.start()
+    try:
+        try:
+            execute_ask(
+                request=AskRequest(question="demo", mode="thinking", user_id=None, conversation_id=None, chat_history=[], options={}),
+                timeout_seconds=10,
+                trace_id="req_test",
+                cancel_event=cancel_event,
+            )
+        except Exception as exc:
+            assert exc.__class__.__name__ == "AskCancelledError"
+        else:  # pragma: no cover
+            raise AssertionError("expected AskCancelledError")
+    finally:
+        cancel_thread.join(timeout=0.5)
+
+    assert future.cancel_called is True
+
+
+def test_execute_ask_cancel_during_result_wait_still_raises_cancelled(monkeypatch):
+    state = type("State", (), {"final_answer": "alpha", "timings": {"total": 0.1}, "error": ""})()
+    future = DelayedResultFuture(result=state, delay_sec=0.08)
+    executor = DummyExecutor(future)
+    cancel_event = threading.Event()
+
+    monkeypatch.setattr("server.services.ask_service._get_agent_executor", lambda: executor)
+
+    def _trigger_cancel():
+        time.sleep(0.03)
+        cancel_event.set()
+
+    cancel_thread = threading.Thread(target=_trigger_cancel, daemon=True)
+    cancel_thread.start()
+    try:
+        try:
+            execute_ask(
+                request=AskRequest(question="demo", mode="thinking", user_id=None, conversation_id=None, chat_history=[], options={}),
+                timeout_seconds=10,
+                trace_id="req_test",
+                cancel_event=cancel_event,
+            )
+        except Exception as exc:
+            assert exc.__class__.__name__ == "AskCancelledError"
+        else:  # pragma: no cover
+            raise AssertionError("expected AskCancelledError")
+    finally:
+        cancel_thread.join(timeout=0.5)
+
     assert future.cancel_called is True
 
 

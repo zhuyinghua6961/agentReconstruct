@@ -246,6 +246,28 @@ def test_execution_event_relay_redis_describe_request_uses_sequence_key_not_lran
     assert payload["latest_sequence"] == 2
 
 
+def test_execution_event_relay_redis_get_frames_reads_from_sequence_offset():
+    redis = _FakeRedis()
+    store = ExecutionEventRelayStore(redis_service=RedisService.from_prefix(client=redis, key_prefix="gateway"))
+    store.append_frame("req_offset", {"type": "metadata"}, ttl_seconds=600)
+    store.append_frame("req_offset", {"type": "content"}, ttl_seconds=600)
+    store.append_frame("req_offset", {"type": "done"}, ttl_seconds=600)
+    captured: dict[str, int] = {}
+    original_lrange = redis.lrange
+
+    def tracking_lrange(key: str, start: int, stop: int):
+        captured["start"] = int(start)
+        captured["stop"] = int(stop)
+        return original_lrange(key, start, stop)
+
+    redis.lrange = tracking_lrange  # type: ignore[method-assign]
+
+    frames = store.get_frames("req_offset", after_sequence=2)
+
+    assert captured == {"start": 2, "stop": -1}
+    assert [frame["sequence"] for frame in frames] == [3]
+
+
 def test_execution_event_relay_redis_describe_repairs_dirty_indexes():
     redis = _FakeRedis()
     store = ExecutionEventRelayStore(redis_service=RedisService.from_prefix(client=redis, key_prefix="gateway"))
@@ -279,6 +301,29 @@ def test_execution_event_relay_keeps_dirty_flag_until_failed_index_write_is_repa
     redis.zadd = _failing_zadd  # type: ignore[assignment]
 
     record = store.append_frame("req_partial", {"type": "metadata"}, ttl_seconds=600)
+
+    assert record["sequence"] == 1
+    assert store._redis_dirty() is True
+
+    payload = store.describe()
+
+    assert payload["requests_tracked"] == 1
+    assert payload["frames_tracked"] == 1
+    assert store._redis_dirty() is False
+
+
+def test_execution_event_relay_keeps_dirty_flag_when_total_frame_counter_write_fails():
+    redis = _FakeRedis()
+    store = ExecutionEventRelayStore(redis_service=RedisService.from_prefix(client=redis, key_prefix="gateway"))
+    original_incrby = redis.incrby
+
+    def _failing_incrby(key: str, amount: int):
+        redis.incrby = original_incrby
+        raise RuntimeError("incrby failed")
+
+    redis.incrby = _failing_incrby  # type: ignore[assignment]
+
+    record = store.append_frame("req_partial_total", {"type": "metadata"}, ttl_seconds=600)
 
     assert record["sequence"] == 1
     assert store._redis_dirty() is True

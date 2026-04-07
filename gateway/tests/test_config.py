@@ -75,11 +75,15 @@ def test_gateway_settings_expose_admission_defaults(monkeypatch):
     monkeypatch.delenv("INTERACTIVE_EXECUTION_MAX_CONCURRENT", raising=False)
     monkeypatch.delenv("INTERACTIVE_EXECUTION_FAST_OR_PATENT_MAX_CONCURRENT", raising=False)
     monkeypatch.delenv("INTERACTIVE_EXECUTION_THINKING_MAX_CONCURRENT", raising=False)
+    monkeypatch.delenv("INTERACTIVE_EXECUTION_PER_USER_MAX_ACTIVE", raising=False)
+    monkeypatch.delenv("INTERACTIVE_EXECUTION_THINKING_MIN_SLOTS", raising=False)
+    monkeypatch.delenv("INTERACTIVE_QUEUE_MAX_SIZE", raising=False)
     monkeypatch.delenv("INTERACTIVE_QUEUED_TTL_SECONDS", raising=False)
     monkeypatch.delenv("INTERACTIVE_POST_ADMIT_ATTACH_TTL_SECONDS", raising=False)
     monkeypatch.delenv("GATEWAY_ADMISSION_ENABLED", raising=False)
     monkeypatch.delenv("GATEWAY_RUNTIME_ROLE", raising=False)
     monkeypatch.delenv("REDIS_ENABLED", raising=False)
+    monkeypatch.delenv("GATEWAY_REFRESH_SURVIVABLE_QA_TASKS_ENABLED", raising=False)
 
     settings = GatewaySettings.from_env()
 
@@ -87,11 +91,15 @@ def test_gateway_settings_expose_admission_defaults(monkeypatch):
     assert settings.redis.key_prefix == "gateway"
     assert settings.admission.enabled is False
     assert settings.admission.runtime_role == "web"
-    assert settings.admission.max_concurrent == 10
-    assert settings.admission.fast_or_patent_max_concurrent == 10
+    assert settings.admission.max_concurrent == 20
+    assert settings.admission.fast_or_patent_max_concurrent == 20
     assert settings.admission.thinking_max_concurrent == 5
+    assert settings.admission.per_user_max_active == 5
+    assert settings.admission.thinking_min_slots == 1
+    assert settings.admission.queue_max_size == 200
     assert settings.admission.queued_ttl_seconds == 900
     assert settings.admission.post_admit_attach_ttl_seconds == 600
+    assert settings.refresh_survivable_qa_tasks_enabled is False
 
 
 def test_gateway_settings_accept_runtime_role_and_redis_env(monkeypatch):
@@ -101,6 +109,9 @@ def test_gateway_settings_accept_runtime_role_and_redis_env(monkeypatch):
     monkeypatch.setenv("REDIS_ENABLED", "1")
     monkeypatch.setenv("REDIS_KEY_PREFIX", "gateway_dev")
     monkeypatch.setenv("INTERACTIVE_EXECUTION_MAX_CONCURRENT", "12")
+    monkeypatch.setenv("INTERACTIVE_EXECUTION_PER_USER_MAX_ACTIVE", "3")
+    monkeypatch.setenv("INTERACTIVE_EXECUTION_THINKING_MIN_SLOTS", "2")
+    monkeypatch.setenv("INTERACTIVE_QUEUE_MAX_SIZE", "88")
 
     settings = GatewaySettings.from_env()
 
@@ -110,3 +121,14 @@ def test_gateway_settings_accept_runtime_role_and_redis_env(monkeypatch):
     assert settings.redis.enabled is True
     assert settings.redis.key_prefix == "gateway_dev"
     assert settings.admission.max_concurrent == 12
+    assert settings.admission.per_user_max_active == 3
+    assert settings.admission.thinking_min_slots == 2
+    assert settings.admission.queue_max_size == 88
+
+
+def test_gateway_settings_can_enable_refresh_survivable_qa_tasks(monkeypatch):
+    monkeypatch.setenv("GATEWAY_REFRESH_SURVIVABLE_QA_TASKS_ENABLED", "true")
+
+    settings = GatewaySettings.from_env()
+
+    assert settings.refresh_survivable_qa_tasks_enabled is True

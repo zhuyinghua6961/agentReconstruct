@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+import os
 from typing import Any
 
 import httpx
 from fastapi import Request
 
 from app.core.config import GatewaySettings
+from app.core.trace import TRACE_ID_HEADER, get_trace_id
 from app.services.sse_frames import SSEFrameBuffer, parse_sse_json_frame
 
 
@@ -113,6 +115,177 @@ class ConversationPersistenceService:
 
     def set_transport(self, transport: httpx.AsyncBaseTransport | None) -> None:
         self._transport = transport
+
+    async def persist_task_user_message(
+        self,
+        *,
+        request: Request,
+        conversation_id: int | str | None,
+        user_id: int | str | None,
+        task_id: str,
+        content: str,
+        route: str,
+        requested_mode: str,
+        actual_mode: str,
+        selected_file_ids: list[int] | None = None,
+    ) -> dict[str, Any]:
+        cid = _conversation_id_int(conversation_id)
+        uid = _conversation_id_int(user_id)
+        if cid is None or uid is None:
+            raise ValueError("conversation_id_and_user_id_required")
+        source_service = self._source_service_for_mode(actual_mode)
+        payload = {
+            "conversation_id": cid,
+            "user_id": uid,
+            "trace_id": str(task_id or "").strip(),
+            "source_service": source_service,
+            "route": str(route or "").strip() or "kb_qa",
+            "requested_mode": str(requested_mode or "").strip() or actual_mode,
+            "actual_mode": str(actual_mode or "").strip(),
+            "idempotency_key": f"{cid}:{str(task_id or '').strip()}:user",
+            "message": {
+                "role": "user",
+                "content": str(content or "").strip(),
+            },
+            "context_hints": {
+                "selected_file_ids": list(selected_file_ids or []),
+                "last_turn_route_hint": str(route or "").strip() or None,
+            },
+        }
+        return await self._post_internal_json(
+            request=request,
+            path=f"/internal/conversations/{cid}/messages/user",
+            payload=payload,
+        )
+
+    async def start_task_assistant(
+        self,
+        *,
+        request: Request,
+        conversation_id: int | str | None,
+        user_id: int | str | None,
+        task_id: str,
+        route: str,
+        requested_mode: str,
+        actual_mode: str,
+        status: str = "queued",
+        last_seq: int = 0,
+    ) -> dict[str, Any]:
+        cid = _conversation_id_int(conversation_id)
+        uid = _conversation_id_int(user_id)
+        if cid is None or uid is None:
+            raise ValueError("conversation_id_and_user_id_required")
+        source_service = self._source_service_for_mode(actual_mode)
+        payload = {
+            "conversation_id": cid,
+            "user_id": uid,
+            "task_id": str(task_id or "").strip(),
+            "trace_id": str(task_id or "").strip(),
+            "source_service": source_service,
+            "route": str(route or "").strip() or "kb_qa",
+            "requested_mode": str(requested_mode or "").strip() or actual_mode,
+            "actual_mode": str(actual_mode or "").strip(),
+            "status": str(status or "queued").strip() or "queued",
+            "last_seq": max(0, int(last_seq)),
+        }
+        return await self._post_internal_json(
+            request=request,
+            path=f"/internal/conversations/{cid}/tasks/{str(task_id or '').strip()}/assistant-start",
+            payload=payload,
+        )
+
+    async def rollback_task_creation(
+        self,
+        *,
+        request: Request,
+        conversation_id: int | str | None,
+        user_id: int | str | None,
+        task_id: str,
+        user_message_id: str | None = None,
+        assistant_message_id: str | None = None,
+        preserve_user_message: bool = False,
+    ) -> dict[str, Any]:
+        cid = _conversation_id_int(conversation_id)
+        uid = _conversation_id_int(user_id)
+        if cid is None or uid is None:
+            raise ValueError("conversation_id_and_user_id_required")
+        payload = {
+            "conversation_id": cid,
+            "user_id": uid,
+            "task_id": str(task_id or "").strip(),
+            "user_message_id": str(user_message_id or "").strip(),
+            "assistant_message_id": str(assistant_message_id or "").strip(),
+            "preserve_user_message": bool(preserve_user_message),
+        }
+        return await self._post_internal_json(
+            request=request,
+            path=f"/internal/conversations/{cid}/tasks/{str(task_id or '').strip()}/rollback-create",
+            payload=payload,
+        )
+
+    async def progress_task_assistant(
+        self,
+        *,
+        request: Request,
+        conversation_id: int | str | None,
+        user_id: int | str | None,
+        task_id: str,
+        status: str,
+        content_delta: str = "",
+        steps: list[dict[str, Any]] | None = None,
+        last_seq: int = 0,
+    ) -> dict[str, Any]:
+        cid = _conversation_id_int(conversation_id)
+        uid = _conversation_id_int(user_id)
+        if cid is None or uid is None:
+            raise ValueError("conversation_id_and_user_id_required")
+        payload = {
+            "conversation_id": cid,
+            "user_id": uid,
+            "task_id": str(task_id or "").strip(),
+            "status": str(status or "running").strip() or "running",
+            "content_delta": str(content_delta or ""),
+            "steps": list(steps or []),
+            "last_seq": max(0, int(last_seq)),
+        }
+        return await self._post_internal_json(
+            request=request,
+            path=f"/internal/conversations/{cid}/tasks/{str(task_id or '').strip()}/assistant-progress",
+            payload=payload,
+        )
+
+    async def terminal_task_assistant(
+        self,
+        *,
+        request: Request,
+        conversation_id: int | str | None,
+        user_id: int | str | None,
+        task_id: str,
+        terminal_status: str,
+        last_seq: int = 0,
+        answer_text: str = "",
+        steps: list[dict[str, Any]] | None = None,
+        failure: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        cid = _conversation_id_int(conversation_id)
+        uid = _conversation_id_int(user_id)
+        if cid is None or uid is None:
+            raise ValueError("conversation_id_and_user_id_required")
+        payload = {
+            "conversation_id": cid,
+            "user_id": uid,
+            "task_id": str(task_id or "").strip(),
+            "terminal_status": str(terminal_status or "failed").strip() or "failed",
+            "last_seq": max(0, int(last_seq)),
+            "answer_text": str(answer_text or ""),
+            "steps": list(steps or []),
+            "failure": dict(failure or {}),
+        }
+        return await self._post_internal_json(
+            request=request,
+            path=f"/internal/conversations/{cid}/tasks/{str(task_id or '').strip()}/assistant-terminal",
+            payload=payload,
+        )
 
     async def persist_user_message(
         self,
@@ -336,6 +509,28 @@ class ConversationPersistenceService:
             )
             response.raise_for_status()
 
+    async def _post_internal_json(
+        self,
+        *,
+        request: Request,
+        path: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        async with httpx.AsyncClient(
+            timeout=float(self._settings.request_timeout_seconds),
+            transport=self._transport,
+        ) as client:
+            response = await client.post(
+                f"{self._settings.endpoints.public}{path}",
+                headers=self._internal_headers(request),
+                json=payload,
+            )
+            response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict):
+            raise ValueError("conversation_internal_invalid_response")
+        return data
+
     def _forward_headers(self, request: Request) -> dict[str, str]:
         headers: dict[str, str] = {}
         authorization = str(request.headers.get("authorization") or "").strip()
@@ -343,3 +538,31 @@ class ConversationPersistenceService:
             headers["Authorization"] = authorization
         headers["Content-Type"] = "application/json"
         return headers
+
+    def _internal_headers(self, request: Request) -> dict[str, str]:
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "X-Internal-Service-Name": "gateway",
+            "X-Internal-Service-Token": self._internal_token(),
+        }
+        trace_id = get_trace_id(request)
+        if trace_id:
+            headers[TRACE_ID_HEADER] = trace_id
+        return headers
+
+    def _internal_token(self) -> str:
+        token = str(os.getenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "") or "").strip()
+        if token:
+            return token
+        if str(self._settings.environment or "").strip().lower() == "test":
+            return "authority-test-token"
+        return ""
+
+    def _source_service_for_mode(self, actual_mode: str) -> str:
+        normalized = str(actual_mode or "").strip().lower()
+        if normalized == "thinking":
+            return "highThinkingQA"
+        if normalized == "patent":
+            return "patentQA"
+        return "fastQA"

@@ -42,6 +42,10 @@ class AskTimeoutError(AskServiceError):
     pass
 
 
+class AskCancelledError(AskServiceError):
+    pass
+
+
 _AGENT_EXECUTOR: concurrent.futures.ThreadPoolExecutor | None = None
 
 
@@ -348,8 +352,9 @@ def _progress_to_step_event(payload: dict[str, Any]) -> dict[str, Any]:
 def _extract_references(text: str) -> list[str]:
     seen: set[str] = set()
     refs: list[str] = []
-    for doi in extract_dois(str(text or "")):
-        if not doi:
+    for match in _DOI_PATTERN.finditer(str(text or "")):
+        doi = normalize_doi(match.group(0))
+        if not doi or "/" not in doi:
             continue
         key = doi.lower()
         if key in seen:
@@ -624,11 +629,12 @@ def execute_ask(
     request: AskRequest,
     timeout_seconds: int,
     trace_id: str,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     """Execute non-stream ask and return response data payload."""
     profile = resolve_profile(request.mode)
     context, rewrite = _prepare_execution(request)
-    cancel_event = threading.Event()
+    active_cancel_event = cancel_event or threading.Event()
     logger.info(
         "[trace_id=%s] execute_ask start mode=%s conversation_id=%s question=%s",
         trace_id,
@@ -651,13 +657,32 @@ def execute_ask(
             "conversation_id": context.conversation_id,
             "user_id": context.user_id,
         },
-        cancel_event=cancel_event,
+        cancel_event=active_cancel_event,
         trace_id=trace_id,
     )
+    deadline = time.monotonic() + max(1, int(timeout_seconds))
     try:
-        state = future.result(timeout=max(1, int(timeout_seconds)))
+        while True:
+            if active_cancel_event.is_set():
+                cancel = getattr(future, "cancel", None)
+                if callable(cancel):
+                    cancel()
+                raise AskCancelledError("cancelled")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise concurrent.futures.TimeoutError()
+            try:
+                state = future.result(timeout=min(0.1, max(0.01, remaining)))
+                if active_cancel_event.is_set():
+                    cancel = getattr(future, "cancel", None)
+                    if callable(cancel):
+                        cancel()
+                    raise AskCancelledError("cancelled")
+                break
+            except concurrent.futures.TimeoutError:
+                continue
     except concurrent.futures.TimeoutError as exc:
-        cancel_event.set()
+        active_cancel_event.set()
         cancel = getattr(future, "cancel", None)
         if callable(cancel):
             cancel()
@@ -665,7 +690,7 @@ def execute_ask(
 
     if getattr(state, "error", ""):
         if str(getattr(state, "error", "")).strip().lower() == "cancelled":
-            raise AskTimeoutError("upstream model timeout")
+            raise AskCancelledError("cancelled")
         raise AskServiceError(str(state.error))
 
     frontend_answer = _adapt_answer_for_frontend(state.final_answer)
@@ -736,6 +761,7 @@ def stream_ask_events(
     heartbeat_seconds: int,
     trace_id: str,
     completion_callback: Callable[[dict[str, Any]], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> Generator[dict[str, Any], None, None]:
     """Yield structured ask-stream events (not encoded as SSE yet)."""
     profile = resolve_profile(request.mode)
@@ -755,10 +781,11 @@ def stream_ask_events(
     result_holder: dict[str, Any] = {}
     completion_lock = threading.Lock()
     step_idx = 0
-    cancel_event = threading.Event()
+    active_cancel_event = cancel_event or threading.Event()
     streamed_raw_content = ""
     streamed_adapted_content = ""
     first_content_logged = False
+    timed_out = False
 
     def on_step(description: str, elapsed: float) -> None:
         nonlocal step_idx
@@ -800,7 +827,9 @@ def stream_ask_events(
         if content.startswith(streamed_adapted_content):
             delta = content[len(streamed_adapted_content):]
         else:
-            delta = content
+            # Streaming must stay monotonic. If the adapter rewrites already-emitted
+            # content, wait for the terminal done frame to replace the full answer.
+            return
         if not delta:
             streamed_adapted_content = content
             return
@@ -838,11 +867,13 @@ def stream_ask_events(
             stream_callback=on_content,
             step_callback=on_step,
             progress_callback=on_progress,
-            cancel_event=cancel_event,
+            cancel_event=active_cancel_event,
             trace_id=trace_id,
         )
         def _on_future_done(done_future) -> None:
             if completion_callback is None:
+                return
+            if active_cancel_event.is_set():
                 return
             try:
                 state = done_future.result()
@@ -897,11 +928,28 @@ def stream_ask_events(
     worker()
 
     while True:
+        if active_cancel_event.is_set():
+            logger.info("[trace_id=%s] stream canceled before completion", trace_id)
+            future = result_holder.get("future")
+            if future is not None:
+                cancel = getattr(future, "cancel", None)
+                if callable(cancel):
+                    cancel()
+            yield {
+                "type": "error",
+                "code": "ASK_CANCELLED",
+                "error": "cancelled",
+                "message": "cancelled",
+                "retriable": False,
+                "trace_id": trace_id,
+            }
+            return
         elapsed = time.monotonic() - started_at
         remaining = max(0.0, float(timeout_seconds) - elapsed)
         if remaining <= 0:
             logger.warning("[trace_id=%s] stream timeout after %.3fs", trace_id, elapsed)
-            cancel_event.set()
+            timed_out = True
+            active_cancel_event.set()
             future = result_holder.get("future")
             if future is not None:
                 cancel = getattr(future, "cancel", None)
@@ -947,6 +995,27 @@ def stream_ask_events(
     if streamed_raw_content:
         _emit_adapted_delta(_adapt_answer_for_frontend(streamed_raw_content))
 
+    if active_cancel_event.is_set():
+        if timed_out:
+            yield {
+                "type": "error",
+                "code": "UPSTREAM_TIMEOUT",
+                "error": "upstream_timeout",
+                "message": "upstream model timeout",
+                "retriable": True,
+                "trace_id": trace_id,
+            }
+            return
+        yield {
+            "type": "error",
+            "code": "ASK_CANCELLED",
+            "error": "cancelled",
+            "message": "cancelled",
+            "retriable": False,
+            "trace_id": trace_id,
+        }
+        return
+
     state = result_holder.get("state")
     if "error" in result_holder:
         logger.error("[trace_id=%s] stream finished with upstream error=%s", trace_id, result_holder["error"])
@@ -975,12 +1044,22 @@ def stream_ask_events(
     if getattr(state, "error", ""):
         logger.error("[trace_id=%s] stream state error=%s", trace_id, state.error)
         if str(getattr(state, "error", "")).strip().lower() == "cancelled":
+            if timed_out:
+                yield {
+                    "type": "error",
+                    "code": "UPSTREAM_TIMEOUT",
+                    "error": "upstream_timeout",
+                    "message": "upstream model timeout",
+                    "retriable": True,
+                    "trace_id": trace_id,
+                }
+                return
             yield {
                 "type": "error",
-                "code": "UPSTREAM_TIMEOUT",
-                "error": "upstream_timeout",
-                "message": "upstream model timeout",
-                "retriable": True,
+                "code": "ASK_CANCELLED",
+                "error": "cancelled",
+                "message": "cancelled",
+                "retriable": False,
                 "trace_id": trace_id,
             }
             return

@@ -2,10 +2,26 @@
 
 from __future__ import annotations
 
+import json
+
+from fastapi import HTTPException
 from fastapi import APIRouter, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from app.services.proxy import ProxyService
+from app.services.qa_tasks import QATaskService
+
+_CONVERSATION_LIST_ROUTE_PATHS = {
+    "/api/conversations",
+    "/api/v1/conversations",
+}
+
+_CONVERSATION_DETAIL_ROUTE_PATHS = {
+    "/api/conversations/{conversation_id}",
+    "/api/v1/conversations/{conversation_id}",
+}
+
+_LIVE_PUBLIC_TASK_STATUSES = {"queued", "admitted", "running"}
 
 router = APIRouter(tags=["public-proxy"])
 
@@ -41,7 +57,142 @@ async def _proxy_to_public(request: Request) -> Response:
             headers=handle.headers,
             media_type=str(handle.headers.get("content-type") or "application/octet-stream"),
         )
-    return await proxy_service.forward(request=request, target=registry.get_public())
+    if _is_conversation_detail_read(request):
+        task_service = QATaskService(request)
+        try:
+            conversation_id = int(request.path_params.get("conversation_id") or 0)
+        except Exception:
+            conversation_id = 0
+        if conversation_id > 0:
+            await task_service.reconcile_pending_terminal_tasks(conversation_ids={conversation_id})
+    response = await proxy_service.forward(request=request, target=registry.get_public())
+    return _maybe_enrich_conversation_reads(request=request, response=response)
+
+
+def _route_path(request: Request) -> str:
+    route = request.scope.get("route")
+    return str(getattr(route, "path", "") or "")
+
+
+def _is_conversation_list_read(request: Request) -> bool:
+    return request.method.upper() == "GET" and _route_path(request) in _CONVERSATION_LIST_ROUTE_PATHS
+
+
+def _is_conversation_detail_read(request: Request) -> bool:
+    return request.method.upper() == "GET" and _route_path(request) in _CONVERSATION_DETAIL_ROUTE_PATHS
+
+
+def _decode_json_response(response: Response) -> dict | None:
+    content_type = str(response.headers.get("content-type") or "").lower()
+    if "application/json" not in content_type:
+        return None
+    body = getattr(response, "body", None)
+    if not body:
+        return None
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _task_timestamp_sort_key(record: dict) -> tuple[int, str]:
+    status = str(record.get("status") or "").strip().lower()
+    status_rank = {
+        "running": 3,
+        "admitted": 2,
+        "queued": 1,
+    }.get(status, 0)
+    for field_name in ("updated_at", "started_at", "admitted_at", "enqueued_at", "created_at"):
+        value = str(record.get(field_name) or "").strip()
+        if value:
+            return (status_rank, value)
+    return (status_rank, "")
+
+
+def _live_task_summary_by_conversation(request: Request) -> dict[int, dict]:
+    queue_store = request.app.state.execution_queue_status_store
+    task_service = QATaskService(request)
+    chosen: dict[int, dict] = {}
+    for record in queue_store.list_requests():
+        try:
+            conversation_id = int(record.get("conversation_id") or 0)
+        except Exception:
+            continue
+        if conversation_id <= 0:
+            continue
+        if str(record.get("status") or "").strip().lower() not in _LIVE_PUBLIC_TASK_STATUSES:
+            continue
+        current = chosen.get(conversation_id)
+        if current is None or _task_timestamp_sort_key(record) >= _task_timestamp_sort_key(current):
+            chosen[conversation_id] = record
+    summaries: dict[int, dict] = {}
+    for conversation_id, record in chosen.items():
+        request_id = str(record.get("request_id") or "").strip()
+        if not request_id:
+            continue
+        try:
+            summaries[conversation_id] = task_service.build_task_summary(request_id)
+        except HTTPException as exc:
+            if int(exc.status_code or 500) == 404:
+                continue
+            raise
+    return summaries
+
+
+def _json_response_from_payload(response: Response, payload: dict) -> JSONResponse:
+    headers = {
+        key: value
+        for key, value in dict(response.headers).items()
+        if key.lower() != "content-length"
+    }
+    return JSONResponse(
+        status_code=int(response.status_code or 200),
+        content=payload,
+        headers=headers,
+    )
+
+
+def _maybe_enrich_conversation_reads(*, request: Request, response: Response) -> Response:
+    if not (_is_conversation_list_read(request) or _is_conversation_detail_read(request)):
+        return response
+    payload = _decode_json_response(response)
+    if not isinstance(payload, dict):
+        return response
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return response
+    active_tasks = _live_task_summary_by_conversation(request)
+    if _is_conversation_list_read(request):
+        conversations = data.get("conversations")
+        if not isinstance(conversations, list):
+            return response
+        enriched_items = []
+        for item in conversations:
+            if not isinstance(item, dict):
+                enriched_items.append(item)
+                continue
+            enriched = dict(item)
+            try:
+                conversation_id = int(enriched.get("conversation_id") or 0)
+            except Exception:
+                conversation_id = 0
+            enriched["active_task"] = active_tasks.get(conversation_id)
+            enriched_items.append(enriched)
+        enriched_payload = dict(payload)
+        enriched_data = dict(data)
+        enriched_data["conversations"] = enriched_items
+        enriched_payload["data"] = enriched_data
+        return _json_response_from_payload(response, enriched_payload)
+    try:
+        conversation_id = int(data.get("conversation_id") or 0)
+    except Exception:
+        conversation_id = 0
+    enriched_payload = dict(payload)
+    enriched_data = dict(data)
+    enriched_data["active_task"] = active_tasks.get(conversation_id)
+    enriched_payload["data"] = enriched_data
+    return _json_response_from_payload(response, enriched_payload)
 
 
 async def _proxy_public(

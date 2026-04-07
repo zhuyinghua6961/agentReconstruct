@@ -3,12 +3,15 @@ import { prepareChatsForPersistence, restorePersistedChats } from './chatPersist
 import { resolveChatPersistPolicy, shouldForcePersistForStreamingTransition } from './streamPersistPolicy.js'
 import { ref, computed } from 'vue'
 import { api } from '../services/api.js'
+import { isRecoverableTaskStatus, normalizeTaskReplayCursor } from '../utils/taskReplayCursor.js'
+import { createTaskRecoveryDebugLogger, summarizeTaskRecoveryDetail } from '../utils/taskRecoveryDebug.js'
 
 export const useChatStore = defineStore('chat', () => {
   const DEFAULT_CHAT_TITLE = '新对话'
   const CHATS_STORAGE_KEY = 'lfp_chats'
   const ACTIVE_CHAT_STORAGE_KEY = 'lfp_current_chat_id'
   const MAX_CONCURRENT_BUSY_CHATS = 5
+  const taskRecoveryDebug = createTaskRecoveryDebugLogger()
 
   // 状态
   const chats = ref([])
@@ -43,9 +46,25 @@ export const useChatStore = defineStore('chat', () => {
     currentChat.value?.messages || []
   )
 
-  const activeBusyCount = computed(() => Object.keys(chatBusyRuntime.value || {}).length)
+  const activeBusyCount = computed(() => {
+    const busyChatIds = new Set(
+      Object.keys(chatBusyRuntime.value || {})
+        .map((chatId) => normalizeBusyChatId(chatId))
+        .filter(Boolean)
+    )
+    chats.value.forEach((chat) => {
+      const chatId = normalizeBusyChatId(chat?.id)
+      if (!chatId) return
+      const cursor = normalizeTaskReplayCursor(chat?.activeTask, chat?.lastTaskSeq)
+      if (cursor.recoverable) {
+        busyChatIds.add(chatId)
+      }
+    })
+    return busyChatIds.size
+  })
   const hasBusyCapacity = computed(() => activeBusyCount.value < MAX_CONCURRENT_BUSY_CHATS)
   const isStreaming = computed(() => legacyStreamingState.value || activeBusyCount.value > 0)
+  const refreshSurvivableQATasksEnabled = computed(() => Boolean(api.refreshSurvivableQATasksEnabled))
 
   function toTimestamp(value) {
     if (!value) return 0
@@ -79,8 +98,35 @@ export const useChatStore = defineStore('chat', () => {
     return chatBusyRuntime.value[normalizedChatId] || null
   }
 
+  function getChatById(chatId) {
+    const normalizedChatId = normalizeBusyChatId(chatId)
+    if (!normalizedChatId) return null
+    return chats.value.find((chat) => normalizeBusyChatId(chat?.id) === normalizedChatId) || null
+  }
+
+  function getChatActiveTask(chatId) {
+    const chat = getChatById(chatId)
+    if (!chat) return null
+    const cursor = normalizeTaskReplayCursor(chat?.activeTask, chat?.lastTaskSeq)
+    if (!cursor.taskId || !cursor.recoverable) return null
+    return {
+      ...(chat.activeTask && typeof chat.activeTask === 'object' ? chat.activeTask : {}),
+      task_id: cursor.taskId,
+      status: cursor.status,
+      last_seq: cursor.lastSeq,
+      replay_available: cursor.replayAvailable,
+    }
+  }
+
+  function getChatLastTaskSeq(chatId) {
+    const chat = getChatById(chatId)
+    if (!chat) return 0
+    const cursor = normalizeTaskReplayCursor(chat?.activeTask, chat?.lastTaskSeq)
+    return cursor.lastSeq
+  }
+
   function isChatBusy(chatId) {
-    return Boolean(getChatBusyRuntime(chatId))
+    return Boolean(getChatBusyRuntime(chatId) || getChatActiveTask(chatId))
   }
 
   function isChatStreaming(chatId) {
@@ -178,7 +224,21 @@ export const useChatStore = defineStore('chat', () => {
   function requestChatBusyStop(chatId) {
     const normalizedChatId = normalizeBusyChatId(chatId)
     const currentRuntime = getChatBusyRuntime(normalizedChatId)
-    if (!currentRuntime) return false
+    if (!currentRuntime) {
+      const activeTask = getChatActiveTask(normalizedChatId)
+      if (!activeTask) return false
+      applyBusyRuntimeMutation((runtimeMap) => {
+        runtimeMap[normalizedChatId] = {
+          chatId: normalizedChatId,
+          phase: String(activeTask?.status || 'running').trim().toLowerCase() || 'running',
+          stopRequested: true,
+          requestId: String(activeTask?.task_id || '').trim(),
+          targetMessageIndex: -1,
+          startedAt: new Date().toISOString(),
+        }
+      }, { persist: false })
+      return true
+    }
 
     applyBusyRuntimeMutation((runtimeMap) => {
       runtimeMap[normalizedChatId] = {
@@ -332,6 +392,23 @@ export const useChatStore = defineStore('chat', () => {
     return fallback
   }
 
+  function normalizeTaskMetadata(activeTask, fallbackLastSeq = 0) {
+    const cursor = normalizeTaskReplayCursor(activeTask, fallbackLastSeq)
+    if (!cursor.taskId || !cursor.recoverable) {
+      return { activeTask: null, lastTaskSeq: cursor.lastSeq }
+    }
+    return {
+      activeTask: {
+        ...(activeTask && typeof activeTask === 'object' ? activeTask : {}),
+        task_id: cursor.taskId,
+        status: cursor.status,
+        last_seq: cursor.lastSeq,
+        replay_available: cursor.replayAvailable,
+      },
+      lastTaskSeq: cursor.lastSeq,
+    }
+  }
+
   function normalizeMessage(message = {}) {
     const metadata = message?.metadata && typeof message.metadata === 'object' ? { ...message.metadata } : {}
     const rawMode = String(
@@ -448,6 +525,22 @@ export const useChatStore = defineStore('chat', () => {
     const itemMessages = Array.isArray(item?.messages) ? item.messages : null
     const fallbackMessages = Array.isArray(fallback?.messages) ? fallback.messages : []
     const synced = Boolean(item?.synced ?? fallback?.synced)
+    const fallbackLastTaskSeq = Number(
+      item?.lastTaskSeq
+      ?? item?.last_task_seq
+      ?? fallback?.lastTaskSeq
+      ?? fallback?.last_task_seq
+      ?? fallback?.activeTask?.last_seq
+      ?? fallback?.active_task?.last_seq
+      ?? 0
+    ) || 0
+    const taskMetadata = normalizeTaskMetadata(
+      item?.activeTask
+      ?? item?.active_task
+      ?? fallback?.activeTask
+      ?? fallback?.active_task,
+      fallbackLastTaskSeq,
+    )
     return {
       ...item,
       messages: normalizeMessages(
@@ -464,6 +557,8 @@ export const useChatStore = defineStore('chat', () => {
         item?.syncStatus ?? fallback?.syncStatus,
         synced ? 'synced' : 'local'
       ),
+      activeTask: taskMetadata.activeTask,
+      lastTaskSeq: taskMetadata.lastTaskSeq,
     }
   }
 
@@ -757,6 +852,8 @@ export const useChatStore = defineStore('chat', () => {
               synced: true,
               syncStatus: 'synced',
               isPinned: cached?.isPinned,
+              activeTask: conv.active_task || null,
+              lastTaskSeq: conv?.active_task?.last_seq ?? cached?.lastTaskSeq ?? 0,
             }, cached)
             reindexConversationFiles(normalized)
             return normalized
@@ -900,7 +997,7 @@ export const useChatStore = defineStore('chat', () => {
     if (chat && chat.synced) {
       const uid = getUserId()
       if (uid) {
-        const wasBusyAtSwitchStart = isChatBusy(normalizedChatId)
+        const hadRuntimeBusyAtSwitchStart = Boolean(getChatBusyRuntime(normalizedChatId))
         try {
           console.log('[switchChat] 从服务器加载对话详情...')
           const response = await api.getConversationDetail(parseInt(chat.id), uid)
@@ -910,9 +1007,19 @@ export const useChatStore = defineStore('chat', () => {
           if (requestToken !== switchChatRequestToken || currentChatId.value !== normalizedChatId) {
             return
           }
+          taskRecoveryDebug.log('store:switch-chat-server-detail', {
+            chatId: normalizedChatId,
+            requestToken,
+            hadRuntimeBusyAtSwitchStart,
+            detail: summarizeTaskRecoveryDetail(
+              response,
+              String(response?.active_task?.task_id || chat?.activeTask?.task_id || '').trim(),
+            ),
+            serverMessageCount: Array.isArray(response?.messages) ? response.messages.length : 0,
+          })
           
           if (response.messages) {
-            const shouldPreserveBusyMessages = wasBusyAtSwitchStart || isChatBusy(normalizedChatId)
+            const shouldPreserveBusyMessages = hadRuntimeBusyAtSwitchStart || Boolean(getChatBusyRuntime(normalizedChatId))
             if (!shouldPreserveBusyMessages) {
               const cachedMessages = Array.isArray(chat.messages) ? [...chat.messages] : []
               const mergedMessages = response.messages.map((message, index) => {
@@ -955,6 +1062,9 @@ export const useChatStore = defineStore('chat', () => {
             }
             chat.updatedAt = response.updated_at || chat.updatedAt
             chat.syncStatus = 'synced'
+            const taskMetadata = normalizeTaskMetadata(response.active_task, chat.lastTaskSeq)
+            chat.activeTask = taskMetadata.activeTask
+            chat.lastTaskSeq = taskMetadata.lastTaskSeq
             
             // 更新PDF列表
             if (response.pdf_list) {
@@ -978,6 +1088,21 @@ export const useChatStore = defineStore('chat', () => {
             sortChatsInPlace()
             saveChats()
             console.log('[switchChat] 消息已更新到 chat.messages, 当前消息数:', chat.messages.length)
+            taskRecoveryDebug.log('store:switch-chat-updated', {
+              chatId: normalizedChatId,
+              requestToken,
+              preservedBusyMessages: shouldPreserveBusyMessages,
+              currentMessageCount: Array.isArray(chat.messages) ? chat.messages.length : 0,
+              currentLastTaskSeq: Number(chat.lastTaskSeq || 0),
+              activeTask: chat.activeTask
+                ? {
+                    taskId: String(chat.activeTask.task_id || '').trim(),
+                    status: String(chat.activeTask.status || '').trim().toLowerCase(),
+                    lastSeq: Number(chat.activeTask.last_seq || 0),
+                    replayAvailable: chat.activeTask.replay_available !== false,
+                  }
+                : null,
+            })
           }
         } catch (e) {
           if (requestToken !== switchChatRequestToken || currentChatId.value !== normalizedChatId) {
@@ -1121,6 +1246,49 @@ export const useChatStore = defineStore('chat', () => {
     // 用户消息会在 ask_stream 接口中统一保存，避免重复
     console.log('[addUserMessage] ✅ 用户消息已添加到本地，等待 ask_stream 保存到服务器')
     return targetChat
+  }
+
+  async function ensureChatConversation(chatId, titleHint = DEFAULT_CHAT_TITLE) {
+    const requestedChatId = String(chatId || currentChatId.value || '').trim()
+    let targetChat = chats.value.find(c => c.id === requestedChatId) || null
+    if (!targetChat) return null
+
+    const uid = getUserId()
+    if (targetChat.synced || !uid) {
+      return targetChat
+    }
+
+    try {
+      syncStatus.value = 'syncing'
+      targetChat.syncStatus = 'syncing'
+      const response = await api.createConversation(uid, titleHint)
+      const oldId = requestedChatId
+      const chatIndex = chats.value.findIndex(c => c.id === oldId)
+      if (chatIndex === -1) {
+        return targetChat
+      }
+
+      const newId = response.conversation_id.toString()
+      chats.value[chatIndex].id = newId
+      chats.value[chatIndex].title = response.title || titleHint || chats.value[chatIndex].title
+      chats.value[chatIndex].createdAt = response.created_at
+      chats.value[chatIndex].updatedAt = response.updated_at
+      chats.value[chatIndex].synced = true
+      chats.value[chatIndex].syncStatus = 'synced'
+      moveChatBusyRuntime(oldId, newId)
+      if (currentChatId.value === oldId) {
+        currentChatId.value = newId
+      }
+      targetChat = chats.value[chatIndex]
+      syncStatus.value = 'synced'
+      saveChats()
+      return targetChat
+    } catch (e) {
+      console.error('[ensureChatConversation] 创建服务器对话失败:', e)
+      syncStatus.value = 'failed'
+      targetChat.syncStatus = 'failed'
+      return targetChat
+    }
   }
 
   async function addBotMessage(message, options = {}) {
@@ -1575,11 +1743,64 @@ export const useChatStore = defineStore('chat', () => {
     saveChats({ force: true })
   }
 
+  function setChatActiveTask(chatId, taskSummary, options = {}) {
+    const chat = getChatById(chatId)
+    if (!chat) return null
+    const fallbackLastSeq = Number(options?.lastSeq ?? chat?.lastTaskSeq ?? 0) || 0
+    const taskMetadata = normalizeTaskMetadata(taskSummary, fallbackLastSeq)
+    chat.activeTask = taskMetadata.activeTask
+    chat.lastTaskSeq = taskMetadata.lastTaskSeq
+    if (options?.touch !== false) {
+      touchChat(chat)
+    }
+    if (options?.persist !== false) {
+      saveChats()
+    }
+    return chat.activeTask
+  }
+
+  function updateChatTaskReplayCursor(chatId, lastSeq, options = {}) {
+    const chat = getChatById(chatId)
+    if (!chat) return 0
+    const nextLastSeq = Math.max(Number(chat?.lastTaskSeq || 0) || 0, Number(lastSeq || 0) || 0)
+    chat.lastTaskSeq = nextLastSeq
+    if (chat.activeTask && typeof chat.activeTask === 'object') {
+      chat.activeTask = {
+        ...chat.activeTask,
+        last_seq: nextLastSeq,
+      }
+    }
+    if (options?.touch !== false) {
+      touchChat(chat)
+    }
+    if (options?.persist !== false) {
+      saveChats()
+    }
+    return nextLastSeq
+  }
+
+  function clearChatActiveTask(chatId, options = {}) {
+    const chat = getChatById(chatId)
+    if (!chat) return false
+    chat.activeTask = null
+    if (options?.resetLastSeq) {
+      chat.lastTaskSeq = 0
+    }
+    if (options?.touch !== false) {
+      touchChat(chat)
+    }
+    if (options?.persist !== false) {
+      saveChats()
+    }
+    return true
+  }
+
   return {
     chats,
     currentChatId,
     currentChat,
     currentMessages,
+    refreshSurvivableQATasksEnabled,
     activeBusyCount,
     hasBusyCapacity,
     isStreaming,
@@ -1591,10 +1812,13 @@ export const useChatStore = defineStore('chat', () => {
     getUserId,
     loadChats,
     createChat,
+    buildAutoTitleFromText,
     buildAutoTitleFromFileName,
     updateCurrentChatTitle,
     switchChat,
     getChatBusyRuntime,
+    getChatActiveTask,
+    getChatLastTaskSeq,
     isChatBusy,
     isChatStreaming,
     isChatStopRequested,
@@ -1606,9 +1830,13 @@ export const useChatStore = defineStore('chat', () => {
     clearChatBusyRuntime,
     togglePinned,
     persistLocalState,
+    setChatActiveTask,
+    updateChatTaskReplayCursor,
+    clearChatActiveTask,
     deleteChat,
     clearAllChats,
     addUserMessage,
+    ensureChatConversation,
     addBotMessage,
     updateLastBotMessage,
     addSystemMessage,

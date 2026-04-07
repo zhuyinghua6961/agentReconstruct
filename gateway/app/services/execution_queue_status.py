@@ -9,6 +9,8 @@ from typing import Any
 
 from app.integrations.redis.service import RedisService
 
+_EXPIRED_RECORD_RETENTION_SECONDS = 60
+
 
 class ExecutionQueueStatusStore:
     def __init__(self, *, redis_service: RedisService) -> None:
@@ -67,6 +69,14 @@ class ExecutionQueueStatusStore:
         now = self._now()
         expired = [request_id for request_id, deadline in self._memory_request_expiry.items() if deadline <= now]
         for request_id in expired:
+            record = self._memory_requests.get(request_id)
+            if self._should_terminalize_expired_record(record):
+                previous = deepcopy(record) if isinstance(record, dict) else None
+                updated = self._terminalize_expired_record(record)
+                self._memory_requests[request_id] = updated
+                self._memory_request_expiry[request_id] = now + _EXPIRED_RECORD_RETENTION_SECONDS
+                self._sync_memory_request_indexes(request_id=request_id, previous=previous, current=updated)
+                continue
             self._memory_requests.pop(request_id, None)
             self._memory_request_expiry.pop(request_id, None)
             self._memory_request_ids.discard(request_id)
@@ -227,12 +237,46 @@ class ExecutionQueueStatusStore:
         )
         if not expired_ids:
             return
-        self.redis_service.srem(self.request_index_key(), *expired_ids)
-        self.redis_service.zrem(self.request_expiry_key(), *expired_ids)
-        self.redis_service.zrem(self.queued_index_key(), *expired_ids)
-        self.redis_service.srem(self.admitted_index_key(), *expired_ids)
-        self.redis_service.srem(self.terminal_index_key(), *expired_ids)
-        self.redis_service.srem(self.cancellable_index_key(), *expired_ids)
+        removable_ids: list[str] = []
+        for request_id in expired_ids:
+            payload = self.redis_service.get_json(self.request_key(request_id), default=None)
+            if self._should_terminalize_expired_record(payload):
+                updated = self._terminalize_expired_record(payload)
+                self.redis_service.set_json(
+                    self.request_key(request_id),
+                    updated,
+                    ttl_seconds=_EXPIRED_RECORD_RETENTION_SECONDS,
+                )
+                self._sync_redis_request_indexes(
+                    request_id=request_id,
+                    current=updated,
+                    ttl_seconds=_EXPIRED_RECORD_RETENTION_SECONDS,
+                )
+                continue
+            removable_ids.append(request_id)
+        if not removable_ids:
+            return
+        self.redis_service.srem(self.request_index_key(), *removable_ids)
+        self.redis_service.zrem(self.request_expiry_key(), *removable_ids)
+        self.redis_service.zrem(self.queued_index_key(), *removable_ids)
+        self.redis_service.srem(self.admitted_index_key(), *removable_ids)
+        self.redis_service.srem(self.terminal_index_key(), *removable_ids)
+        self.redis_service.srem(self.cancellable_index_key(), *removable_ids)
+
+    def _should_terminalize_expired_record(self, record: dict[str, Any] | None) -> bool:
+        if not isinstance(record, dict):
+            return False
+        return str(record.get("status") or "").strip().lower() == "queued"
+
+    def _terminalize_expired_record(self, record: dict[str, Any]) -> dict[str, Any]:
+        expired_at = datetime.fromtimestamp(self._now(), tz=timezone.utc).isoformat()
+        updated = deepcopy(record)
+        updated["status"] = "expired"
+        updated["cancel_allowed"] = False
+        updated["expired_at"] = expired_at
+        updated["updated_at"] = expired_at
+        updated["terminal_sync_pending"] = True
+        return updated
 
     def _prune_redis_results(self) -> None:
         expired_ids = self.redis_service.zrangebyscore(
@@ -369,6 +413,48 @@ class ExecutionQueueStatusStore:
         updated = dict(record)
         updated["status"] = "cancelled"
         updated["cancel_allowed"] = False
+        if cancelled_at:
+            updated["cancelled_at"] = str(cancelled_at)
+        request_key = self.request_key(str(request_id))
+        ttl_seconds = self.redis_service.ttl(request_key) if self.redis_service.available else None
+        if ttl_seconds is None or ttl_seconds <= 0:
+            ttl_seconds = 60
+        if self.redis_service.available:
+            dirty_version = self._mark_redis_dirty()
+            swapped = self.redis_service.compare_and_swap_json(
+                request_key,
+                expected_value=record,
+                new_value=updated,
+                ttl_seconds=int(ttl_seconds),
+            )
+            if not swapped:
+                self._clear_redis_dirty(dirty_version)
+                return None
+            self._sync_redis_request_indexes(
+                request_id=str(request_id or "").strip(),
+                current=updated,
+                ttl_seconds=int(ttl_seconds),
+            )
+            if self._redis_request_indexes_consistent(
+                request_id=str(request_id or "").strip(),
+                current=updated,
+            ):
+                self._clear_redis_dirty(dirty_version)
+        else:
+            self.put_request(updated, ttl_seconds=int(ttl_seconds))
+        return updated
+
+    def cancel_active_request(self, request_id: str, *, cancelled_at: str | None = None) -> dict[str, Any] | None:
+        record = self.get_request(request_id)
+        if not isinstance(record, dict):
+            return None
+        status = str(record.get("status") or "").strip().lower()
+        if status in {"completed", "failed", "cancelled", "expired"}:
+            return record
+        updated = dict(record)
+        updated["status"] = "cancelled"
+        updated["cancel_allowed"] = False
+        updated["updated_at"] = str(cancelled_at or datetime.now(timezone.utc).isoformat())
         if cancelled_at:
             updated["cancelled_at"] = str(cancelled_at)
         request_key = self.request_key(str(request_id))

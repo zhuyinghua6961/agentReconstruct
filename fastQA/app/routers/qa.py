@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import replace
 from threading import Event
 import uuid
@@ -175,7 +176,37 @@ def _hook_exists(*, request: Request, hook_name: str) -> bool:
     return callable(getattr(request.app.state, hook_name, None))
 
 
+def _header_truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _request_header(request: Request, header_name: str) -> Any:
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return None
+    getter = getattr(headers, "get", None)
+    if callable(getter):
+        return getter(header_name)
+    return None
+
+
+def _gateway_owned_persistence(request: Request) -> bool:
+    expected_token = str(os.getenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "") or "").strip()
+    if not expected_token:
+        return False
+    internal_service_name = str(_request_header(request, "X-Internal-Service-Name") or "").strip().lower()
+    internal_service_token = str(_request_header(request, "X-Internal-Service-Token") or "").strip()
+    return (
+        _header_truthy(_request_header(request, "X-Gateway-Task-Execution"))
+        and _header_truthy(_request_header(request, "X-Gateway-Owned-Persistence"))
+        and internal_service_name == "gateway"
+        and internal_service_token == expected_token
+    )
+
+
 def _persist_user_message_if_needed(*, request: Request, adapted_request: GatewayAskRequest, route: str, trace_id: str) -> None:
+    if _gateway_owned_persistence(request):
+        return
     conversation_id = _conversation_id_int(adapted_request.conversation_id)
     if conversation_id is None:
         return
@@ -321,6 +352,8 @@ def _persist_assistant_terminal_if_needed(
     terminal_status: str,
     error_payload: dict[str, Any] | None = None,
 ) -> None:
+    if _gateway_owned_persistence(request):
+        return
     conversation_id = _conversation_id_int(adapted_request.conversation_id)
     if conversation_id is None:
         return

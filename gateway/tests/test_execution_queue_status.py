@@ -270,11 +270,16 @@ def test_queue_status_store_describe_exposes_oldest_queued_age(monkeypatch):
 def test_queue_status_store_memory_request_ttl_expires(monkeypatch):
     store = _store()
     monkeypatch.setattr(queue_status_module.time, "time", lambda: 1000.0)
-    store.put_request({"request_id": "req_ttl", "status": "queued"}, ttl_seconds=10)
+    store.put_request({"request_id": "req_ttl", "status": "queued", "cancel_allowed": True}, ttl_seconds=10)
 
     monkeypatch.setattr(queue_status_module.time, "time", lambda: 1011.0)
 
-    assert store.get_request("req_ttl") is None
+    record = store.get_request("req_ttl")
+
+    assert record is not None
+    assert record["status"] == "expired"
+    assert record["cancel_allowed"] is False
+    assert record["terminal_sync_pending"] is True
 
 
 def test_queue_status_store_memory_result_ttl_expires(monkeypatch):

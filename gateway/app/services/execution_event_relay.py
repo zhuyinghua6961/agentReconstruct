@@ -221,7 +221,6 @@ class ExecutionEventRelayStore:
 
         if self.redis_service.available:
             dirty_version = self._mark_redis_dirty()
-            previous_total_frames = self.redis_service.get_int(self.total_frames_key(), default=0)
             next_sequence = self.redis_service.incr(self.cursor_key(normalized_id))
             if next_sequence is None:
                 self._clear_redis_dirty(dirty_version)
@@ -239,10 +238,9 @@ class ExecutionEventRelayStore:
                 self.expiry_index_key(),
                 {normalized_id: self._now() + max(1, int(ttl_seconds))},
             )
-            self.redis_service.incrby(self.total_frames_key(), 1)
-            if self._redis_indexes_consistent_for_request(
+            total_frames = self.redis_service.incrby(self.total_frames_key(), 1)
+            if total_frames is not None and self._redis_indexes_consistent_for_request(
                 request_id=normalized_id,
-                expected_total_frames=previous_total_frames + 1,
                 expected_latest_sequence=next_sequence,
                 expected_frame_count=pushed,
             ):
@@ -264,11 +262,12 @@ class ExecutionEventRelayStore:
         normalized_id = str(request_id or "").strip()
         if not normalized_id:
             return []
+        start_index = max(0, int(after_sequence))
         if self.redis_service.available:
-            frames = self.redis_service.lrange_json(self.frames_key(normalized_id))
+            frames = self.redis_service.lrange_json(self.frames_key(normalized_id), start=start_index, stop=-1)
         else:
             self._prune_memory_frames()
-            frames = self._memory_frames.get(normalized_id, [])
+            frames = list(self._memory_frames.get(normalized_id, []))[start_index:]
         output: list[dict[str, Any]] = []
         for item in frames:
             if not isinstance(item, dict):

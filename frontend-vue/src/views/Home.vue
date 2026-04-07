@@ -12,6 +12,10 @@ import { buildQuestionOutlineItems, buildQuestionOutlineSignature, getQuestionAn
 import { DEFAULT_NEAR_BOTTOM_THRESHOLD_PX, isNearBottom, shouldAutoScroll } from '../utils/scrollFollow'
 import { mergeSelectedFileIdsAfterUpload, resolveUploadedFileDisplayNumber } from '../utils/fileSelection'
 import { shouldIgnoreLateStreamError } from '../utils/streamingLifecycle'
+import { normalizeTaskReplayCursor } from '../utils/taskReplayCursor'
+import { consumePendingStreamContent, shouldClearRecoveredActiveTask } from '../utils/taskRecoveryRuntime'
+import { createTaskRecoveryDebugLogger, summarizeTaskRecoveryDetail } from '../utils/taskRecoveryDebug'
+import { createRecoverableTaskController } from '../utils/recoverableTaskController'
 import PdfReader from '../components/PdfReader.vue'
 import QuotaLimitCard from '../components/QuotaLimitCard.vue'
 import { buildCitationLocationsForDoi } from '../utils/citationEvidence'
@@ -32,6 +36,7 @@ const fileInput = ref(null)
 const uploading = ref(false)
 const uploadProgress = ref(0)
 const streamRuntimeByChatId = new Map()
+const taskAttachInFlightByChatId = new Map()
 const selectedFileIds = ref([])
 const selectedAskMode = ref(localStorage.getItem(ASK_MODE_STORAGE_KEY) || 'thinking')
 const leftSidebarCollapsed = ref(false)
@@ -120,6 +125,7 @@ const pendingAutoScroll = ref(false)
 
 const renderedMessageCache = new WeakMap()
 const renderStreamingMessageHtml = createStreamingHtmlRenderer()
+const taskRecoveryDebug = createTaskRecoveryDebugLogger()
 
 function normalizeAskMode(mode) {
   const value = String(mode || 'thinking').trim().toLowerCase()
@@ -149,7 +155,7 @@ function getStreamRuntime(chatId) {
   return streamRuntimeByChatId.get(normalizedChatId) || null
 }
 
-function createStreamRuntime(chatId, requestId, targetIndex = -1) {
+function createStreamRuntime(chatId, requestId, targetIndex = -1, options = {}) {
   const normalizedChatId = normalizeChatId(chatId)
   if (!normalizedChatId) return null
 
@@ -160,6 +166,13 @@ function createStreamRuntime(chatId, requestId, targetIndex = -1) {
     abortController: new AbortController(),
     pendingContent: '',
     flushFrame: null,
+    strictRequestMatch: options?.strictRequestMatch ?? Boolean(requestId),
+    mode: String(options?.mode || 'legacy').trim().toLowerCase() || 'legacy',
+    pollTimer: null,
+    eventState: {
+      thinkingIndex: 0,
+      activeStepKey: '',
+    },
   }
   streamRuntimeByChatId.set(normalizedChatId, runtime)
   return runtime
@@ -179,6 +192,10 @@ function clearStreamRuntime(chatId) {
   const runtime = getStreamRuntime(chatId)
   if (!runtime) return
   resetStreamFlushState(chatId)
+  if (runtime.pollTimer) {
+    window.clearTimeout(runtime.pollTimer)
+    runtime.pollTimer = null
+  }
   streamRuntimeByChatId.delete(runtime.chatId)
 }
 
@@ -191,7 +208,7 @@ function getStreamingTargetMessage(chatId) {
     messages: chat.messages,
     requestId: runtime?.requestId,
     cachedTargetIndex: runtime?.targetIndex,
-    strictRequestMatch: Boolean(runtime?.requestId),
+    strictRequestMatch: Boolean(runtime?.strictRequestMatch),
   })
   if (!target) {
     runtime.targetIndex = -1
@@ -241,6 +258,130 @@ function getHistoryItemTitle(chatId) {
   }
   return ''
 }
+
+function sleepWithSignal(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve()
+      return
+    }
+    const timer = window.setTimeout(() => {
+      cleanup()
+      resolve()
+    }, Math.max(0, Number(ms || 0)))
+    const cleanup = () => {
+      window.clearTimeout(timer)
+      signal?.removeEventListener?.('abort', onAbort)
+    }
+    const onAbort = () => {
+      cleanup()
+      resolve()
+    }
+    signal?.addEventListener?.('abort', onAbort, { once: true })
+  })
+}
+
+function getTaskPhaseLabel(chatId) {
+  const chat = getChatById(chatId)
+  const taskStatus = String(
+    chat?.activeTask?.status
+    || store.getChatBusyRuntime(chatId)?.phase
+    || ''
+  ).trim().toLowerCase()
+  if (taskStatus === 'queued') return '排队中'
+  if (taskStatus === 'admitted') return '即将开始'
+  if (taskStatus === 'running') return '生成中'
+  if (taskStatus === 'streaming' || taskStatus === 'dispatching') return '生成中'
+  return ''
+}
+
+async function refreshConversationTruth(chatId) {
+  const targetChatId = normalizeChatId(chatId)
+  const chat = getChatById(targetChatId)
+  if (!chat?.synced) return null
+
+  const uid = store.getUserId()
+  if (!uid) return null
+
+  const detail = await api.getConversationDetail(parseInt(chat.id), uid)
+  const liveChat = getChatById(targetChatId)
+  if (!liveChat) return detail
+
+  liveChat.title = detail.title || liveChat.title
+  liveChat.messages = Array.isArray(detail.messages) ? [...detail.messages] : []
+  liveChat.messageCount = Number(detail.message_count || liveChat.messages.length)
+  liveChat.updatedAt = detail.updated_at || liveChat.updatedAt
+  if (Array.isArray(detail.pdf_list)) {
+    liveChat.pdf_list = [...detail.pdf_list]
+  }
+  if (Array.isArray(detail.excel_list)) {
+    liveChat.excel_list = [...detail.excel_list]
+  }
+  if (Array.isArray(detail.uploaded_files)) {
+    liveChat.uploaded_files = [...detail.uploaded_files]
+  }
+  if (detail.active_task) {
+    store.setChatActiveTask(targetChatId, detail.active_task, { touch: false })
+  } else {
+    store.clearChatActiveTask(targetChatId, { touch: false, persist: false })
+  }
+  taskRecoveryDebug.log('home:refresh-conversation-truth', {
+    chatId: targetChatId,
+    detail: summarizeTaskRecoveryDetail(
+      detail,
+      detail?.active_task?.task_id || liveChat?.activeTask?.task_id || '',
+    ),
+    localLastSeq: store.getChatLastTaskSeq(targetChatId),
+  })
+  store.persistLocalState()
+  return detail
+}
+
+async function refreshConversationTruthFallback(chatId, fallbackLastSeq = 0) {
+  const detail = await refreshConversationTruth(chatId)
+  const shouldClear = shouldClearRecoveredActiveTask(detail, fallbackLastSeq)
+  if (!shouldClear) {
+    const cursor = normalizeTaskReplayCursor(detail?.active_task, Math.max(store.getChatLastTaskSeq(chatId), fallbackLastSeq))
+    return {
+      detail,
+      keepRecovering: true,
+      cursor,
+    }
+  }
+  finalizeRecoverableTaskLocally(chatId, { lastSeq: fallbackLastSeq, clearActiveTask: true })
+  return {
+    detail,
+    keepRecovering: false,
+    cursor: normalizeTaskReplayCursor({}, fallbackLastSeq),
+  }
+}
+
+const recoverableTaskController = createRecoverableTaskController({
+  api,
+  store,
+  normalizeChatId,
+  getChatById,
+  getCurrentChatId: () => store.currentChatId,
+  taskAttachInFlightByChatId,
+  streamRuntimeByChatId,
+  getStreamRuntime,
+  createStreamRuntime,
+  clearStreamRuntime,
+  refreshConversationTruth,
+  refreshConversationTruthFallback,
+  applyGatewayEvent,
+  sleepWithSignal,
+  clearInput: () => {
+    inputMessage.value = ''
+  },
+  scrollToBottom,
+  onError: (scope, error) => {
+    console.error(`[${scope}]`, error)
+  },
+  debugLog: (scope, payload) => {
+    taskRecoveryDebug.log(scope, payload)
+  },
+})
 
 function setAskMode(mode) {
   selectedAskMode.value = normalizeAskMode(mode)
@@ -626,6 +767,290 @@ function updateStreamingSteps(chatId, mutator) {
   return steps
 }
 
+function ensureRuntimeEventState(runtime) {
+  if (!runtime) {
+    return {
+      thinkingIndex: 0,
+      activeStepKey: '',
+    }
+  }
+  if (!runtime.eventState || typeof runtime.eventState !== 'object') {
+    runtime.eventState = {
+      thinkingIndex: 0,
+      activeStepKey: '',
+    }
+  }
+  return runtime.eventState
+}
+
+function markRuntimeActiveStep(chatId, runtime, status, error = '') {
+  const eventState = ensureRuntimeEventState(runtime)
+  if (!eventState.activeStepKey) return
+  updateStreamingSteps(chatId, (steps) => {
+    const idx = steps.findIndex((step) => step.step === eventState.activeStepKey)
+    if (idx < 0) return
+    steps[idx] = {
+      ...steps[idx],
+      status: normalizeStepStatus(status, steps[idx].status || 'processing'),
+      ...(error ? { error: String(error) } : {}),
+      updatedAt: new Date().toISOString()
+    }
+  })
+}
+
+function syncRecoverableTaskSummary(chatId, payload = {}) {
+  const targetChatId = normalizeChatId(chatId)
+  const chat = getChatById(targetChatId)
+  if (!chat) return null
+  const existingTask = chat?.activeTask && typeof chat.activeTask === 'object' ? chat.activeTask : {}
+  const taskId = String(payload?.task_id || existingTask?.task_id || '').trim()
+  if (!taskId) return null
+  return store.setChatActiveTask(
+    targetChatId,
+    {
+      ...existingTask,
+      ...payload,
+      task_id: taskId,
+      last_seq: Number(payload?.seq ?? payload?.last_seq ?? chat?.lastTaskSeq ?? 0) || 0,
+      replay_available: payload?.replay_available ?? existingTask?.replay_available ?? true,
+    },
+    { persist: false }
+  )
+}
+
+function finalizeRecoverableTaskLocally(chatId, options = {}) {
+  if (options?.lastSeq !== undefined) {
+    store.updateChatTaskReplayCursor(chatId, options.lastSeq, { persist: false, touch: false })
+  }
+  clearStreamRuntime(chatId)
+  store.finishChatBusyRuntime(chatId)
+  if (options?.clearActiveTask !== false) {
+    store.clearChatActiveTask(chatId, { persist: false, touch: false })
+  }
+  store.persistLocalState()
+}
+
+function applyGatewayEvent(chatId, data, runtime = getStreamRuntime(chatId)) {
+  const eventState = ensureRuntimeEventState(runtime)
+  const eventSeq = Number(data.seq || 0) || 0
+  const localLastSeq = store.getChatLastTaskSeq(chatId)
+  if (eventSeq > 0 && eventSeq <= localLastSeq) {
+    taskRecoveryDebug.log('home:event-skipped-duplicate', {
+      chatId,
+      taskId: String(runtime?.requestId || ''),
+      seq: eventSeq,
+      localLastSeq,
+      type: String(data.type || '').trim().toLowerCase(),
+    })
+    return { terminal: false, skipped: true }
+  }
+
+  if (data.type === 'state') {
+    const status = String(data.status || '').trim().toLowerCase()
+    if (status === 'queued' || status === 'admitted' || status === 'running') {
+      syncRecoverableTaskSummary(chatId, data)
+      store.updateChatTaskReplayCursor(chatId, data.seq, { persist: false, touch: false })
+      store.persistLocalState()
+      return { terminal: false }
+    }
+    if (status === 'canceled') {
+      updateStreamingTargetMessage(chatId, {
+        terminalStatus: 'canceled',
+        status: 'canceled',
+        failureMessage: '用户已停止生成',
+        failureCode: 'ASK_CANCELLED',
+        retriable: false,
+        doneSeen: false,
+        metadata: {
+          terminal_status: 'canceled',
+          status: 'canceled',
+          failure_message: '用户已停止生成',
+          failure_code: 'ASK_CANCELLED',
+          retriable: false,
+          done_seen: false,
+          streaming_terminal_event: 'canceled',
+        },
+        isComplete: true
+      })
+      finalizeRecoverableTaskLocally(chatId, { lastSeq: data.seq })
+      return { terminal: true, status: 'canceled' }
+    }
+  }
+
+  if (data.type === 'thinking') {
+    flushPendingStreamContent(chatId)
+    const thinkingMessage = String(data.content || data.message || '').trim()
+    if (thinkingMessage) {
+      eventState.thinkingIndex += 1
+      const stepPayload = buildStepPayload(data, `thinking_${eventState.thinkingIndex}`, 'processing')
+      upsertStreamingStep(chatId, stepPayload, eventState.activeStepKey, { markPreviousActiveSuccess: true })
+      eventState.activeStepKey = stepPayload.step
+    }
+    return { terminal: false }
+  }
+
+  if (data.type === 'step') {
+    flushPendingStreamContent(chatId)
+    const stepPayload = buildStepPayload(data, `step_${Date.now()}`, 'processing')
+    upsertStreamingStep(chatId, stepPayload, eventState.activeStepKey, {
+      markPreviousActiveSuccess:
+        stepPayload.step !== eventState.activeStepKey && normalizeStepStatus(stepPayload.status) === 'processing'
+    })
+    eventState.activeStepKey = stepPayload.step
+    return { terminal: false }
+  }
+
+  if (data.type === 'metadata') {
+    const targetMessage = getStreamingTargetMessage(chatId)?.message || {}
+    const existingMeta = (targetMessage.metadata && typeof targetMessage.metadata === 'object') ? targetMessage.metadata : {}
+    const mergedMeta = mergeRoutingMetadata(existingMeta, data)
+    const modeFromExpert = data.expert === 'neo4j'
+      ? '知识图谱'
+      : data.expert === 'community'
+        ? '社区分析'
+        : data.expert === 'tabular'
+          ? '表格问答'
+          : '文献检索'
+    updateStreamingTargetMessage(chatId, {
+      expert: data.expert,
+      queryMode: getFallbackQueryModeLabel(data, mergedMeta) || modeFromExpert,
+      metadata: mergedMeta
+    })
+    return { terminal: false }
+  }
+
+  if (data.type === 'content') {
+    const activeRuntime = getStreamRuntime(chatId)
+    if (!activeRuntime) return { terminal: false }
+    activeRuntime.pendingContent += String(data.content || data.delta || '')
+    taskRecoveryDebug.log('home:event-content', {
+      chatId,
+      taskId: String(activeRuntime?.requestId || ''),
+      seq: Number(data.seq || 0) || 0,
+      deltaLength: String(data.content || data.delta || '').length,
+      pendingLength: String(activeRuntime.pendingContent || '').length,
+      localLastSeq: store.getChatLastTaskSeq(chatId),
+    })
+    scheduleStreamContentFlush(chatId)
+    return { terminal: false }
+  }
+
+  if (data.type === 'done') {
+    flushPendingStreamContent(chatId)
+    const targetMessage = getStreamingTargetMessage(chatId)?.message || {}
+    const existingMeta = (targetMessage.metadata && typeof targetMessage.metadata === 'object') ? targetMessage.metadata : {}
+    const doneMeta = (data.metadata && typeof data.metadata === 'object') ? data.metadata : {}
+    const referenceLinks = data.reference_links || data.pdf_links || data.referenceLinks || data.pdfLinks || []
+    const references = Array.isArray(data.reference_objects)
+      ? data.reference_objects
+      : (Array.isArray(data.references) ? data.references : [])
+    const mergedMeta = mergeRoutingMetadata({ ...existingMeta, ...doneMeta }, data)
+    const finalizedSteps = updateStreamingSteps(chatId, (steps) => {
+      if (eventState.activeStepKey) {
+        const activeIdx = steps.findIndex((step) => step.step === eventState.activeStepKey)
+        if (activeIdx >= 0) {
+          steps[activeIdx] = { ...steps[activeIdx], status: 'success', updatedAt: new Date().toISOString() }
+        }
+      }
+      steps.forEach((step, idx) => {
+        if (normalizeStepStatus(step.status) === 'processing') {
+          steps[idx] = { ...step, status: 'success', updatedAt: new Date().toISOString() }
+        }
+      })
+    })
+    const updates = {
+      references,
+      referenceLinks,
+      steps: finalizedSteps,
+      isComplete: true
+    }
+    if (data.final_answer) updates.content = data.final_answer
+    if (data.doi_locations) updates.doiLocations = data.doi_locations
+    updates.metadata = {
+      ...mergedMeta,
+      done_seen: true,
+      streaming_terminal_event: 'done',
+      used_files: Array.isArray(data.used_files) ? data.used_files : (existingMeta.used_files || []),
+      timings: (data.timings && typeof data.timings === 'object') ? data.timings : (existingMeta.timings || {}),
+    }
+    if (!targetMessage.queryMode) {
+      updates.queryMode = getFallbackQueryModeLabel(data, mergedMeta)
+    }
+
+    updateStreamingTargetMessage(chatId, updates)
+    taskRecoveryDebug.log('home:event-done', {
+      chatId,
+      taskId: String(getStreamRuntime(chatId)?.requestId || ''),
+      seq: Number(data.seq || 0) || 0,
+      finalAnswerLength: String(data.final_answer || '').length,
+      localLastSeq: store.getChatLastTaskSeq(chatId),
+      targetContentLength: String(updates.content || targetMessage.content || '').length,
+    })
+    return { terminal: true, status: 'completed' }
+  }
+
+  if (data.type === 'error') {
+    flushPendingStreamContent(chatId)
+    const targetMessage = getStreamingTargetMessage(chatId)?.message || {}
+    if (shouldIgnoreLateStreamError(targetMessage)) {
+      return { terminal: false }
+    }
+    const existingMeta = (targetMessage.metadata && typeof targetMessage.metadata === 'object') ? targetMessage.metadata : {}
+    const mergedMeta = mergeRoutingMetadata(existingMeta, data)
+    const errorText = String(data.message || data.error || '处理失败')
+    const presentation = buildRoutingErrorPresentation({
+      code: data.code,
+      message: errorText,
+      metadata: mergedMeta,
+      data: data.data,
+    })
+    if (presentation.kind === 'quota_card' && presentation.card) {
+      mergedMeta.quota_card = presentation.card
+    } else {
+      delete mergedMeta.quota_card
+    }
+    const renderedError = presentation.kind === 'markdown'
+      ? presentation.markdown
+      : errorText
+    if (eventState.activeStepKey) {
+      markRuntimeActiveStep(chatId, runtime, 'error', errorText)
+    } else {
+      updateStreamingSteps(chatId, (steps) => {
+        steps.push({
+          step: 'error',
+          title: '处理失败',
+          message: errorText,
+          detail: '',
+          status: 'error',
+          error: errorText,
+          updatedAt: new Date().toISOString()
+        })
+      })
+    }
+    const existingContent = String(targetMessage.content || '').trim()
+    updateStreamingTargetMessage(chatId, {
+      content: existingContent ? `${existingContent}\n\n${renderedError}` : renderedError,
+      queryMode: getFallbackQueryModeLabel(data, mergedMeta) || targetMessage.queryMode || '',
+      metadata: {
+        ...mergedMeta,
+        streaming_terminal_event: 'error',
+      },
+      isComplete: true
+    })
+    taskRecoveryDebug.log('home:event-error', {
+      chatId,
+      taskId: String(getStreamRuntime(chatId)?.requestId || ''),
+      seq: Number(data.seq || 0) || 0,
+      message: errorText,
+      code: String(data.code || ''),
+      localLastSeq: store.getChatLastTaskSeq(chatId),
+    })
+    return { terminal: true, status: 'failed' }
+  }
+
+  return { terminal: false }
+}
+
 function getRenderedMessageHtml(msg) {
   const content = String(msg?.content || '')
   const referenceLinks = Array.isArray(msg?.referenceLinks) ? msg.referenceLinks : []
@@ -663,8 +1088,15 @@ function flushPendingStreamContent(chatId) {
   if (!runtime?.pendingContent) return
   const target = getStreamingTargetMessage(chatId)
   const existingContent = String(target?.message?.content || '')
-  updateStreamingTargetMessage(chatId, { content: existingContent + runtime.pendingContent })
-  runtime.pendingContent = ''
+  const { nextContent, remainingPending } = consumePendingStreamContent({
+    existingContent,
+    pendingContent: runtime.pendingContent,
+    targetFound: Boolean(target?.message),
+  })
+  if (target?.message && nextContent !== existingContent) {
+    updateStreamingTargetMessage(chatId, { content: nextContent })
+  }
+  runtime.pendingContent = remainingPending
   if (normalizeChatId(store.currentChatId) === normalizeChatId(chatId)) {
     scrollToBottom()
   }
@@ -986,9 +1418,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  Array.from(streamRuntimeByChatId.keys()).forEach((chatId) => {
-    stopStreaming(chatId)
-  })
+  recoverableTaskController.detachAllRecoverableTasks()
   stopFileStatusPolling()
   stopPanelResize()
   resetQuestionOutlineState()
@@ -1076,14 +1506,55 @@ function toggleFileListSection() {
   localStorage.setItem(FILE_LIST_COLLAPSED_KEY, fileListCollapsed.value ? '1' : '0')
 }
 
-async function sendMessage() {
+async function attachRecoverableTask({ chatId, taskSummary, replaceMessagesFromServer = false }) {
+  return recoverableTaskController.attachRecoverableTask({
+    chatId,
+    taskSummary,
+    replaceMessagesFromServer,
+  })
+}
+
+async function cancelRecoverableTask(chatId, taskId) {
+  return recoverableTaskController.cancelRecoverableTask(chatId, taskId)
+}
+
+async function sendTaskMessage() {
   const requestedChatId = normalizeChatId(store.currentChatId)
   if (!requestedChatId) return
 
-  if (!canSend.value) {
-    if (isCurrentChatBusy.value) stopStreaming(requestedChatId)
-    return
+  const message = inputMessage.value.trim()
+  if (!message) return
+
+  const requestContextChat = getChatById(requestedChatId)
+  const requestChatContext = buildChatRequestContext({
+    chat: requestContextChat,
+    sessionState: store.sessionState,
+    selectedFileIds: selectedFileIds.value,
+  })
+  const requestAskMode = selectedAskMode.value
+  const titleHint = store.buildAutoTitleFromText(message)
+  const result = await recoverableTaskController.sendTaskMessage({
+    requestedChatId,
+    message,
+    titleHint,
+    requestChatContext,
+    requestAskMode,
+  })
+  if (!result?.ok) {
+    if (result.reason === 'capacity_reached') {
+      alert('最多同时生成 5 个对话，请先停止一个正在生成的会话。')
+      return
+    }
+    if (result.reason === 'task_create_failed') {
+      console.error('[task-create] 创建任务失败:', result.error)
+      alert(String(result?.error?.payload?.message || result?.error?.message || '创建任务失败'))
+    }
   }
+}
+
+async function sendLegacyMessage() {
+  const requestedChatId = normalizeChatId(store.currentChatId)
+  if (!requestedChatId) return
 
   const message = inputMessage.value.trim()
   if (!message) return
@@ -1173,24 +1644,7 @@ async function sendMessage() {
     const conversationId = targetChat?.synced ? parseInt(targetChat.id) : null
     const pdfContext = requestChatContext
 
-    let thinkingIndex = 0
-    let activeStepKey = ''
-
-    const markActiveStep = (status, error = '') => {
-      if (!activeStepKey) return
-      updateStreamingSteps(streamChatId, (steps) => {
-        const idx = steps.findIndex((step) => step.step === activeStepKey)
-        if (idx < 0) return
-        steps[idx] = {
-          ...steps[idx],
-          status: normalizeStepStatus(status, steps[idx].status || 'processing'),
-          ...(error ? { error: String(error) } : {}),
-          updatedAt: new Date().toISOString()
-        }
-      })
-    }
-
-    for await (const data of api.askStream(
+    for await (const eventFrame of api.askStream(
       message,
       chatHistory,
       conversationId,
@@ -1198,136 +1652,7 @@ async function sendMessage() {
       runtime?.abortController?.signal,
       requestAskMode
     )) {
-      if (data.type === 'thinking') {
-        flushPendingStreamContent(streamChatId)
-        const thinkingMessage = String(data.content || data.message || '').trim()
-        if (thinkingMessage) {
-          thinkingIndex += 1
-          const stepPayload = buildStepPayload(data, `thinking_${thinkingIndex}`, 'processing')
-          upsertStreamingStep(streamChatId, stepPayload, activeStepKey, { markPreviousActiveSuccess: true })
-          activeStepKey = stepPayload.step
-        }
-      } else if (data.type === 'step') {
-        flushPendingStreamContent(streamChatId)
-        const stepPayload = buildStepPayload(data, `step_${Date.now()}`, 'processing')
-        upsertStreamingStep(streamChatId, stepPayload, activeStepKey, {
-          markPreviousActiveSuccess:
-            stepPayload.step !== activeStepKey && normalizeStepStatus(stepPayload.status) === 'processing'
-        })
-        activeStepKey = stepPayload.step
-      } else if (data.type === 'metadata') {
-        const targetMessage = getStreamingTargetMessage(streamChatId)?.message || {}
-        const existingMeta = (targetMessage.metadata && typeof targetMessage.metadata === 'object') ? targetMessage.metadata : {}
-        const mergedMeta = mergeRoutingMetadata(existingMeta, data)
-        const modeFromExpert = data.expert === 'neo4j'
-          ? '知识图谱'
-          : data.expert === 'community'
-            ? '社区分析'
-            : data.expert === 'tabular'
-              ? '表格问答'
-              : '文献检索'
-        updateStreamingTargetMessage(streamChatId, {
-          expert: data.expert,
-          queryMode: getFallbackQueryModeLabel(data, mergedMeta) || modeFromExpert,
-          metadata: mergedMeta
-        })
-      } else if (data.type === 'content') {
-        const activeRuntime = getStreamRuntime(streamChatId)
-        if (!activeRuntime) continue
-        activeRuntime.pendingContent += String(data.content || '')
-        scheduleStreamContentFlush(streamChatId)
-      } else if (data.type === 'done') {
-        flushPendingStreamContent(streamChatId)
-        const targetMessage = getStreamingTargetMessage(streamChatId)?.message || {}
-        const existingMeta = (targetMessage.metadata && typeof targetMessage.metadata === 'object') ? targetMessage.metadata : {}
-        const doneMeta = (data.metadata && typeof data.metadata === 'object') ? data.metadata : {}
-        const referenceLinks = data.reference_links || data.pdf_links || data.referenceLinks || data.pdfLinks || []
-        const references = Array.isArray(data.reference_objects)
-          ? data.reference_objects
-          : (Array.isArray(data.references) ? data.references : [])
-        const mergedMeta = mergeRoutingMetadata({ ...existingMeta, ...doneMeta }, data)
-        const finalizedSteps = updateStreamingSteps(streamChatId, (steps) => {
-          if (activeStepKey) {
-            const activeIdx = steps.findIndex((step) => step.step === activeStepKey)
-            if (activeIdx >= 0) {
-              steps[activeIdx] = { ...steps[activeIdx], status: 'success', updatedAt: new Date().toISOString() }
-            }
-          }
-          steps.forEach((step, idx) => {
-            if (normalizeStepStatus(step.status) === 'processing') {
-              steps[idx] = { ...step, status: 'success', updatedAt: new Date().toISOString() }
-            }
-          })
-        })
-        const updates = {
-          references,
-          referenceLinks,
-          steps: finalizedSteps,
-          isComplete: true
-        }
-        if (data.final_answer) updates.content = data.final_answer
-        if (data.doi_locations) updates.doiLocations = data.doi_locations
-        updates.metadata = {
-          ...mergedMeta,
-          done_seen: true,
-          streaming_terminal_event: 'done',
-          used_files: Array.isArray(data.used_files) ? data.used_files : (existingMeta.used_files || []),
-          timings: (data.timings && typeof data.timings === 'object') ? data.timings : (existingMeta.timings || {}),
-        }
-        if (!targetMessage.queryMode) {
-          updates.queryMode = getFallbackQueryModeLabel(data, mergedMeta)
-        }
-
-        updateStreamingTargetMessage(streamChatId, updates)
-      } else if (data.type === 'error') {
-        flushPendingStreamContent(streamChatId)
-        const targetMessage = getStreamingTargetMessage(streamChatId)?.message || {}
-        if (shouldIgnoreLateStreamError(targetMessage)) {
-          continue
-        }
-        const existingMeta = (targetMessage.metadata && typeof targetMessage.metadata === 'object') ? targetMessage.metadata : {}
-        const mergedMeta = mergeRoutingMetadata(existingMeta, data)
-        const errorText = String(data.message || data.error || '处理失败')
-        const presentation = buildRoutingErrorPresentation({
-          code: data.code,
-          message: errorText,
-          metadata: mergedMeta,
-          data: data.data,
-        })
-        if (presentation.kind === 'quota_card' && presentation.card) {
-          mergedMeta.quota_card = presentation.card
-        } else {
-          delete mergedMeta.quota_card
-        }
-        const renderedError = presentation.kind === 'markdown'
-          ? presentation.markdown
-          : errorText
-        if (activeStepKey) {
-          markActiveStep('error', errorText)
-        } else {
-          updateStreamingSteps(streamChatId, (steps) => {
-            steps.push({
-              step: 'error',
-              title: '处理失败',
-              message: errorText,
-              detail: '',
-              status: 'error',
-              error: errorText,
-              updatedAt: new Date().toISOString()
-            })
-          })
-        }
-        const existingContent = String(targetMessage.content || '').trim()
-        updateStreamingTargetMessage(streamChatId, {
-          content: existingContent ? `${existingContent}\n\n${renderedError}` : renderedError,
-          queryMode: getFallbackQueryModeLabel(data, mergedMeta) || targetMessage.queryMode || '',
-          metadata: {
-            ...mergedMeta,
-            streaming_terminal_event: 'error',
-          },
-          isComplete: true
-        })
-      }
+      applyGatewayEvent(streamChatId, eventFrame, runtime)
     }
   } catch (e) {
     flushPendingStreamContent(streamChatId)
@@ -1375,10 +1700,31 @@ async function sendMessage() {
   }
 }
 
+async function sendMessage() {
+  const requestedChatId = normalizeChatId(store.currentChatId)
+  if (!requestedChatId) return
+
+  if (!canSend.value) {
+    if (isCurrentChatBusy.value) stopStreaming(requestedChatId)
+    return
+  }
+
+  if (store.refreshSurvivableQATasksEnabled) {
+    return sendTaskMessage()
+  }
+  return sendLegacyMessage()
+}
+
 function stopStreaming(chatId = store.currentChatId) {
   const targetChatId = normalizeChatId(chatId)
   if (!targetChatId) return
+  const chat = getChatById(targetChatId)
+  const activeTaskId = String(chat?.activeTask?.task_id || '').trim()
   store.requestChatBusyStop(targetChatId)
+  if (store.refreshSurvivableQATasksEnabled && activeTaskId) {
+    void cancelRecoverableTask(targetChatId, activeTaskId)
+    return
+  }
   const runtime = getStreamRuntime(targetChatId)
   runtime?.abortController?.abort()
   flushPendingStreamContent(targetChatId)
@@ -1672,6 +2018,29 @@ watch(
   { immediate: true }
 )
 
+watch(() => ({
+  chatId: normalizeChatId(store.currentChatId),
+  taskId: store.currentChat?.activeTask?.task_id,
+  status: store.currentChat?.activeTask?.status,
+}), ({ chatId, taskId, status }) => {
+  if (!store.refreshSurvivableQATasksEnabled) return
+  if (!chatId) return
+  if (!String(taskId || '').trim()) return
+  const cursor = normalizeTaskReplayCursor({
+    task_id: taskId,
+    status,
+    last_seq: store.getChatLastTaskSeq(chatId),
+    replay_available: store.currentChat?.activeTask?.replay_available,
+  }, store.getChatLastTaskSeq(chatId))
+  if (!cursor.recoverable) return
+  const existingRuntime = getStreamRuntime(chatId)
+  if (existingRuntime?.mode === 'task' && existingRuntime?.requestId === cursor.taskId && !existingRuntime?.abortController?.signal?.aborted) return
+  void attachRecoverableTask({
+    chatId,
+    taskSummary: store.currentChat.activeTask,
+  })
+}, { immediate: true })
+
 watch(
   () => [normalizeChatId(store.currentChatId), questionOutlineSignature.value],
   () => {
@@ -1738,7 +2107,7 @@ watch(
                   <div class="history-title">
                     <span class="history-title-text">{{ chat.title }}</span>
                     <div class="history-title-actions">
-                      <span v-if="isChatBusy(chat.id)" class="history-status-badge">生成中</span>
+                      <span v-if="getTaskPhaseLabel(chat.id)" class="history-status-badge">{{ getTaskPhaseLabel(chat.id) }}</span>
                       <button
                         v-if="isChatBusy(chat.id)"
                         class="history-stop-btn"
@@ -1804,7 +2173,7 @@ watch(
                   <div class="history-title">
                     <span class="history-title-text">{{ chat.title }}</span>
                     <div class="history-title-actions">
-                      <span v-if="isChatBusy(chat.id)" class="history-status-badge">生成中</span>
+                      <span v-if="getTaskPhaseLabel(chat.id)" class="history-status-badge">{{ getTaskPhaseLabel(chat.id) }}</span>
                       <button
                         v-if="isChatBusy(chat.id)"
                         class="history-stop-btn"
@@ -2013,6 +2382,7 @@ watch(
                   <div class="terminal-message-title">{{ getTerminalMessageTitle(entry.message) }}</div>
                   <div v-if="getTerminalMessageDetail(entry.message)" class="terminal-message-detail">{{ getTerminalMessageDetail(entry.message) }}</div>
                 </div>
+                <div v-else-if="getTaskPhaseLabel(store.currentChatId)" class="loading-animation"><span>{{ getTaskPhaseLabel(store.currentChatId) }}...</span></div>
                 <div v-else class="loading-animation"><span>思考中...</span></div>
               </div>
             </template>

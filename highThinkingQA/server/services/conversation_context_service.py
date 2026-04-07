@@ -114,6 +114,19 @@ def _sanitize_summary(summary: dict[str, Any] | Any) -> dict[str, Any]:
     if short_summary:
         sanitized["short_summary"] = short_summary
         sanitized["recent_focus"] = short_summary
+    else:
+        topic = _normalize_text(summary.get("topic"), max_chars=400)
+        if topic:
+            sanitized["topic"] = topic
+        recent_focus = _normalize_text(summary.get("recent_focus"), max_chars=600)
+        if recent_focus:
+            sanitized["recent_focus"] = recent_focus
+        user_goal = _normalize_text(summary.get("user_goal"), max_chars=600)
+        if user_goal:
+            sanitized["user_goal"] = user_goal
+        updated_at = _normalize_text(summary.get("updated_at"), max_chars=120)
+        if updated_at:
+            sanitized["updated_at"] = updated_at
     open_threads = [str(item).strip() for item in list(summary.get("open_threads") or []) if str(item).strip()]
     if open_threads:
         sanitized["open_threads"] = open_threads

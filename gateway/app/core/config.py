@@ -67,6 +67,9 @@ class AdmissionSettings:
     max_concurrent: int
     fast_or_patent_max_concurrent: int
     thinking_max_concurrent: int
+    per_user_max_active: int
+    thinking_min_slots: int
+    queue_max_size: int
     queued_ttl_seconds: int
     post_admit_attach_ttl_seconds: int
 
@@ -98,6 +101,7 @@ class GatewaySettings:
     admission: AdmissionSettings
     route_classifier: RouteClassifierSettings
     patent_file_routes_enabled: bool = True
+    refresh_survivable_qa_tasks_enabled: bool = False
     strict_backend_config: bool = False
     backend_config_warnings: tuple[str, ...] = field(default_factory=tuple)
 
@@ -150,9 +154,12 @@ class GatewaySettings:
                 dispatcher_enabled=_env_bool("GATEWAY_ADMISSION_DISPATCHER_ENABLED", admission_enabled),
                 control_api_token=str(os.getenv("GATEWAY_ADMISSION_CONTROL_TOKEN", "") or "").strip(),
                 poll_interval_seconds=max(1, _env_int("GATEWAY_ADMISSION_POLL_INTERVAL_SECONDS", 5)),
-                max_concurrent=max(1, _env_int("INTERACTIVE_EXECUTION_MAX_CONCURRENT", 10)),
-                fast_or_patent_max_concurrent=max(1, _env_int("INTERACTIVE_EXECUTION_FAST_OR_PATENT_MAX_CONCURRENT", 10)),
+                max_concurrent=max(1, _env_int("INTERACTIVE_EXECUTION_MAX_CONCURRENT", 20)),
+                fast_or_patent_max_concurrent=max(1, _env_int("INTERACTIVE_EXECUTION_FAST_OR_PATENT_MAX_CONCURRENT", 20)),
                 thinking_max_concurrent=max(1, _env_int("INTERACTIVE_EXECUTION_THINKING_MAX_CONCURRENT", 5)),
+                per_user_max_active=max(1, _env_int("INTERACTIVE_EXECUTION_PER_USER_MAX_ACTIVE", 5)),
+                thinking_min_slots=max(0, _env_int("INTERACTIVE_EXECUTION_THINKING_MIN_SLOTS", 1)),
+                queue_max_size=max(1, _env_int("INTERACTIVE_QUEUE_MAX_SIZE", 200)),
                 queued_ttl_seconds=max(60, _env_int("INTERACTIVE_QUEUED_TTL_SECONDS", 900)),
                 post_admit_attach_ttl_seconds=max(60, _env_int("INTERACTIVE_POST_ADMIT_ATTACH_TTL_SECONDS", 600)),
             ),
@@ -163,6 +170,7 @@ class GatewaySettings:
                 medium_confidence_threshold=float(str(os.getenv("GATEWAY_ROUTE_CLASSIFIER_MEDIUM_CONFIDENCE", "0.6") or "0.6")),
             ),
             patent_file_routes_enabled=_env_bool("GATEWAY_PATENT_FILE_ROUTES_ENABLED", True),
+            refresh_survivable_qa_tasks_enabled=_env_bool("GATEWAY_REFRESH_SURVIVABLE_QA_TASKS_ENABLED", False),
             strict_backend_config=strict_backend_config,
             backend_config_warnings=backend_warnings,
         )

@@ -81,7 +81,6 @@ test('Home ignores late stream errors after a done event has already completed t
   assert.match(source, /import \{ shouldIgnoreLateStreamError \} from '\.\.\/utils\/streamingLifecycle'/)
   assert.match(source, /streaming_terminal_event:\s*'done'/)
   assert.match(source, /done_seen:\s*true/)
-  assert.match(source, /if \(shouldIgnoreLateStreamError\(targetMessage\)\) \{\s*continue\s*\}/)
   assert.match(source, /if \(shouldIgnoreLateStreamError\(targetMessage\)\) \{\s*return\s*\}/)
 })
 
@@ -100,7 +99,7 @@ test('Home scopes busy controls to the current chat instead of globally locking 
 })
 
 test('Home renders per-chat busy badges with sidebar stop and delete guards', () => {
-  assert.match(source, /<span v-if="isChatBusy\(chat\.id\)" class="history-status-badge">生成中<\/span>/)
+  assert.match(source, /<span v-if="getTaskPhaseLabel\(chat\.id\)" class="history-status-badge">{{ getTaskPhaseLabel\(chat\.id\) }}<\/span>/)
   assert.match(source, /<button\s+v-if="isChatBusy\(chat\.id\)"\s+class="history-stop-btn"/)
   assert.match(source, /@click\.stop="stopStreaming\(chat\.id\)"/)
   assert.match(source, /<button\s+class="history-delete-btn"/)
@@ -126,4 +125,41 @@ test('Home snapshots per-chat request context before async chat promotion and re
   assert.match(source, /const messageChat = await store\.addUserMessage\(message, \{ chatId: requestedChatId \}\)/)
   assert.match(source, /const pdfContext = requestChatContext/)
   assert.doesNotMatch(source, /const pdfContext = \{\s*newly_uploaded_ids: store\.getNewlyUploadedFileIds\(\),\s*all_available_ids: store\.getAllUploadedFileIds\(\),\s*selected_ids: \[\.\.\.selectedFileIds\.value\],\s*last_focus_ids: getLastFocusFileIds\(\),\s*last_turn_route: getLastTurnRoute\(\)\s*\}/s)
+})
+
+test('Home routes refresh-survivable sends through task create and recovery instead of legacy ask_stream', () => {
+  assert.match(source, /import \{ createRecoverableTaskController \} from '\.\.\/utils\/recoverableTaskController'/)
+  assert.match(source, /const recoverableTaskController = createRecoverableTaskController\(\{/)
+  assert.match(source, /if \(store\.refreshSurvivableQATasksEnabled\) \{\s*return sendTaskMessage\(\)\s*\}/)
+  assert.match(source, /async function sendTaskMessage\(\)/)
+  assert.match(source, /const result = await recoverableTaskController\.sendTaskMessage\(\{/)
+  assert.doesNotMatch(source, /for await \(const data of api\.askStream\(/)
+})
+
+test('Home exposes queued and admitted task states in the UI instead of showing every recoverable task as streaming', () => {
+  assert.match(source, /function getTaskPhaseLabel\(chatId\)/)
+  assert.match(source, /if \(taskStatus === 'queued'\) return '排队中'/)
+  assert.match(source, /if \(taskStatus === 'admitted'\) return '即将开始'/)
+  assert.match(source, /if \(taskStatus === 'running'\) return '生成中'/)
+  assert.match(source, /<span v-if="getTaskPhaseLabel\(chat\.id\)" class="history-status-badge">{{ getTaskPhaseLabel\(chat\.id\) }}<\/span>/)
+  assert.match(source, /<div v-else-if="getTaskPhaseLabel\(store\.currentChatId\)" class="loading-animation"><span>{{ getTaskPhaseLabel\(store\.currentChatId\) }}\.\.\.<\/span><\/div>/)
+})
+
+test('Home stop flow uses gateway task cancel for recoverable tasks and attaches recovery on current-chat active_task', () => {
+  assert.match(source, /watch\(\(\) => \(\{\s*chatId: normalizeChatId\(store\.currentChatId\),\s*taskId: store\.currentChat\?\.activeTask\?\.task_id,/s)
+  assert.match(source, /const existingRuntime = getStreamRuntime\(chatId\)/)
+  assert.match(source, /if \(existingRuntime\?\.mode === 'task' && existingRuntime\?\.requestId === cursor\.taskId && !existingRuntime\?\.abortController\?\.signal\?\.aborted\) return/)
+  assert.match(source, /void attachRecoverableTask\(\{\s*chatId,\s*taskSummary: store\.currentChat\.activeTask,\s*\}\)/s)
+  assert.match(source, /const activeTaskId = String\(chat\?\.activeTask\?\.task_id \|\| ''\)\.trim\(\)/)
+  assert.match(source, /if \(store\.refreshSurvivableQATasksEnabled && activeTaskId\) \{\s*void cancelRecoverableTask\(targetChatId, activeTaskId\)\s*return\s*\}/s)
+  assert.match(source, /return recoverableTaskController\.cancelRecoverableTask\(chatId, taskId\)/)
+  assert.match(source, /recoverableTaskController\.detachAllRecoverableTasks\(\)/)
+})
+
+test('Home drops duplicate recoverable task events whose seq is not ahead of the local replay cursor', () => {
+  assert.match(source, /function applyGatewayEvent\(chatId, data, runtime = getStreamRuntime\(chatId\)\)/)
+  assert.match(source, /const eventSeq = Number\(data\.seq \|\| 0\) \|\| 0/)
+  assert.match(source, /const localLastSeq = store\.getChatLastTaskSeq\(chatId\)/)
+  assert.match(source, /if \(eventSeq > 0 && eventSeq <= localLastSeq\) \{/)
+  assert.match(source, /taskRecoveryDebug\.log\('home:event-skipped-duplicate'/)
 })

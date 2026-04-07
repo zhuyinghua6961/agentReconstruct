@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from types import SimpleNamespace
 from contextlib import contextmanager
 
@@ -483,6 +484,117 @@ def test_fast_mode_stream_persistence_hook_receives_user_id_from_body(monkeypatc
     assert '"type": "done"' in body
     assert calls["user"]["user_id"] == 7
     assert calls["assistant"]["user_id"] == 7
+
+
+def test_fast_mode_stream_skips_local_persistence_for_gateway_owned_task(monkeypatch):
+    calls = {"user": 0, "assistant": 0}
+
+    def _persist_user_message_hook(**_kwargs):
+        calls["user"] += 1
+
+    def _persist_assistant_terminal_hook(**_kwargs):
+        calls["assistant"] += 1
+
+    def _events(**_kwargs):
+        yield {"type": "metadata", "query_mode": "kb_qa", "route": "kb_qa", "trace_id": "trace-task-stream"}
+        yield {"type": "content", "content": "hello"}
+        yield {"type": "done", "route": "kb_qa", "references": [], "trace_id": "trace-task-stream"}
+
+    request = _FakeRequest(app, "/api/ask_stream")
+    request.headers["X-Gateway-Task-Execution"] = "1"
+    request.headers["X-Gateway-Owned-Persistence"] = "1"
+    request.headers["X-Internal-Service-Name"] = "gateway"
+    request.headers["X-Internal-Service-Token"] = str(os.getenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN") or "")
+
+    monkeypatch.setattr("app.routers.qa.qa_kb_service.iter_answer_events", _events)
+    monkeypatch.setattr(app.state, "persist_user_message_hook", _persist_user_message_hook, raising=False)
+    monkeypatch.setattr(app.state, "load_conversation_context_hook", lambda **_kwargs: None, raising=False)
+    monkeypatch.setattr(app.state, "persist_assistant_terminal_hook", _persist_assistant_terminal_hook, raising=False)
+    with _runtime_state(object(), "ok"):
+        response = ask_stream(
+            AskRequest(question="hello", requested_mode="fast", conversation_id=12, user_id=7),
+            request,
+        )
+        body = asyncio.run(_collect_streaming_body(response))
+
+    assert response.status_code == 200
+    assert '"type": "done"' in body
+    assert calls == {"user": 0, "assistant": 0}
+
+
+def test_fast_mode_sync_skips_local_persistence_for_gateway_owned_task(monkeypatch):
+    calls = {"user": 0, "assistant": 0}
+
+    def _persist_user_message_hook(**_kwargs):
+        calls["user"] += 1
+
+    def _persist_assistant_terminal_hook(**_kwargs):
+        calls["assistant"] += 1
+
+    request = _FakeRequest(app, "/api/ask")
+    request.headers["X-Gateway-Task-Execution"] = "1"
+    request.headers["X-Gateway-Owned-Persistence"] = "1"
+    request.headers["X-Internal-Service-Name"] = "gateway"
+    request.headers["X-Internal-Service-Token"] = str(os.getenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN") or "")
+
+    monkeypatch.setattr(app.state, "persist_user_message_hook", _persist_user_message_hook, raising=False)
+    monkeypatch.setattr(app.state, "load_conversation_context_hook", lambda **_kwargs: None, raising=False)
+    monkeypatch.setattr(app.state, "persist_assistant_terminal_hook", _persist_assistant_terminal_hook, raising=False)
+    monkeypatch.setattr(
+        "app.routers.qa._iter_route_frames",
+        lambda **_kwargs: iter(
+            [
+                {"type": "metadata", "route": "kb_qa", "query_mode": "kb_qa", "trace_id": "trace-task-sync"},
+                {"type": "content", "content": "hello"},
+                {"type": "done", "route": "kb_qa", "references": [], "trace_id": "trace-task-sync"},
+            ]
+        ),
+    )
+
+    with _runtime_state(object(), "ok"):
+        response = ask(
+            AskRequest(question="hello", requested_mode="fast", conversation_id=12, user_id=7),
+            request,
+        )
+        payload = _decode_json_response(response)
+
+    assert response.status_code == 200
+    assert payload["final_answer"] == "hello"
+    assert calls == {"user": 0, "assistant": 0}
+
+
+def test_fast_mode_stream_public_headers_without_internal_auth_still_persist(monkeypatch):
+    calls = {"user": 0, "assistant": 0}
+
+    def _persist_user_message_hook(**_kwargs):
+        calls["user"] += 1
+
+    def _persist_assistant_terminal_hook(**_kwargs):
+        calls["assistant"] += 1
+
+    def _events(**_kwargs):
+        yield {"type": "metadata", "query_mode": "kb_qa", "route": "kb_qa", "trace_id": "trace-untrusted-stream"}
+        yield {"type": "content", "content": "hello"}
+        yield {"type": "done", "route": "kb_qa", "references": [], "trace_id": "trace-untrusted-stream"}
+
+    request = _FakeRequest(app, "/api/ask_stream")
+    request.headers["X-Gateway-Task-Execution"] = "1"
+    request.headers["X-Gateway-Owned-Persistence"] = "1"
+
+    monkeypatch.setattr("app.routers.qa.qa_kb_service.iter_answer_events", _events)
+    monkeypatch.setattr(app.state, "persist_user_message_hook", _persist_user_message_hook, raising=False)
+    monkeypatch.setattr(app.state, "load_conversation_context_hook", lambda **_kwargs: None, raising=False)
+    monkeypatch.setattr(app.state, "persist_assistant_terminal_hook", _persist_assistant_terminal_hook, raising=False)
+    with _runtime_state(object(), "ok"):
+        response = ask_stream(
+            AskRequest(question="hello", requested_mode="fast", conversation_id=12, user_id=7),
+            request,
+        )
+        body = asyncio.run(_collect_streaming_body(response))
+
+    assert response.status_code == 200
+    assert '"type": "done"' in body
+    assert calls == {"user": 1, "assistant": 1}
 
 
 def test_fast_mode_sync_ask_persists_failed_terminal_before_returning_error(monkeypatch):

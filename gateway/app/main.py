@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import threading
 
 from fastapi import FastAPI
 
+from app.core.auth import GatewayAuthService
 from app.core.config import GatewaySettings
 from app.core.logging import setup_logging
 from app.core.trace import trace_id_middleware
@@ -14,8 +16,10 @@ from app.routers.admission import router as admission_router
 from app.routers.health import router as health_router
 from app.routers.public_proxy import router as public_proxy_router
 from app.routers.qa import router as qa_router
+from app.routers.tasks import router as tasks_router
 from app.services.backend_registry import BackendRegistry
 from app.services.conversation_persistence import ConversationPersistenceService
+from app.services.distributed_lock import DistributedLockManager
 from app.services.execution_admission import build_admission_status
 from app.services.execution_event_relay import ExecutionEventRelayStore
 from app.services.execution_queue_status import ExecutionQueueStatusStore
@@ -51,6 +55,7 @@ def create_app() -> FastAPI:
     app.state.execution_queue_status_store = ExecutionQueueStatusStore(redis_service=redis_runtime.service)
     app.state.execution_event_relay_store = ExecutionEventRelayStore(redis_service=redis_runtime.service)
     app.state.execution_slot_lease_store = ExecutionSlotLeaseStore(redis_service=redis_runtime.service)
+    app.state.distributed_lock_manager = DistributedLockManager(redis_service=redis_runtime.service)
     app.state.backend_registry = BackendRegistry(settings)
     app.state.conversation_file_service = ConversationFileService(
         provider=build_conversation_file_provider(settings),
@@ -65,6 +70,9 @@ def create_app() -> FastAPI:
     )
     app.state.route_decision_service = RouteDecisionService()
     app.state.proxy_service = ProxyService(settings)
+    app.state.active_task_streams = {}
+    app.state.active_task_streams_lock = threading.RLock()
+    app.state.gateway_auth_service = GatewayAuthService(settings)
     app.state.quota_proxy_service = QuotaProxyService(settings)
     app.state.conversation_persistence_service = ConversationPersistenceService(settings)
     app.state.component_status = {
@@ -82,6 +90,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health_router)
     app.include_router(admission_router)
+    app.include_router(tasks_router)
     app.include_router(public_proxy_router)
     app.include_router(qa_router)
     return app

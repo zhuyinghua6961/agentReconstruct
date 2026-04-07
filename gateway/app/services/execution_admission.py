@@ -18,16 +18,93 @@ import signal
 import socket
 import threading
 import time
+from types import SimpleNamespace
 from typing import Any, Callable
 
 from app.core.config import GatewaySettings
 from app.core.logging import setup_logging
 from app.integrations.redis.service import GatewayRedisRuntime
+from app.services.distributed_lock import DistributedLockManager
 from app.services.execution_queue_status import ExecutionQueueStatusStore
 from app.services.execution_slot_leases import ExecutionSlotLeaseStore
 
 
 logger = logging.getLogger(__name__)
+
+_PUBLIC_TASK_STATUS_MAP = {
+    "cancelled": "canceled",
+}
+
+_LIVE_TASK_STATUSES = {"queued", "admitted", "running"}
+
+
+def normalize_public_task_status(status: Any) -> str:
+    normalized = str(status or "").strip().lower()
+    return _PUBLIC_TASK_STATUS_MAP.get(normalized, normalized)
+
+
+@dataclass(frozen=True)
+class TaskCreateAdmissionDecision:
+    allowed: bool
+    status_code: int = 200
+    detail: str = ""
+
+
+def evaluate_task_create_admission(
+    *,
+    settings: GatewaySettings,
+    queue_status_store: ExecutionQueueStatusStore,
+    conversation_id: Any,
+    user_id: Any,
+) -> TaskCreateAdmissionDecision:
+    normalized_conversation_id = _positive_int(conversation_id)
+    normalized_user_id = _positive_int(user_id)
+    live_records = [
+        record
+        for record in queue_status_store.list_requests()
+        if normalize_public_task_status(record.get("status")) in _LIVE_TASK_STATUSES
+    ]
+
+    if normalized_conversation_id is not None:
+        same_conversation_live = any(
+            _positive_int(record.get("conversation_id")) == normalized_conversation_id
+            for record in live_records
+        )
+        if same_conversation_live:
+            return TaskCreateAdmissionDecision(
+                allowed=False,
+                status_code=409,
+                detail="task_conversation_active",
+            )
+
+    if normalized_user_id is not None:
+        per_user_limit = max(1, int(settings.admission.per_user_max_active))
+        live_for_user = sum(1 for record in live_records if _positive_int(record.get("user_id")) == normalized_user_id)
+        if live_for_user >= per_user_limit:
+            return TaskCreateAdmissionDecision(
+                allowed=False,
+                status_code=429,
+                detail="task_user_active_limit",
+            )
+
+    queue_max_size = max(1, int(settings.admission.queue_max_size))
+    queued_count = sum(1 for record in live_records if normalize_public_task_status(record.get("status")) == "queued")
+    if queued_count >= queue_max_size:
+        return TaskCreateAdmissionDecision(
+            allowed=False,
+            status_code=503,
+            detail="task_queue_full",
+        )
+
+    return TaskCreateAdmissionDecision(allowed=True)
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        normalized = int(value)
+    except Exception:
+        return None
+    return normalized if normalized > 0 else None
 
 
 @dataclass(frozen=True)
@@ -68,12 +145,14 @@ class ExecutionAdmissionDispatcher:
         slot_lease_store: ExecutionSlotLeaseStore,
         readiness_checker: Callable[[dict[str, Any]], tuple[bool, str]] | None = None,
         thinking_starvation_seconds: int = 120,
+        lock_manager: DistributedLockManager | None = None,
     ) -> None:
         self.settings = settings
         self.queue_status_store = queue_status_store
         self.slot_lease_store = slot_lease_store
         self.readiness_checker = readiness_checker
         self.thinking_starvation_seconds = max(0, int(thinking_starvation_seconds))
+        self.lock_manager = lock_manager or DistributedLockManager(redis_service=queue_status_store.redis_service)
 
     def capacity_key_for_record(self, record: dict[str, Any]) -> str:
         explicit = str(record.get("backend_capacity_key") or "").strip()
@@ -96,6 +175,9 @@ class ExecutionAdmissionDispatcher:
         queued = self.queue_status_store.list_requests(status="queued")
         if not queued:
             return None
+        reserved_thinking = self._pick_reserved_thinking_request(now_epoch=now_epoch)
+        if reserved_thinking is not None:
+            return reserved_thinking
         return min(
             queued,
             key=lambda record: self.queue_priority_for_record(record, now_epoch=now_epoch),
@@ -109,6 +191,16 @@ class ExecutionAdmissionDispatcher:
         lease_ttl_seconds: int,
         now_epoch: float | None = None,
     ) -> AdmissionDispatchResult:
+        reserved_thinking = self._pick_reserved_thinking_request(now_epoch=now_epoch)
+        if reserved_thinking is not None:
+            ready, reason = self._ready_for_dispatch(reserved_thinking)
+            if ready and self._capacity_available("thinking"):
+                return self.claim_request(
+                    str(reserved_thinking.get("request_id") or "").strip(),
+                    owner_id=owner_id,
+                    admitted_at=admitted_at,
+                    lease_ttl_seconds=lease_ttl_seconds,
+                )
         queued = sorted(
             self.queue_status_store.list_requests(status="queued"),
             key=lambda record: self.queue_priority_for_record(record, now_epoch=now_epoch),
@@ -154,64 +246,76 @@ class ExecutionAdmissionDispatcher:
         admitted_at: str,
         lease_ttl_seconds: int,
     ) -> AdmissionDispatchResult:
-        record = self.queue_status_store.get_request(request_id)
-        if not isinstance(record, dict):
-            return AdmissionDispatchResult(outcome="not_found", request_id=request_id)
-        if str(record.get("status") or "").strip().lower() != "queued":
-            return AdmissionDispatchResult(outcome="not_queued", request_id=request_id, request=record)
-        capacity = self.capacity_key_for_record(record)
-        if not self._capacity_available(capacity):
-            return AdmissionDispatchResult(outcome="capacity_exhausted", request_id=request_id, request=record)
-        ready, reason = self._ready_for_dispatch(record)
-        if not ready:
-            if str(record.get("target_backend") or "").strip().lower() == "patent":
-                failed = self._store_terminal_request(
-                    record,
-                    terminal_status="failed",
-                    timestamp_field="failed_at",
-                    timestamp_value=admitted_at,
-                    extra={"failure_reason": reason or "backend_not_ready"},
-                )
-                return AdmissionDispatchResult(
-                    outcome="failed",
-                    request_id=request_id,
-                    reason=reason or "backend_not_ready",
-                    request=failed,
-                )
-            return AdmissionDispatchResult(outcome="not_ready", request_id=request_id, reason=reason, request=record)
-
-        lease = self.slot_lease_store.acquire(
-            request_id=request_id,
-            capacity_key=capacity,
-            owner_id=owner_id,
-            ttl_seconds=lease_ttl_seconds,
-            acquired_at=admitted_at,
-            metadata={
-                "actual_mode": record.get("actual_mode"),
-                "target_backend": record.get("target_backend"),
-            },
+        lock_handle = self.lock_manager.acquire(
+            "admission",
+            "claim",
+            owner=f"{owner_id}:{request_id}",
+            ttl_seconds=max(5, int(lease_ttl_seconds)),
+            wait_timeout_seconds=2.0,
         )
-        if lease is None:
-            return AdmissionDispatchResult(outcome="lease_conflict", request_id=request_id, request=record)
+        if lock_handle is None:
+            return AdmissionDispatchResult(outcome="lease_conflict", request_id=request_id)
+        try:
+            record = self.queue_status_store.get_request(request_id)
+            if not isinstance(record, dict):
+                return AdmissionDispatchResult(outcome="not_found", request_id=request_id)
+            if str(record.get("status") or "").strip().lower() != "queued":
+                return AdmissionDispatchResult(outcome="not_queued", request_id=request_id, request=record)
+            capacity = self.capacity_key_for_record(record)
+            if not self._capacity_available(capacity):
+                return AdmissionDispatchResult(outcome="capacity_exhausted", request_id=request_id, request=record)
+            ready, reason = self._ready_for_dispatch(record)
+            if not ready:
+                if str(record.get("target_backend") or "").strip().lower() == "patent":
+                    failed = self._store_terminal_request(
+                        record,
+                        terminal_status="failed",
+                        timestamp_field="failed_at",
+                        timestamp_value=admitted_at,
+                        extra={"failure_reason": reason or "backend_not_ready"},
+                    )
+                    return AdmissionDispatchResult(
+                        outcome="failed",
+                        request_id=request_id,
+                        reason=reason or "backend_not_ready",
+                        request=failed,
+                    )
+                return AdmissionDispatchResult(outcome="not_ready", request_id=request_id, reason=reason, request=record)
 
-        updated = dict(record)
-        updated["status"] = "admitted"
-        updated["cancel_allowed"] = False
-        updated["admitted_at"] = str(admitted_at)
-        updated["lease_owner_id"] = str(owner_id)
-        updated["backend_capacity_key"] = capacity
-        updated["dispatch_attempts"] = int(record.get("dispatch_attempts") or 0) + 1
-        ttl_seconds = self._request_ttl_seconds(record)
-        stored = self.queue_status_store.put_request(updated, ttl_seconds=ttl_seconds)
-        if not stored:
-            self.slot_lease_store.release(request_id, owner_id=owner_id)
-            return AdmissionDispatchResult(outcome="store_write_failed", request_id=request_id, request=record)
-        return AdmissionDispatchResult(
-            outcome="claimed",
-            request_id=request_id,
-            request=updated,
-            lease=lease,
-        )
+            lease = self.slot_lease_store.acquire(
+                request_id=request_id,
+                capacity_key=capacity,
+                owner_id=owner_id,
+                ttl_seconds=lease_ttl_seconds,
+                acquired_at=admitted_at,
+                metadata={
+                    "actual_mode": record.get("actual_mode"),
+                    "target_backend": record.get("target_backend"),
+                },
+            )
+            if lease is None:
+                return AdmissionDispatchResult(outcome="lease_conflict", request_id=request_id, request=record)
+
+            updated = dict(record)
+            updated["status"] = "admitted"
+            updated["cancel_allowed"] = False
+            updated["admitted_at"] = str(admitted_at)
+            updated["lease_owner_id"] = str(owner_id)
+            updated["backend_capacity_key"] = capacity
+            updated["dispatch_attempts"] = int(record.get("dispatch_attempts") or 0) + 1
+            ttl_seconds = self._request_ttl_seconds(updated)
+            stored = self.queue_status_store.put_request(updated, ttl_seconds=ttl_seconds)
+            if not stored:
+                self.slot_lease_store.release(request_id, owner_id=owner_id)
+                return AdmissionDispatchResult(outcome="store_write_failed", request_id=request_id, request=record)
+            return AdmissionDispatchResult(
+                outcome="claimed",
+                request_id=request_id,
+                request=updated,
+                lease=lease,
+            )
+        finally:
+            self.lock_manager.release(lock_handle)
 
     def requeue_request(
         self,
@@ -224,7 +328,7 @@ class ExecutionAdmissionDispatcher:
         record = self.queue_status_store.get_request(request_id)
         if not isinstance(record, dict):
             return AdmissionDispatchResult(outcome="not_found", request_id=request_id)
-        if str(record.get("status") or "").strip().lower() != "admitted":
+        if str(record.get("status") or "").strip().lower() not in {"admitted", "running"}:
             return AdmissionDispatchResult(outcome="not_admitted", request_id=request_id, request=record)
         lease = self.slot_lease_store.get(request_id)
         allow_missing_lease = (not isinstance(lease, dict)) and self._record_owned_by(record, owner_id)
@@ -247,6 +351,37 @@ class ExecutionAdmissionDispatcher:
                 return AdmissionDispatchResult(outcome="lease_release_failed", request_id=request_id, request=updated)
         return AdmissionDispatchResult(outcome="requeued", request_id=request_id, reason=reason, request=updated)
 
+    def transition_to_running(
+        self,
+        request_id: str,
+        *,
+        owner_id: str,
+        started_at: str,
+    ) -> AdmissionDispatchResult:
+        record = self.queue_status_store.get_request(request_id)
+        if not isinstance(record, dict):
+            return AdmissionDispatchResult(outcome="not_found", request_id=request_id)
+        current_status = str(record.get("status") or "").strip().lower()
+        if current_status == "running":
+            return AdmissionDispatchResult(outcome="running", request_id=request_id, request=record)
+        if current_status != "admitted":
+            return AdmissionDispatchResult(outcome="not_admitted", request_id=request_id, request=record)
+        lease = self.slot_lease_store.get(request_id)
+        allow_missing_lease = (not isinstance(lease, dict)) and self._record_owned_by(record, owner_id)
+        if not isinstance(lease, dict) and not allow_missing_lease:
+            return AdmissionDispatchResult(outcome="lease_missing", request_id=request_id, request=record)
+        if isinstance(lease, dict) and str(lease.get("owner_id") or "").strip() != str(owner_id or "").strip():
+            return AdmissionDispatchResult(outcome="lease_owner_mismatch", request_id=request_id, request=record)
+        updated = dict(record)
+        updated["status"] = "running"
+        updated["started_at"] = str(started_at)
+        updated["updated_at"] = str(started_at)
+        updated["cancel_allowed"] = True
+        ttl_seconds = self._request_ttl_seconds(record)
+        if not self.queue_status_store.put_request(updated, ttl_seconds=ttl_seconds):
+            return AdmissionDispatchResult(outcome="store_write_failed", request_id=request_id, request=record)
+        return AdmissionDispatchResult(outcome="running", request_id=request_id, request=updated, lease=lease)
+
     def complete_request(
         self,
         request_id: str,
@@ -256,11 +391,12 @@ class ExecutionAdmissionDispatcher:
         completed_at: str,
         result_payload: Any | None = None,
         failure_reason: str | None = None,
+        extra_updates: dict[str, Any] | None = None,
     ) -> AdmissionDispatchResult:
         record = self.queue_status_store.get_request(request_id)
         if not isinstance(record, dict):
             return AdmissionDispatchResult(outcome="not_found", request_id=request_id)
-        if str(record.get("status") or "").strip().lower() != "admitted":
+        if str(record.get("status") or "").strip().lower() not in {"admitted", "running"}:
             return AdmissionDispatchResult(outcome="not_admitted", request_id=request_id, request=record)
         normalized_status = self._normalize_terminal_status(terminal_status)
         if normalized_status is None:
@@ -288,6 +424,8 @@ class ExecutionAdmissionDispatcher:
             updated["failure_reason"] = str(failure_reason or "execution_failed")
         else:
             updated.pop("failure_reason", None)
+        if extra_updates:
+            updated.update(dict(extra_updates))
         if not self.queue_status_store.put_request(updated, ttl_seconds=ttl_seconds):
             if result_payload is not None:
                 if not self.queue_status_store.delete_result(request_id):
@@ -321,6 +459,38 @@ class ExecutionAdmissionDispatcher:
             return int(self.settings.admission.fast_or_patent_max_concurrent)
         return None
 
+    def _pick_reserved_thinking_request(self, *, now_epoch: float | None = None) -> dict[str, Any] | None:
+        minimum_slots = max(0, int(self.settings.admission.thinking_min_slots))
+        if minimum_slots <= 0:
+            return None
+        slot_metrics = self.slot_lease_store.describe()
+        active_total = int(slot_metrics.get("active_leases") or 0)
+        global_limit = int(self.settings.admission.max_concurrent)
+        if active_total >= global_limit:
+            return None
+        capacity_counts = dict(slot_metrics.get("capacity_counts") or {})
+        active_thinking = int(capacity_counts.get("thinking") or 0)
+        if active_thinking >= minimum_slots:
+            return None
+        missing_thinking_slots = max(0, minimum_slots - active_thinking)
+        remaining_global_slots = max(0, global_limit - active_total)
+        if remaining_global_slots > missing_thinking_slots:
+            return None
+        thinking_limit = max(0, int(self.settings.admission.thinking_max_concurrent))
+        if active_thinking >= thinking_limit:
+            return None
+        thinking_queued = [
+            record
+            for record in self.queue_status_store.list_requests(status="queued")
+            if self.capacity_key_for_record(record) == "thinking"
+        ]
+        if not thinking_queued:
+            return None
+        return min(
+            thinking_queued,
+            key=lambda record: self.queue_priority_for_record(record, now_epoch=now_epoch),
+        )
+
     def _ready_for_dispatch(self, record: dict[str, Any]) -> tuple[bool, str]:
         if self.readiness_checker is None:
             return True, ""
@@ -328,6 +498,9 @@ class ExecutionAdmissionDispatcher:
         return bool(ready), str(reason or "")
 
     def _request_ttl_seconds(self, record: dict[str, Any]) -> int:
+        public_status = normalize_public_task_status(record.get("status"))
+        if public_status in {"admitted", "running", "completed", "failed", "canceled", "expired"}:
+            return max(60, int(self.settings.admission.post_admit_attach_ttl_seconds))
         ttl_seconds = self.queue_status_store.request_ttl_seconds(str(record.get("request_id") or ""))
         if ttl_seconds is None or ttl_seconds <= 0:
             ttl_seconds = int(self.settings.admission.queued_ttl_seconds)
@@ -448,6 +621,7 @@ class ExecutionAdmissionWorker:
                 completed_at=self._timestamp(),
                 result_payload=execution.result_payload,
                 failure_reason=execution.reason or "execution_failed",
+                extra_updates=request.get("post_complete_record_updates") if isinstance(request.get("post_complete_record_updates"), dict) else None,
             )
         else:
             terminal_status, failure_reason = self._effective_terminal_status(execution)
@@ -458,7 +632,9 @@ class ExecutionAdmissionWorker:
                 completed_at=self._timestamp(),
                 result_payload=execution.result_payload,
                 failure_reason=failure_reason,
+                extra_updates=request.get("post_complete_record_updates") if isinstance(request.get("post_complete_record_updates"), dict) else None,
             )
+        final = self._coalesce_terminal_race(request_id=request_id, result=final)
         self._remember_result(final)
         return final
 
@@ -575,6 +751,22 @@ class ExecutionAdmissionWorker:
         elif result.outcome == "failed":
             self._failed_requests += 1
 
+    def _coalesce_terminal_race(self, *, request_id: str, result: AdmissionDispatchResult) -> AdmissionDispatchResult:
+        if result.outcome not in {"not_admitted", "lease_missing", "lease_owner_mismatch"}:
+            return result
+        latest = self.dispatcher.queue_status_store.get_request(request_id)
+        if not isinstance(latest, dict):
+            return result
+        public_status = normalize_public_task_status(latest.get("status"))
+        if public_status not in {"completed", "failed", "canceled", "expired"}:
+            return result
+        return AdmissionDispatchResult(
+            outcome=public_status,
+            request_id=request_id,
+            request=latest,
+        )
+
+
 
 def build_admission_status(
     *,
@@ -603,6 +795,9 @@ def build_admission_status(
             "fast_or_patent": int(settings.admission.fast_or_patent_max_concurrent),
             "thinking": int(settings.admission.thinking_max_concurrent),
         },
+        "per_user_max_active": int(settings.admission.per_user_max_active),
+        "thinking_min_slots": int(settings.admission.thinking_min_slots),
+        "queue_max_size": int(settings.admission.queue_max_size),
         "queued_ttl_seconds": int(settings.admission.queued_ttl_seconds),
         "post_admit_attach_ttl_seconds": int(settings.admission.post_admit_attach_ttl_seconds),
         "redis": redis_status,
@@ -618,7 +813,7 @@ def build_admission_status(
         "shared_state_ready": shared_state_ready,
         "degraded_reasons": degraded_reasons,
         "worker_script_supported": True,
-        "request_path_cutover_enabled": False,
+        "request_path_cutover_enabled": True,
     }
 
 
@@ -655,7 +850,31 @@ def run_admission_worker(
 
     interval = max(1, int(settings.admission.poll_interval_seconds))
     worker: ExecutionAdmissionWorker | None = None
-    if executor is not None:
+    effective_executor = executor
+    if effective_executor is None:
+        from app.services.backend_registry import BackendRegistry
+        from app.services.conversation_persistence import ConversationPersistenceService
+        from app.services.proxy import ProxyService
+        from app.services.qa_tasks import GatewayTaskExecutor
+        from app.services.quota_proxy import QuotaProxyService
+
+        runtime_app = SimpleNamespace(
+            state=SimpleNamespace(
+                settings=settings,
+                execution_queue_status_store=ExecutionQueueStatusStore(redis_service=redis_runtime.service),
+                execution_event_relay_store=None,
+                execution_slot_lease_store=ExecutionSlotLeaseStore(redis_service=redis_runtime.service),
+                backend_registry=BackendRegistry(settings),
+                proxy_service=ProxyService(settings),
+                conversation_persistence_service=ConversationPersistenceService(settings),
+                quota_proxy_service=QuotaProxyService(settings),
+            )
+        )
+        from app.services.execution_event_relay import ExecutionEventRelayStore
+
+        runtime_app.state.execution_event_relay_store = ExecutionEventRelayStore(redis_service=redis_runtime.service)
+        effective_executor = GatewayTaskExecutor(runtime_app).execute
+    if effective_executor is not None:
         dispatcher = ExecutionAdmissionDispatcher(
             settings=settings,
             queue_status_store=ExecutionQueueStatusStore(redis_service=redis_runtime.service),
@@ -664,7 +883,7 @@ def run_admission_worker(
         worker = ExecutionAdmissionWorker(
             dispatcher=dispatcher,
             owner_id=worker_owner_id or build_admission_worker_owner_id(settings.admission.runtime_role),
-            executor=executor,
+            executor=effective_executor,
         )
     while not stop_event.is_set():
         if worker is None:

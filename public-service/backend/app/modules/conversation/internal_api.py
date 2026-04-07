@@ -19,6 +19,12 @@ from app.modules.conversation.authority_schemas import (
     AuthorityConversationSummary,
     AuthorityUserWriteRequest,
 )
+from app.modules.conversation.task_schemas import (
+    AuthorityTaskCreateRollbackRequest,
+    AuthorityTaskAssistantProgressRequest,
+    AuthorityTaskAssistantStartRequest,
+    AuthorityTaskAssistantTerminalRequest,
+)
 
 
 router = APIRouter(tags=["conversation-internal"])
@@ -94,6 +100,11 @@ def _enforce_path_conversation_id(*, path_conversation_id: int, payload_conversa
         raise AppError(message="conversation_id_mismatch", code="CONVERSATION_ID_MISMATCH", status_code=400)
 
 
+def _enforce_path_task_id(*, path_task_id: str, payload_task_id: str) -> None:
+    if str(path_task_id or "").strip() != str(payload_task_id or "").strip():
+        raise AppError(message="task_id_mismatch", code="TASK_ID_MISMATCH", status_code=400)
+
+
 def _enforce_source_service_policy(
     *,
     caller_service_name: str,
@@ -117,10 +128,84 @@ def _enforce_source_service_policy(
         )
 
 
+def _enforce_gateway_or_source_service_policy(
+    *,
+    caller_service_name: str,
+    source_service: str,
+    requested_mode: str,
+    actual_mode: str,
+) -> None:
+    normalized_caller = str(caller_service_name or "").strip()
+    if normalized_caller == "gateway":
+        _enforce_source_service_contract(
+            source_service=source_service,
+            requested_mode=requested_mode,
+            actual_mode=actual_mode,
+        )
+        return
+    _enforce_source_service_policy(
+        caller_service_name=normalized_caller,
+        source_service=source_service,
+        requested_mode=requested_mode,
+        actual_mode=actual_mode,
+    )
+
+
+def _enforce_source_service_contract(
+    *,
+    source_service: str,
+    requested_mode: str,
+    actual_mode: str,
+) -> None:
+    policy = _SOURCE_SERVICE_POLICY.get(str(source_service))
+    allowed_requested_modes = set(policy.get("requested_modes") or ()) if isinstance(policy, dict) else set()
+    allowed_actual_modes = set(policy.get("actual_modes") or ()) if isinstance(policy, dict) else set()
+    if (
+        not policy
+        or requested_mode not in allowed_requested_modes
+        or actual_mode not in allowed_actual_modes
+    ):
+        raise AppError(
+            message="internal_source_service_forbidden",
+            code="INTERNAL_SOURCE_SERVICE_FORBIDDEN",
+            status_code=403,
+        )
+
+
+def _enforce_task_binding_policy(
+    *,
+    conversation_id: int,
+    user_id: int,
+    task_id: str,
+) -> None:
+    binding = _conversation_service().get_authority_task_binding(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        task_id=task_id,
+    )
+    if not isinstance(binding, dict):
+        return
+    _enforce_source_service_contract(
+        source_service=str(binding.get("source_service") or "").strip(),
+        requested_mode=str(binding.get("requested_mode") or "").strip(),
+        actual_mode=str(binding.get("actual_mode") or "").strip(),
+    )
+
+
 def _enforce_idempotency_key(*, idempotency_key: str, conversation_id: int, trace_id: str, operation: str) -> None:
     expected = f"{conversation_id}:{trace_id}:{operation}"
     if str(idempotency_key).strip() != expected:
         raise AppError(message="idempotency_key_invalid", code="IDEMPOTENCY_KEY_INVALID", status_code=400)
+
+
+def _require_gateway_internal_caller(caller: InternalAuthorityCaller = Depends(require_internal_authority)) -> InternalAuthorityCaller:
+    if str(caller.service_name or "").strip().lower() != "gateway":
+        raise AppError(
+            message="internal_source_service_forbidden",
+            code="INTERNAL_SOURCE_SERVICE_FORBIDDEN",
+            status_code=403,
+        )
+    return caller
 
 
 @router.post("/internal/conversations/{conversation_id}/messages/user")
@@ -130,7 +215,7 @@ def append_user_message(
     caller: InternalAuthorityCaller = Depends(require_internal_authority),
 ):
     _enforce_path_conversation_id(path_conversation_id=conversation_id, payload_conversation_id=payload.conversation_id)
-    _enforce_source_service_policy(
+    _enforce_gateway_or_source_service_policy(
         caller_service_name=caller.service_name,
         source_service=payload.source_service,
         requested_mode=payload.requested_mode,
@@ -296,3 +381,109 @@ def accept_assistant_terminal_event(
             "status": str(result.get("status") or "accepted"),
         },
     )
+
+
+@router.post("/internal/conversations/{conversation_id}/tasks/{task_id}/assistant-start")
+def start_task_assistant(
+    conversation_id: int,
+    task_id: str,
+    payload: AuthorityTaskAssistantStartRequest,
+    _caller: InternalAuthorityCaller = Depends(_require_gateway_internal_caller),
+):
+    _enforce_path_conversation_id(path_conversation_id=conversation_id, payload_conversation_id=payload.conversation_id)
+    _enforce_path_task_id(path_task_id=task_id, payload_task_id=payload.task_id)
+    _enforce_source_service_contract(
+        source_service=payload.source_service,
+        requested_mode=payload.requested_mode,
+        actual_mode=payload.actual_mode,
+    )
+    result = _conversation_service().start_authority_task_assistant(
+        user_id=payload.user_id,
+        conversation_id=payload.conversation_id,
+        task_id=payload.task_id,
+        trace_id=payload.trace_id,
+        source_service=payload.source_service,
+        route=payload.route,
+        requested_mode=payload.requested_mode,
+        actual_mode=payload.actual_mode,
+        status=payload.status,
+        last_seq=payload.last_seq,
+    )
+    _raise_service_error(result=result, ok_status=200)
+    return JSONResponse(status_code=200, content=jsonable_encoder(result))
+
+
+@router.post("/internal/conversations/{conversation_id}/tasks/{task_id}/assistant-progress")
+def progress_task_assistant(
+    conversation_id: int,
+    task_id: str,
+    payload: AuthorityTaskAssistantProgressRequest,
+    _caller: InternalAuthorityCaller = Depends(_require_gateway_internal_caller),
+):
+    _enforce_path_conversation_id(path_conversation_id=conversation_id, payload_conversation_id=payload.conversation_id)
+    _enforce_path_task_id(path_task_id=task_id, payload_task_id=payload.task_id)
+    _enforce_task_binding_policy(
+        conversation_id=payload.conversation_id,
+        user_id=payload.user_id,
+        task_id=payload.task_id,
+    )
+    result = _conversation_service().progress_authority_task_assistant(
+        user_id=payload.user_id,
+        conversation_id=payload.conversation_id,
+        task_id=payload.task_id,
+        status=payload.status,
+        content_delta=payload.content_delta,
+        steps=payload.steps,
+        last_seq=payload.last_seq,
+    )
+    _raise_service_error(result=result, ok_status=200)
+    return JSONResponse(status_code=200, content=jsonable_encoder(result))
+
+
+@router.post("/internal/conversations/{conversation_id}/tasks/{task_id}/assistant-terminal")
+def terminal_task_assistant(
+    conversation_id: int,
+    task_id: str,
+    payload: AuthorityTaskAssistantTerminalRequest,
+    _caller: InternalAuthorityCaller = Depends(_require_gateway_internal_caller),
+):
+    _enforce_path_conversation_id(path_conversation_id=conversation_id, payload_conversation_id=payload.conversation_id)
+    _enforce_path_task_id(path_task_id=task_id, payload_task_id=payload.task_id)
+    _enforce_task_binding_policy(
+        conversation_id=payload.conversation_id,
+        user_id=payload.user_id,
+        task_id=payload.task_id,
+    )
+    result = _conversation_service().terminal_authority_task_assistant(
+        user_id=payload.user_id,
+        conversation_id=payload.conversation_id,
+        task_id=payload.task_id,
+        terminal_status=payload.terminal_status,
+        last_seq=payload.last_seq,
+        answer_text=payload.answer_text,
+        steps=payload.steps,
+        failure=payload.failure,
+    )
+    _raise_service_error(result=result, ok_status=200)
+    return JSONResponse(status_code=200, content=jsonable_encoder(result))
+
+
+@router.post("/internal/conversations/{conversation_id}/tasks/{task_id}/rollback-create")
+def rollback_task_create(
+    conversation_id: int,
+    task_id: str,
+    payload: AuthorityTaskCreateRollbackRequest,
+    _caller: InternalAuthorityCaller = Depends(_require_gateway_internal_caller),
+):
+    _enforce_path_conversation_id(path_conversation_id=conversation_id, payload_conversation_id=payload.conversation_id)
+    _enforce_path_task_id(path_task_id=task_id, payload_task_id=payload.task_id)
+    result = _conversation_service().rollback_authority_task_creation(
+        user_id=payload.user_id,
+        conversation_id=payload.conversation_id,
+        task_id=payload.task_id,
+        user_message_id=payload.user_message_id,
+        assistant_message_id=payload.assistant_message_id,
+        preserve_user_message=payload.preserve_user_message,
+    )
+    _raise_service_error(result=result, ok_status=200)
+    return JSONResponse(status_code=200, content=jsonable_encoder(result))

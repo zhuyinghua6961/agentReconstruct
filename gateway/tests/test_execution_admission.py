@@ -1,3 +1,6 @@
+from dataclasses import replace
+import threading
+
 from app.integrations.redis.service import (
     GatewayRedisRuntime,
     GatewayRedisRuntimeStatus,
@@ -18,7 +21,12 @@ from app.services.execution_queue_status import ExecutionQueueStatusStore
 from app.services.execution_slot_leases import ExecutionSlotLeaseStore
 
 
-def test_build_admission_status_exposes_infra_only_defaults(monkeypatch):
+def _settings_with_admission_overrides(**overrides) -> GatewaySettings:
+    base = GatewaySettings.from_env()
+    return replace(base, admission=replace(base.admission, **overrides))
+
+
+def test_build_admission_status_exposes_task_api_defaults(monkeypatch):
     monkeypatch.delenv("GATEWAY_ADMISSION_ENABLED", raising=False)
     monkeypatch.delenv("GATEWAY_RUNTIME_ROLE", raising=False)
     monkeypatch.delenv("REDIS_ENABLED", raising=False)
@@ -39,9 +47,12 @@ def test_build_admission_status_exposes_infra_only_defaults(monkeypatch):
     assert payload["enabled"] is False
     assert payload["runtime_role"] == "web"
     assert payload["worker_script_supported"] is True
-    assert payload["request_path_cutover_enabled"] is False
-    assert payload["backend_specific_ceilings"]["fast_or_patent"] == 10
+    assert payload["request_path_cutover_enabled"] is True
+    assert payload["backend_specific_ceilings"]["fast_or_patent"] == 20
     assert payload["backend_specific_ceilings"]["thinking"] == 5
+    assert payload["per_user_max_active"] == 5
+    assert payload["thinking_min_slots"] == 1
+    assert payload["queue_max_size"] == 200
     assert payload["queue_metrics"]["backlog"] == 0
     assert payload["slot_metrics"]["active_leases"] == 0
     assert payload["shared_state_ready"] is True
@@ -267,6 +278,62 @@ def test_dispatcher_claim_next_request_marks_record_admitted_and_creates_lease()
     assert slot_store.describe()["active_leases"] == 1
 
 
+def test_claim_request_enforces_capacity_atomically_under_concurrent_workers():
+    queue_store = _memory_queue_store()
+    slot_store = _memory_slot_store()
+    settings = _settings_with_admission_overrides(
+        max_concurrent=1,
+        fast_or_patent_max_concurrent=1,
+        thinking_max_concurrent=1,
+    )
+    queue_store.put_request(
+        _queued_record("req_atomic_1", actual_mode="fast", enqueued_at="2026-03-30T10:00:00+00:00"),
+        ttl_seconds=900,
+    )
+    queue_store.put_request(
+        _queued_record("req_atomic_2", actual_mode="fast", enqueued_at="2026-03-30T10:00:01+00:00"),
+        ttl_seconds=900,
+    )
+    dispatcher = ExecutionAdmissionDispatcher(
+        settings=settings,
+        queue_status_store=queue_store,
+        slot_lease_store=slot_store,
+    )
+    original_acquire = slot_store.acquire
+    barrier = threading.Barrier(2)
+
+    def delayed_acquire(**kwargs):
+        try:
+            barrier.wait(timeout=1)
+        except threading.BrokenBarrierError:
+            pass
+        return original_acquire(**kwargs)
+
+    slot_store.acquire = delayed_acquire  # type: ignore[method-assign]
+    results: dict[str, object] = {}
+
+    def run_claim(request_id: str, owner_id: str):
+        results[request_id] = dispatcher.claim_request(
+            request_id,
+            owner_id=owner_id,
+            admitted_at="2026-03-30T10:01:00+00:00",
+            lease_ttl_seconds=30,
+        )
+
+    thread_1 = threading.Thread(target=run_claim, args=("req_atomic_1", "worker-a"), daemon=True)
+    thread_2 = threading.Thread(target=run_claim, args=("req_atomic_2", "worker-b"), daemon=True)
+    thread_1.start()
+    thread_2.start()
+    thread_1.join(timeout=5)
+    thread_2.join(timeout=5)
+
+    assert not thread_1.is_alive()
+    assert not thread_2.is_alive()
+    outcomes = sorted(result.outcome for result in results.values())
+    assert outcomes == ["capacity_exhausted", "claimed"]
+    assert slot_store.describe()["active_leases"] == 1
+
+
 def test_dispatcher_respects_capacity_limits_before_claiming():
     queue_store = _memory_queue_store()
     slot_store = _memory_slot_store()
@@ -281,33 +348,10 @@ def test_dispatcher_respects_capacity_limits_before_claiming():
         ttl_seconds=30,
         acquired_at="2026-03-30T10:00:00+00:00",
     )
-    monkeypatch_settings = GatewaySettings.from_env()
-    monkeypatch_settings = GatewaySettings(
-        app_name=monkeypatch_settings.app_name,
-        environment=monkeypatch_settings.environment,
-        debug=monkeypatch_settings.debug,
-        host=monkeypatch_settings.host,
-        port=monkeypatch_settings.port,
-        request_timeout_seconds=monkeypatch_settings.request_timeout_seconds,
-        sse_timeout_seconds=monkeypatch_settings.sse_timeout_seconds,
-        conversation_file_provider=monkeypatch_settings.conversation_file_provider,
-        endpoints=monkeypatch_settings.endpoints,
-        redis=monkeypatch_settings.redis,
-        admission=type(monkeypatch_settings.admission)(
-            enabled=monkeypatch_settings.admission.enabled,
-            runtime_role=monkeypatch_settings.admission.runtime_role,
-            dispatcher_enabled=monkeypatch_settings.admission.dispatcher_enabled,
-            control_api_token=monkeypatch_settings.admission.control_api_token,
-            poll_interval_seconds=monkeypatch_settings.admission.poll_interval_seconds,
-            max_concurrent=10,
-            fast_or_patent_max_concurrent=10,
-            thinking_max_concurrent=1,
-            queued_ttl_seconds=monkeypatch_settings.admission.queued_ttl_seconds,
-            post_admit_attach_ttl_seconds=monkeypatch_settings.admission.post_admit_attach_ttl_seconds,
-        ),
-        route_classifier=monkeypatch_settings.route_classifier,
-        strict_backend_config=monkeypatch_settings.strict_backend_config,
-        backend_config_warnings=monkeypatch_settings.backend_config_warnings,
+    monkeypatch_settings = _settings_with_admission_overrides(
+        max_concurrent=10,
+        fast_or_patent_max_concurrent=10,
+        thinking_max_concurrent=1,
     )
     dispatcher = ExecutionAdmissionDispatcher(
         settings=monkeypatch_settings,
@@ -343,33 +387,10 @@ def test_dispatcher_skips_capacity_blocked_starved_thinking_and_claims_fast():
         ttl_seconds=30,
         acquired_at="2026-03-30T10:00:00+00:00",
     )
-    base = GatewaySettings.from_env()
-    settings = GatewaySettings(
-        app_name=base.app_name,
-        environment=base.environment,
-        debug=base.debug,
-        host=base.host,
-        port=base.port,
-        request_timeout_seconds=base.request_timeout_seconds,
-        sse_timeout_seconds=base.sse_timeout_seconds,
-        conversation_file_provider=base.conversation_file_provider,
-        endpoints=base.endpoints,
-        redis=base.redis,
-        admission=type(base.admission)(
-            enabled=base.admission.enabled,
-            runtime_role=base.admission.runtime_role,
-            dispatcher_enabled=base.admission.dispatcher_enabled,
-            control_api_token=base.admission.control_api_token,
-            poll_interval_seconds=base.admission.poll_interval_seconds,
-            max_concurrent=10,
-            fast_or_patent_max_concurrent=10,
-            thinking_max_concurrent=1,
-            queued_ttl_seconds=base.admission.queued_ttl_seconds,
-            post_admit_attach_ttl_seconds=base.admission.post_admit_attach_ttl_seconds,
-        ),
-        route_classifier=base.route_classifier,
-        strict_backend_config=base.strict_backend_config,
-        backend_config_warnings=base.backend_config_warnings,
+    settings = _settings_with_admission_overrides(
+        max_concurrent=10,
+        fast_or_patent_max_concurrent=10,
+        thinking_max_concurrent=1,
     )
     dispatcher = ExecutionAdmissionDispatcher(
         settings=settings,
@@ -388,6 +409,47 @@ def test_dispatcher_skips_capacity_blocked_starved_thinking_and_claims_fast():
     assert result.outcome == "claimed"
     assert result.request_id == "fast_new"
     assert queue_store.get_request("think_old")["status"] == "queued"
+
+
+def test_dispatcher_reserves_thinking_min_slot_before_high_tier_when_none_active():
+    queue_store = _memory_queue_store()
+    slot_store = _memory_slot_store()
+    queue_store.put_request(
+        _queued_record("think_first", actual_mode="thinking", enqueued_at="2026-03-30T10:00:00+00:00"),
+        ttl_seconds=900,
+    )
+    queue_store.put_request(
+        _queued_record("fast_second", actual_mode="fast", enqueued_at="2026-03-30T10:00:01+00:00"),
+        ttl_seconds=900,
+    )
+    slot_store.acquire(
+        request_id="req_existing_fast",
+        capacity_key="fast_or_patent",
+        owner_id="worker-z",
+        ttl_seconds=30,
+        acquired_at="2026-03-30T10:00:00+00:00",
+    )
+    settings = _settings_with_admission_overrides(
+        max_concurrent=2,
+        fast_or_patent_max_concurrent=20,
+        thinking_max_concurrent=5,
+        thinking_min_slots=1,
+    )
+    dispatcher = ExecutionAdmissionDispatcher(
+        settings=settings,
+        queue_status_store=queue_store,
+        slot_lease_store=slot_store,
+        thinking_starvation_seconds=300,
+    )
+
+    result = dispatcher.claim_next_request(
+        owner_id="worker-a",
+        admitted_at="2026-03-30T10:00:05+00:00",
+        lease_ttl_seconds=30,
+    )
+
+    assert result.outcome == "claimed"
+    assert result.request_id == "think_first"
 
 
 def test_dispatcher_fails_patent_request_when_readiness_checker_rejects():

@@ -6,10 +6,32 @@ import { fileURLToPath } from 'node:url'
 
 const currentDir = dirname(fileURLToPath(import.meta.url))
 const source = readFileSync(join(currentDir, 'api.js'), 'utf8')
+const chatStoreSource = readFileSync(join(currentDir, '..', 'stores', 'chatStore.js'), 'utf8')
 
 test('api normalizeMessage keeps rich reference fields instead of shrinking to doi/title only', () => {
   assert.match(source, /return\s*\{\s*\.\.\.ref,/)
   assert.match(source, /metadata\.reference_objects/)
+})
+
+test('api reads refresh-survivable task rollout flag and keeps legacy ask_stream path available', () => {
+  assert.match(source, /VITE_REFRESH_SURVIVABLE_QA_TASKS_ENABLED/)
+  assert.match(source, /const askPath = \['fast', 'thinking', 'patent'\]\.includes\(normalizedMode\)\s*\? `\$\{V1\}\/\$\{normalizedMode\}\/ask_stream`/s)
+})
+
+test('api exposes task endpoints behind the refresh-survivable QA task rollout surface', () => {
+  assert.match(source, /refreshSurvivableQATasksEnabled:/)
+  assert.match(source, /async createTask\(question, chatHistory = \[\], conversationId = null, pdfContext = null, mode = 'thinking'\)/)
+  assert.match(source, /requestJson\(`\$\{API_BASE\}\$\{V1\}\/v1\/tasks`/)
+  assert.match(source, /async getTask\(taskId\)/)
+  assert.match(source, /async streamTaskEvents\(taskId, afterSeq = 0, options = \{\}\)/)
+  assert.match(source, /Accept:\s*'text\/event-stream'/)
+  assert.match(source, /await streamSseJson\(\{ response, onEvent \}\)/)
+  assert.match(source, /async getTaskEvents\(taskId, afterSeq = 0\)/)
+  assert.match(source, /async cancelTask\(taskId\)/)
+})
+
+test('chatStore tracks the rollout flag for later task-path cutover work', () => {
+  assert.match(chatStoreSource, /refreshSurvivableQATasksEnabled/)
 })
 
 test('api exposes document-level translation for the PdfReader full-document tab', () => {

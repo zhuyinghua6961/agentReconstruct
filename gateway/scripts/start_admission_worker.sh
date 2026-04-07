@@ -62,6 +62,7 @@ fi
 
 : > "$STARTUP_LOG_FILE"
 
+cd "$PROJECT_ROOT"
 nohup conda run --no-capture-output -n agent python -m app.services.execution_admission >"$STARTUP_LOG_FILE" 2>&1 &
 
 LAUNCHER_PID=$!

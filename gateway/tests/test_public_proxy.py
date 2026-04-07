@@ -1,9 +1,38 @@
 import httpx
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from app.integrations.redis.service import RedisService
 from app.main import app
 from app.routers.public_proxy import router as public_proxy_router
+from app.services import execution_queue_status as queue_status_module
+from app.services.execution_event_relay import ExecutionEventRelayStore
+from app.services.execution_queue_status import ExecutionQueueStatusStore
+from app.services.execution_slot_leases import ExecutionSlotLeaseStore
+
+
+@pytest.fixture(autouse=True)
+def _fresh_public_proxy_task_state():
+    previous_queue = app.state.execution_queue_status_store
+    previous_relay = app.state.execution_event_relay_store
+    previous_slot_leases = app.state.execution_slot_lease_store
+    app.state.execution_queue_status_store = ExecutionQueueStatusStore(
+        redis_service=RedisService.from_prefix(client=None, key_prefix="gateway")
+    )
+    app.state.execution_event_relay_store = ExecutionEventRelayStore(
+        redis_service=RedisService.from_prefix(client=None, key_prefix="gateway")
+    )
+    app.state.execution_slot_lease_store = ExecutionSlotLeaseStore(
+        redis_service=RedisService.from_prefix(client=None, key_prefix="gateway")
+    )
+    try:
+        yield
+    finally:
+        app.state.execution_queue_status_store = previous_queue
+        app.state.execution_event_relay_store = previous_relay
+        app.state.execution_slot_lease_store = previous_slot_leases
+        app.state.proxy_service.set_transport(None)
 
 
 class _TransportGuard:
@@ -12,10 +41,14 @@ class _TransportGuard:
 
     def __enter__(self):
         app.state.proxy_service.set_transport(self._transport)
+        app.state.conversation_persistence_service.set_transport(self._transport)
+        app.state.quota_proxy_service.set_transport(self._transport)
         return self
 
     def __exit__(self, exc_type, exc, tb):
         app.state.proxy_service.set_transport(None)
+        app.state.conversation_persistence_service.set_transport(None)
+        app.state.quota_proxy_service.set_transport(None)
         return False
 
 
@@ -44,6 +77,359 @@ def test_public_proxy_forwards_json_to_public_backend():
     assert response.status_code == 200
     assert response.json()["source"] == "public"
     assert response.headers["x-gateway-backend"] == "public"
+
+
+@pytest.mark.parametrize("path", ["/api/conversations", "/api/v1/conversations"])
+def test_public_proxy_enriches_conversation_list_with_live_active_task(path: str):
+    app.state.execution_queue_status_store.put_request(
+        {
+            "request_id": "task_list_live",
+            "status": "queued",
+            "conversation_id": 12,
+            "assistant_message_id": "msg_list_live",
+            "requested_mode": "thinking",
+            "actual_mode": "thinking",
+            "route": "thinking_qa",
+            "queue_tier": "low",
+            "created_at": "2026-04-06T10:00:00+00:00",
+            "updated_at": "2026-04-06T10:00:00+00:00",
+            "enqueued_at": "2026-04-06T10:00:00+00:00",
+            "expires_at": "2026-04-06T10:15:00+00:00",
+            "cancel_allowed": True,
+            "user_id": 42,
+        },
+        ttl_seconds=900,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == path
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": {
+                    "conversations": [
+                        {
+                            "conversation_id": 12,
+                            "user_id": 42,
+                            "title": "queued",
+                            "message_count": 2,
+                            "created_at": "2026-04-06T09:00:00+00:00",
+                            "updated_at": "2026-04-06T09:30:00+00:00",
+                        },
+                        {
+                            "conversation_id": 13,
+                            "user_id": 42,
+                            "title": "idle",
+                            "message_count": 1,
+                            "created_at": "2026-04-06T09:00:00+00:00",
+                            "updated_at": "2026-04-06T09:30:00+00:00",
+                        },
+                    ],
+                    "total_count": 2,
+                    "page": 1,
+                    "page_size": 20,
+                },
+            },
+        )
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        response = client.get(path, headers={"Authorization": "Bearer demo"})
+
+    assert response.status_code == 200
+    conversations = response.json()["data"]["conversations"]
+    assert conversations[0]["active_task"]["task_id"] == "task_list_live"
+    assert conversations[0]["active_task"]["status"] == "queued"
+    assert conversations[1]["active_task"] is None
+
+
+@pytest.mark.parametrize("path", ["/api/conversations/12", "/api/v1/conversations/12"])
+def test_public_proxy_enriches_conversation_detail_with_live_active_task(path: str):
+    app.state.execution_queue_status_store.put_request(
+        {
+            "request_id": "task_detail_live",
+            "status": "running",
+            "conversation_id": 12,
+            "assistant_message_id": "msg_detail_live",
+            "requested_mode": "fast",
+            "actual_mode": "fast",
+            "route": "kb_qa",
+            "queue_tier": "high",
+            "created_at": "2026-04-06T10:00:00+00:00",
+            "updated_at": "2026-04-06T10:01:00+00:00",
+            "enqueued_at": "2026-04-06T10:00:00+00:00",
+            "admitted_at": "2026-04-06T10:00:10+00:00",
+            "started_at": "2026-04-06T10:00:20+00:00",
+            "expires_at": "2026-04-06T10:15:00+00:00",
+            "cancel_allowed": True,
+            "user_id": 42,
+        },
+        ttl_seconds=900,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == path
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": {
+                    "conversation_id": 12,
+                    "user_id": 42,
+                    "title": "detail",
+                    "message_count": 2,
+                    "created_at": "2026-04-06T09:00:00+00:00",
+                    "updated_at": "2026-04-06T09:30:00+00:00",
+                    "messages": [],
+                    "uploaded_files": [],
+                    "uploaded_files_all": [],
+                    "pdf_files": [],
+                    "excel_files": [],
+                },
+            },
+        )
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        response = client.get(path, headers={"Authorization": "Bearer demo"})
+
+    assert response.status_code == 200
+    active_task = response.json()["data"]["active_task"]
+    assert active_task["task_id"] == "task_detail_live"
+    assert active_task["status"] == "running"
+    assert active_task["assistant_message_id"] == "msg_detail_live"
+
+
+def test_public_proxy_detail_read_reconciles_expired_task_before_fetching_detail():
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(queue_status_module.time, "time", lambda: 1000.0)
+        app.state.execution_queue_status_store.put_request(
+            {
+                "request_id": "task_expired_detail",
+                "status": "queued",
+                "conversation_id": 12,
+                "assistant_message_id": "msg_expired_detail",
+                "requested_mode": "fast",
+                "actual_mode": "fast",
+                "route": "kb_qa",
+                "queue_tier": "high",
+                "created_at": "2026-04-06T10:00:00+00:00",
+                "updated_at": "2026-04-06T10:00:00+00:00",
+                "enqueued_at": "2026-04-06T10:00:00+00:00",
+                "expires_at": "2026-04-06T10:15:00+00:00",
+                "cancel_allowed": True,
+                "user_id": 42,
+                "quota_grant_id": "grant-expired-detail",
+            },
+            ttl_seconds=10,
+        )
+        monkeypatch.setattr(queue_status_module.time, "time", lambda: 1011.0)
+        state = {
+            "messages": [
+                {"message_id": "m_user", "role": "user", "content": "hello"},
+                {
+                    "message_id": "msg_expired_detail",
+                    "role": "assistant",
+                    "content": "",
+                    "status": "queued",
+                    "metadata": {"task_id": "task_expired_detail", "task_status": "queued"},
+                },
+            ],
+            "active_task_id": "task_expired_detail",
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/internal/conversations/12/tasks/task_expired_detail/assistant-terminal":
+                state["messages"][1]["status"] = "expired"
+                state["messages"][1]["metadata"] = {
+                    **state["messages"][1]["metadata"],
+                    "task_status": "expired",
+                    "terminal_status": "expired",
+                }
+                state["active_task_id"] = None
+                return httpx.Response(200, json={"success": True, "status": "expired"})
+            if request.url.path == "/internal/quota/grants/grant-expired-detail/finalize":
+                return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-expired-detail", "counted": False, "idempotent": False}})
+            if request.url.path == "/api/conversations/12":
+                return httpx.Response(
+                    200,
+                    json={
+                        "success": True,
+                        "data": {
+                            "conversation_id": 12,
+                            "user_id": 42,
+                            "title": "detail",
+                            "message_count": len(state["messages"]),
+                            "created_at": "2026-04-06T09:00:00+00:00",
+                            "updated_at": "2026-04-06T09:30:00+00:00",
+                            "messages": list(state["messages"]),
+                            "uploaded_files": [],
+                            "uploaded_files_all": [],
+                            "pdf_files": [],
+                            "excel_files": [],
+                        },
+                    },
+                )
+            raise AssertionError(f"unexpected path: {request.url.path}")
+
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            response = client.get("/api/conversations/12", headers={"Authorization": "Bearer demo"})
+
+        assert response.status_code == 200
+        payload = response.json()["data"]
+        assert payload["active_task"] is None
+        assert payload["messages"][1]["status"] == "expired"
+        stored = app.state.execution_queue_status_store.get_request("task_expired_detail")
+        assert stored is not None
+        assert stored["status"] == "expired"
+        assert stored["terminal_sync_pending"] is False
+    finally:
+        monkeypatch.undo()
+
+
+@pytest.mark.parametrize(
+    ("path", "task_status", "expected_active_task"),
+    [
+        ("/api/conversations", "completed", None),
+        ("/api/v1/conversations/12", "failed", None),
+    ],
+)
+def test_public_proxy_sets_active_task_null_when_no_live_task(path: str, task_status: str, expected_active_task):
+    app.state.execution_queue_status_store.put_request(
+        {
+            "request_id": "task_not_live",
+            "status": task_status,
+            "conversation_id": 12,
+            "assistant_message_id": "msg_not_live",
+            "requested_mode": "fast",
+            "actual_mode": "fast",
+            "route": "kb_qa",
+            "queue_tier": "high",
+            "created_at": "2026-04-06T10:00:00+00:00",
+            "updated_at": "2026-04-06T10:05:00+00:00",
+            "enqueued_at": "2026-04-06T10:00:00+00:00",
+            "expires_at": "2026-04-06T10:15:00+00:00",
+            "cancel_allowed": False,
+            "user_id": 42,
+        },
+        ttl_seconds=900,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if path.endswith("/12"):
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": {
+                        "conversation_id": 12,
+                        "user_id": 42,
+                        "title": "detail",
+                        "message_count": 0,
+                        "created_at": "2026-04-06T09:00:00+00:00",
+                        "updated_at": "2026-04-06T09:30:00+00:00",
+                        "messages": [],
+                        "uploaded_files": [],
+                        "uploaded_files_all": [],
+                        "pdf_files": [],
+                        "excel_files": [],
+                    },
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": {
+                    "conversations": [
+                        {
+                            "conversation_id": 12,
+                            "user_id": 42,
+                            "title": "done",
+                            "message_count": 1,
+                            "created_at": "2026-04-06T09:00:00+00:00",
+                            "updated_at": "2026-04-06T09:30:00+00:00",
+                        }
+                    ],
+                    "total_count": 1,
+                    "page": 1,
+                    "page_size": 20,
+                },
+            },
+        )
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        response = client.get(path, headers={"Authorization": "Bearer demo"})
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    if path.endswith("/12"):
+        assert data["active_task"] is expected_active_task
+    else:
+        assert data["conversations"][0]["active_task"] is expected_active_task
+
+
+def test_public_proxy_degrades_to_null_active_task_when_task_expires_during_enrichment(monkeypatch):
+    stale_record = {
+        "request_id": "task_race_vanished",
+        "status": "queued",
+        "conversation_id": 12,
+        "assistant_message_id": "msg_race_vanished",
+        "requested_mode": "fast",
+        "actual_mode": "fast",
+        "route": "kb_qa",
+        "queue_tier": "high",
+        "created_at": "2026-04-06T10:00:00+00:00",
+        "updated_at": "2026-04-06T10:00:00+00:00",
+        "enqueued_at": "2026-04-06T10:00:00+00:00",
+        "expires_at": "2026-04-06T10:15:00+00:00",
+        "cancel_allowed": True,
+        "user_id": 42,
+    }
+    monkeypatch.setattr(app.state.execution_queue_status_store, "list_requests", lambda status=None: [dict(stale_record)])
+
+    def _missing_summary(self, task_id: str):
+        assert task_id == "task_race_vanished"
+        raise HTTPException(status_code=404, detail="task_not_found")
+
+    monkeypatch.setattr("app.routers.public_proxy.QATaskService.build_task_summary", _missing_summary)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/conversations"
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": {
+                    "conversations": [
+                        {
+                            "conversation_id": 12,
+                            "user_id": 42,
+                            "title": "race",
+                            "message_count": 1,
+                            "created_at": "2026-04-06T09:00:00+00:00",
+                            "updated_at": "2026-04-06T09:30:00+00:00",
+                        }
+                    ],
+                    "total_count": 1,
+                    "page": 1,
+                    "page_size": 20,
+                },
+            },
+        )
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        response = client.get("/api/conversations", headers={"Authorization": "Bearer demo"})
+
+    assert response.status_code == 200
+    assert response.json()["data"]["conversations"][0]["active_task"] is None
 
 
 def test_public_proxy_accepts_x_request_id_and_forwards_canonical_trace_header():

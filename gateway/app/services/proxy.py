@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -61,6 +61,7 @@ class StreamingProxyHandle:
     headers: dict[str, str]
     upstream: httpx.Response
     client: httpx.AsyncClient
+    _abort_requested: bool = field(default=False, init=False, repr=False)
 
     async def body_iter(self) -> AsyncIterator[bytes]:
         try:
@@ -72,9 +73,53 @@ class StreamingProxyHandle:
             async for chunk in self.upstream.aiter_raw():
                 if chunk:
                     yield chunk
+        except Exception:
+            if self._abort_requested:
+                return
+            raise
         finally:
             await self.upstream.aclose()
             await self.client.aclose()
+
+    async def abort(self) -> None:
+        self._abort_requested = True
+        first_error: Exception | None = None
+        for stream in self._abort_stream_chain():
+            close_stream = getattr(stream, "aclose", None)
+            if not callable(close_stream):
+                continue
+            try:
+                await close_stream()
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+        for resource in (self.upstream, self.client):
+            try:
+                await resource.aclose()
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
+
+    def _abort_stream_chain(self) -> list[Any]:
+        chain: list[Any] = []
+        pending = [getattr(self.upstream, "stream", None), getattr(self.upstream, "_stream", None)]
+        seen: set[int] = set()
+        while pending:
+            stream = pending.pop()
+            if stream is None:
+                continue
+            marker = id(stream)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            chain.append(stream)
+            nested = getattr(stream, "_stream", None)
+            if nested is not None:
+                pending.append(nested)
+        chain.reverse()
+        return chain
 
 
 class ProxyService:

@@ -13,8 +13,15 @@ function resolveBackendBase() {
   return '';
 }
 
+function readFeatureFlag(name, defaultValue = false) {
+  const viteEnv = (typeof import.meta !== 'undefined' && import.meta?.env) ? import.meta.env : {};
+  const raw = String(viteEnv?.[name] ?? (defaultValue ? '1' : '0')).trim().toLowerCase();
+  return ['1', 'true', 'yes', 'on'].includes(raw);
+}
+
 const API_BASE = resolveBackendBase();
 const V1 = '/api';
+const REFRESH_SURVIVABLE_QA_TASKS_ENABLED = readFeatureFlag('VITE_REFRESH_SURVIVABLE_QA_TASKS_ENABLED', false);
 
 function readStoredToken() {
   return localStorage.getItem('token')
@@ -95,6 +102,7 @@ function normalizeConversationSummary(item) {
     message_count: Number(item?.message_count || 0),
     created_at: item?.created_at || new Date().toISOString(),
     updated_at: item?.updated_at || new Date().toISOString(),
+    active_task: item?.active_task && typeof item.active_task === 'object' ? { ...item.active_task } : null,
   };
 }
 
@@ -364,6 +372,8 @@ function asExcelList(files) {
 }
 
 export const api = {
+  refreshSurvivableQATasksEnabled: REFRESH_SURVIVABLE_QA_TASKS_ENABLED,
+
   // ==================== Conversation ====================
 
   async createConversation(_userId, title = '新对话') {
@@ -427,6 +437,7 @@ export const api = {
       uploaded_files: files,
       pdf_list: asPdfList(files),
       excel_list: asExcelList(files),
+      active_task: data?.active_task && typeof data.active_task === 'object' ? { ...data.active_task } : null,
     };
   },
 
@@ -604,6 +615,84 @@ export const api = {
         }
       }
     }
+  },
+
+  async createTask(question, chatHistory = [], conversationId = null, pdfContext = null, mode = 'thinking') {
+    const normalizedMode = String(mode || 'thinking').trim().toLowerCase();
+    const body = {
+      question,
+      chat_history: chatHistory.slice(-10),
+      requested_mode: ['fast', 'thinking', 'patent'].includes(normalizedMode) ? normalizedMode : 'fast',
+    };
+    if (conversationId) body.conversation_id = conversationId;
+    const userId = readStoredUserId();
+    if (userId) body.user_id = userId;
+    if (pdfContext) body.pdf_context = pdfContext;
+
+    return await requestJson(`${API_BASE}${V1}/v1/tasks`, {
+      method: 'POST',
+      headers: authHeaders(true),
+      body: JSON.stringify(body),
+    });
+  },
+
+  async getTask(taskId) {
+    return await requestJson(`${API_BASE}${V1}/v1/tasks/${encodeURIComponent(String(taskId || ''))}`, {
+      method: 'GET',
+      headers: authHeaders(false),
+    });
+  },
+
+  async streamTaskEvents(taskId, afterSeq = 0, options = {}) {
+    const onEvent = typeof options.onEvent === 'function' ? options.onEvent : () => {};
+    const response = await fetch(
+      `${API_BASE}${V1}/v1/tasks/${encodeURIComponent(String(taskId || ''))}/events?after_seq=${encodeURIComponent(afterSeq)}`,
+      {
+        method: 'GET',
+        headers: {
+          ...authHeaders(false),
+          Accept: 'text/event-stream',
+        },
+        signal: options.signal,
+      }
+    );
+
+    const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+    if (!response.ok && !contentType.includes('text/event-stream')) {
+      const payload = await response.json().catch(() => ({}));
+      handleApiError(payload, response);
+      const error = new Error(payload?.message || payload?.error || `HTTP ${response.status}`);
+      error.status = Number(response.status || 0);
+      error.code = payload?.code || '';
+      error.payload = payload;
+      throw error;
+    }
+
+    if (contentType.includes('application/json')) {
+      const payload = await response.json().catch(() => ({}));
+      const events = Array.isArray(payload?.events) ? payload.events : [];
+      events.forEach((event) => onEvent(event));
+      return;
+    }
+
+    await streamSseJson({ response, onEvent });
+  },
+
+  async getTaskEvents(taskId, afterSeq = 0) {
+    return await requestJson(
+      `${API_BASE}${V1}/v1/tasks/${encodeURIComponent(String(taskId || ''))}/events?after_seq=${encodeURIComponent(afterSeq)}`,
+      {
+        method: 'GET',
+        headers: authHeaders(false),
+      }
+    );
+  },
+
+  async cancelTask(taskId) {
+    return await requestJson(`${API_BASE}${V1}/v1/tasks/${encodeURIComponent(String(taskId || ''))}/cancel`, {
+      method: 'POST',
+      headers: authHeaders(false),
+    });
   },
 
   async ask(question, chatHistory = [], mode = 'thinking') {

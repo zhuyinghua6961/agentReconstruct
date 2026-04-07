@@ -44,8 +44,8 @@ class AuthorityRecentTurn(BaseModel):
     content: str
     created_at: datetime
     trace_id: str = Field(default="", description="Trace identifier for the final turn; execution traces themselves are excluded.")
-    status: Literal["done", "failed", "canceled"] = "done"
-    terminal_status: Literal["done", "failed", "canceled"] = "done"
+    status: Literal["queued", "admitted", "running", "done", "failed", "canceled", "expired"] = "done"
+    terminal_status: Literal["queued", "admitted", "running", "done", "failed", "canceled", "expired"] = "done"
     failure_stage: str | None = None
     failure_code: str | None = None
     failure_message: str | None = None

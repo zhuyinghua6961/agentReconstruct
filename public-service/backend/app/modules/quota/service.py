@@ -325,9 +325,9 @@ class QuotaService:
     @staticmethod
     def quota_grant_ttl_seconds() -> int:
         try:
-            return max(30, min(3600, int(str(os.getenv("QUOTA_GRANT_TTL_SECONDS", "60") or "60").strip())))
+            return max(30, min(3600, int(str(os.getenv("QUOTA_GRANT_TTL_SECONDS", "900") or "900").strip())))
         except Exception:
-            return 60
+            return 900
 
     def _repo_get_quota_config(self, quota_type: str) -> dict[str, Any] | None:
         redis_service = self._get_redis_service()

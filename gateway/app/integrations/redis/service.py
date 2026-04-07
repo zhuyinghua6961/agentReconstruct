@@ -210,6 +210,31 @@ class RedisService:
         except Exception:
             return False
 
+    def delete_if_json_matches(self, key: str, *, expected_value: Any) -> bool:
+        if self.client is None or not str(key or "").strip():
+            return False
+        expected_payload = json.dumps(expected_value, ensure_ascii=False, separators=(",", ":"))
+        try:
+            if not hasattr(self.client, "pipeline"):
+                current = self.client.get(str(key))
+                current_payload = "" if current in (None, "") else str(_decode_if_bytes(current))
+                if current_payload != expected_payload:
+                    return False
+                return bool(self.client.delete(str(key)))
+            with self.client.pipeline() as pipe:
+                pipe.watch(str(key))
+                current = pipe.get(str(key))
+                current_payload = "" if current in (None, "") else str(_decode_if_bytes(current))
+                if current_payload != expected_payload:
+                    pipe.unwatch()
+                    return False
+                pipe.multi()
+                pipe.delete(str(key))
+                pipe.execute()
+                return True
+        except Exception:
+            return False
+
     def delete(self, *keys: str) -> int:
         if self.client is None or not keys:
             return 0

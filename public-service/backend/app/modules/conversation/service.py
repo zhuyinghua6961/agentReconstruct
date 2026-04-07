@@ -59,6 +59,8 @@ class ConversationService:
         self._parse_status_set = {"uploaded", "parsing", "parsed", "failed"}
         self._index_status_set = {"pending", "indexing", "ready", "failed"}
         self._processing_stage_set = {"uploaded", "parsing", "parsed", "indexing", "ready", "failed"}
+        self._live_task_status_set = {"queued", "admitted", "running"}
+        self._terminal_task_status_set = {"done", "completed", "failed", "canceled", "expired"}
 
     def status_code_for(self, result: dict[str, Any], *, ok_status: int) -> int:
         if result.get("success"):
@@ -664,6 +666,7 @@ class ConversationService:
             rows.append(
                 {
                     "id": self._message_numeric_id(item, idx),
+                    "message_id": str(item.get("message_id") or f"m_{self._message_numeric_id(item, idx):06d}"),
                     "role": str(item.get("role") or "assistant"),
                     "content": str(item.get("content") or ""),
                     "metadata": metadata,
@@ -1120,35 +1123,45 @@ class ConversationService:
 
     def _normalize_terminal_status(self, value: Any, *, default: str = "done") -> str:
         status = str(value or "").strip().lower() or default
-        if status not in {"done", "failed", "canceled"}:
+        if status not in self._terminal_task_status_set.union(self._live_task_status_set):
             return default
         return status
 
     def _message_terminal_status(self, item: dict[str, Any]) -> str:
         metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
         return self._normalize_terminal_status(
-            item.get("status") or metadata.get("terminal_status"),
+            item.get("status") or metadata.get("task_status") or metadata.get("terminal_status"),
             default="done",
         )
 
+    def _is_completed_status(self, status: str) -> bool:
+        normalized = self._normalize_terminal_status(status, default="done")
+        return normalized in {"done", "completed"}
+
     def _terminal_status_rank(self, status: str) -> int:
         normalized = self._normalize_terminal_status(status, default="canceled")
-        if normalized == "done":
-            return 3
+        if normalized in {"done", "completed"}:
+            return 4
         if normalized == "failed":
+            return 3
+        if normalized == "canceled":
             return 2
+        if normalized == "expired":
+            return 1
+        if normalized in self._live_task_status_set:
+            return 0
         return 1
 
     def _terminal_failure_metadata(self, *, terminal_status: str, terminal_event: dict[str, Any]) -> dict[str, Any]:
-        if terminal_status == "done":
+        if self._is_completed_status(terminal_status):
             return {}
         failure = terminal_event.get("failure") if isinstance(terminal_event.get("failure"), dict) else {}
         failure_stage = str(failure.get("stage") or "").strip() or "unknown"
         failure_code = str(failure.get("code") or "").strip()
-        default_message = "已取消" if terminal_status == "canceled" else "处理失败"
+        default_message = "已过期" if terminal_status == "expired" else ("已取消" if terminal_status == "canceled" else "处理失败")
         failure_message = str(failure.get("message") or "").strip() or default_message
         retriable_raw = failure.get("retriable")
-        retriable = False if terminal_status == "canceled" else bool(retriable_raw)
+        retriable = False if terminal_status in {"canceled", "expired"} else bool(retriable_raw)
         return {
             "failure_stage": failure_stage,
             "failure_code": failure_code,
@@ -1190,7 +1203,7 @@ class ConversationService:
                 continue
             role = str(item.get("role") or "").strip().lower()
             status = self._normalize_terminal_status(item.get("status"), default="done")
-            if role == "assistant" and status != "done":
+            if role == "assistant" and not self._is_completed_status(status):
                 continue
             summary_turns.append(item)
         return build_authority_summary(recent_turns=summary_turns)
@@ -1518,6 +1531,481 @@ class ConversationService:
         except Exception as exc:
             return {"success": False, "error": str(exc), "code": "AUTHORITY_USER_WRITE_ERROR"}
 
+    def _find_task_placeholder(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        task_id: str,
+    ) -> dict[str, Any] | None:
+        lookup = str(task_id or "").strip()
+        if not lookup:
+            return None
+        for item in messages:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("role") or "").strip().lower() != "assistant":
+                continue
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            if str(metadata.get("task_id") or "").strip() == lookup:
+                return item
+        return None
+
+    def _replace_message(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        message_id: str,
+        next_message: dict[str, Any],
+    ) -> None:
+        lookup = str(message_id or "").strip()
+        for index, item in enumerate(messages):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("message_id") or "").strip() == lookup:
+                messages[index] = next_message
+                return
+
+    def _task_mutation_response(self, *, conversation_id: int, task_id: str, assistant_message: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "success": True,
+            "conversation_id": int(conversation_id),
+            "task_id": str(task_id or "").strip(),
+            "assistant_message_id": str(assistant_message.get("message_id") or ""),
+            "status": self._message_terminal_status(assistant_message),
+        }
+
+    def rollback_authority_task_creation(
+        self,
+        *,
+        user_id: int,
+        conversation_id: int,
+        task_id: str,
+        user_message_id: str = "",
+        assistant_message_id: str = "",
+        preserve_user_message: bool = False,
+    ) -> dict[str, Any]:
+        lookup_task_id = str(task_id or "").strip()
+        lookup_user_message_id = str(user_message_id or "").strip()
+        lookup_assistant_message_id = str(assistant_message_id or "").strip()
+        expected_user_idempotency_key = f"{conversation_id}:{lookup_task_id}:user"
+        try:
+            row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id)
+            if not row:
+                return {"success": False, "error": "conversation_not_found", "code": "NOT_FOUND"}
+            removed_count = 0
+            with self._json_store.conversation_lock(user_id=user_id, conversation_id=conversation_id):
+                row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id) or row
+                document, _ = self._load_or_bootstrap_document(
+                    row=row,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    prefer_cached_detail=False,
+                )
+                messages = document.get("messages") if isinstance(document.get("messages"), list) else []
+                retained_messages: list[dict[str, Any]] = []
+                for message in messages:
+                    if not isinstance(message, dict):
+                        retained_messages.append(message)
+                        continue
+                    role = str(message.get("role") or "").strip().lower()
+                    message_id = str(message.get("message_id") or "").strip()
+                    metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+                    if role == "assistant":
+                        bound_task_id = str(metadata.get("task_id") or "").strip()
+                        if message_id == lookup_assistant_message_id or (lookup_task_id and bound_task_id == lookup_task_id):
+                            removed_count += 1
+                            continue
+                    if role == "user":
+                        idempotency_key = str(metadata.get("idempotency_key") or "").strip()
+                        trace_id = str(metadata.get("trace_id") or "").strip()
+                        if (
+                            not preserve_user_message
+                            and (
+                                message_id == lookup_user_message_id
+                                or idempotency_key == expected_user_idempotency_key
+                                or (lookup_task_id and trace_id == lookup_task_id)
+                            )
+                        ):
+                            removed_count += 1
+                            continue
+                    retained_messages.append(message)
+                document["messages"] = retained_messages
+                meta = document.get("meta") if isinstance(document.get("meta"), dict) else {}
+                if str(meta.get("active_task_id") or "").strip() == lookup_task_id:
+                    meta.pop("active_task_id", None)
+                meta["updated_at"] = self._now_iso()
+                meta["message_count"] = len(retained_messages)
+                document["meta"] = meta
+                self._persist_task_runtime_document(
+                    row=row,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    document=document,
+                )
+            return {
+                "success": True,
+                "conversation_id": int(conversation_id),
+                "task_id": lookup_task_id,
+                "removed_count": int(removed_count),
+            }
+        except DatabaseUnavailableError as exc:
+            return {"success": False, "error": exc.message, "code": exc.code}
+        except Exception as exc:
+            return {"success": False, "error": str(exc), "code": "AUTHORITY_TASK_CREATE_ROLLBACK_ERROR"}
+
+    def get_authority_task_binding(
+        self,
+        *,
+        user_id: int,
+        conversation_id: int,
+        task_id: str,
+    ) -> dict[str, Any] | None:
+        row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id)
+        if not row:
+            return None
+        try:
+            document, _ = self._load_or_bootstrap_document(
+                row=row,
+                conversation_id=conversation_id,
+                user_id=user_id,
+                prefer_cached_detail=False,
+            )
+        except Exception:
+            return None
+        messages = document.get("messages") if isinstance(document.get("messages"), list) else []
+        placeholder = self._find_task_placeholder(messages=messages, task_id=task_id)
+        if not isinstance(placeholder, dict):
+            return None
+        metadata = placeholder.get("metadata") if isinstance(placeholder.get("metadata"), dict) else {}
+        return {
+            "source_service": str(metadata.get("source_service") or "").strip(),
+            "requested_mode": str(metadata.get("requested_mode") or "").strip(),
+            "actual_mode": str(metadata.get("actual_mode") or "").strip(),
+        }
+
+    def _persist_task_runtime_document(
+        self,
+        *,
+        row: dict[str, Any],
+        user_id: int,
+        conversation_id: int,
+        document: dict[str, Any],
+    ) -> None:
+        self._persist_document_and_index(
+            row=row,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            document=document,
+        )
+        self._repo.set_message_count(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            message_count=len(document.get("messages") or []),
+            touch_updated_at=False,
+        )
+        row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id) or row
+        self._refresh_detail_cache(
+            row=row,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            document=document,
+        )
+        self._refresh_primary_list_cache(user_id=user_id)
+
+    def start_authority_task_assistant(
+        self,
+        *,
+        user_id: int,
+        conversation_id: int,
+        task_id: str,
+        trace_id: str,
+        source_service: str,
+        route: str,
+        requested_mode: str,
+        actual_mode: str,
+        status: str,
+        last_seq: int = 0,
+    ) -> dict[str, Any]:
+        live_status = self._normalize_terminal_status(status, default="queued")
+        if live_status not in self._live_task_status_set:
+            return {"success": False, "error": "invalid_task_status", "code": "VALIDATION_ERROR"}
+        try:
+            row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id)
+            if not row:
+                return {"success": False, "error": "conversation_not_found", "code": "NOT_FOUND"}
+            with self._json_store.conversation_lock(user_id=user_id, conversation_id=conversation_id):
+                row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id) or row
+                document, _ = self._load_or_bootstrap_document(
+                    row=row,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    prefer_cached_detail=False,
+                )
+                messages = document.get("messages") if isinstance(document.get("messages"), list) else []
+                existing = self._find_task_placeholder(messages=messages, task_id=task_id)
+                now_iso = self._now_iso()
+                if isinstance(existing, dict):
+                    assistant_message = dict(existing)
+                else:
+                    assistant_message = {
+                        "message_id": self._next_message_id(messages),
+                        "role": "assistant",
+                        "content": "",
+                        "created_at": now_iso,
+                        "status": live_status,
+                        "metadata": {
+                            "task_id": str(task_id or "").strip(),
+                            "task_status": live_status,
+                            "trace_id": str(trace_id or "").strip(),
+                            "source_service": str(source_service or "").strip(),
+                            "route": str(route or "").strip(),
+                            "requested_mode": str(requested_mode or "").strip(),
+                            "actual_mode": str(actual_mode or "").strip(),
+                            "last_seq": max(0, int(last_seq)),
+                            "steps": [],
+                        },
+                    }
+                    messages.append(assistant_message)
+                metadata = assistant_message.get("metadata") if isinstance(assistant_message.get("metadata"), dict) else {}
+                current_status = self._message_terminal_status(assistant_message)
+                current_last_seq = max(0, self._safe_int(metadata.get("last_seq"), default=0))
+                if current_status in {"completed", "failed", "canceled", "expired"}:
+                    document["messages"] = messages
+                    meta = document.get("meta") if isinstance(document.get("meta"), dict) else {}
+                    if current_status in self._live_task_status_set:
+                        meta["active_task_id"] = str(task_id or "").strip()
+                    elif str(meta.get("active_task_id") or "").strip() == str(task_id or "").strip():
+                        meta.pop("active_task_id", None)
+                    meta["updated_at"] = now_iso
+                    meta["message_count"] = len(messages)
+                    document["meta"] = meta
+                    self._persist_task_runtime_document(
+                        row=row,
+                        user_id=user_id,
+                        conversation_id=conversation_id,
+                        document=document,
+                    )
+                    return {
+                        "success": True,
+                        "conversation_id": int(conversation_id),
+                        "task_id": str(task_id or "").strip(),
+                        "assistant_message_id": str(assistant_message.get("message_id") or ""),
+                        "status": current_status,
+                    }
+                metadata["task_id"] = str(task_id or "").strip()
+                metadata["trace_id"] = str(trace_id or "").strip()
+                metadata["source_service"] = str(source_service or "").strip()
+                metadata["route"] = str(route or "").strip()
+                metadata["requested_mode"] = str(requested_mode or "").strip()
+                metadata["actual_mode"] = str(actual_mode or "").strip()
+                metadata["task_status"] = current_status if current_status in self._live_task_status_set and self._terminal_status_rank(current_status) >= self._terminal_status_rank(live_status) else live_status
+                metadata["last_seq"] = max(current_last_seq, max(0, int(last_seq)))
+                assistant_message["status"] = str(metadata.get("task_status") or live_status)
+                assistant_message["metadata"] = metadata
+                self._replace_message(
+                    messages=messages,
+                    message_id=str(assistant_message.get("message_id") or ""),
+                    next_message=assistant_message,
+                )
+                document["messages"] = messages
+                meta = document.get("meta") if isinstance(document.get("meta"), dict) else {}
+                meta["active_task_id"] = str(task_id or "").strip()
+                meta["updated_at"] = now_iso
+                meta["message_count"] = len(messages)
+                document["meta"] = meta
+                self._persist_task_runtime_document(
+                    row=row,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    document=document,
+                )
+            return {
+                "success": True,
+                "conversation_id": int(conversation_id),
+                "task_id": str(task_id or "").strip(),
+                "assistant_message_id": str(assistant_message.get("message_id") or ""),
+                "status": str(assistant_message.get("status") or live_status),
+            }
+        except DatabaseUnavailableError as exc:
+            return {"success": False, "error": exc.message, "code": exc.code}
+        except Exception as exc:
+            return {"success": False, "error": str(exc), "code": "AUTHORITY_TASK_START_ERROR"}
+
+    def progress_authority_task_assistant(
+        self,
+        *,
+        user_id: int,
+        conversation_id: int,
+        task_id: str,
+        status: str,
+        content_delta: str,
+        steps: list[dict[str, Any]] | None,
+        last_seq: int,
+    ) -> dict[str, Any]:
+        live_status = self._normalize_terminal_status(status, default="running")
+        if live_status not in self._live_task_status_set:
+            return {"success": False, "error": "invalid_task_status", "code": "VALIDATION_ERROR"}
+        try:
+            row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id)
+            if not row:
+                return {"success": False, "error": "conversation_not_found", "code": "NOT_FOUND"}
+            with self._json_store.conversation_lock(user_id=user_id, conversation_id=conversation_id):
+                row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id) or row
+                document, _ = self._load_or_bootstrap_document(
+                    row=row,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    prefer_cached_detail=False,
+                )
+                messages = document.get("messages") if isinstance(document.get("messages"), list) else []
+                assistant_message = self._find_task_placeholder(messages=messages, task_id=task_id)
+                if not isinstance(assistant_message, dict):
+                    return {"success": False, "error": "task_placeholder_not_found", "code": "NOT_FOUND"}
+                current_status = self._message_terminal_status(assistant_message)
+                if current_status in {"completed", "failed", "canceled", "expired"}:
+                    return self._task_mutation_response(
+                        conversation_id=conversation_id,
+                        task_id=task_id,
+                        assistant_message=assistant_message,
+                    )
+                updated = dict(assistant_message)
+                metadata = updated.get("metadata") if isinstance(updated.get("metadata"), dict) else {}
+                current_last_seq = max(0, self._safe_int(metadata.get("last_seq"), default=0))
+                if int(last_seq) <= current_last_seq:
+                    return self._task_mutation_response(
+                        conversation_id=conversation_id,
+                        task_id=task_id,
+                        assistant_message=assistant_message,
+                    )
+                delta = str(content_delta or "")
+                if delta:
+                    updated["content"] = f"{str(updated.get('content') or '')}{delta}"
+                metadata["task_id"] = str(task_id or "").strip()
+                metadata["task_status"] = live_status
+                metadata["last_seq"] = max(0, int(last_seq))
+                if steps is not None:
+                    metadata["steps"] = list(steps)
+                updated["status"] = live_status
+                updated["metadata"] = metadata
+                self._replace_message(
+                    messages=messages,
+                    message_id=str(updated.get("message_id") or ""),
+                    next_message=updated,
+                )
+                document["messages"] = messages
+                meta = document.get("meta") if isinstance(document.get("meta"), dict) else {}
+                meta["active_task_id"] = str(task_id or "").strip()
+                meta["updated_at"] = self._now_iso()
+                meta["message_count"] = len(messages)
+                document["meta"] = meta
+                self._persist_task_runtime_document(
+                    row=row,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    document=document,
+                )
+            return self._task_mutation_response(
+                conversation_id=conversation_id,
+                task_id=task_id,
+                assistant_message=updated,
+            )
+        except DatabaseUnavailableError as exc:
+            return {"success": False, "error": exc.message, "code": exc.code}
+        except Exception as exc:
+            return {"success": False, "error": str(exc), "code": "AUTHORITY_TASK_PROGRESS_ERROR"}
+
+    def terminal_authority_task_assistant(
+        self,
+        *,
+        user_id: int,
+        conversation_id: int,
+        task_id: str,
+        terminal_status: str,
+        last_seq: int,
+        answer_text: str = "",
+        steps: list[dict[str, Any]] | None = None,
+        failure: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized_status = self._normalize_terminal_status(terminal_status, default="completed")
+        if normalized_status not in {"completed", "failed", "canceled", "expired"}:
+            return {"success": False, "error": "invalid_terminal_status", "code": "VALIDATION_ERROR"}
+        try:
+            row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id)
+            if not row:
+                return {"success": False, "error": "conversation_not_found", "code": "NOT_FOUND"}
+            with self._json_store.conversation_lock(user_id=user_id, conversation_id=conversation_id):
+                row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id) or row
+                document, _ = self._load_or_bootstrap_document(
+                    row=row,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    prefer_cached_detail=False,
+                )
+                messages = document.get("messages") if isinstance(document.get("messages"), list) else []
+                assistant_message = self._find_task_placeholder(messages=messages, task_id=task_id)
+                if not isinstance(assistant_message, dict):
+                    return {"success": False, "error": "task_placeholder_not_found", "code": "NOT_FOUND"}
+                current_status = self._message_terminal_status(assistant_message)
+                if current_status in {"completed", "failed", "canceled", "expired"}:
+                    return self._task_mutation_response(
+                        conversation_id=conversation_id,
+                        task_id=task_id,
+                        assistant_message=assistant_message,
+                    )
+                updated = dict(assistant_message)
+                metadata = updated.get("metadata") if isinstance(updated.get("metadata"), dict) else {}
+                if str(answer_text or "").strip():
+                    updated["content"] = str(answer_text or "").strip()
+                metadata["task_id"] = str(task_id or "").strip()
+                metadata["task_status"] = normalized_status
+                metadata["terminal_status"] = normalized_status
+                metadata["last_seq"] = max(0, int(last_seq))
+                if steps is not None:
+                    metadata["steps"] = list(steps)
+                failure_payload = dict(failure or {})
+                if failure_payload:
+                    metadata["failure"] = failure_payload
+                else:
+                    metadata.pop("failure", None)
+                terminal_failure_metadata = self._terminal_failure_metadata(
+                    terminal_status=normalized_status,
+                    terminal_event={"failure": failure_payload},
+                )
+                if terminal_failure_metadata:
+                    metadata.update(terminal_failure_metadata)
+                else:
+                    for field_name in ("failure_stage", "failure_code", "failure_message", "retriable"):
+                        metadata.pop(field_name, None)
+                updated["status"] = normalized_status
+                updated["metadata"] = metadata
+                self._replace_message(
+                    messages=messages,
+                    message_id=str(updated.get("message_id") or ""),
+                    next_message=updated,
+                )
+                document["messages"] = messages
+                meta = document.get("meta") if isinstance(document.get("meta"), dict) else {}
+                if str(meta.get("active_task_id") or "").strip() == str(task_id or "").strip():
+                    meta.pop("active_task_id", None)
+                meta["updated_at"] = self._now_iso()
+                meta["message_count"] = len(messages)
+                document["meta"] = meta
+                self._persist_task_runtime_document(
+                    row=row,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    document=document,
+                )
+            return self._task_mutation_response(
+                conversation_id=conversation_id,
+                task_id=task_id,
+                assistant_message=updated,
+            )
+        except DatabaseUnavailableError as exc:
+            return {"success": False, "error": exc.message, "code": exc.code}
+        except Exception as exc:
+            return {"success": False, "error": str(exc), "code": "AUTHORITY_TASK_TERMINAL_ERROR"}
+
     def accept_authority_assistant_async(
         self,
         *,
@@ -1702,7 +2190,7 @@ class ConversationService:
             default="done",
         )
         answer_text = str(event_payload.get("answer_text") or refreshed_task.get("content") or "").strip()
-        if terminal_status == "done" and not answer_text:
+        if self._is_completed_status(terminal_status) and not answer_text:
             return {"success": False, "error": "empty_answer_text", "code": "VALIDATION_ERROR"}
         try:
             row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id)

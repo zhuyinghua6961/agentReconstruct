@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import threading
+import time
 from types import SimpleNamespace
 
 import server_fastapi.routers.ask as ask_router
@@ -524,3 +528,284 @@ def test_stream_error_still_emits_error_frame_when_terminal_persistence_fails(mo
     ]
     assert [frame["type"] for frame in frames] == ["content", "error"]
     assert frames[-1]["message"] == "boom"
+
+
+def test_stream_skips_local_persistence_for_gateway_owned_task(monkeypatch):
+    assistant_calls: list[dict] = []
+    user_calls: list[dict] = []
+
+    monkeypatch.setattr(
+        "server_fastapi.routers.ask.chat_persistence",
+        type(
+            "FakeChatPersistence",
+            (),
+            {
+                "persist_user_message": staticmethod(lambda **kwargs: user_calls.append(dict(kwargs))),
+                "persist_assistant_summary": staticmethod(lambda **kwargs: assistant_calls.append(dict(kwargs))),
+            },
+        )(),
+        raising=False,
+    )
+
+    def fake_stream_ask_events(**kwargs):
+        completion_callback = kwargs["completion_callback"]
+        yield {"type": "metadata", "query_mode": "thinking", "trace_id": kwargs["trace_id"]}
+        yield {"type": "content", "content": "alpha "}
+        completion_callback(
+            {
+                "type": "done",
+                "route": "thinking_qa",
+                "query_mode": "thinking",
+                "final_answer": "alpha",
+                "references": [],
+                "trace_id": kwargs["trace_id"],
+            }
+        )
+
+    monkeypatch.setattr("server_fastapi.routers.ask.stream_ask_events", fake_stream_ask_events)
+
+    app = create_app()
+    app.dependency_overrides[require_auth_context] = lambda: AuthContext(user_id=7, role="user", username="demo")
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/ask_stream",
+        headers={
+            "X-Gateway-Task-Execution": "1",
+            "X-Gateway-Owned-Persistence": "1",
+            "X-Internal-Service-Name": "gateway",
+            "X-Internal-Service-Token": str(os.getenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN") or ""),
+        },
+        json={"question": "demo", "requested_mode": "thinking", "conversation_id": 11},
+    )
+
+    assert response.status_code == 200
+    frames = [
+        json.loads(chunk[6:])
+        for chunk in response.text.split("\n\n")
+        if chunk.startswith("data: ")
+    ]
+    assert [frame["type"] for frame in frames] == ["metadata", "content"]
+    assert user_calls == []
+    assert assistant_calls == []
+
+
+def test_sync_skips_local_persistence_for_gateway_owned_task(monkeypatch):
+    assistant_calls: list[dict] = []
+    user_calls: list[dict] = []
+
+    monkeypatch.setattr(
+        "server_fastapi.routers.ask.chat_persistence",
+        type(
+            "FakeChatPersistence",
+            (),
+            {
+                "persist_user_message": staticmethod(lambda **kwargs: user_calls.append(dict(kwargs))),
+                "persist_assistant_summary": staticmethod(lambda **kwargs: assistant_calls.append(dict(kwargs))),
+            },
+        )(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "server_fastapi.routers.ask.execute_ask",
+        lambda **kwargs: {
+            "final_answer": "alpha",
+            "metadata": {"query_mode": "thinking"},
+            "references": [],
+        },
+    )
+
+    app = create_app()
+    app.dependency_overrides[require_auth_context] = lambda: AuthContext(user_id=7, role="user", username="demo")
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/ask",
+        headers={
+            "X-Gateway-Task-Execution": "1",
+            "X-Gateway-Owned-Persistence": "1",
+            "X-Internal-Service-Name": "gateway",
+            "X-Internal-Service-Token": str(os.getenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN") or ""),
+        },
+        json={"question": "demo", "requested_mode": "thinking", "conversation_id": 11},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert body["data"]["final_answer"] == "alpha"
+    assert user_calls == []
+    assert assistant_calls == []
+
+
+def test_sync_public_headers_without_internal_auth_still_persist(monkeypatch):
+    assistant_calls: list[dict] = []
+    user_calls: list[dict] = []
+
+    monkeypatch.setattr(
+        "server_fastapi.routers.ask.chat_persistence",
+        type(
+            "FakeChatPersistence",
+            (),
+            {
+                "persist_user_message": staticmethod(lambda **kwargs: user_calls.append(dict(kwargs))),
+                "persist_assistant_summary": staticmethod(lambda **kwargs: assistant_calls.append(dict(kwargs))),
+            },
+        )(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "server_fastapi.routers.ask.execute_ask",
+        lambda **kwargs: {
+            "final_answer": "alpha",
+            "metadata": {"query_mode": "thinking"},
+            "references": [],
+        },
+    )
+
+    app = create_app()
+    app.dependency_overrides[require_auth_context] = lambda: AuthContext(user_id=7, role="user", username="demo")
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/ask",
+        headers={
+            "X-Gateway-Task-Execution": "1",
+            "X-Gateway-Owned-Persistence": "1",
+        },
+        json={"question": "demo", "requested_mode": "thinking", "conversation_id": 11},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert body["data"]["final_answer"] == "alpha"
+    assert len(user_calls) == 1
+    assert len(assistant_calls) == 1
+
+
+async def _collect_streaming_body(response) -> str:
+    chunks: list[str] = []
+    async for chunk in response.body_iterator:
+        chunks.append(chunk.decode("utf-8") if isinstance(chunk, bytes) else str(chunk))
+    return "".join(chunks)
+
+
+class _DisconnectingRequest:
+    def __init__(self, app):
+        self.app = app
+        self.headers = {
+            "X-Gateway-Task-Execution": "1",
+            "X-Gateway-Owned-Persistence": "1",
+            "X-Internal-Service-Name": "gateway",
+            "X-Internal-Service-Token": str(os.getenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN") or ""),
+        }
+        self._checks = 0
+
+    async def is_disconnected(self) -> bool:
+        self._checks += 1
+        return self._checks > 1
+
+
+def test_gateway_owned_sync_disconnect_passes_cancel_event_to_execute_ask(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_execute_ask(**kwargs):
+        captured["cancel_event"] = kwargs.get("cancel_event")
+        cancel_event = kwargs.get("cancel_event")
+        assert isinstance(cancel_event, threading.Event)
+        deadline = time.time() + 0.5
+        while time.time() < deadline and not cancel_event.is_set():
+            time.sleep(0.01)
+        if cancel_event.is_set():
+            raise ask_router.AskCancelledError("cancelled")
+        return {"final_answer": "alpha", "metadata": {"query_mode": "thinking"}, "references": []}
+
+    monkeypatch.setattr("server_fastapi.routers.ask.execute_ask", fake_execute_ask)
+
+    app = create_app()
+    request = _DisconnectingRequest(app)
+    ask_request = SimpleNamespace(
+        user_id=7,
+        conversation_id=11,
+        question="demo",
+        requested_mode="thinking",
+        actual_mode="thinking",
+        route="thinking_qa",
+        turn_mode="kb_only",
+        trace_id="trace-sync-disconnect",
+    )
+
+    try:
+        asyncio.run(
+            ask_router._execute_sync_ask_with_disconnect_support(
+                request=request,
+                ask_request=ask_request,
+                trace_id="trace-sync-disconnect",
+            )
+        )
+    except Exception as exc:
+        assert exc.__class__.__name__ == "AskCancelledError"
+    else:  # pragma: no cover
+        raise AssertionError("expected AskCancelledError")
+
+    assert isinstance(captured.get("cancel_event"), threading.Event)
+    assert captured["cancel_event"].is_set() is True
+
+
+def test_gateway_owned_stream_disconnect_passes_cancel_event_to_executor(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_stream_ask_events(**kwargs):
+        captured["cancel_event"] = kwargs.get("cancel_event")
+        yield {"type": "metadata", "query_mode": "thinking", "trace_id": kwargs["trace_id"]}
+        cancel_event = kwargs.get("cancel_event")
+        assert isinstance(cancel_event, threading.Event)
+        deadline = time.time() + 0.5
+        while time.time() < deadline and not cancel_event.is_set():
+            time.sleep(0.01)
+        if cancel_event.is_set():
+            yield {
+                "type": "error",
+                "code": "ASK_CANCELLED",
+                "error": "cancelled",
+                "message": "cancelled",
+                "retriable": False,
+                "trace_id": kwargs["trace_id"],
+            }
+            return
+        yield {
+            "type": "done",
+            "route": "thinking_qa",
+            "query_mode": "thinking",
+            "final_answer": "alpha",
+            "references": [],
+            "trace_id": kwargs["trace_id"],
+        }
+
+    monkeypatch.setattr("server_fastapi.routers.ask.stream_ask_events", fake_stream_ask_events)
+
+    app = create_app()
+    request = _DisconnectingRequest(app)
+    slot = SimpleNamespace(release=lambda: None)
+    ask_request = SimpleNamespace(
+        user_id=7,
+        conversation_id=11,
+        question="demo",
+        requested_mode="thinking",
+        actual_mode="thinking",
+        route="thinking_qa",
+        turn_mode="kb_only",
+        trace_id="trace-disconnect",
+    )
+
+    response = ask_router._build_stream_response(
+        request=request,
+        ask_request=ask_request,
+        trace_id="trace-disconnect",
+        slot=slot,
+    )
+    body = asyncio.run(_collect_streaming_body(response))
+
+    assert isinstance(captured.get("cancel_event"), threading.Event)
+    assert '"type": "done"' not in body

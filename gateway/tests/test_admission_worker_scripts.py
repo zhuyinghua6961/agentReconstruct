@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import subprocess
+import time
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -101,6 +102,45 @@ def test_start_admission_worker_fails_when_worker_exits_during_bootstrap(tmp_pat
     assert completed.returncode != 0
     assert "failed to start" in completed.stdout
     assert not GATEWAY_PID_FILE.exists()
+
+
+def test_start_admission_worker_launches_from_gateway_project_root(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    cwd_file = tmp_path / "cwd.txt"
+    fake_conda = fake_bin / "conda"
+    fake_conda.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s\\n' \"$PWD\" > \"" + str(cwd_file) + "\"\n"
+        "sleep 5\n",
+        encoding="utf-8",
+    )
+    fake_conda.chmod(0o755)
+    env_file = tmp_path / "gateway.env"
+    env_file.write_text("", encoding="utf-8")
+
+    GATEWAY_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    if GATEWAY_PID_FILE.exists():
+        GATEWAY_PID_FILE.unlink()
+
+    try:
+        completed = _run_bash(
+            "bash gateway/scripts/start_admission_worker.sh",
+            env={
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "GATEWAY_ENV_FILES": str(env_file),
+                "GATEWAY_ADMISSION_STARTUP_STABLE_CHECKS": "1",
+            },
+        )
+
+        assert completed.returncode == 0
+        for _ in range(20):
+            if cwd_file.exists():
+                break
+            time.sleep(0.05)
+        assert cwd_file.read_text(encoding="utf-8").strip() == str(REPO_ROOT / "gateway")
+    finally:
+        _run_bash("bash gateway/scripts/stop_admission_worker.sh")
 
 
 def test_run_admission_worker_foreground_preserves_explicit_runtime_role_over_env_file(tmp_path):

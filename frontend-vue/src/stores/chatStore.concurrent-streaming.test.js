@@ -86,6 +86,13 @@ test('different chats can be busy simultaneously while the same chat cannot star
   assert.equal(store.isChatBusy(chatB.id), true)
 })
 
+test('chat store exposes buildAutoTitleFromText for the recoverable send flow', async () => {
+  const store = await createStoreWithChats(1)
+
+  assert.equal(typeof store.buildAutoTitleFromText, 'function')
+  assert.equal(store.buildAutoTitleFromText('这是一个用于生成标题的超长问题描述'), '这是一个用于生成标题的超长问题描述')
+})
+
 test('dispatching and streaming phases both count toward active busy capacity', async () => {
   const store = await createStoreWithChats(1)
   const [chatA] = store.chats
