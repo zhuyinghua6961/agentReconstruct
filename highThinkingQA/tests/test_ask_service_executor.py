@@ -395,6 +395,12 @@ def test_adapt_answer_for_frontend_repairs_polluted_bracket_citations():
     assert _adapt_answer_for_frontend("A [10.1016j.est.2024.113859, Results] B") == "A [DOI: 10.1016/j.est.2024.113859] B"
 
 
+def test_adapt_answer_for_frontend_repairs_merged_doi_identifiers():
+    assert _adapt_answer_for_frontend("A [10.1016/j.electacta.2006.05.002)1002.aem.202501444] B") == (
+        "A [DOI: 10.1016/j.electacta.2006.05.002] [DOI: 10.1002/aem.202501444] B"
+    )
+
+
 def test_extract_references_normalizes_polluted_doi_tokens():
     refs = _extract_references(
         "A [10.1007_s11581-021-04073-2, Results] and doi:10.1007/s11581-021-04073-2)."

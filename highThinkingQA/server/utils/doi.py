@@ -9,14 +9,33 @@ from urllib.parse import unquote
 
 
 _DOI_START_WITHOUT_SEPARATOR_RE = re.compile(r"(10\.\d{1,9})(?=[A-Za-z])", re.IGNORECASE)
+_DOI_MERGED_SECOND_PREFIX_RE = re.compile(
+    r"(?P<first>10\.\d{1,9}/[-._;()/:A-Z0-9]+?)(?P<sep>[)\]])(?P<registrant>\d{4,9})\.(?P<suffix>[A-Z][-._;()/:A-Z0-9]*)",
+    re.IGNORECASE,
+)
 _DOI_EXTRACT_RE = re.compile(
-    r"10\.\d{1,9}/[-._;()/:A-Z0-9]+?(?=(?:10\.\d{1,9}/)|$)",
+    r"10\.\d{1,9}/[-._;()/:A-Z0-9]+?(?=(?:[\]\)\s,;:]*)10\.\d{1,9}/|[\]\)\s,;:]*$)",
     re.IGNORECASE,
 )
 
 
 def _repair_missing_separator(text: str) -> str:
     return _DOI_START_WITHOUT_SEPARATOR_RE.sub(r"\1/", str(text or ""))
+
+
+def _repair_merged_second_prefix(text: str) -> str:
+    repaired = str(text or "")
+    previous = None
+    while previous != repaired:
+        previous = repaired
+        repaired = _DOI_MERGED_SECOND_PREFIX_RE.sub(
+            lambda match: (
+                f"{match.group('first')}{match.group('sep')}"
+                f"10.{match.group('registrant')}/{match.group('suffix')}"
+            ),
+            repaired,
+        )
+    return repaired
 
 
 def normalize_doi(value: str) -> str:
@@ -52,7 +71,7 @@ def normalize_doi(value: str) -> str:
 
 
 def extract_dois(value: str) -> list[str]:
-    text = normalize_doi(value)
+    text = _repair_merged_second_prefix(normalize_doi(value))
     if not text:
         return []
     results: list[str] = []

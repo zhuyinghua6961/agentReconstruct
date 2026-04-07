@@ -11,6 +11,7 @@ from app.core.auth import AuthContext, require_auth_context
 from app.core.config import GatewaySettings
 from app.integrations.redis.service import RedisService
 from app.main import app
+from app.models.files import ConversationFileRow
 from app.services import execution_queue_status as queue_status_module
 from app.services import qa_tasks as qa_task_module
 from app.services.execution_admission import ExecutionAdmissionDispatcher, ExecutionAdmissionWorker
@@ -525,17 +526,285 @@ def test_create_task_prechecks_quota_stores_grant_and_emits_initial_queued_state
     assert client.get(f"/api/v1/tasks/{payload['task_id']}").json()["last_seq"] == 1
 
 
-def test_create_task_rejects_patent_mode_while_rollout_gate_is_pending():
-    calls: list[str] = []
-    _set_task_transport(lambda request: calls.append(request.url.path) or httpx.Response(200, json={"status": "ok"}))
+def test_create_task_allows_patent_mode_and_persists_patent_backend_target():
+    calls: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        payload = _json_request_body(request)
+        calls.append((path, payload))
+        if path == "/api/health":
+            return httpx.Response(200, json={"status": "ok"})
+        if path == "/internal/quota/grants/precheck":
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": {
+                        "grant_id": "grant-task-patent-create",
+                        "quota_type": payload.get("quota_type") or "ask_query",
+                        "noop": False,
+                    },
+                },
+            )
+        if path == "/internal/conversations/123/messages/user":
+            return httpx.Response(201, json={"success": True, "message_id": "m_user_patent", "deduped": False})
+        if path.endswith("/assistant-start"):
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "conversation_id": 123,
+                    "task_id": str(payload.get("task_id") or ""),
+                    "assistant_message_id": "m_assistant_patent",
+                    "status": "queued",
+                },
+            )
+        raise AssertionError(f"unexpected upstream path: {path}")
+
+    _set_task_transport(handler)
     client = TestClient(app)
 
     response = client.post("/api/v1/tasks", json=_request_body(requested_mode="patent"))
 
+    assert response.status_code == 200
+    payload = response.json()
+    stored = app.state.execution_queue_status_store.get_request(payload["task_id"])
+    assert stored is not None
+    assert stored["requested_mode"] == "patent"
+    assert stored["actual_mode"] == "patent"
+    assert stored["target_backend"] == "patent"
+    assert stored["quota_grant_id"] == "grant-task-patent-create"
+    assert [path for path, _ in calls] == [
+        "/api/health",
+        "/internal/quota/grants/precheck",
+        "/internal/conversations/123/messages/user",
+        f"/internal/conversations/123/tasks/{payload['task_id']}/assistant-start",
+    ]
+
+
+def test_create_task_rejects_patent_file_route_when_patent_file_routes_are_disabled():
+    async def _list_files(*, conversation_id, request=None):
+        _ = conversation_id, request
+        return [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")]
+
+    original_settings = app.state.settings
+    original_list_files = app.state.conversation_file_service.list_files
+    app.state.settings = replace(app.state.settings, patent_file_routes_enabled=False)
+    app.state.conversation_file_service.list_files = _list_files
+    _set_health_transport()
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            "/api/v1/tasks",
+            json=_request_body(
+                requested_mode="patent",
+                question="请总结这篇文献",
+                pdf_context={"selected_ids": [11]},
+            ),
+        )
+    finally:
+        app.state.settings = original_settings
+        app.state.conversation_file_service.list_files = original_list_files
+
     assert response.status_code == 503
-    assert response.json()["detail"] == "task_patent_rollout_pending"
-    assert calls == []
+    assert response.json()["detail"] == "patent_file_route_disabled"
     assert app.state.execution_queue_status_store.list_requests() == []
+
+
+def test_create_task_persists_patent_file_route_protocol_fields_for_worker_execution():
+    async def _list_files(*, conversation_id, request=None):
+        _ = conversation_id, request
+        return [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")]
+
+    original_list_files = app.state.conversation_file_service.list_files
+    app.state.conversation_file_service.list_files = _list_files
+    calls: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        payload = _json_request_body(request)
+        calls.append((path, payload))
+        if path == "/api/health":
+            return httpx.Response(200, json={"status": "ok"})
+        if path == "/internal/quota/grants/precheck":
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": {
+                        "grant_id": "grant-task-patent-mixed",
+                        "quota_type": payload.get("quota_type") or "file_qa",
+                        "noop": False,
+                    },
+                },
+            )
+        if path == "/internal/conversations/123/messages/user":
+            return httpx.Response(201, json={"success": True, "message_id": "m_user_patent_mixed", "deduped": False})
+        if path.endswith("/assistant-start"):
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "conversation_id": 123,
+                    "task_id": str(payload.get("task_id") or ""),
+                    "assistant_message_id": "m_assistant_patent_mixed",
+                    "status": "queued",
+                },
+            )
+        raise AssertionError(f"unexpected upstream path: {path}")
+
+    _set_task_transport(handler)
+    client = TestClient(app)
+
+    try:
+        response = client.post(
+            "/api/v1/tasks",
+            json=_request_body(
+                requested_mode="patent",
+                question="请结合知识库总结这篇文献",
+                pdf_context={"selected_ids": [11]},
+            ),
+        )
+    finally:
+        app.state.conversation_file_service.list_files = original_list_files
+
+    assert response.status_code == 200
+    payload = response.json()
+    stored = app.state.execution_queue_status_store.get_request(payload["task_id"])
+    assert stored is not None
+    snapshot = stored["execution_snapshot"]
+    assert snapshot["requested_mode"] == "patent"
+    assert snapshot["actual_mode"] == "patent"
+    assert snapshot["route"] == "hybrid_qa"
+    assert snapshot["turn_mode"] == "mixed"
+    assert snapshot["source_scope"] == "pdf+kb"
+    assert snapshot["kb_enabled"] is True
+    assert snapshot["allow_kb_verification"] is True
+    assert snapshot["selected_file_ids"] == [11]
+    assert snapshot["execution_files"][0]["file_id"] == 11
+    assert snapshot["execution_files"][0]["file_type"] == "pdf"
+    assert snapshot["execution_files"][0]["file_name"] == "battery-paper.pdf"
+    assert snapshot["file_selection"]["turn_mode"] == "mixed"
+
+
+def test_admission_worker_sends_patent_protocol_fields_to_upstream_stream(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    queue_store = app.state.execution_queue_status_store
+    relay_store = app.state.execution_event_relay_store
+    slot_store = app.state.execution_slot_lease_store
+    queue_store.put_request(
+        _queued_task_record(
+            request_id="req_worker_patent_protocol",
+            requested_mode="patent",
+            actual_mode="patent",
+            target_backend="patent",
+            route="hybrid_qa",
+            turn_mode="mixed",
+            source_scope="pdf+kb",
+            kb_enabled=True,
+            allow_kb_verification=True,
+            selected_file_ids=[11],
+            execution_files=[{"file_id": 11, "file_type": "pdf", "file_name": "battery-paper.pdf"}],
+            assistant_message_id="msg_worker_patent_protocol",
+            quota_grant_id="grant-worker-patent-protocol",
+            execution_snapshot={
+                "question": "请结合知识库总结这篇文献",
+                "conversation_id": 123,
+                "user_id": 42,
+                "chat_history": [],
+                "requested_mode": "patent",
+                "actual_mode": "patent",
+                "route": "hybrid_qa",
+                "source_scope": "pdf+kb",
+                "turn_mode": "mixed",
+                "kb_enabled": True,
+                "allow_kb_verification": True,
+                "used_files": [{"file_id": 11, "file_type": "pdf", "file_name": "battery-paper.pdf"}],
+                "execution_files": [{"file_id": 11, "file_type": "pdf", "file_name": "battery-paper.pdf"}],
+                "selected_file_ids": [11],
+                "strategy": "explicit_selection",
+                "primary_file_id": 11,
+                "file_selection": {
+                    "strategy": "explicit_selection",
+                    "selected_file_ids": [11],
+                    "turn_mode": "mixed",
+                    "source_scope": "pdf+kb",
+                    "kb_enabled": True,
+                },
+                "route_reasons": ["EXPLICIT_SELECTED_FILES", "EXPLICIT_MIXED_INTENT"],
+                "route_confidence": 1.0,
+                "classifier_used": False,
+                "trace_id": "req_worker_patent_protocol",
+                "options": {},
+            },
+        ),
+        ttl_seconds=900,
+    )
+    relay_store.append_frame("req_worker_patent_protocol", {"type": "state", "status": "queued"}, ttl_seconds=900)
+    captured_payload = {}
+
+    class _Handle:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        async def body_iter(self):
+            yield (
+                b'data: {"type":"metadata","query_mode":"patent","route":"hybrid_qa","trace_id":"req_worker_patent_protocol"}\n\n'
+                b'data: {"type":"done","final_answer":"ok","query_mode":"patent","route":"hybrid_qa","trace_id":"req_worker_patent_protocol"}\n\n'
+            )
+
+        async def abort(self):
+            return None
+
+    async def _fake_open_json_stream(*, request, target, path, payload):
+        _ = request, target, path
+        captured_payload.update(payload)
+        return _Handle()
+
+    original_open_json_stream = app.state.proxy_service.open_json_stream
+    app.state.proxy_service.open_json_stream = _fake_open_json_stream
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        payload = _json_request_body(request)
+        if path == "/internal/conversations/123/tasks/req_worker_patent_protocol/assistant-progress":
+            return httpx.Response(200, json={"success": True, "status": payload.get("status")})
+        if path == "/internal/conversations/123/tasks/req_worker_patent_protocol/assistant-terminal":
+            return httpx.Response(200, json={"success": True, "status": payload.get("terminal_status")})
+        if path == "/internal/quota/grants/grant-worker-patent-protocol/finalize":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-worker-patent-protocol", "counted": payload["success"], "idempotent": False}})
+        raise AssertionError(f"unexpected upstream path: {path}")
+
+    _set_task_transport(handler)
+    dispatcher = ExecutionAdmissionDispatcher(
+        settings=app.state.settings,
+        queue_status_store=queue_store,
+        slot_lease_store=slot_store,
+    )
+    worker = ExecutionAdmissionWorker(
+        dispatcher=dispatcher,
+        owner_id="worker-patent-protocol",
+        executor=qa_task_module.GatewayTaskExecutor(app).execute,
+        timestamp_factory=lambda: "2026-04-06T10:00:09+00:00",
+    )
+
+    try:
+        result = worker.run_dispatch_cycle()
+    finally:
+        app.state.proxy_service.open_json_stream = original_open_json_stream
+
+    assert result.outcome == "completed"
+    assert captured_payload["requested_mode"] == "patent"
+    assert captured_payload["actual_mode"] == "patent"
+    assert captured_payload["route"] == "hybrid_qa"
+    assert captured_payload["turn_mode"] == "mixed"
+    assert captured_payload["source_scope"] == "pdf+kb"
+    assert captured_payload["kb_enabled"] is True
+    assert captured_payload["allow_kb_verification"] is True
+    assert captured_payload["selected_file_ids"] == [11]
+    assert captured_payload["execution_files"] == [{"file_id": 11, "file_type": "pdf", "file_name": "battery-paper.pdf"}]
 
 
 def test_get_task_normalizes_raw_cancelled_status_to_public_canceled():

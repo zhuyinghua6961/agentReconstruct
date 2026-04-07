@@ -90,7 +90,8 @@ class QATaskService:
         self._assert_requested_mode_enabled(bound_payload)
         conversation_id = self._require_positive_int(bound_payload.conversation_id, detail="task_conversation_id_required")
         user_id = self._require_positive_int(bound_payload.user_id, detail="task_user_id_required")
-        route_decision = await self._resolve_route(bound_payload)
+        route_decision, file_context = await self._resolve_route(bound_payload)
+        self._assert_route_enabled(route_decision)
         lock_manager = getattr(self.app.state, "distributed_lock_manager", None)
         lock_handle = None
         if lock_manager is not None:
@@ -169,6 +170,12 @@ class QATaskService:
                     "actual_mode": route_decision.actual_mode,
                     "target_backend": route_decision.actual_mode,
                     "route": route_decision.route,
+                    "turn_mode": route_decision.turn_mode,
+                    "source_scope": route_decision.source_scope,
+                    "kb_enabled": route_decision.kb_enabled,
+                    "allow_kb_verification": route_decision.allow_kb_verification,
+                    "selected_file_ids": list(route_decision.selected_file_ids or []),
+                    "execution_files": list(route_decision.execution_files or []),
                     "queue_tier": self._queue_tier(route_decision.actual_mode),
                     "created_at": created_at.isoformat(),
                     "updated_at": created_at.isoformat(),
@@ -188,6 +195,20 @@ class QATaskService:
                         "requested_mode": bound_payload.requested_mode,
                         "actual_mode": route_decision.actual_mode,
                         "route": route_decision.route,
+                        "source_scope": route_decision.source_scope,
+                        "turn_mode": route_decision.turn_mode,
+                        "kb_enabled": route_decision.kb_enabled,
+                        "allow_kb_verification": route_decision.allow_kb_verification,
+                        "needs_clarification": route_decision.needs_clarification,
+                        "used_files": list(file_context.used_files or []),
+                        "execution_files": list(route_decision.execution_files or []),
+                        "selected_file_ids": list(route_decision.selected_file_ids or []),
+                        "strategy": route_decision.strategy,
+                        "primary_file_id": route_decision.primary_file_id,
+                        "file_selection": dict(route_decision.file_selection or {}),
+                        "route_reasons": list(route_decision.route_reasons or []),
+                        "route_confidence": route_decision.route_confidence,
+                        "classifier_used": route_decision.classifier_used,
                         "task_id": task_id,
                         "user_message_id": user_message_id,
                         "assistant_message_id": assistant_message_id,
@@ -456,7 +477,7 @@ class QATaskService:
             pdf_context=payload.pdf_context,
             available_files=available_files,
         )
-        return decision_service.decide(requested_mode=payload.requested_mode, file_context=file_context)
+        return decision_service.decide(requested_mode=payload.requested_mode, file_context=file_context), file_context
 
     def _require_positive_int(self, value: Any, *, detail: str) -> int:
         try:
@@ -628,8 +649,13 @@ class QATaskService:
         raise HTTPException(status_code=decision.status_code, detail=decision.detail)
 
     def _assert_requested_mode_enabled(self, payload: AskRequest) -> None:
-        if str(payload.requested_mode or "").strip().lower() == "patent":
-            raise HTTPException(status_code=503, detail="task_patent_rollout_pending")
+        _ = payload
+
+    def _assert_route_enabled(self, route_decision: Any) -> None:
+        requested_mode = str(getattr(route_decision, "requested_mode", "") or "").strip().lower()
+        route_name = str(getattr(route_decision, "route", "") or "").strip().lower()
+        if requested_mode == "patent" and route_name in _FILE_ROUTES and not bool(self.settings.patent_file_routes_enabled):
+            raise HTTPException(status_code=503, detail="patent_file_route_disabled")
 
     async def _assert_backend_ready(self, actual_mode: Any) -> None:
         target = self.app.state.backend_registry.get_mode_backend(str(actual_mode or ""))

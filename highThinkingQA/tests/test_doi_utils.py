@@ -28,3 +28,21 @@ def test_extract_dois_keeps_parenthesized_suffix():
     assert extract_dois("(doi=10.1016/S0378-7753(03)00297-0)") == [
         "10.1016/S0378-7753(03)00297-0"
     ]
+
+
+def test_extract_dois_repairs_merged_second_doi_missing_leading_separator():
+    assert extract_dois("10.1016/j.electacta.2006.05.002)1002.aem.202501444") == [
+        "10.1016/j.electacta.2006.05.002",
+        "10.1002/aem.202501444",
+    ]
+
+
+def test_extract_dois_repairs_square_bracket_merged_second_doi_missing_leading_separator():
+    assert extract_dois("10.1016/j.electacta.2006.05.002]1002.aem.202501444") == [
+        "10.1016/j.electacta.2006.05.002",
+        "10.1002/aem.202501444",
+    ]
+
+
+def test_extract_dois_does_not_fabricate_doi_from_non_doi_suffix():
+    assert extract_dois("(n=5)1002.alpha") == []

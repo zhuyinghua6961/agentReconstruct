@@ -34,6 +34,13 @@ function normalizePatentIdForLink(raw) {
   return /^[A-Z]{2}[A-Z0-9._/\-]+$/.test(value) ? value : ''
 }
 
+function repairMergedDoiIdentifiers(text) {
+  return String(text || '').replace(
+    /(10\.\d{1,9}\/[-._;()/:A-Z0-9]+?)([)\]])(\d{4,9})\.([A-Za-z][-._;()/:A-Z0-9]*)/gi,
+    (_match, first, separator, registrant, suffix) => `${first}${separator} 10.${registrant}/${suffix}`
+  )
+}
+
 function readEnclosedSpan(text, startIndex, openChar, closeChar) {
   if (text[startIndex] !== openChar) return null
   let depth = 0
@@ -161,7 +168,7 @@ function readPlainDoiSegment(text, startIndex) {
 }
 
 function linkifyDoiTextSegment(text) {
-  const source = String(text || '')
+  const source = repairMergedDoiIdentifiers(text)
   let output = ''
   let i = 0
 

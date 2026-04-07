@@ -55,6 +55,32 @@ test('streaming answer keeps patent citation clickable', async () => {
   assert.match(html, /data-patent-id="CN100420075C"/)
 })
 
+test('streaming answer repairs merged doi identifiers into separate clickable links', async () => {
+  const { formatStreamingAnswer } = await loadRenderUtils()
+
+  const html = formatStreamingAnswer('结论成立 (10.1016/j.electacta.2006.05.002)1002.aem.202501444)')
+
+  assert.match(html, /data-doi="10\.1016\/j\.electacta\.2006\.05\.002"/)
+  assert.match(html, /data-doi="10\.1002\/aem\.202501444"/)
+})
+
+test('streaming answer repairs square-bracket merged doi identifiers into separate clickable links', async () => {
+  const { formatStreamingAnswer } = await loadRenderUtils()
+
+  const html = formatStreamingAnswer('结论成立 [10.1016/j.electacta.2006.05.002]1002.aem.202501444')
+
+  assert.match(html, /data-doi="10\.1016\/j\.electacta\.2006\.05\.002"/)
+  assert.match(html, /data-doi="10\.1002\/aem\.202501444"/)
+})
+
+test('streaming answer does not fabricate doi links from ordinary bracket-adjacent text', async () => {
+  const { formatStreamingAnswer } = await loadRenderUtils()
+
+  const html = formatStreamingAnswer('(see Fig. 2)1002.3 V')
+
+  assert.doesNotMatch(html, /class="doi-link"/)
+})
+
 test('streaming answer handles incomplete doi fragments without pathological slowdown', async () => {
   const { formatStreamingAnswer } = await loadRenderUtils()
 
