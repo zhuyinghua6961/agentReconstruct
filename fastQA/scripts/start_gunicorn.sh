@@ -22,10 +22,42 @@ export FASTQA_SERVICE_STATE_ROOT="${FASTQA_SERVICE_STATE_ROOT:-$STATE_DIR_DEFAUL
 export FASTQA_SERVICE_RUNTIME_ROOT="${FASTQA_SERVICE_RUNTIME_ROOT:-$RUNTIME_DIR_DEFAULT}"
 export FASTQA_SERVICE_ASSET_ROOT="${FASTQA_SERVICE_ASSET_ROOT:-$ASSET_DIR_DEFAULT}"
 export FASTQA_SERVICE_LOG_ROOT="${FASTQA_SERVICE_LOG_ROOT:-$LOG_DIR_DEFAULT}"
+export FASTQA_ENV_FILES="${FASTQA_ENV_FILES:-$FASTQA_SERVICE_CONFIG_ROOT/config.env:$FASTQA_SERVICE_CONFIG_ROOT/config.shared.env:$FASTQA_SERVICE_CONFIG_ROOT/config.secret.env:$PROJECT_ROOT/.env}"
 export APP_PORT="${APP_PORT:-8008}"
 export FASTAPI_PORT="${FASTAPI_PORT:-$APP_PORT}"
 export BACKEND_PORT="${BACKEND_PORT:-$FASTAPI_PORT}"
-export FASTQA_GUNICORN_WORKERS="${FASTQA_GUNICORN_WORKERS:-8}"
+export FASTQA_GUNICORN_WORKERS="${FASTQA_GUNICORN_WORKERS:-16}"
+
+load_env_files() {
+  local env_files="$1"
+  IFS=':' read -r -a files <<< "$env_files"
+  for file in "${files[@]}"; do
+    [[ -n "${file:-}" ]] || continue
+    [[ -f "$file" ]] || continue
+    while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
+      line="${raw_line%$'\r'}"
+      [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+      [[ "$line" =~ ^[[:space:]]*# ]] && continue
+      if [[ "$line" =~ ^[[:space:]]*export[[:space:]]+ ]]; then
+        line="${line#export }"
+      fi
+      [[ "$line" == *=* ]] || continue
+      name="${line%%=*}"
+      value="${line#*=}"
+      name="${name#"${name%%[![:space:]]*}"}"
+      name="${name%"${name##*[![:space:]]}"}"
+      [[ -n "${name:-}" ]] || continue
+      if [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]]; then
+        value="${value:1:${#value}-2}"
+      elif [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+        value="${value:1:${#value}-2}"
+      fi
+      export "${name}=${value}"
+    done < "$file"
+  done
+}
+
+load_env_files "$FASTQA_ENV_FILES"
 
 PID_FILE="$FASTQA_SERVICE_RUNTIME_ROOT/fastqa-gunicorn.pid"
 STARTUP_LOG_FILE="$FASTQA_SERVICE_LOG_ROOT/fastqa-startup.log"
@@ -61,7 +93,7 @@ fi
 nohup conda run --no-capture-output -n agent gunicorn   -k uvicorn.workers.UvicornWorker   app.main:app   --chdir "$PROJECT_ROOT"   --bind "0.0.0.0:${FASTAPI_PORT}"   --workers "${FASTQA_GUNICORN_WORKERS}"   --timeout 600   --pid "$PID_FILE"   --capture-output   --access-logfile "$ACCESS_LOG_FILE"   --error-logfile "$ERROR_LOG_FILE"   >"$STARTUP_LOG_FILE" 2>&1 &
 
 LAUNCHER_PID=$!
-for _ in $(seq 1 30); do
+for _ in $(seq 1 60); do
   if [[ -f "$PID_FILE" ]]; then
     PID="$(cat "$PID_FILE" 2>/dev/null || true)"
     if [[ -n "${PID:-}" ]] && kill -0 "$PID" 2>/dev/null; then

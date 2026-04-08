@@ -17,7 +17,7 @@ ERROR_LOG_FILE="$LOG_DIR_DEFAULT/gateway-error.log"
 mkdir -p "$RUNTIME_DIR" "$LOG_DIR_DEFAULT"
 
 export GATEWAY_PORT="${GATEWAY_PORT:-8101}"
-export GATEWAY_GUNICORN_WORKERS="${GATEWAY_GUNICORN_WORKERS:-8}"
+export GATEWAY_GUNICORN_WORKERS="${GATEWAY_GUNICORN_WORKERS:-16}"
 export GATEWAY_RUNTIME_ROLE="${GATEWAY_RUNTIME_ROLE:-web}"
 export GATEWAY_ENV_FILES="${GATEWAY_ENV_FILES:-$CONFIG_DIR_DEFAULT/config.env:$CONFIG_DIR_DEFAULT/config.shared.env:$CONFIG_DIR_DEFAULT/config.secret.env:$PROJECT_ROOT/.env}"
 export PUBLIC_BACKEND_BASE_URL="${PUBLIC_BACKEND_BASE_URL:-http://127.0.0.1:8102}"
@@ -69,7 +69,7 @@ fi
 nohup conda run --no-capture-output -n agent gunicorn   -k uvicorn.workers.UvicornWorker   app.main:app   --chdir "$PROJECT_ROOT"   --bind "0.0.0.0:${GATEWAY_PORT}"   --workers "${GATEWAY_GUNICORN_WORKERS}"   --timeout 600   --pid "$PID_FILE"   --capture-output   --access-logfile "$ACCESS_LOG_FILE"   --error-logfile "$ERROR_LOG_FILE"   >"$STARTUP_LOG_FILE" 2>&1 &
 
 LAUNCHER_PID=$!
-for _ in $(seq 1 30); do
+for _ in $(seq 1 60); do
   if [[ -f "$PID_FILE" ]]; then
     PID="$(cat "$PID_FILE" 2>/dev/null || true)"
     if [[ -n "${PID:-}" ]] && kill -0 "$PID" 2>/dev/null; then

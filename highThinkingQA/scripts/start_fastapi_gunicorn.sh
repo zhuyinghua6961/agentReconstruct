@@ -61,7 +61,7 @@ cd "$ROOT_DIR"
 nohup conda run --no-capture-output -n agent   gunicorn server_fastapi.asgi:app   -c server_fastapi/gunicorn.conf.py   --pid "$PID_FILE"   --capture-output   --access-logfile "$ACCESS_LOG_FILE"   --error-logfile "$ERROR_LOG_FILE"   >"$STARTUP_LOG_FILE" 2>&1 &
 
 LAUNCHER_PID=$!
-for _ in $(seq 1 30); do
+for _ in $(seq 1 60); do
   if [[ -f "$PID_FILE" ]]; then
     PID="$(cat "$PID_FILE" 2>/dev/null || true)"
     if [[ -n "${PID:-}" ]] && kill -0 "$PID" 2>/dev/null; then

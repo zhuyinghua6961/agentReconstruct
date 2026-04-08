@@ -111,7 +111,7 @@ nohup env PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
   >"$STARTUP_LOG_FILE" 2>&1 &
 
 LAUNCHER_PID=$!
-for _ in $(seq 1 30); do
+for _ in $(seq 1 60); do
   if [[ -f "$PID_FILE" ]]; then
     PID="$(cat "$PID_FILE" 2>/dev/null || true)"
     if [[ -n "${PID:-}" ]] && kill -0 "$PID" 2>/dev/null; then

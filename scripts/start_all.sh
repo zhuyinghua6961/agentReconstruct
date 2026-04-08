@@ -14,11 +14,11 @@ for service in "${SERVICES[@]}"; do
     exit 1
   fi
   run_service_script "$service" start
-  if ! wait_for_port_state "$port" 1 60; then
+  if ! wait_for_port_state "$port" 1 90; then
     echo "[error] $service did not bind to :$port"
     exit 1
   fi
-  if ! wait_for_service_health "$service" 60; then
+  if ! wait_for_service_health "$service" 120; then
     echo "[error] $service bound to :$port but did not become healthy within timeout"
     exit 1
   fi

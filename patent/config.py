@@ -155,7 +155,7 @@ def get_settings() -> Settings:
             port=_read_int("PATENT_PORT", 8787),
         ),
         gunicorn=GunicornSettings(
-            workers=_read_int("PATENT_GUNICORN_WORKERS", 1),
+            workers=_read_int("PATENT_GUNICORN_WORKERS", 16),
             threads=max(1, _read_int("PATENT_GUNICORN_THREADS", 8)),
             timeout=_read_int("PATENT_GUNICORN_TIMEOUT", 120),
             keepalive=max(1, _read_int("PATENT_GUNICORN_KEEPALIVE", 15)),
