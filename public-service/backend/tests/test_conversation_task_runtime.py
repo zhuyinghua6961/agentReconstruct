@@ -77,6 +77,85 @@ def test_task_assistant_start_creates_placeholder_and_binds_active_task_id():
     assert document["meta"]["active_task_id"] == "task_001"
 
 
+def test_create_authority_task_turn_atomically_persists_user_turn_and_placeholder():
+    with _task_runtime_harness() as service:
+        created = service.create_conversation(user_id=7, title="task atomic create")
+        conversation_id = int(created["data"]["conversation_id"])
+
+        created_turn = service.create_authority_task_turn(
+            user_id=7,
+            conversation_id=conversation_id,
+            task_id="task_atomic_001",
+            trace_id="task-atomic-001",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            content="atomic hello",
+            context_hints={"selected_file_ids": [9], "last_turn_route_hint": "kb_qa"},
+            status="queued",
+            last_seq=0,
+        )
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+        document = service._json_store.load_document(user_id=7, conversation_id=conversation_id)
+
+    assert created_turn["success"] is True
+    assert created_turn["status"] == "queued"
+    assert created_turn["user_message_id"].startswith("m_")
+    assert created_turn["assistant_message_id"].startswith("m_")
+    assert created_turn["user_message_id"] != created_turn["assistant_message_id"]
+    assert len(detail["data"]["messages"]) == 2
+    assert detail["data"]["messages"][0]["role"] == "user"
+    assert detail["data"]["messages"][0]["content"] == "atomic hello"
+    assert detail["data"]["messages"][1]["role"] == "assistant"
+    assert detail["data"]["messages"][1]["status"] == "queued"
+    assert detail["data"]["messages"][1]["metadata"]["task_id"] == "task_atomic_001"
+    assert document["meta"]["active_task_id"] == "task_atomic_001"
+
+
+def test_create_authority_task_turn_is_idempotent_for_same_task_id():
+    with _task_runtime_harness() as service:
+        created = service.create_conversation(user_id=7, title="task atomic dedupe")
+        conversation_id = int(created["data"]["conversation_id"])
+
+        first = service.create_authority_task_turn(
+            user_id=7,
+            conversation_id=conversation_id,
+            task_id="task_atomic_002",
+            trace_id="task-atomic-002",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            content="atomic dedupe",
+            context_hints={"selected_file_ids": [], "last_turn_route_hint": "kb_qa"},
+            status="queued",
+            last_seq=0,
+        )
+        second = service.create_authority_task_turn(
+            user_id=7,
+            conversation_id=conversation_id,
+            task_id="task_atomic_002",
+            trace_id="task-atomic-002",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            content="atomic dedupe",
+            context_hints={"selected_file_ids": [], "last_turn_route_hint": "kb_qa"},
+            status="queued",
+            last_seq=0,
+        )
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+
+    assert first["success"] is True
+    assert second["success"] is True
+    assert second["deduped"] is True
+    assert first["user_message_id"] == second["user_message_id"]
+    assert first["assistant_message_id"] == second["assistant_message_id"]
+    assert len(detail["data"]["messages"]) == 2
+
+
 def test_task_assistant_start_is_idempotent_for_same_task_id():
     with _task_runtime_harness() as service:
         conversation_id, _ = _create_conversation_with_user_turn(service)

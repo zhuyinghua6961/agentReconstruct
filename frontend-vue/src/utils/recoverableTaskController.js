@@ -32,6 +32,75 @@ export function createRecoverableTaskController(deps = {}) {
   const scrollToBottom = deps.scrollToBottom || noop
   const onError = deps.onError || ((scope, error) => console.error(`[${scope}]`, error))
   const debugLog = typeof deps.debugLog === 'function' ? deps.debugLog : noop
+  const scheduleTaskRecoveryPersist = typeof store?.scheduleTaskRecoveryPersist === 'function'
+    ? () => store.scheduleTaskRecoveryPersist()
+    : () => store?.persistLocalState?.()
+  const flushTaskRecoveryPersist = typeof store?.flushTaskRecoveryPersist === 'function'
+    ? () => store.flushTaskRecoveryPersist()
+    : () => store?.persistLocalState?.()
+
+  function hasLocalTaskPlaceholder(chatId, taskId) {
+    const normalizedTaskId = String(taskId || '').trim()
+    if (!normalizedTaskId) return false
+    const messages = Array.isArray(getChatById(chatId)?.messages) ? getChatById(chatId).messages : []
+    return messages.some((message) => {
+      if (String(message?.role || '').trim().toLowerCase() !== 'assistant') return false
+      const messageTaskId = String(
+        message?.streamRequestId
+        || message?.metadata?.task_id
+        || message?.metadata?.request_id
+        || '',
+      ).trim()
+      return messageTaskId === normalizedTaskId
+    })
+  }
+
+  async function seedLocalTaskMessages(chatId, { message, taskSummary }) {
+    const targetChatId = normalizeChatId(chatId)
+    const taskId = String(taskSummary?.task_id || '').trim()
+    if (!targetChatId || !taskId) return
+
+    if (typeof store?.addUserMessage === 'function') {
+      await store.addUserMessage(message, { chatId: targetChatId, persist: false })
+    }
+    if (typeof store?.addBotMessage === 'function') {
+      store.addBotMessage(
+        {
+          role: 'assistant',
+          content: '',
+          streamRequestId: taskId,
+          queryMode: '',
+          expert: '',
+          references: [],
+          referenceLinks: [],
+          steps: [],
+          stepsCollapsed: false,
+          isComplete: false,
+          status: String(taskSummary?.status || 'queued').trim().toLowerCase() || 'queued',
+          metadata: {
+            task_id: taskId,
+            status: String(taskSummary?.status || 'queued').trim().toLowerCase() || 'queued',
+            last_seq: Number(taskSummary?.last_seq || 0) || 0,
+            replay_available: taskSummary?.replay_available !== false,
+          },
+        },
+        { chatId: targetChatId, persist: false },
+      )
+    }
+    scheduleTaskRecoveryPersist()
+  }
+
+  function settleTerminalTaskLocally(chatId, cursor) {
+    const targetChatId = normalizeChatId(chatId)
+    if (!targetChatId) return
+    if (cursor?.lastSeq !== undefined) {
+      store.updateChatTaskReplayCursor(targetChatId, cursor.lastSeq, { persist: false, touch: false })
+    }
+    clearStreamRuntime(targetChatId)
+    store.finishChatBusyRuntime(targetChatId)
+    store.clearChatActiveTask(targetChatId, { persist: false, touch: false })
+    flushTaskRecoveryPersist()
+  }
 
   function settleDetachedRecoveryFailure(chatId, cursorHint = null) {
     const targetChatId = normalizeChatId(chatId)
@@ -65,13 +134,13 @@ export function createRecoverableTaskController(deps = {}) {
         { persist: false },
       )
       store.updateChatTaskReplayCursor(targetChatId, cursor.lastSeq, { persist: false, touch: false })
-      store.persistLocalState()
+      scheduleTaskRecoveryPersist()
       return
     }
 
     store.finishChatBusyRuntime(targetChatId)
     store.clearChatActiveTask(targetChatId, { persist: false, touch: false })
-    store.persistLocalState()
+    flushTaskRecoveryPersist()
   }
 
   function recoverReplayCursorFromDetail(chatId, detail, activeCursor, options = {}) {
@@ -162,7 +231,8 @@ export function createRecoverableTaskController(deps = {}) {
         !replaceMessagesFromServer
         && activeCursor.recoverable
         && !existingRuntime
-        && getChatById(targetChatId)?.synced,
+        && getChatById(targetChatId)?.synced
+        && !hasLocalTaskPlaceholder(targetChatId, activeCursor.taskId)
       )
 
       const previousRuntime = getStreamRuntime(targetChatId)
@@ -250,10 +320,11 @@ export function createRecoverableTaskController(deps = {}) {
       }
 
       while (!runtime.abortController.signal.aborted) {
+        let terminalCursor = null
+        let terminalSettled = false
         try {
           const afterSeq = store.getChatLastTaskSeq(targetChatId)
           let sawEvent = false
-          let terminalCursor = null
           const batchEvents = []
           debugLog('attach:stream-open', {
             chatId: targetChatId,
@@ -264,6 +335,9 @@ export function createRecoverableTaskController(deps = {}) {
           await api.streamTaskEvents(activeCursor.taskId, afterSeq, {
             signal: runtime.abortController.signal,
             onEvent: (event) => {
+              if (terminalCursor) {
+                return
+              }
               sawEvent = true
               batchEvents.push(event)
               applyGatewayEvent(targetChatId, event, runtime)
@@ -277,7 +351,13 @@ export function createRecoverableTaskController(deps = {}) {
                 [event],
               )
               store.updateChatTaskReplayCursor(targetChatId, nextCursor.lastSeq, { persist: false, touch: false })
-              store.persistLocalState()
+              if (nextCursor.terminal) {
+                settleTerminalTaskLocally(targetChatId, nextCursor)
+                terminalSettled = true
+                runtime.abortController.abort()
+              } else {
+                scheduleTaskRecoveryPersist()
+              }
               activeCursor = normalizeTaskReplayCursor(
                 getChatById(targetChatId)?.activeTask || {
                   task_id: activeCursor.taskId,
@@ -300,6 +380,9 @@ export function createRecoverableTaskController(deps = {}) {
             localLastSeq: store.getChatLastTaskSeq(targetChatId),
             terminalCursor,
           })
+          if (terminalSettled) {
+            return
+          }
           if (terminalCursor) {
             const fallback = await refreshConversationTruthFallback(targetChatId, terminalCursor.lastSeq)
             debugLog('attach:terminal-fallback', {
@@ -365,6 +448,9 @@ export function createRecoverableTaskController(deps = {}) {
           await sleepWithSignal(800, runtime.abortController.signal)
         } catch (error) {
           if (runtime.abortController.signal.aborted) {
+            if (terminalCursor || terminalSettled) {
+              return
+            }
             return
           }
           debugLog('attach:stream-error', {
@@ -415,8 +501,6 @@ export function createRecoverableTaskController(deps = {}) {
       await attachRecoverableTask({ chatId: targetChatId, taskSummary: summary })
     } catch (error) {
       onError('task-recovery cancel failed', error)
-    } finally {
-      store.finishChatBusyRuntime(targetChatId)
     }
   }
 
@@ -464,11 +548,12 @@ export function createRecoverableTaskController(deps = {}) {
         requestChatContext,
         requestAskMode,
       )
+      await seedLocalTaskMessages(streamChatId, { message, taskSummary })
       store.finishChatBusyRuntime(streamChatId)
       await attachRecoverableTask({
         chatId: streamChatId,
         taskSummary,
-        replaceMessagesFromServer: true,
+        replaceMessagesFromServer: false,
       })
       return { ok: true, taskId: String(taskSummary?.task_id || '') }
     } catch (error) {
@@ -481,23 +566,32 @@ export function createRecoverableTaskController(deps = {}) {
     }
   }
 
-  function detachRecoverableTask(chatId) {
+  function detachRecoverableTask(chatId, options = {}) {
     const targetChatId = normalizeChatId(chatId)
     if (!targetChatId) return
     const runtime = getStreamRuntime(targetChatId)
     runtime?.abortController?.abort()
     clearStreamRuntime(targetChatId)
+    if (options?.flush !== false) {
+      flushTaskRecoveryPersist()
+    }
   }
 
   function detachAllRecoverableTasks() {
+    let detachedAny = false
     if (typeof deps.listRuntimeChatIds === 'function') {
       deps.listRuntimeChatIds().forEach((chatId) => {
-        detachRecoverableTask(chatId)
+        detachedAny = true
+        detachRecoverableTask(chatId, { flush: false })
       })
     } else if (deps.streamRuntimeByChatId instanceof Map) {
       Array.from(deps.streamRuntimeByChatId.keys()).forEach((chatId) => {
-        detachRecoverableTask(chatId)
+        detachedAny = true
+        detachRecoverableTask(chatId, { flush: false })
       })
+    }
+    if (detachedAny) {
+      flushTaskRecoveryPersist()
     }
     taskAttachInFlightByChatId.clear()
   }

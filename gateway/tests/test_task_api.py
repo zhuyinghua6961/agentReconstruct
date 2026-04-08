@@ -3,6 +3,7 @@ import threading
 import time
 from dataclasses import replace
 
+import anyio
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -90,17 +91,17 @@ def _set_health_transport() -> None:
             )
         if path.startswith("/internal/quota/grants/") and path.endswith("/finalize"):
             return httpx.Response(200, json={"success": True, "data": {"grant_id": path.split("/")[-2], "counted": bool(payload.get("success")), "idempotent": False}})
-        if path.endswith("/messages/user"):
-            return httpx.Response(201, json={"success": True, "message_id": "m_user_default", "deduped": False})
-        if path.endswith("/assistant-start"):
+        if path.endswith("/create-turn"):
             return httpx.Response(
                 200,
                 json={
                     "success": True,
                     "conversation_id": int(payload.get("conversation_id") or 0),
                     "task_id": str(payload.get("task_id") or ""),
+                    "user_message_id": "m_user_default",
                     "assistant_message_id": "m_assistant_default",
                     "status": "queued",
+                    "deduped": False,
                 },
             )
         if path.endswith("/rollback-create"):
@@ -242,6 +243,24 @@ class _AbortAwareBlockingAsyncStream(httpx.AsyncByteStream):
 
     async def aclose(self) -> None:
         self._closed_event.set()
+
+
+class _AsyncPauseStream(httpx.AsyncByteStream):
+    def __init__(self, *, first_chunk: bytes, second_chunk: bytes, first_released: threading.Event, continue_event: threading.Event) -> None:
+        self._first_chunk = first_chunk
+        self._second_chunk = second_chunk
+        self._first_released = first_released
+        self._continue_event = continue_event
+
+    async def __aiter__(self):
+        yield self._first_chunk
+        self._first_released.set()
+        while not self._continue_event.is_set():
+            await anyio.sleep(0.01)
+        yield self._second_chunk
+
+    async def aclose(self) -> None:
+        return None
 
 
 def test_create_task_returns_gateway_managed_summary_and_persists_request_record():
@@ -486,17 +505,17 @@ def test_create_task_prechecks_quota_stores_grant_and_emits_initial_queued_state
                 200,
                 json={"success": True, "data": {"grant_id": "grant-task-create-1", "quota_type": payload["quota_type"], "noop": False}},
             )
-        if path.endswith("/messages/user"):
-            return httpx.Response(201, json={"success": True, "message_id": "m_user_task_create", "deduped": False})
-        if path.endswith("/assistant-start"):
+        if path.endswith("/create-turn"):
             return httpx.Response(
                 200,
                 json={
                     "success": True,
                     "conversation_id": 123,
                     "task_id": str(payload.get("task_id") or ""),
+                    "user_message_id": "m_user_task_create",
                     "assistant_message_id": "m_assistant_task_create",
                     "status": "queued",
+                    "deduped": False,
                 },
             )
         raise AssertionError(f"unexpected upstream path: {path}")
@@ -513,8 +532,7 @@ def test_create_task_prechecks_quota_stores_grant_and_emits_initial_queued_state
     assert [path for path, _ in calls] == [
         "/api/health",
         "/internal/quota/grants/precheck",
-        "/internal/conversations/123/messages/user",
-        f"/internal/conversations/123/tasks/{payload['task_id']}/assistant-start",
+        f"/internal/conversations/123/tasks/{payload['task_id']}/create-turn",
     ]
     assert calls[1][1]["quota_type"] == "ask_query"
     assert stored["quota_type"] == "ask_query"
@@ -547,17 +565,17 @@ def test_create_task_allows_patent_mode_and_persists_patent_backend_target():
                     },
                 },
             )
-        if path == "/internal/conversations/123/messages/user":
-            return httpx.Response(201, json={"success": True, "message_id": "m_user_patent", "deduped": False})
-        if path.endswith("/assistant-start"):
+        if path.endswith("/create-turn"):
             return httpx.Response(
                 200,
                 json={
                     "success": True,
                     "conversation_id": 123,
                     "task_id": str(payload.get("task_id") or ""),
+                    "user_message_id": "m_user_patent",
                     "assistant_message_id": "m_assistant_patent",
                     "status": "queued",
+                    "deduped": False,
                 },
             )
         raise AssertionError(f"unexpected upstream path: {path}")
@@ -578,8 +596,7 @@ def test_create_task_allows_patent_mode_and_persists_patent_backend_target():
     assert [path for path, _ in calls] == [
         "/api/health",
         "/internal/quota/grants/precheck",
-        "/internal/conversations/123/messages/user",
-        f"/internal/conversations/123/tasks/{payload['task_id']}/assistant-start",
+        f"/internal/conversations/123/tasks/{payload['task_id']}/create-turn",
     ]
 
 
@@ -640,17 +657,17 @@ def test_create_task_persists_patent_file_route_protocol_fields_for_worker_execu
                     },
                 },
             )
-        if path == "/internal/conversations/123/messages/user":
-            return httpx.Response(201, json={"success": True, "message_id": "m_user_patent_mixed", "deduped": False})
-        if path.endswith("/assistant-start"):
+        if path.endswith("/create-turn"):
             return httpx.Response(
                 200,
                 json={
                     "success": True,
                     "conversation_id": 123,
                     "task_id": str(payload.get("task_id") or ""),
+                    "user_message_id": "m_user_patent_mixed",
                     "assistant_message_id": "m_assistant_patent_mixed",
                     "status": "queued",
+                    "deduped": False,
                 },
             )
         raise AssertionError(f"unexpected upstream path: {path}")
@@ -1017,6 +1034,7 @@ def test_get_task_reconciles_pending_progress_sync_for_live_task(monkeypatch):
             "updated_at": "2026-04-06T10:00:04+00:00",
             "started_at": "2026-04-06T10:00:03+00:00",
             "cancel_allowed": True,
+            "persisted_last_seq": 1,
             "progress_sync_pending": True,
             "progress_sync_payload": {
                 "status": "running",
@@ -1046,6 +1064,7 @@ def test_get_task_reconciles_pending_progress_sync_for_live_task(monkeypatch):
     assert response.json()["status"] == "running"
     stored = queue_store.get_request("req_progress_sync")
     assert stored is not None
+    assert stored["persisted_last_seq"] == 3
     assert stored["progress_sync_pending"] is False
     assert "progress_sync_payload" not in stored
     assert calls == [
@@ -1062,6 +1081,553 @@ def test_get_task_reconciles_pending_progress_sync_for_live_task(monkeypatch):
             },
         )
     ]
+
+
+def test_admission_worker_batches_content_progress_flushes_and_marks_persisted_last_seq(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    queue_store = app.state.execution_queue_status_store
+    relay_store = app.state.execution_event_relay_store
+    slot_store = app.state.execution_slot_leases_store if hasattr(app.state, "execution_slot_leases_store") else app.state.execution_slot_lease_store
+    request_id = "req_worker_batched_progress"
+    queue_store.put_request(
+        _queued_task_record(
+            request_id=request_id,
+            conversation_id=98,
+            assistant_message_id="msg_worker_batched_progress",
+            quota_grant_id="grant-worker-batched-progress",
+        ),
+        ttl_seconds=900,
+    )
+    relay_store.append_frame(request_id, {"type": "state", "status": "queued"}, ttl_seconds=900)
+    progress_calls: list[dict] = []
+    terminal_calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        payload = _json_request_body(request)
+        if path == "/api/fast/ask_stream":
+            chunk = "chunk-12345"
+            frames = [
+                b'data: {"type":"metadata","query_mode":"fast","route":"kb_qa","trace_id":"req_worker_batched_progress"}\n\n'
+            ]
+            frames.extend(
+                f'data: {{"type":"content","content":"{chunk}"}}\n\n'.encode("utf-8")
+                for _ in range(100)
+            )
+            frames.append(
+                b'data: {"type":"done","final_answer":"'
+                + (chunk.encode("utf-8") * 100)
+                + b'","query_mode":"fast","route":"kb_qa","trace_id":"req_worker_batched_progress"}\n\n'
+            )
+            return httpx.Response(200, content=b"".join(frames), headers={"content-type": "text/event-stream"})
+        if path == f"/internal/conversations/98/tasks/{request_id}/assistant-progress":
+            progress_calls.append(payload)
+            return httpx.Response(200, json={"success": True, "status": payload.get("status")})
+        if path == f"/internal/conversations/98/tasks/{request_id}/assistant-terminal":
+            terminal_calls.append(payload)
+            return httpx.Response(200, json={"success": True, "status": payload.get("terminal_status")})
+        if path == "/internal/quota/grants/grant-worker-batched-progress/finalize":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-worker-batched-progress", "counted": payload["success"], "idempotent": False}})
+        raise AssertionError(f"unexpected upstream path: {path}")
+
+    _set_task_transport(handler)
+    dispatcher = ExecutionAdmissionDispatcher(
+        settings=app.state.settings,
+        queue_status_store=queue_store,
+        slot_lease_store=slot_store,
+    )
+    worker = ExecutionAdmissionWorker(
+        dispatcher=dispatcher,
+        owner_id="worker-batched-progress",
+        executor=qa_task_module.GatewayTaskExecutor(app).execute,
+        timestamp_factory=lambda: "2026-04-06T10:00:05+00:00",
+    )
+
+    result = worker.run_dispatch_cycle()
+
+    assert result.outcome == "completed"
+    content_progress_calls = [payload for payload in progress_calls if payload.get("content_delta")]
+    assert len(content_progress_calls) <= 20
+    assert (len(content_progress_calls) / 100) <= 0.2
+    assert terminal_calls[0]["terminal_status"] == "completed"
+    assert terminal_calls[0]["last_seq"] > 0
+    assert content_progress_calls[-1]["last_seq"] == terminal_calls[0]["last_seq"] - 1
+    stored = queue_store.get_request(request_id)
+    assert stored is not None
+    assert stored["persisted_last_seq"] == terminal_calls[0]["last_seq"]
+
+
+def test_admission_worker_idle_flush_persists_progress_before_next_event_arrives(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    monkeypatch.setattr(qa_task_module, "_PROGRESS_FLUSH_MAX_IDLE_SECONDS", 0.05)
+    queue_store = app.state.execution_queue_status_store
+    relay_store = app.state.execution_event_relay_store
+    slot_store = app.state.execution_slot_lease_store
+    request_id = "req_worker_idle_flush"
+    queue_store.put_request(
+        _queued_task_record(
+            request_id=request_id,
+            conversation_id=99,
+            assistant_message_id="msg_worker_idle_flush",
+            quota_grant_id="grant-worker-idle-flush",
+        ),
+        ttl_seconds=900,
+    )
+    relay_store.append_frame(request_id, {"type": "state", "status": "queued"}, ttl_seconds=900)
+    first_chunk_released = threading.Event()
+    continue_event = threading.Event()
+    idle_progress_seen = threading.Event()
+    calls: list[tuple[str, dict]] = []
+    result_holder: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        payload = _json_request_body(request)
+        calls.append((path, payload))
+        if path == "/api/fast/ask_stream":
+            return httpx.Response(
+                200,
+                content=_AsyncPauseStream(
+                    first_chunk=(
+                        b'data: {"type":"metadata","query_mode":"fast","route":"kb_qa","trace_id":"req_worker_idle_flush"}\n\n'
+                        b'data: {"type":"content","content":"hello"}\n\n'
+                    ),
+                    second_chunk=b'data: {"type":"done","final_answer":"hello","query_mode":"fast","route":"kb_qa","trace_id":"req_worker_idle_flush"}\n\n',
+                    first_released=first_chunk_released,
+                    continue_event=continue_event,
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        if path == f"/internal/conversations/99/tasks/{request_id}/assistant-progress":
+            if payload.get("content_delta") == "hello":
+                idle_progress_seen.set()
+            return httpx.Response(200, json={"success": True, "status": payload.get("status")})
+        if path == f"/internal/conversations/99/tasks/{request_id}/assistant-terminal":
+            return httpx.Response(200, json={"success": True, "status": payload.get("terminal_status")})
+        if path == "/internal/quota/grants/grant-worker-idle-flush/finalize":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-worker-idle-flush", "counted": payload["success"], "idempotent": False}})
+        raise AssertionError(f"unexpected upstream path: {path}")
+
+    _set_task_transport(handler)
+    dispatcher = ExecutionAdmissionDispatcher(
+        settings=app.state.settings,
+        queue_status_store=queue_store,
+        slot_lease_store=slot_store,
+    )
+    worker = ExecutionAdmissionWorker(
+        dispatcher=dispatcher,
+        owner_id="worker-idle-flush",
+        executor=qa_task_module.GatewayTaskExecutor(app).execute,
+        timestamp_factory=lambda: "2026-04-06T10:00:05+00:00",
+    )
+
+    def _run_worker():
+        result_holder["result"] = worker.run_dispatch_cycle()
+
+    thread = threading.Thread(target=_run_worker, daemon=True)
+    thread.start()
+    assert first_chunk_released.wait(timeout=5)
+    assert idle_progress_seen.wait(timeout=5)
+    terminal_calls_before_done = [
+        payload
+        for path, payload in calls
+        if path == f"/internal/conversations/99/tasks/{request_id}/assistant-terminal"
+    ]
+    assert terminal_calls_before_done == []
+    continue_event.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+
+    result = result_holder["result"]
+    assert result.outcome == "completed"
+    progress_calls = [payload for path, payload in calls if path == f"/internal/conversations/99/tasks/{request_id}/assistant-progress"]
+    assert any(payload.get("content_delta") == "hello" for payload in progress_calls)
+
+
+def test_admission_worker_idle_flush_does_not_duplicate_content_when_first_flush_overlaps_new_content(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    monkeypatch.setattr(qa_task_module, "_PROGRESS_FLUSH_MAX_IDLE_SECONDS", 0.05)
+    queue_store = app.state.execution_queue_status_store
+    relay_store = app.state.execution_event_relay_store
+    slot_store = app.state.execution_slot_lease_store
+    request_id = "req_worker_idle_overlap"
+    queue_store.put_request(
+        _queued_task_record(
+            request_id=request_id,
+            conversation_id=100,
+            assistant_message_id="msg_worker_idle_overlap",
+            quota_grant_id="grant-worker-idle-overlap",
+        ),
+        ttl_seconds=900,
+    )
+    relay_store.append_frame(request_id, {"type": "state", "status": "queued"}, ttl_seconds=900)
+    first_chunk_released = threading.Event()
+    continue_event = threading.Event()
+    first_progress_started = threading.Event()
+    allow_first_progress_return = threading.Event()
+    progress_calls: list[dict] = []
+    terminal_calls: list[dict] = []
+    result_holder: dict[str, object] = {}
+
+    async def _progress_task_assistant(**kwargs):
+        payload = {
+            "status": kwargs.get("status"),
+            "content_delta": kwargs.get("content_delta"),
+            "last_seq": kwargs.get("last_seq"),
+            "steps": list(kwargs.get("steps") or []),
+        }
+        progress_calls.append(payload)
+        if payload["content_delta"] == "hello":
+            first_progress_started.set()
+            while not allow_first_progress_return.is_set():
+                await anyio.sleep(0.01)
+        return {"success": True, "status": payload["status"]}
+
+    async def _terminal_task_assistant(**kwargs):
+        terminal_calls.append(
+            {
+                "terminal_status": kwargs.get("terminal_status"),
+                "answer_text": kwargs.get("answer_text"),
+                "last_seq": kwargs.get("last_seq"),
+            }
+        )
+        return {"success": True, "status": kwargs.get("terminal_status")}
+
+    monkeypatch.setattr(app.state.conversation_persistence_service, "progress_task_assistant", _progress_task_assistant)
+    monkeypatch.setattr(app.state.conversation_persistence_service, "terminal_task_assistant", _terminal_task_assistant)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        payload = _json_request_body(request)
+        if path == "/api/fast/ask_stream":
+            return httpx.Response(
+                200,
+                content=_AsyncPauseStream(
+                    first_chunk=(
+                        b'data: {"type":"metadata","query_mode":"fast","route":"kb_qa","trace_id":"req_worker_idle_overlap"}\n\n'
+                        b'data: {"type":"content","content":"hello"}\n\n'
+                    ),
+                    second_chunk=(
+                        b'data: {"type":"content","content":"world"}\n\n'
+                        b'data: {"type":"done","final_answer":"helloworld","query_mode":"fast","route":"kb_qa","trace_id":"req_worker_idle_overlap"}\n\n'
+                    ),
+                    first_released=first_chunk_released,
+                    continue_event=continue_event,
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        if path == "/internal/quota/grants/grant-worker-idle-overlap/finalize":
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"grant_id": "grant-worker-idle-overlap", "counted": payload["success"], "idempotent": False}},
+            )
+        raise AssertionError(f"unexpected upstream path: {path}")
+
+    _set_task_transport(handler)
+    dispatcher = ExecutionAdmissionDispatcher(
+        settings=app.state.settings,
+        queue_status_store=queue_store,
+        slot_lease_store=slot_store,
+    )
+    worker = ExecutionAdmissionWorker(
+        dispatcher=dispatcher,
+        owner_id="worker-idle-overlap",
+        executor=qa_task_module.GatewayTaskExecutor(app).execute,
+        timestamp_factory=lambda: "2026-04-06T10:00:05+00:00",
+    )
+
+    def _run_worker():
+        result_holder["result"] = worker.run_dispatch_cycle()
+
+    thread = threading.Thread(target=_run_worker, daemon=True)
+    thread.start()
+    assert first_chunk_released.wait(timeout=5)
+    assert first_progress_started.wait(timeout=5)
+    continue_event.set()
+    time.sleep(0.1)
+    allow_first_progress_return.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+
+    result = result_holder["result"]
+    assert result.outcome == "completed"
+    assert [payload["content_delta"] for payload in progress_calls if payload["content_delta"]] == ["hello", "world"]
+    assert len(terminal_calls) == 1
+    assert terminal_calls[0]["terminal_status"] == "completed"
+    assert terminal_calls[0]["answer_text"] == "helloworld"
+
+
+def test_admission_worker_clears_inflight_progress_when_progress_flush_raises(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    monkeypatch.setattr(qa_task_module, "_PROGRESS_FLUSH_MAX_IDLE_SECONDS", 0.05)
+    queue_store = app.state.execution_queue_status_store
+    relay_store = app.state.execution_event_relay_store
+    slot_store = app.state.execution_slot_lease_store
+    request_id = "req_worker_idle_overlap_failure"
+    queue_store.put_request(
+        _queued_task_record(
+            request_id=request_id,
+            conversation_id=101,
+            assistant_message_id="msg_worker_idle_overlap_failure",
+            quota_grant_id="grant-worker-idle-overlap-failure",
+        ),
+        ttl_seconds=900,
+    )
+    relay_store.append_frame(request_id, {"type": "state", "status": "queued"}, ttl_seconds=900)
+    first_chunk_released = threading.Event()
+    continue_event = threading.Event()
+    first_progress_started = threading.Event()
+    progress_calls: list[dict] = []
+    terminal_calls: list[dict] = []
+    result_holder: dict[str, object] = {}
+    original_sync_progress_best_effort = qa_task_module.GatewayTaskExecutor._sync_progress_best_effort
+    first_call = {"pending": True}
+
+    async def _raising_once_sync_progress_best_effort(self, *, request, internal_request, status, last_seq, content_delta="", steps=None):
+        payload = {
+            "status": status,
+            "content_delta": content_delta,
+            "last_seq": last_seq,
+            "steps": list(steps or []),
+        }
+        progress_calls.append(payload)
+        if payload["content_delta"] == "hello" and first_call["pending"]:
+            first_call["pending"] = False
+            first_progress_started.set()
+            raise RuntimeError("simulated progress flush failure")
+        return await original_sync_progress_best_effort(
+            self,
+            request=request,
+            internal_request=internal_request,
+            status=status,
+            last_seq=last_seq,
+            content_delta=content_delta,
+            steps=steps,
+        )
+
+    async def _terminal_task_assistant(**kwargs):
+        terminal_calls.append(
+            {
+                "terminal_status": kwargs.get("terminal_status"),
+                "answer_text": kwargs.get("answer_text"),
+                "last_seq": kwargs.get("last_seq"),
+            }
+        )
+        return {"success": True, "status": kwargs.get("terminal_status")}
+
+    monkeypatch.setattr(qa_task_module.GatewayTaskExecutor, "_sync_progress_best_effort", _raising_once_sync_progress_best_effort)
+    monkeypatch.setattr(app.state.conversation_persistence_service, "terminal_task_assistant", _terminal_task_assistant)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        payload = _json_request_body(request)
+        if path == "/api/fast/ask_stream":
+            return httpx.Response(
+                200,
+                content=_AsyncPauseStream(
+                    first_chunk=(
+                        b'data: {"type":"metadata","query_mode":"fast","route":"kb_qa","trace_id":"req_worker_idle_overlap_failure"}\n\n'
+                        b'data: {"type":"content","content":"hello"}\n\n'
+                    ),
+                    second_chunk=(
+                        b'data: {"type":"content","content":"world"}\n\n'
+                        b'data: {"type":"done","final_answer":"helloworld","query_mode":"fast","route":"kb_qa","trace_id":"req_worker_idle_overlap_failure"}\n\n'
+                    ),
+                    first_released=first_chunk_released,
+                    continue_event=continue_event,
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        if path == f"/internal/conversations/101/tasks/{request_id}/assistant-progress":
+            return httpx.Response(200, json={"success": True, "status": payload.get("status")})
+        if path == "/internal/quota/grants/grant-worker-idle-overlap-failure/finalize":
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"grant_id": "grant-worker-idle-overlap-failure", "counted": payload["success"], "idempotent": False}},
+            )
+        raise AssertionError(f"unexpected upstream path: {path}")
+
+    _set_task_transport(handler)
+    dispatcher = ExecutionAdmissionDispatcher(
+        settings=app.state.settings,
+        queue_status_store=queue_store,
+        slot_lease_store=slot_store,
+    )
+    worker = ExecutionAdmissionWorker(
+        dispatcher=dispatcher,
+        owner_id="worker-idle-overlap-failure",
+        executor=qa_task_module.GatewayTaskExecutor(app).execute,
+        timestamp_factory=lambda: "2026-04-06T10:00:05+00:00",
+    )
+
+    def _run_worker():
+        result_holder["result"] = worker.run_dispatch_cycle()
+
+    thread = threading.Thread(target=_run_worker, daemon=True)
+    thread.start()
+    assert first_chunk_released.wait(timeout=5)
+    assert first_progress_started.wait(timeout=5)
+    continue_event.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+
+    result = result_holder["result"]
+    assert result.outcome == "completed"
+    assert [payload["content_delta"] for payload in progress_calls if payload["content_delta"]] == ["hello", "helloworld"]
+    assert len(terminal_calls) == 1
+    assert terminal_calls[0]["terminal_status"] == "completed"
+    assert terminal_calls[0]["answer_text"] == "helloworld"
+
+
+def test_admission_worker_cancel_flushes_pending_content_before_canceled_terminal(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    queue_store = app.state.execution_queue_status_store
+    relay_store = app.state.execution_event_relay_store
+    slot_store = app.state.execution_slot_lease_store
+    request_id = "req_worker_cancel_pending_flush"
+    queue_store.put_request(
+        _queued_task_record(
+            request_id=request_id,
+            conversation_id=91,
+            assistant_message_id="msg_worker_cancel_pending_flush",
+            quota_grant_id="grant-worker-cancel-pending-flush",
+        ),
+        ttl_seconds=900,
+    )
+    relay_store.append_frame(request_id, {"type": "state", "status": "queued"}, ttl_seconds=900)
+    first_chunk_released = threading.Event()
+    continue_event = threading.Event()
+    calls: list[tuple[str, dict]] = []
+    result_holder: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        payload = _json_request_body(request)
+        calls.append((path, payload))
+        if path == "/api/fast/ask_stream":
+            return httpx.Response(
+                200,
+                content=_BlockingAsyncStream(
+                    first_chunk=(
+                        b'data: {"type":"metadata","query_mode":"fast","route":"kb_qa","trace_id":"req_worker_cancel_pending_flush"}\n\n'
+                        b'data: {"type":"content","content":"hi"}\n\n'
+                    ),
+                    second_chunk=b'data: {"type":"done","final_answer":"should_not_commit","query_mode":"fast","route":"kb_qa","trace_id":"req_worker_cancel_pending_flush"}\n\n',
+                    first_released=first_chunk_released,
+                    continue_event=continue_event,
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        if path == f"/internal/conversations/91/tasks/{request_id}/assistant-progress":
+            return httpx.Response(200, json={"success": True, "status": payload.get("status")})
+        if path == f"/internal/conversations/91/tasks/{request_id}/assistant-terminal":
+            return httpx.Response(200, json={"success": True, "status": payload.get("terminal_status")})
+        if path == "/internal/quota/grants/grant-worker-cancel-pending-flush/finalize":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-worker-cancel-pending-flush", "counted": payload["success"], "idempotent": False}})
+        raise AssertionError(f"unexpected upstream path: {path}")
+
+    _set_task_transport(handler)
+    dispatcher = ExecutionAdmissionDispatcher(
+        settings=app.state.settings,
+        queue_status_store=queue_store,
+        slot_lease_store=slot_store,
+    )
+    worker = ExecutionAdmissionWorker(
+        dispatcher=dispatcher,
+        owner_id="worker-cancel-pending-flush",
+        executor=qa_task_module.GatewayTaskExecutor(app).execute,
+        timestamp_factory=lambda: "2026-04-06T10:00:05+00:00",
+    )
+
+    def _run_worker():
+        result_holder["result"] = worker.run_dispatch_cycle()
+
+    thread = threading.Thread(target=_run_worker, daemon=True)
+    thread.start()
+    assert first_chunk_released.wait(timeout=5)
+
+    client = TestClient(app)
+    response = client.post(f"/api/v1/tasks/{request_id}/cancel")
+    assert response.status_code == 200
+    continue_event.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+
+    result = result_holder["result"]
+    assert result.outcome == "canceled"
+    progress_calls = [payload for path, payload in calls if path == f"/internal/conversations/91/tasks/{request_id}/assistant-progress"]
+    terminal_calls = [payload for path, payload in calls if path == f"/internal/conversations/91/tasks/{request_id}/assistant-terminal"]
+    assert any(payload.get("content_delta") == "hi" for payload in progress_calls)
+    assert len(terminal_calls) == 1
+    flushed = next(payload for payload in progress_calls if payload.get("content_delta") == "hi")
+    assert flushed["last_seq"] < terminal_calls[0]["last_seq"]
+    assert terminal_calls[0]["terminal_status"] == "canceled"
+
+
+def test_admission_worker_failure_terminal_persistence_does_not_clear_pending_progress(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    queue_store = app.state.execution_queue_status_store
+    relay_store = app.state.execution_event_relay_store
+    slot_store = app.state.execution_slot_lease_store
+    request_id = "req_worker_failed_terminal_retry"
+    calls: list[tuple[str, dict]] = []
+    queue_store.put_request(
+        _queued_task_record(
+            request_id=request_id,
+            conversation_id=90,
+            assistant_message_id="msg_worker_failed_terminal_retry",
+            quota_grant_id="grant-worker-failed-terminal-retry",
+        ),
+        ttl_seconds=900,
+    )
+    relay_store.append_frame(request_id, {"type": "state", "status": "queued"}, ttl_seconds=900)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        payload = _json_request_body(request)
+        calls.append((path, payload))
+        if path == "/api/fast/ask_stream":
+            return httpx.Response(
+                200,
+                content=(
+                    b'data: {"type":"metadata","query_mode":"fast","route":"kb_qa","trace_id":"failed-terminal-retry"}\n\n'
+                    b'data: {"type":"content","content":"hello"}\n\n'
+                    b'data: {"type":"error","message":"boom"}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        if path == f"/internal/conversations/90/tasks/{request_id}/assistant-progress":
+            return httpx.Response(500, json={"success": False, "error": "progress_sync_failed"})
+        if path == f"/internal/conversations/90/tasks/{request_id}/assistant-terminal":
+            return httpx.Response(500, json={"success": False, "error": "terminal_write_failed"})
+        if path == "/internal/quota/grants/grant-worker-failed-terminal-retry/finalize":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-worker-failed-terminal-retry", "counted": payload["success"], "idempotent": False}})
+        raise AssertionError(f"unexpected upstream path: {path}")
+
+    _set_task_transport(handler)
+    dispatcher = ExecutionAdmissionDispatcher(
+        settings=app.state.settings,
+        queue_status_store=queue_store,
+        slot_lease_store=slot_store,
+    )
+    worker = ExecutionAdmissionWorker(
+        dispatcher=dispatcher,
+        owner_id="worker-failed-terminal-retry",
+        executor=qa_task_module.GatewayTaskExecutor(app).execute,
+        timestamp_factory=lambda: "2026-04-06T10:00:05+00:00",
+    )
+
+    result = worker.run_dispatch_cycle()
+
+    stored = queue_store.get_request(request_id)
+    assert result.outcome == "failed"
+    assert stored is not None
+    assert stored["status"] == "failed"
+    assert int(stored.get("persisted_last_seq") or 0) == 0
+    assert stored["progress_sync_pending"] is True
+    assert stored["progress_sync_payload"]["content_delta"] == "hello"
+    assert stored["terminal_sync_pending"] is True
+    assert stored["terminal_sync_payload"]["terminal_status"] == "failed"
 
 
 def test_get_task_keeps_terminal_sync_pending_when_quota_finalize_returns_failure_payload(monkeypatch):
@@ -1595,18 +2161,16 @@ def test_create_task_persists_single_user_turn_and_placeholder_and_binds_assista
         calls.append((path, payload, headers))
         if path == "/api/health":
             return httpx.Response(200, json={"status": "ok"})
-        if path == "/internal/conversations/123/messages/user":
+        if path.endswith("/create-turn"):
+            task_id = path.split("/")[-2]
             state["messages"].append(
                 {
                     "message_id": "m_user_001",
                     "role": "user",
                     "content": payload["message"]["content"],
-                    "idempotency_key": payload["idempotency_key"],
+                    "task_id": task_id,
                 }
             )
-            return httpx.Response(201, json={"success": True, "message_id": "m_user_001", "deduped": False})
-        if path.endswith("/assistant-start"):
-            task_id = path.split("/")[-2]
             state["messages"].append(
                 {
                     "message_id": "m_assistant_001",
@@ -1621,8 +2185,10 @@ def test_create_task_persists_single_user_turn_and_placeholder_and_binds_assista
                     "success": True,
                     "conversation_id": 123,
                     "task_id": task_id,
+                    "user_message_id": "m_user_001",
                     "assistant_message_id": "m_assistant_001",
                     "status": "queued",
+                    "deduped": False,
                 },
             )
         raise AssertionError(f"unexpected upstream path: {path}")
@@ -1638,8 +2204,7 @@ def test_create_task_persists_single_user_turn_and_placeholder_and_binds_assista
     assert payload["status"] == "queued"
     assert [path for path, _, _ in calls if path != "/api/health"] == [
         "/internal/quota/grants/precheck",
-        "/internal/conversations/123/messages/user",
-        f"/internal/conversations/123/tasks/{payload['task_id']}/assistant-start",
+        f"/internal/conversations/123/tasks/{payload['task_id']}/create-turn",
     ]
     assert calls[2][2]["x-internal-service-name"] == "gateway"
     assert calls[2][2]["x-internal-service-token"] == "authority-test-token"
@@ -1667,6 +2232,38 @@ def test_create_task_rejects_same_conversation_when_live_task_exists_without_per
             "created_at": "2026-04-06T10:00:00+00:00",
             "updated_at": "2026-04-06T10:00:05+00:00",
             "enqueued_at": "2026-04-06T10:00:00+00:00",
+        },
+        ttl_seconds=900,
+    )
+    calls: list[str] = []
+    _set_task_transport(lambda request: calls.append(request.url.path) or httpx.Response(200, json={"status": "ok"}))
+    client = TestClient(app)
+
+    response = client.post("/api/v1/tasks", json=_request_body(user_id=7))
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "task_conversation_active"
+    assert calls == []
+    assert len(app.state.execution_queue_status_store.list_requests()) == 1
+
+
+def test_create_task_rejects_same_conversation_when_provisioning_task_exists_without_persisting_side_effects():
+    _set_current_task_user(7)
+    queue_store = app.state.execution_queue_status_store
+    queue_store.put_request(
+        {
+            "request_id": "req_live_provisioning_same_conversation",
+            "status": "provisioning",
+            "conversation_id": 123,
+            "user_id": 7,
+            "requested_mode": "fast",
+            "actual_mode": "fast",
+            "route": "kb_qa",
+            "queue_tier": "high",
+            "created_at": "2026-04-06T10:00:00+00:00",
+            "updated_at": "2026-04-06T10:00:05+00:00",
+            "enqueued_at": "2026-04-06T10:00:00+00:00",
+            "cancel_allowed": False,
         },
         ttl_seconds=900,
     )
@@ -1822,17 +2419,15 @@ def test_create_task_rolls_back_conversation_side_effects_when_queue_record_writ
         calls.append(path)
         if path == "/api/health":
             return httpx.Response(200, json={"status": "ok"})
-        if path == "/internal/conversations/123/messages/user":
+        if path.endswith("/create-turn"):
+            task_id = path.split("/")[-2]
             state["messages"].append(
                 {
                     "message_id": "m_user_rollback",
                     "role": "user",
-                    "idempotency_key": payload["idempotency_key"],
+                    "task_id": task_id,
                 }
             )
-            return httpx.Response(201, json={"success": True, "message_id": "m_user_rollback", "deduped": False})
-        if path.endswith("/assistant-start"):
-            task_id = path.split("/")[-2]
             state["messages"].append({"message_id": "m_assistant_rollback", "role": "assistant", "task_id": task_id})
             state["active_task_id"] = task_id
             return httpx.Response(
@@ -1841,8 +2436,10 @@ def test_create_task_rolls_back_conversation_side_effects_when_queue_record_writ
                     "success": True,
                     "conversation_id": 123,
                     "task_id": task_id,
+                    "user_message_id": "m_user_rollback",
                     "assistant_message_id": "m_assistant_rollback",
                     "status": "queued",
+                    "deduped": False,
                 },
             )
         if path.endswith("/rollback-create"):
@@ -1861,7 +2458,16 @@ def test_create_task_rolls_back_conversation_side_effects_when_queue_record_writ
         raise AssertionError(f"unexpected upstream path: {path}")
 
     _set_task_transport(handler)
-    monkeypatch.setattr(app.state.execution_queue_status_store, "put_request", lambda record, ttl_seconds: False)
+    put_request_calls = {"count": 0}
+    original_put_request = app.state.execution_queue_status_store.put_request
+
+    def _fail_second_put_request(record, ttl_seconds):
+        put_request_calls["count"] += 1
+        if put_request_calls["count"] == 2:
+            return False
+        return original_put_request(record, ttl_seconds=ttl_seconds)
+
+    monkeypatch.setattr(app.state.execution_queue_status_store, "put_request", _fail_second_put_request)
     client = TestClient(app)
 
     response = client.post("/api/v1/tasks", json=_request_body())
@@ -1871,9 +2477,9 @@ def test_create_task_rolls_back_conversation_side_effects_when_queue_record_writ
     assert len(state["messages"]) == 0
     assert state["active_task_id"] is None
     assert calls[1] == "/internal/quota/grants/precheck"
-    assert calls[2] == "/internal/conversations/123/messages/user"
-    assert calls[3].endswith("/assistant-start")
-    assert calls[4].endswith("/rollback-create")
+    assert calls[2].endswith("/create-turn")
+    assert calls[3].endswith("/rollback-create")
+    assert calls[4].endswith("/finalize")
 
 
 def test_create_task_rolls_back_when_queue_record_write_raises(monkeypatch):
@@ -1887,11 +2493,9 @@ def test_create_task_rolls_back_when_queue_record_write_raises(monkeypatch):
         calls.append(path)
         if path == "/api/health":
             return httpx.Response(200, json={"status": "ok"})
-        if path == "/internal/conversations/123/messages/user":
-            state["messages"].append({"message_id": "m_user_raise", "role": "user"})
-            return httpx.Response(201, json={"success": True, "message_id": "m_user_raise", "deduped": False})
-        if path.endswith("/assistant-start"):
+        if path.endswith("/create-turn"):
             task_id = path.split("/")[-2]
+            state["messages"].append({"message_id": "m_user_raise", "role": "user", "task_id": task_id})
             state["messages"].append({"message_id": "m_assistant_raise", "role": "assistant", "task_id": task_id})
             state["active_task_id"] = task_id
             return httpx.Response(
@@ -1900,8 +2504,10 @@ def test_create_task_rolls_back_when_queue_record_write_raises(monkeypatch):
                     "success": True,
                     "conversation_id": 123,
                     "task_id": task_id,
+                    "user_message_id": "m_user_raise",
                     "assistant_message_id": "m_assistant_raise",
                     "status": "queued",
+                    "deduped": False,
                 },
             )
         if path.endswith("/rollback-create"):
@@ -1914,10 +2520,16 @@ def test_create_task_rolls_back_when_queue_record_write_raises(monkeypatch):
 
     _set_task_transport(handler)
 
-    def _raise_put_request(record, ttl_seconds):
-        raise RuntimeError("queue store exploded")
+    put_request_calls = {"count": 0}
+    original_put_request = app.state.execution_queue_status_store.put_request
 
-    monkeypatch.setattr(app.state.execution_queue_status_store, "put_request", _raise_put_request)
+    def _raise_second_put_request(record, ttl_seconds):
+        put_request_calls["count"] += 1
+        if put_request_calls["count"] == 2:
+            raise RuntimeError("queue store exploded")
+        return original_put_request(record, ttl_seconds=ttl_seconds)
+
+    monkeypatch.setattr(app.state.execution_queue_status_store, "put_request", _raise_second_put_request)
     client = TestClient(app)
 
     response = client.post("/api/v1/tasks", json=_request_body())
@@ -1941,11 +2553,9 @@ def test_create_task_surfaces_compensation_failure_when_rollback_cannot_complete
         calls.append(path)
         if path == "/api/health":
             return httpx.Response(200, json={"status": "ok"})
-        if path == "/internal/conversations/123/messages/user":
-            state["messages"].append({"message_id": "m_user_compensation", "role": "user"})
-            return httpx.Response(201, json={"success": True, "message_id": "m_user_compensation", "deduped": False})
-        if path.endswith("/assistant-start"):
+        if path.endswith("/create-turn"):
             task_id = path.split("/")[-2]
+            state["messages"].append({"message_id": "m_user_compensation", "role": "user", "task_id": task_id})
             state["messages"].append({"message_id": "m_assistant_compensation", "role": "assistant", "task_id": task_id})
             state["active_task_id"] = task_id
             return httpx.Response(
@@ -1954,8 +2564,10 @@ def test_create_task_surfaces_compensation_failure_when_rollback_cannot_complete
                     "success": True,
                     "conversation_id": 123,
                     "task_id": task_id,
+                    "user_message_id": "m_user_compensation",
                     "assistant_message_id": "m_assistant_compensation",
                     "status": "queued",
+                    "deduped": False,
                 },
             )
         if path.endswith("/rollback-create"):
@@ -1963,7 +2575,16 @@ def test_create_task_surfaces_compensation_failure_when_rollback_cannot_complete
         raise AssertionError(f"unexpected upstream path: {path}")
 
     _set_task_transport(handler)
-    monkeypatch.setattr(app.state.execution_queue_status_store, "put_request", lambda record, ttl_seconds: False)
+    put_request_calls = {"count": 0}
+    original_put_request = app.state.execution_queue_status_store.put_request
+
+    def _fail_second_put_request(record, ttl_seconds):
+        put_request_calls["count"] += 1
+        if put_request_calls["count"] == 2:
+            return False
+        return original_put_request(record, ttl_seconds=ttl_seconds)
+
+    monkeypatch.setattr(app.state.execution_queue_status_store, "put_request", _fail_second_put_request)
     client = TestClient(app)
 
     response = client.post("/api/v1/tasks", json=_request_body())
@@ -1972,7 +2593,11 @@ def test_create_task_surfaces_compensation_failure_when_rollback_cannot_complete
     assert response.json()["detail"] == "task_create_rollback_failed"
     assert len(state["messages"]) == 2
     assert state["active_task_id"]
-    assert calls[-1].endswith("/rollback-create")
+    assert any(path.endswith("/rollback-create") for path in calls)
+    finalize_calls = [path for path in calls if path.endswith("/finalize")]
+    assert finalize_calls == ["/internal/quota/grants/grant-task-default/finalize"]
+    remaining = app.state.execution_queue_status_store.list_requests()
+    assert remaining == []
 
 
 def test_create_task_rejects_blank_assistant_message_id_and_rolls_back(monkeypatch):
@@ -1986,11 +2611,9 @@ def test_create_task_rejects_blank_assistant_message_id_and_rolls_back(monkeypat
         calls.append(path)
         if path == "/api/health":
             return httpx.Response(200, json={"status": "ok"})
-        if path == "/internal/conversations/123/messages/user":
-            state["messages"].append({"message_id": "m_user_blank_assistant", "role": "user"})
-            return httpx.Response(201, json={"success": True, "message_id": "m_user_blank_assistant", "deduped": False})
-        if path.endswith("/assistant-start"):
+        if path.endswith("/create-turn"):
             task_id = path.split("/")[-2]
+            state["messages"].append({"message_id": "m_user_blank_assistant", "role": "user", "task_id": task_id})
             state["messages"].append({"message_id": "m_assistant_blank", "role": "assistant", "task_id": task_id})
             state["active_task_id"] = task_id
             return httpx.Response(
@@ -1999,8 +2622,10 @@ def test_create_task_rejects_blank_assistant_message_id_and_rolls_back(monkeypat
                     "success": True,
                     "conversation_id": 123,
                     "task_id": task_id,
+                    "user_message_id": "m_user_blank_assistant",
                     "assistant_message_id": "",
                     "status": "queued",
+                    "deduped": False,
                 },
             )
         if path.endswith("/rollback-create"):
@@ -2034,9 +2659,22 @@ def test_create_task_rejects_blank_user_message_id_and_rolls_back(monkeypatch):
         calls.append(path)
         if path == "/api/health":
             return httpx.Response(200, json={"status": "ok"})
-        if path == "/internal/conversations/123/messages/user":
-            state["messages"].append({"message_id": "m_user_blank", "role": "user", "trace_id": payload.get("trace_id")})
-            return httpx.Response(201, json={"success": True, "message_id": "", "deduped": False})
+        if path.endswith("/create-turn"):
+            task_id = path.split("/")[-2]
+            state["messages"].append({"message_id": "m_user_blank", "role": "user", "task_id": task_id})
+            state["active_task_id"] = task_id
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "conversation_id": 123,
+                    "task_id": task_id,
+                    "user_message_id": "",
+                    "assistant_message_id": "m_assistant_unused",
+                    "status": "queued",
+                    "deduped": False,
+                },
+            )
         if path.endswith("/rollback-create"):
             state["messages"] = []
             state["active_task_id"] = None
@@ -2055,6 +2693,226 @@ def test_create_task_rejects_blank_user_message_id_and_rolls_back(monkeypatch):
     assert len(app.state.execution_queue_status_store.list_requests()) == 0
     assert calls[-2].endswith("/rollback-create")
     assert calls[-1].endswith("/finalize")
+
+
+def test_create_task_stores_provisional_request_before_atomic_turn_creation_and_cleans_it_on_failure(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    queue_store = app.state.execution_queue_status_store
+    calls: list[str] = []
+    observed_task_ids: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        calls.append(path)
+        if path == "/api/health":
+            return httpx.Response(200, json={"status": "ok"})
+        if path == "/internal/conversations/123/tasks/task_force_failure/create-turn":
+            raise AssertionError("unexpected hard-coded task id")
+        if path.endswith("/create-turn"):
+            task_id = path.split("/")[-2]
+            observed_task_ids.append(task_id)
+            stored = queue_store.get_request(task_id)
+            assert stored is not None
+            assert stored["status"] == "provisioning"
+            assert stored.get("assistant_message_id") in {None, ""}
+            return httpx.Response(500, json={"success": False, "error": "atomic_create_failed"})
+        raise AssertionError(f"unexpected upstream path: {path}")
+
+    _set_task_transport(handler)
+    client = TestClient(app)
+
+    response = client.post("/api/v1/tasks", json=_request_body())
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "task_create_failed"
+    assert calls[1] == "/internal/quota/grants/precheck"
+    assert calls[2].endswith("/create-turn")
+    assert calls[3].endswith("/finalize")
+    assert len(observed_task_ids) == 1
+    assert queue_store.get_request(observed_task_ids[0]) is None
+
+
+def test_admission_worker_does_not_dispatch_provisioning_requests(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    queue_store = app.state.execution_queue_status_store
+    slot_store = app.state.execution_slot_lease_store
+    request_id = "req_provisioning_only"
+    queue_store.put_request(
+        _queued_task_record(
+            request_id=request_id,
+            status="provisioning",
+            cancel_allowed=False,
+            assistant_message_id=None,
+        ),
+        ttl_seconds=900,
+    )
+    executor_calls: list[str] = []
+    dispatcher = ExecutionAdmissionDispatcher(
+        settings=app.state.settings,
+        queue_status_store=queue_store,
+        slot_lease_store=slot_store,
+    )
+    worker = ExecutionAdmissionWorker(
+        dispatcher=dispatcher,
+        owner_id="worker-provisioning-guard",
+        executor=lambda request, lease: executor_calls.append(str(request.get("request_id") or "")) or {"outcome": "completed"},
+        timestamp_factory=lambda: "2026-04-06T10:00:05+00:00",
+    )
+
+    result = worker.run_dispatch_cycle()
+
+    assert result.outcome == "no_queued"
+    assert executor_calls == []
+    assert queue_store.get_request(request_id)["status"] == "provisioning"
+
+
+def test_get_task_recovers_provisioning_record_into_queued_summary_and_initial_event(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    queue_store = app.state.execution_queue_status_store
+    relay_store = app.state.execution_event_relay_store
+    request_id = "req_provisioning_recover"
+    queue_store.put_request(
+        _queued_task_record(
+            request_id=request_id,
+            status="provisioning",
+            cancel_allowed=False,
+            assistant_message_id=None,
+            conversation_id=123,
+            user_id=42,
+            execution_snapshot={
+                "question": "recover me",
+                "conversation_id": 123,
+                "user_id": 42,
+                "chat_history": [],
+                "requested_mode": "fast",
+                "actual_mode": "fast",
+                "route": "kb_qa",
+                "selected_file_ids": [11],
+                "options": {},
+            },
+        ),
+        ttl_seconds=900,
+    )
+    calls: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        payload = _json_request_body(request)
+        calls.append((path, payload))
+        if path.endswith("/create-turn"):
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "conversation_id": 123,
+                    "task_id": request_id,
+                    "user_message_id": "m_user_recover",
+                    "assistant_message_id": "m_assistant_recover",
+                    "status": "queued",
+                    "deduped": True,
+                },
+            )
+        raise AssertionError(f"unexpected upstream path: {path}")
+
+    _set_task_transport(handler)
+    client = TestClient(app)
+
+    first_response = client.get(f"/api/v1/tasks/{request_id}")
+    second_response = client.get(f"/api/v1/tasks/{request_id}")
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    payload = first_response.json()
+    assert payload["status"] == "queued"
+    assert payload["assistant_message_id"] == "m_assistant_recover"
+    assert second_response.json()["status"] == "queued"
+    stored = queue_store.get_request(request_id)
+    assert stored is not None
+    assert stored["status"] == "queued"
+    assert stored["assistant_message_id"] == "m_assistant_recover"
+    assert stored["execution_snapshot"]["user_message_id"] == "m_user_recover"
+    assert stored["execution_snapshot"]["assistant_message_id"] == "m_assistant_recover"
+    replay = relay_store.get_frames(request_id, after_sequence=0)
+    assert [frame["sequence"] for frame in replay] == [1]
+    assert replay[0]["payload"] == {"type": "state", "status": "queued"}
+    assert calls == [
+        (
+            f"/internal/conversations/123/tasks/{request_id}/create-turn",
+            {
+                "conversation_id": 123,
+                "user_id": 42,
+                "task_id": request_id,
+                "trace_id": request_id,
+                "source_service": "fastQA",
+                "route": "kb_qa",
+                "requested_mode": "fast",
+                "actual_mode": "fast",
+                "message": {"role": "user", "content": "recover me"},
+                "context_hints": {"selected_file_ids": [11], "last_turn_route_hint": "kb_qa"},
+                "status": "queued",
+                "last_seq": 0,
+            },
+        )
+    ]
+
+
+def test_get_task_does_not_attempt_provisioning_recovery_when_recovery_lock_is_unavailable(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    queue_store = app.state.execution_queue_status_store
+    relay_store = app.state.execution_event_relay_store
+    request_id = "req_provisioning_lock_skip"
+    queue_store.put_request(
+        _queued_task_record(
+            request_id=request_id,
+            status="provisioning",
+            cancel_allowed=False,
+            assistant_message_id=None,
+            conversation_id=123,
+            user_id=42,
+            execution_snapshot={
+                "question": "recover me later",
+                "conversation_id": 123,
+                "user_id": 42,
+                "chat_history": [],
+                "requested_mode": "fast",
+                "actual_mode": "fast",
+                "route": "kb_qa",
+                "selected_file_ids": [],
+                "options": {},
+            },
+        ),
+        ttl_seconds=900,
+    )
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    _set_task_transport(handler)
+
+    class _NoopLockManager:
+        def acquire(self, *segments, owner, ttl_seconds=5, wait_timeout_seconds=2.0, retry_interval_seconds=0.01):
+            _ = segments, owner, ttl_seconds, wait_timeout_seconds, retry_interval_seconds
+            return None
+
+        def release(self, handle):
+            _ = handle
+            return False
+
+    monkeypatch.setattr(app.state, "distributed_lock_manager", _NoopLockManager())
+    client = TestClient(app)
+
+    response = client.get(f"/api/v1/tasks/{request_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "provisioning"
+    assert calls == []
+    stored = queue_store.get_request(request_id)
+    assert stored is not None
+    assert stored["status"] == "provisioning"
+    assert relay_store.get_frames(request_id, after_sequence=0) == []
 
 
 def test_admission_worker_executes_task_stream_updates_progress_and_finalizes_quota(monkeypatch):

@@ -1237,8 +1237,10 @@ export const useChatStore = defineStore('chat', () => {
     const userMessageCount = countMessagesByRole(targetChat.messages, 'user')
     if (userMessageCount === 1 && isPlaceholderTitle(targetChat.title)) {
       targetChat.title = buildAutoTitleFromText(content)
-      saveChats()
-    } else {
+      if (options.persist !== false) {
+        saveChats()
+      }
+    } else if (options.persist !== false) {
       saveChats()
     }
     
@@ -1309,7 +1311,9 @@ export const useChatStore = defineStore('chat', () => {
     
     targetChat.messages.push(botMessage)
     touchChat(targetChat, botMessage.timestamp)
-    saveChats()
+    if (options.persist !== false) {
+      saveChats()
+    }
     
     // 注意：不在这里同步到服务器，因为消息可能还不完整
     // 等流式响应完成后，由 ask_stream 接口自动保存完整消息
@@ -1743,6 +1747,14 @@ export const useChatStore = defineStore('chat', () => {
     saveChats({ force: true })
   }
 
+  function scheduleTaskRecoveryPersist() {
+    saveChats()
+  }
+
+  function flushTaskRecoveryPersist() {
+    saveChats({ force: true })
+  }
+
   function setChatActiveTask(chatId, taskSummary, options = {}) {
     const chat = getChatById(chatId)
     if (!chat) return null
@@ -1830,6 +1842,8 @@ export const useChatStore = defineStore('chat', () => {
     clearChatBusyRuntime,
     togglePinned,
     persistLocalState,
+    scheduleTaskRecoveryPersist,
+    flushTaskRecoveryPersist,
     setChatActiveTask,
     updateChatTaskReplayCursor,
     clearChatActiveTask,

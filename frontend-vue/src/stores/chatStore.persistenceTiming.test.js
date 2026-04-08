@@ -116,3 +116,53 @@ test('chat store force persist clears pending streaming debounce and persists on
     global.fetch = originalFetch
   }
 })
+
+test('chat store task recovery scheduler coalesces repeated persist requests until an explicit flush', async () => {
+  const storage = installLocalStorageRecorder()
+  const timers = installTimerRecorder()
+
+  const originalFetch = global.fetch
+  global.fetch = async () => {
+    throw new Error('fetch should not be called in persistence timing test')
+  }
+
+  try {
+    const { createPinia, setActivePinia } = await import('pinia')
+    const { useChatStore } = await import('./chatStore.js')
+
+    setActivePinia(createPinia())
+    const store = useChatStore()
+
+    const chat = store.createChat()
+    store.setChatActiveTask(chat.id, {
+      task_id: 'task_scheduler_42',
+      status: 'running',
+      last_seq: 0,
+      replay_available: true,
+    }, { persist: false, touch: false })
+    storage.resetCalls()
+
+    assert.equal(typeof store.scheduleTaskRecoveryPersist, 'function')
+    assert.equal(typeof store.flushTaskRecoveryPersist, 'function')
+
+    for (let index = 0; index < 100; index += 1) {
+      store.updateChatTaskReplayCursor(chat.id, index + 1, { persist: false, touch: false })
+      store.scheduleTaskRecoveryPersist()
+    }
+
+    assert.equal(storage.countWrites('lfp_chats'), 0)
+    assert.equal(timers.pending.size, 1)
+
+    store.flushTaskRecoveryPersist()
+
+    assert.equal(storage.countWrites('lfp_chats'), 1)
+    assert.equal(timers.pending.size, 0)
+
+    timers.runAllPending()
+
+    assert.equal(storage.countWrites('lfp_chats'), 1)
+  } finally {
+    timers.restore()
+    global.fetch = originalFetch
+  }
+})

@@ -4,7 +4,19 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from app.modules.conversation.authority_schemas import AuthorityRequestBase
+from app.modules.conversation.authority_schemas import (
+    AuthorityContextHints,
+    AuthorityRequestBase,
+    AuthorityUserMessagePayload,
+)
+
+
+class AuthorityTaskCreateTurnRequest(AuthorityRequestBase):
+    task_id: str = Field(min_length=1)
+    message: AuthorityUserMessagePayload
+    context_hints: AuthorityContextHints = Field(default_factory=AuthorityContextHints)
+    status: Literal["queued", "admitted", "running"]
+    last_seq: int = Field(default=0, ge=0)
 
 
 class AuthorityTaskAssistantStartRequest(AuthorityRequestBase):

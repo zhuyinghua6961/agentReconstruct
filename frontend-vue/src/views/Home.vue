@@ -119,6 +119,17 @@ const kbSummaryText = computed(() => {
   const graphPart = graphConnected ? `${Number(store.kbInfo.graphSize ?? 0)} 条` : '未连接'
   return `向量库: ${vectorSize} 条 | 知识图谱: ${graphPart}`
 })
+const currentRecoverableTaskSnapshot = computed(() => {
+  const chatId = normalizeChatId(store.currentChatId)
+  const chat = getChatById(chatId)
+  const activeTask = chat?.activeTask && typeof chat.activeTask === 'object' ? chat.activeTask : null
+  return {
+    chatId,
+    taskId: String(activeTask?.task_id || '').trim(),
+    status: String(activeTask?.status || '').trim().toLowerCase(),
+    replayAvailable: activeTask?.replay_available !== false,
+  }
+})
 const questionOutlineSignature = computed(() => buildQuestionOutlineSignature(store.currentMessages))
 const isNearBottomRef = ref(true)
 const pendingAutoScroll = ref(false)
@@ -321,7 +332,7 @@ async function refreshConversationTruth(chatId) {
     liveChat.uploaded_files = [...detail.uploaded_files]
   }
   if (detail.active_task) {
-    store.setChatActiveTask(targetChatId, detail.active_task, { touch: false })
+    store.setChatActiveTask(targetChatId, detail.active_task, { touch: false, persist: false })
   } else {
     store.clearChatActiveTask(targetChatId, { touch: false, persist: false })
   }
@@ -333,7 +344,7 @@ async function refreshConversationTruth(chatId) {
     ),
     localLastSeq: store.getChatLastTaskSeq(targetChatId),
   })
-  store.persistLocalState()
+  store.scheduleTaskRecoveryPersist()
   return detail
 }
 
@@ -420,7 +431,7 @@ function getTerminalMessageState(message) {
     || message?.metadata?.status
     || ''
   ).trim().toLowerCase()
-  if (raw === 'failed' || raw === 'canceled') return raw
+  if (raw === 'failed' || raw === 'canceled' || raw === 'expired') return raw
   return ''
 }
 
@@ -428,6 +439,7 @@ function getTerminalMessageTitle(message) {
   const state = getTerminalMessageState(message)
   if (state === 'failed') return '处理失败'
   if (state === 'canceled') return '已取消'
+  if (state === 'expired') return '已结束'
   return ''
 }
 
@@ -441,6 +453,7 @@ function getTerminalMessageDetail(message) {
   const state = getTerminalMessageState(message)
   if (state === 'failed') return '这次回答没有成功完成，你可以稍后重试。'
   if (state === 'canceled') return '这次回答已结束，没有继续生成。'
+  if (state === 'expired') return '这次回答已过期结束，请重新发起提问。'
   return ''
 }
 
@@ -827,7 +840,7 @@ function finalizeRecoverableTaskLocally(chatId, options = {}) {
   if (options?.clearActiveTask !== false) {
     store.clearChatActiveTask(chatId, { persist: false, touch: false })
   }
-  store.persistLocalState()
+  store.flushTaskRecoveryPersist()
 }
 
 function applyGatewayEvent(chatId, data, runtime = getStreamRuntime(chatId)) {
@@ -850,30 +863,37 @@ function applyGatewayEvent(chatId, data, runtime = getStreamRuntime(chatId)) {
     if (status === 'queued' || status === 'admitted' || status === 'running') {
       syncRecoverableTaskSummary(chatId, data)
       store.updateChatTaskReplayCursor(chatId, data.seq, { persist: false, touch: false })
-      store.persistLocalState()
+      store.scheduleTaskRecoveryPersist()
       return { terminal: false }
     }
-    if (status === 'canceled') {
+    if (status === 'canceled' || status === 'expired') {
+      flushPendingStreamContent(chatId)
+      const targetMessage = getStreamingTargetMessage(chatId)?.message || {}
+      const existingMeta = (targetMessage.metadata && typeof targetMessage.metadata === 'object') ? targetMessage.metadata : {}
+      const detailMessage = status === 'expired'
+        ? '这次回答已过期结束，请重新发起提问。'
+        : '用户已停止生成'
       updateStreamingTargetMessage(chatId, {
-        terminalStatus: 'canceled',
-        status: 'canceled',
-        failureMessage: '用户已停止生成',
-        failureCode: 'ASK_CANCELLED',
+        terminalStatus: status,
+        status,
+        failureMessage: detailMessage,
+        failureCode: status === 'expired' ? 'TASK_EXPIRED' : 'ASK_CANCELLED',
         retriable: false,
         doneSeen: false,
         metadata: {
-          terminal_status: 'canceled',
-          status: 'canceled',
-          failure_message: '用户已停止生成',
-          failure_code: 'ASK_CANCELLED',
+          ...existingMeta,
+          terminal_status: status,
+          status,
+          failure_message: detailMessage,
+          failure_code: status === 'expired' ? 'TASK_EXPIRED' : 'ASK_CANCELLED',
           retriable: false,
           done_seen: false,
-          streaming_terminal_event: 'canceled',
+          streaming_terminal_event: status,
         },
         isComplete: true
       })
       finalizeRecoverableTaskLocally(chatId, { lastSeq: data.seq })
-      return { terminal: true, status: 'canceled' }
+      return { terminal: true, status }
     }
   }
 
@@ -1418,6 +1438,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  store.flushTaskRecoveryPersist()
   recoverableTaskController.detachAllRecoverableTasks()
   stopFileStatusPolling()
   stopPanelResize()
@@ -2018,26 +2039,36 @@ watch(
   { immediate: true }
 )
 
-watch(() => ({
-  chatId: normalizeChatId(store.currentChatId),
-  taskId: store.currentChat?.activeTask?.task_id,
-  status: store.currentChat?.activeTask?.status,
-}), ({ chatId, taskId, status }) => {
+watch(() => [
+  currentRecoverableTaskSnapshot.value.chatId,
+  currentRecoverableTaskSnapshot.value.taskId,
+  currentRecoverableTaskSnapshot.value.status,
+  currentRecoverableTaskSnapshot.value.replayAvailable ? '1' : '0',
+], ([chatId, taskId, status, replayAvailable]) => {
   if (!store.refreshSurvivableQATasksEnabled) return
   if (!chatId) return
   if (!String(taskId || '').trim()) return
+  const taskSummary = getChatById(chatId)?.activeTask
   const cursor = normalizeTaskReplayCursor({
     task_id: taskId,
     status,
     last_seq: store.getChatLastTaskSeq(chatId),
-    replay_available: store.currentChat?.activeTask?.replay_available,
+    replay_available: replayAvailable === '1',
   }, store.getChatLastTaskSeq(chatId))
   if (!cursor.recoverable) return
   const existingRuntime = getStreamRuntime(chatId)
-  if (existingRuntime?.mode === 'task' && existingRuntime?.requestId === cursor.taskId && !existingRuntime?.abortController?.signal?.aborted) return
+  if (existingRuntime?.mode === 'task' && existingRuntime?.requestId === cursor.taskId && !existingRuntime?.abortController?.signal?.aborted) {
+    taskRecoveryDebug.log('home:attach-watch-skip-active-runtime', {
+      chatId,
+      taskId: cursor.taskId,
+      status: cursor.status,
+      localLastSeq: store.getChatLastTaskSeq(chatId),
+    })
+    return
+  }
   void attachRecoverableTask({
     chatId,
-    taskSummary: store.currentChat.activeTask,
+    taskSummary,
   })
 }, { immediate: true })
 
@@ -3220,6 +3251,12 @@ watch(
   background: #fff7ed;
   border-color: #fed7aa;
   color: #9a3412;
+}
+
+.terminal-message-expired {
+  background: #f8fafc;
+  border-color: #cbd5e1;
+  color: #475569;
 }
 
 .references-section {

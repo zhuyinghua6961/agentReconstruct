@@ -55,3 +55,35 @@ test('shouldIgnoreLateStreamError returns false for terminal errors', async () =
     false,
   )
 })
+
+test('shouldIgnoreLateStreamError returns true when done_seen is the only terminal marker', async () => {
+  const { shouldIgnoreLateStreamError } = await loadStreamingLifecycleUtils()
+
+  assert.equal(typeof shouldIgnoreLateStreamError, 'function')
+  assert.equal(
+    shouldIgnoreLateStreamError({
+      isComplete: true,
+      content: '专利答案已经结束',
+      metadata: {
+        done_seen: true,
+      },
+    }),
+    true,
+  )
+})
+
+test('shouldIgnoreLateStreamError normalizes uppercase done terminal events', async () => {
+  const { shouldIgnoreLateStreamError } = await loadStreamingLifecycleUtils()
+
+  assert.equal(typeof shouldIgnoreLateStreamError, 'function')
+  assert.equal(
+    shouldIgnoreLateStreamError({
+      isComplete: true,
+      content: 'thinking done',
+      metadata: {
+        streaming_terminal_event: 'DONE',
+      },
+    }),
+    true,
+  )
+})

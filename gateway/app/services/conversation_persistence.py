@@ -158,6 +158,52 @@ class ConversationPersistenceService:
             payload=payload,
         )
 
+    async def create_task_turn(
+        self,
+        *,
+        request: Request,
+        conversation_id: int | str | None,
+        user_id: int | str | None,
+        task_id: str,
+        content: str,
+        route: str,
+        requested_mode: str,
+        actual_mode: str,
+        selected_file_ids: list[int] | None = None,
+        status: str = "queued",
+        last_seq: int = 0,
+    ) -> dict[str, Any]:
+        cid = _conversation_id_int(conversation_id)
+        uid = _conversation_id_int(user_id)
+        if cid is None or uid is None:
+            raise ValueError("conversation_id_and_user_id_required")
+        source_service = self._source_service_for_mode(actual_mode)
+        payload = {
+            "conversation_id": cid,
+            "user_id": uid,
+            "task_id": str(task_id or "").strip(),
+            "trace_id": str(task_id or "").strip(),
+            "source_service": source_service,
+            "route": str(route or "").strip() or "kb_qa",
+            "requested_mode": str(requested_mode or "").strip() or actual_mode,
+            "actual_mode": str(actual_mode or "").strip(),
+            "message": {
+                "role": "user",
+                "content": str(content or "").strip(),
+            },
+            "context_hints": {
+                "selected_file_ids": list(selected_file_ids or []),
+                "last_turn_route_hint": str(route or "").strip() or None,
+            },
+            "status": str(status or "queued").strip() or "queued",
+            "last_seq": max(0, int(last_seq)),
+        }
+        return await self._post_internal_json(
+            request=request,
+            path=f"/internal/conversations/{cid}/tasks/{str(task_id or '').strip()}/create-turn",
+            payload=payload,
+        )
+
     async def start_task_assistant(
         self,
         *,

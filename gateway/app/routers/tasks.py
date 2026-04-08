@@ -32,7 +32,7 @@ async def get_task(
 ):
     service = QATaskService(request)
     await service.reconcile_pending_terminal_tasks(task_ids={task_id})
-    return service.get_task(task_id, auth_context=auth_context)
+    return await service.get_task(task_id, auth_context=auth_context)
 
 
 @router.get("/api/v1/tasks/{task_id}/events")
@@ -46,8 +46,8 @@ async def get_task_events(
     await service.reconcile_pending_terminal_tasks(task_ids={task_id})
     accept = str(request.headers.get("accept") or "").lower()
     if "text/event-stream" in accept:
-        return service.stream_task_events(task_id, after_seq=after_seq, auth_context=auth_context)
-    return service.get_task_events(task_id, after_seq=after_seq, auth_context=auth_context)
+        return await service.stream_task_events(task_id, after_seq=after_seq, auth_context=auth_context)
+    return await service.get_task_events(task_id, after_seq=after_seq, auth_context=auth_context)
 
 
 @router.post("/api/v1/tasks/{task_id}/cancel")

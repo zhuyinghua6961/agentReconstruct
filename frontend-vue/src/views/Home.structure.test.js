@@ -69,11 +69,15 @@ test('Home renders failed terminal assistant messages as terminal cards instead 
   assert.match(source, /function getTerminalMessageState\(message\)/)
   assert.match(source, /function getTerminalMessageTitle\(message\)/)
   assert.match(source, /function getTerminalMessageDetail\(message\)/)
+  assert.match(source, /if \(raw === 'failed' \|\| raw === 'canceled' \|\| raw === 'expired'\) return raw/)
+  assert.match(source, /if \(state === 'expired'\) return '已结束'/)
+  assert.match(source, /if \(state === 'expired'\) return '这次回答已过期结束，请重新发起提问。'/)
   assert.match(source, /<div v-if="getTerminalMessageState\(entry\.message\)" class="terminal-message-inline" :class="'terminal-message-' \+ getTerminalMessageState\(entry\.message\)">/)
   assert.match(source, /<div v-else-if="getTerminalMessageState\(entry\.message\)" class="terminal-message-card"/)
   assert.match(source, /<div class="terminal-message-title">{{ getTerminalMessageTitle\(entry\.message\) }}<\/div>/)
   assert.match(source, /<div v-if="getTerminalMessageDetail\(entry\.message\)" class="terminal-message-detail">{{ getTerminalMessageDetail\(entry\.message\) }}<\/div>/)
   assert.match(source, /\.terminal-message-canceled \{/)
+  assert.match(source, /\.terminal-message-expired \{/)
   assert.match(source, /<div v-else class="loading-animation"><span>思考中\.\.\.<\/span><\/div>/)
 })
 
@@ -146,14 +150,22 @@ test('Home exposes queued and admitted task states in the UI instead of showing 
 })
 
 test('Home stop flow uses gateway task cancel for recoverable tasks and attaches recovery on current-chat active_task', () => {
-  assert.match(source, /watch\(\(\) => \(\{\s*chatId: normalizeChatId\(store\.currentChatId\),\s*taskId: store\.currentChat\?\.activeTask\?\.task_id,/s)
+  assert.match(source, /const currentRecoverableTaskSnapshot = computed\(\(\) => \{\s*const chatId = normalizeChatId\(store\.currentChatId\)\s*const chat = getChatById\(chatId\)\s*const activeTask = chat\?\.activeTask/s)
+  assert.match(source, /watch\(\s*\(\) => \[\s*currentRecoverableTaskSnapshot\.value\.chatId,\s*currentRecoverableTaskSnapshot\.value\.taskId,\s*currentRecoverableTaskSnapshot\.value\.status,\s*currentRecoverableTaskSnapshot\.value\.replayAvailable \? '1' : '0',\s*\]/s)
   assert.match(source, /const existingRuntime = getStreamRuntime\(chatId\)/)
-  assert.match(source, /if \(existingRuntime\?\.mode === 'task' && existingRuntime\?\.requestId === cursor\.taskId && !existingRuntime\?\.abortController\?\.signal\?\.aborted\) return/)
-  assert.match(source, /void attachRecoverableTask\(\{\s*chatId,\s*taskSummary: store\.currentChat\.activeTask,\s*\}\)/s)
+  assert.match(source, /if \(existingRuntime\?\.mode === 'task' && existingRuntime\?\.requestId === cursor\.taskId && !existingRuntime\?\.abortController\?\.signal\?\.aborted\) \{\s*taskRecoveryDebug\.log\('home:attach-watch-skip-active-runtime'/s)
+  assert.match(source, /const taskSummary = getChatById\(chatId\)\?\.activeTask/)
+  assert.match(source, /void attachRecoverableTask\(\{\s*chatId,\s*taskSummary,\s*\}\)/s)
   assert.match(source, /const activeTaskId = String\(chat\?\.activeTask\?\.task_id \|\| ''\)\.trim\(\)/)
   assert.match(source, /if \(store\.refreshSurvivableQATasksEnabled && activeTaskId\) \{\s*void cancelRecoverableTask\(targetChatId, activeTaskId\)\s*return\s*\}/s)
   assert.match(source, /return recoverableTaskController\.cancelRecoverableTask\(chatId, taskId\)/)
   assert.match(source, /recoverableTaskController\.detachAllRecoverableTasks\(\)/)
+})
+
+test('Home schedules truth-refresh persistence and force-flushes it on unmount', () => {
+  assert.match(source, /async function refreshConversationTruth\(chatId\) \{[\s\S]*taskRecoveryDebug\.log\('home:refresh-conversation-truth'[\s\S]*store\.scheduleTaskRecoveryPersist\(\)\s*return detail\s*\}/s)
+  assert.doesNotMatch(source, /async function refreshConversationTruth\(chatId\) \{[\s\S]*taskRecoveryDebug\.log\('home:refresh-conversation-truth'[\s\S]*store\.persistLocalState\(\)\s*return detail\s*\}/s)
+  assert.match(source, /onUnmounted\(\(\) => \{\s*store\.flushTaskRecoveryPersist\(\)\s*recoverableTaskController\.detachAllRecoverableTasks\(\)/s)
 })
 
 test('Home drops duplicate recoverable task events whose seq is not ahead of the local replay cursor', () => {
@@ -162,4 +174,10 @@ test('Home drops duplicate recoverable task events whose seq is not ahead of the
   assert.match(source, /const localLastSeq = store\.getChatLastTaskSeq\(chatId\)/)
   assert.match(source, /if \(eventSeq > 0 && eventSeq <= localLastSeq\) \{/)
   assert.match(source, /taskRecoveryDebug\.log\('home:event-skipped-duplicate'/)
+})
+
+test('Home flushes buffered recoverable content before settling canceled or expired terminal state events', () => {
+  assert.match(source, /if \(status === 'canceled' \|\| status === 'expired'\) \{\s*flushPendingStreamContent\(chatId\)/s)
+  assert.match(source, /streaming_terminal_event:\s*status/)
+  assert.match(source, /finalizeRecoverableTaskLocally\(chatId, \{ lastSeq: data\.seq \}\)/)
 })

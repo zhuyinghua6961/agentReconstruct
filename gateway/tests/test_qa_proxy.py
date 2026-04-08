@@ -258,6 +258,69 @@ def test_mode_ask_stream_counts_quota_only_after_done_event(monkeypatch):
     assert calls[2][1]["success"] is True
 
 
+@pytest.mark.parametrize(
+    ("request_path", "requested_mode", "upstream_path"),
+    [
+        ("/api/fast/ask_stream", "fast", "/api/fast/ask_stream"),
+        ("/api/thinking/ask_stream", "thinking", "/api/thinking/ask_stream"),
+        ("/api/patent/ask_stream", "patent", "/api/patent/ask_stream"),
+    ],
+)
+def test_mode_ask_stream_finalizes_success_after_done_across_modes(monkeypatch, request_path, requested_mode, upstream_path):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    calls = []
+    grant_id = f"grant-{requested_mode}-done"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, _json_request_body(request)))
+        if request.url.path == "/internal/quota/grants/precheck":
+            payload = _json_request_body(request)
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"grant_id": grant_id, "quota_type": payload["quota_type"], "noop": False}},
+            )
+        if request.url.path == f"/internal/quota/grants/{grant_id}/finalize":
+            payload = _json_request_body(request)
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": grant_id, "counted": payload["success"], "idempotent": False}})
+        if request.url.path == upstream_path:
+            return httpx.Response(
+                200,
+                content=(
+                    f'data: {{"type":"metadata","query_mode":"{requested_mode}"}}\n\n'.encode("utf-8")
+                    + b'data: {"type":"content","content":"hello"}\n\n'
+                    + f'data: {{"type":"done","final_answer":"hello","query_mode":"{requested_mode}"}}\n\n'.encode("utf-8")
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+
+    with _TransportGuard(handler):
+        client = TestClient(app)
+        with client.stream(
+            "POST",
+            request_path,
+            json={
+                "question": "plain qa",
+                "requested_mode": requested_mode,
+                "conversation_id": 19,
+                "user_id": 42,
+                "chat_history": [],
+                "pdf_context": {},
+                "options": {},
+            },
+        ) as response:
+            body = b"".join(response.iter_bytes())
+
+    assert response.status_code == 200
+    assert b'"type":"done"' in body
+    assert [item[0] for item in calls] == [
+        "/internal/quota/grants/precheck",
+        upstream_path,
+        f"/internal/quota/grants/{grant_id}/finalize",
+    ]
+    assert calls[2][1]["success"] is True
+
+
 def test_mode_ask_stream_appends_quota_warning_when_finalize_fails(monkeypatch):
     monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
 

@@ -21,6 +21,7 @@ from app.modules.conversation.authority_schemas import (
 )
 from app.modules.conversation.task_schemas import (
     AuthorityTaskCreateRollbackRequest,
+    AuthorityTaskCreateTurnRequest,
     AuthorityTaskAssistantProgressRequest,
     AuthorityTaskAssistantStartRequest,
     AuthorityTaskAssistantTerminalRequest,
@@ -406,6 +407,38 @@ def start_task_assistant(
         route=payload.route,
         requested_mode=payload.requested_mode,
         actual_mode=payload.actual_mode,
+        status=payload.status,
+        last_seq=payload.last_seq,
+    )
+    _raise_service_error(result=result, ok_status=200)
+    return JSONResponse(status_code=200, content=jsonable_encoder(result))
+
+
+@router.post("/internal/conversations/{conversation_id}/tasks/{task_id}/create-turn")
+def create_task_turn(
+    conversation_id: int,
+    task_id: str,
+    payload: AuthorityTaskCreateTurnRequest,
+    _caller: InternalAuthorityCaller = Depends(_require_gateway_internal_caller),
+):
+    _enforce_path_conversation_id(path_conversation_id=conversation_id, payload_conversation_id=payload.conversation_id)
+    _enforce_path_task_id(path_task_id=task_id, payload_task_id=payload.task_id)
+    _enforce_source_service_contract(
+        source_service=payload.source_service,
+        requested_mode=payload.requested_mode,
+        actual_mode=payload.actual_mode,
+    )
+    result = _conversation_service().create_authority_task_turn(
+        user_id=payload.user_id,
+        conversation_id=payload.conversation_id,
+        task_id=payload.task_id,
+        trace_id=payload.trace_id,
+        source_service=payload.source_service,
+        route=payload.route,
+        requested_mode=payload.requested_mode,
+        actual_mode=payload.actual_mode,
+        content=payload.message.content,
+        context_hints=payload.context_hints.model_dump(),
         status=payload.status,
         last_seq=payload.last_seq,
     )

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 import json
 import logging
 import os
+import threading
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -33,6 +37,8 @@ _TERMINAL_TASK_STATUSES = {"completed", "failed", "canceled", "expired"}
 _RELAY_RETENTION_FLOOR_SECONDS = 60
 _TERMINAL_SYNCABLE_STATUSES = {"completed", "failed", "canceled", "expired"}
 _TASK_EVENT_STREAM_POLL_SECONDS = 0.1
+_PROGRESS_FLUSH_MAX_PENDING_EVENTS = 5
+_PROGRESS_FLUSH_MAX_IDLE_SECONDS = 0.25
 
 
 def _is_truthy_env_flag(value: Any) -> bool:
@@ -70,6 +76,34 @@ def _normalized_positive_int(value: Any) -> int | None:
     except Exception:
         return None
     return normalized if normalized > 0 else None
+
+
+def _live_runtime_handle(entry: Any) -> Any:
+    if isinstance(entry, dict):
+        return entry.get("handle")
+    return entry
+
+
+def _live_runtime_flush_hook(entry: Any):
+    if isinstance(entry, dict):
+        return entry.get("flush_progress")
+    return getattr(entry, "flush_progress", None)
+
+
+def _live_runtime_terminal_snapshot(entry: Any) -> dict[str, Any]:
+    if not isinstance(entry, dict):
+        return {"answer_text": "", "steps": []}
+    runtime_lock = entry.get("lock")
+    if runtime_lock is None:
+        return {
+            "answer_text": str(entry.get("answer_text") or ""),
+            "steps": list(entry.get("latest_steps") or []),
+        }
+    with runtime_lock:
+        return {
+            "answer_text": str(entry.get("answer_text") or ""),
+            "steps": list(entry.get("latest_steps") or []),
+        }
 
 
 def _quota_type_for_route_name(route_name: Any) -> str:
@@ -115,6 +149,7 @@ class QATaskService:
             user_message_id = ""
             assistant_message_id = ""
             side_effects_started = False
+            request_record_started = False
             quota_type = _quota_type_for_route_name(route_decision.route)
             quota_grant_id = ""
             downstream_authorization = self._downstream_authorization_header()
@@ -132,40 +167,12 @@ class QATaskService:
                     )
                 grant_data = precheck.payload.get("data") if isinstance(precheck.payload.get("data"), dict) else {}
                 quota_grant_id = str(grant_data.get("grant_id") or "").strip()
-                persisted_user = await persistence_service.persist_task_user_message(
-                    request=self.request,
-                    conversation_id=conversation_id,
-                    user_id=user_id,
-                    task_id=task_id,
-                    content=bound_payload.question,
-                    route=route_decision.route,
-                    requested_mode=bound_payload.requested_mode,
-                    actual_mode=route_decision.actual_mode,
-                    selected_file_ids=self._selected_file_ids(bound_payload.pdf_context),
-                )
-                side_effects_started = True
-                user_message_id = str(persisted_user.get("message_id") or "")
-                if not user_message_id:
-                    raise HTTPException(status_code=500, detail="task_create_failed")
-                started_assistant = await persistence_service.start_task_assistant(
-                    request=self.request,
-                    conversation_id=conversation_id,
-                    user_id=user_id,
-                    task_id=task_id,
-                    route=route_decision.route,
-                    requested_mode=bound_payload.requested_mode,
-                    actual_mode=route_decision.actual_mode,
-                    status="queued",
-                    last_seq=0,
-                )
-                assistant_message_id = str(started_assistant.get("assistant_message_id") or "")
-                if not assistant_message_id:
-                    raise HTTPException(status_code=500, detail="task_create_failed")
                 record = {
                     "request_id": task_id,
-                    "status": "queued",
+                    "status": "provisioning",
+                    "persisted_last_seq": 0,
                     "conversation_id": bound_payload.conversation_id,
-                    "assistant_message_id": assistant_message_id or None,
+                    "assistant_message_id": None,
                     "requested_mode": bound_payload.requested_mode,
                     "actual_mode": route_decision.actual_mode,
                     "target_backend": route_decision.actual_mode,
@@ -181,7 +188,7 @@ class QATaskService:
                     "updated_at": created_at.isoformat(),
                     "enqueued_at": created_at.isoformat(),
                     "expires_at": expires_at.isoformat(),
-                    "cancel_allowed": True,
+                    "cancel_allowed": False,
                     "transport_kind": "sse",
                     "user_id": bound_payload.user_id,
                     "quota_type": quota_type,
@@ -210,8 +217,8 @@ class QATaskService:
                         "route_confidence": route_decision.route_confidence,
                         "classifier_used": route_decision.classifier_used,
                         "task_id": task_id,
-                        "user_message_id": user_message_id,
-                        "assistant_message_id": assistant_message_id,
+                        "user_message_id": "",
+                        "assistant_message_id": "",
                         "pdf_context": dict(bound_payload.pdf_context or {}),
                         "quota_type": quota_type,
                         "quota_grant_id": quota_grant_id or None,
@@ -222,69 +229,118 @@ class QATaskService:
                 stored = self.queue_store.put_request(record, ttl_seconds=int(self.settings.admission.queued_ttl_seconds))
                 if not stored:
                     raise HTTPException(status_code=500, detail="task_create_failed")
+                request_record_started = True
+                created_turn = await persistence_service.create_task_turn(
+                    request=self.request,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    task_id=task_id,
+                    content=bound_payload.question,
+                    route=route_decision.route,
+                    requested_mode=bound_payload.requested_mode,
+                    actual_mode=route_decision.actual_mode,
+                    selected_file_ids=self._selected_file_ids(bound_payload.pdf_context),
+                    status="queued",
+                    last_seq=0,
+                )
+                side_effects_started = True
+                user_message_id = str(created_turn.get("user_message_id") or "")
+                if not user_message_id:
+                    raise HTTPException(status_code=500, detail="task_create_failed")
+                assistant_message_id = str(created_turn.get("assistant_message_id") or "")
+                if not assistant_message_id:
+                    raise HTTPException(status_code=500, detail="task_create_failed")
+                updated_record = dict(record)
+                updated_record["status"] = "queued"
+                updated_record["cancel_allowed"] = True
+                updated_record["assistant_message_id"] = assistant_message_id or None
+                execution_snapshot = dict(updated_record.get("execution_snapshot") or {})
+                execution_snapshot["user_message_id"] = user_message_id
+                execution_snapshot["assistant_message_id"] = assistant_message_id
+                updated_record["execution_snapshot"] = execution_snapshot
+                stored = self.queue_store.put_request(updated_record, ttl_seconds=int(self.settings.admission.queued_ttl_seconds))
+                if not stored:
+                    raise HTTPException(status_code=500, detail="task_create_failed")
                 self._append_state_frame(task_id, status="queued")
             except httpx.HTTPStatusError as exc:
-                if side_effects_started:
-                    await self._rollback_task_create(
-                        payload=bound_payload,
-                        task_id=task_id,
-                        user_message_id=user_message_id,
-                        assistant_message_id=assistant_message_id,
-                    )
-                await self._finalize_quota_grant(grant_id=quota_grant_id, success=False)
+                cleanup_error = await self._cleanup_failed_task_create(
+                    payload=bound_payload,
+                    task_id=task_id,
+                    user_message_id=user_message_id,
+                    assistant_message_id=assistant_message_id,
+                    side_effects_started=side_effects_started,
+                    request_record_started=request_record_started,
+                    quota_grant_id=quota_grant_id,
+                )
+                if cleanup_error is not None:
+                    raise cleanup_error
                 raise HTTPException(
                     status_code=int(exc.response.status_code or 503),
                     detail="task_create_failed",
                 ) from exc
             except ValueError as exc:
-                if side_effects_started:
-                    await self._rollback_task_create(
-                        payload=bound_payload,
-                        task_id=task_id,
-                        user_message_id=user_message_id,
-                        assistant_message_id=assistant_message_id,
-                    )
-                await self._finalize_quota_grant(grant_id=quota_grant_id, success=False)
+                cleanup_error = await self._cleanup_failed_task_create(
+                    payload=bound_payload,
+                    task_id=task_id,
+                    user_message_id=user_message_id,
+                    assistant_message_id=assistant_message_id,
+                    side_effects_started=side_effects_started,
+                    request_record_started=request_record_started,
+                    quota_grant_id=quota_grant_id,
+                )
+                if cleanup_error is not None:
+                    raise cleanup_error
                 raise HTTPException(status_code=400, detail=str(exc) or "task_create_invalid") from exc
             except HTTPException:
-                if side_effects_started:
-                    await self._rollback_task_create(
-                        payload=bound_payload,
-                        task_id=task_id,
-                        user_message_id=user_message_id,
-                        assistant_message_id=assistant_message_id,
-                    )
-                await self._finalize_quota_grant(grant_id=quota_grant_id, success=False)
+                cleanup_error = await self._cleanup_failed_task_create(
+                    payload=bound_payload,
+                    task_id=task_id,
+                    user_message_id=user_message_id,
+                    assistant_message_id=assistant_message_id,
+                    side_effects_started=side_effects_started,
+                    request_record_started=request_record_started,
+                    quota_grant_id=quota_grant_id,
+                )
+                if cleanup_error is not None:
+                    raise cleanup_error
                 raise
             except httpx.HTTPError as exc:
-                if side_effects_started:
-                    await self._rollback_task_create(
-                        payload=bound_payload,
-                        task_id=task_id,
-                        user_message_id=user_message_id,
-                        assistant_message_id=assistant_message_id,
-                    )
-                await self._finalize_quota_grant(grant_id=quota_grant_id, success=False)
+                cleanup_error = await self._cleanup_failed_task_create(
+                    payload=bound_payload,
+                    task_id=task_id,
+                    user_message_id=user_message_id,
+                    assistant_message_id=assistant_message_id,
+                    side_effects_started=side_effects_started,
+                    request_record_started=request_record_started,
+                    quota_grant_id=quota_grant_id,
+                )
+                if cleanup_error is not None:
+                    raise cleanup_error
                 raise HTTPException(status_code=503, detail="task_create_failed") from exc
             except Exception as exc:
-                if side_effects_started:
-                    await self._rollback_task_create(
-                        payload=bound_payload,
-                        task_id=task_id,
-                        user_message_id=user_message_id,
-                        assistant_message_id=assistant_message_id,
-                    )
-                await self._finalize_quota_grant(grant_id=quota_grant_id, success=False)
+                cleanup_error = await self._cleanup_failed_task_create(
+                    payload=bound_payload,
+                    task_id=task_id,
+                    user_message_id=user_message_id,
+                    assistant_message_id=assistant_message_id,
+                    side_effects_started=side_effects_started,
+                    request_record_started=request_record_started,
+                    quota_grant_id=quota_grant_id,
+                )
+                if cleanup_error is not None:
+                    raise cleanup_error
                 raise HTTPException(status_code=500, detail="task_create_failed") from exc
         finally:
             if lock_manager is not None:
                 lock_manager.release(lock_handle)
         return self.build_task_summary(task_id, auth_context=auth_context)
 
-    def get_task(self, task_id: str, *, auth_context: AuthContext) -> dict[str, Any]:
+    async def get_task(self, task_id: str, *, auth_context: AuthContext) -> dict[str, Any]:
+        await self._ensure_task_record_ready(task_id, auth_context=auth_context)
         return self.build_task_summary(task_id, auth_context=auth_context)
 
-    def get_task_events(self, task_id: str, *, after_seq: int, auth_context: AuthContext) -> dict[str, Any]:
+    async def get_task_events(self, task_id: str, *, after_seq: int, auth_context: AuthContext) -> dict[str, Any]:
+        await self._ensure_task_record_ready(task_id, auth_context=auth_context)
         summary = self.build_task_summary(task_id, auth_context=auth_context)
         frames = self.relay_store.get_frames(task_id, after_sequence=after_seq)
         events = [self._frame_to_public_event(summary=summary, frame=frame) for frame in frames]
@@ -295,13 +351,15 @@ class QATaskService:
             "events": events,
         }
 
-    def stream_task_events(self, task_id: str, *, after_seq: int, auth_context: AuthContext) -> StreamingResponse:
+    async def stream_task_events(self, task_id: str, *, after_seq: int, auth_context: AuthContext) -> StreamingResponse:
+        await self._ensure_task_record_ready(task_id, auth_context=auth_context)
         self.build_task_summary(task_id, auth_context=auth_context)
         debug_enabled = _task_events_debug_enabled()
 
         async def event_stream():
             next_after = int(after_seq)
             if debug_enabled:
+                await self._ensure_task_record_ready(task_id, auth_context=auth_context)
                 initial_summary = self.build_task_summary(task_id, auth_context=auth_context)
                 initial_relay_state = self.relay_store.describe_request(task_id)
                 logger.info(
@@ -314,6 +372,7 @@ class QATaskService:
                     bool(initial_summary.get("replay_available")),
                 )
             while True:
+                await self._ensure_task_record_ready(task_id, auth_context=auth_context)
                 summary = self.build_task_summary(task_id, auth_context=auth_context)
                 frames = self.relay_store.get_frames(task_id, after_sequence=next_after)
                 events = [self._frame_to_public_event(summary=summary, frame=frame) for frame in frames]
@@ -359,6 +418,7 @@ class QATaskService:
         )
 
     async def cancel_task(self, task_id: str, *, auth_context: AuthContext) -> dict[str, Any]:
+        await self._ensure_task_record_ready(task_id, auth_context=auth_context)
         record = self._get_owned_task_record(task_id, auth_context=auth_context)
         public_status = normalize_public_task_status(record.get("status"))
         if public_status in _TERMINAL_TASK_STATUSES:
@@ -372,6 +432,11 @@ class QATaskService:
         if cancelled_status in _TERMINAL_TASK_STATUSES and cancelled_status != "canceled":
             self._assert_no_live_lease(task_id, record=cancelled)
             return self.build_task_summary(task_id, auth_context=auth_context)
+        live_runtime = self._get_live_runtime(task_id)
+        await self._flush_live_progress(task_id, entry=live_runtime)
+        terminal_snapshot = _live_runtime_terminal_snapshot(live_runtime)
+        terminal_answer_text = str(terminal_snapshot.get("answer_text") or "")
+        terminal_steps = list(terminal_snapshot.get("steps") or [])
         terminal_seq = self._append_state_frame(task_id, status="canceled")["sequence"]
         await self._abort_live_stream(task_id)
         terminal_side_effect_succeeded = False
@@ -384,8 +449,8 @@ class QATaskService:
                     task_id=task_id,
                     terminal_status="canceled",
                     last_seq=int(terminal_seq),
-                    answer_text="",
-                    steps=[],
+                    answer_text=terminal_answer_text,
+                    steps=terminal_steps,
                     failure={},
                 )
                 terminal_side_effect_succeeded = True
@@ -402,8 +467,8 @@ class QATaskService:
                 record=cancelled,
                 terminal_status="canceled",
                 last_seq=int(terminal_seq),
-                answer_text="",
-                steps=[],
+                answer_text=terminal_answer_text,
+                steps=terminal_steps,
                 failure={},
                 quota_success=False,
             )
@@ -418,6 +483,93 @@ class QATaskService:
         else:
             record = self._get_owned_task_record(task_id, auth_context=auth_context)
         return self._build_public_summary(record)
+
+    async def _ensure_task_record_ready(self, task_id: str, *, auth_context: AuthContext | None = None) -> dict[str, Any]:
+        if auth_context is None:
+            record = self.queue_store.get_request(task_id)
+            if record is None:
+                raise HTTPException(status_code=404, detail="task_not_found")
+        else:
+            record = self._get_owned_task_record(task_id, auth_context=auth_context)
+        public_status = normalize_public_task_status(record.get("status"))
+        if public_status != "provisioning":
+            return record
+        recovered = await self._recover_provisioning_task_record(record)
+        return recovered if isinstance(recovered, dict) else record
+
+    async def _recover_provisioning_task_record(self, record: dict[str, Any]) -> dict[str, Any]:
+        request_id = str(record.get("request_id") or "").strip()
+        if not request_id:
+            return record
+        lock_manager = getattr(self.app.state, "distributed_lock_manager", None)
+        lock_handle = None
+        if lock_manager is not None:
+            lock_handle = lock_manager.acquire(
+                "tasks",
+                "provisioning-recover",
+                request_id,
+                owner=f"task:{request_id}:recover",
+                ttl_seconds=10,
+                wait_timeout_seconds=1.0,
+            )
+            if lock_handle is None:
+                current = self.queue_store.get_request(request_id)
+                return current if isinstance(current, dict) else record
+        snapshot = dict(record.get("execution_snapshot") or {})
+        try:
+            current = self.queue_store.get_request(request_id)
+            if not isinstance(current, dict):
+                return record
+            if normalize_public_task_status(current.get("status")) != "provisioning":
+                return current
+            snapshot = dict(current.get("execution_snapshot") or snapshot)
+            conversation_id = _normalized_positive_int(current.get("conversation_id") or snapshot.get("conversation_id"))
+            user_id = _normalized_positive_int(current.get("user_id") or snapshot.get("user_id"))
+            question = str(snapshot.get("question") or "").strip()
+            route = str(current.get("route") or snapshot.get("route") or "").strip() or "kb_qa"
+            requested_mode = str(current.get("requested_mode") or snapshot.get("requested_mode") or "").strip()
+            actual_mode = str(current.get("actual_mode") or snapshot.get("actual_mode") or "").strip()
+            selected_file_ids = list(snapshot.get("selected_file_ids") or current.get("selected_file_ids") or [])
+            if conversation_id is None or user_id is None or not question or not requested_mode or not actual_mode:
+                return current
+            try:
+                created_turn = await self.app.state.conversation_persistence_service.create_task_turn(
+                    request=self.request,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    task_id=request_id,
+                    content=question,
+                    route=route,
+                    requested_mode=requested_mode,
+                    actual_mode=actual_mode,
+                    selected_file_ids=selected_file_ids,
+                    status="queued",
+                    last_seq=0,
+                )
+            except Exception:
+                logger.warning("gateway task provisioning recover failed task_id=%s", request_id, exc_info=True)
+                return current
+            user_message_id = str(created_turn.get("user_message_id") or "").strip()
+            assistant_message_id = str(created_turn.get("assistant_message_id") or "").strip()
+            if not user_message_id or not assistant_message_id:
+                return current
+            ttl_seconds = self.queue_store.request_ttl_seconds(request_id) or int(self.settings.admission.queued_ttl_seconds)
+            updated = dict(current)
+            updated["status"] = "queued"
+            updated["cancel_allowed"] = True
+            updated["assistant_message_id"] = assistant_message_id
+            updated["updated_at"] = datetime.now(timezone.utc).isoformat()
+            execution_snapshot = dict(updated.get("execution_snapshot") or {})
+            execution_snapshot["user_message_id"] = user_message_id
+            execution_snapshot["assistant_message_id"] = assistant_message_id
+            updated["execution_snapshot"] = execution_snapshot
+            if not self.queue_store.put_request(updated, ttl_seconds=int(ttl_seconds)):
+                return current
+            self._append_state_if_needed(request_id, status="queued")
+            return updated
+        finally:
+            if lock_manager is not None:
+                lock_manager.release(lock_handle)
 
     async def reconcile_pending_terminal_tasks(
         self,
@@ -534,6 +686,10 @@ class QATaskService:
         )
         ttl_seconds = self.queue_store.request_ttl_seconds(request_id) or self._task_ttl_seconds(request_id)
         updated = dict(record)
+        updated["persisted_last_seq"] = max(
+            int(updated.get("persisted_last_seq") or 0),
+            int(sync_payload.get("last_seq") or 0),
+        )
         updated["progress_sync_pending"] = False
         updated.pop("progress_sync_payload", None)
         if not self.queue_store.put_request(updated, ttl_seconds=max(_RELAY_RETENTION_FLOOR_SECONDS, int(ttl_seconds))):
@@ -573,6 +729,10 @@ class QATaskService:
             raise RuntimeError("task_terminal_quota_finalize_failed")
         ttl_seconds = self.queue_store.request_ttl_seconds(request_id) or _RELAY_RETENTION_FLOOR_SECONDS
         updated = dict(record)
+        updated["persisted_last_seq"] = max(
+            int(updated.get("persisted_last_seq") or 0),
+            int(latest_seq),
+        )
         updated["terminal_sync_pending"] = False
         updated["terminal_synced_at"] = datetime.now(timezone.utc).isoformat()
         updated.pop("terminal_sync_payload", None)
@@ -592,6 +752,57 @@ class QATaskService:
         if self.queue_store.put_request(updated, ttl_seconds=max(_RELAY_RETENTION_FLOOR_SECONDS, int(ttl_seconds))):
             return updated
         return None
+
+    def _new_progress_accumulator(self, *, persisted_last_seq: int = 0) -> dict[str, Any]:
+        return {
+            "status": "running",
+            "pending_content_delta": "",
+            "pending_content_events": 0,
+            "observed_last_seq": max(0, int(persisted_last_seq)),
+            "persisted_last_seq": max(0, int(persisted_last_seq)),
+            "latest_steps": [],
+            "dirty": False,
+            "last_flush_monotonic": time.monotonic(),
+        }
+
+    def _observe_progress_accumulator(
+        self,
+        accumulator: dict[str, Any],
+        *,
+        status: str,
+        last_seq: int,
+        content_delta: str = "",
+        steps: list[dict[str, Any]] | None = None,
+    ) -> None:
+        accumulator["status"] = str(status or accumulator.get("status") or "running").strip().lower() or "running"
+        accumulator["observed_last_seq"] = max(
+            int(accumulator.get("observed_last_seq") or 0),
+            max(0, int(last_seq)),
+        )
+        if steps is not None:
+            accumulator["latest_steps"] = list(steps or [])
+        delta = str(content_delta or "")
+        if delta:
+            accumulator["pending_content_delta"] = f"{accumulator.get('pending_content_delta') or ''}{delta}"
+            accumulator["pending_content_events"] = int(accumulator.get("pending_content_events") or 0) + 1
+        accumulator["dirty"] = True
+
+    def _progress_accumulator_payload(self, accumulator: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "status": str(accumulator.get("status") or "running").strip().lower() or "running",
+            "last_seq": max(0, int(accumulator.get("observed_last_seq") or 0)),
+            "content_delta": str(accumulator.get("pending_content_delta") or ""),
+            "steps": list(accumulator.get("latest_steps") or []),
+        }
+
+    def _progress_accumulator_should_flush(self, accumulator: dict[str, Any], *, force: bool = False) -> bool:
+        if not bool(accumulator.get("dirty")):
+            return False
+        if force:
+            return True
+        if int(accumulator.get("pending_content_events") or 0) >= _PROGRESS_FLUSH_MAX_PENDING_EVENTS:
+            return True
+        return (time.monotonic() - float(accumulator.get("last_flush_monotonic") or 0.0)) >= _PROGRESS_FLUSH_MAX_IDLE_SECONDS
 
     def _mark_terminal_sync_pending(
         self,
@@ -626,16 +837,35 @@ class QATaskService:
     async def _abort_live_stream(self, task_id: str) -> None:
         registry = getattr(self.app.state, "active_task_streams", None)
         registry_lock = getattr(self.app.state, "active_task_streams_lock", None)
-        handle = None
+        entry = None
         if isinstance(registry, dict) and registry_lock is not None:
             with registry_lock:
-                handle = registry.pop(str(task_id or "").strip(), None)
+                entry = registry.pop(str(task_id or "").strip(), None)
+        handle = _live_runtime_handle(entry)
         if handle is None:
             return
         try:
             await handle.abort()
         except Exception:
             logger.warning("gateway task live stream abort failed task_id=%s", task_id, exc_info=True)
+
+    def _get_live_runtime(self, task_id: str) -> Any:
+        registry = getattr(self.app.state, "active_task_streams", None)
+        registry_lock = getattr(self.app.state, "active_task_streams_lock", None)
+        if not isinstance(registry, dict) or registry_lock is None:
+            return None
+        with registry_lock:
+            return registry.get(str(task_id or "").strip())
+
+    async def _flush_live_progress(self, task_id: str, *, entry: Any | None = None) -> None:
+        live_entry = entry if entry is not None else self._get_live_runtime(task_id)
+        flush_progress = _live_runtime_flush_hook(live_entry)
+        if not callable(flush_progress):
+            return
+        try:
+            await flush_progress(force=True)
+        except Exception:
+            logger.warning("gateway task live progress flush failed task_id=%s", task_id, exc_info=True)
 
     def _assert_task_create_admission(self, payload: AskRequest) -> None:
         decision = evaluate_task_create_admission(
@@ -685,6 +915,39 @@ class QATaskService:
             logger.warning("gateway task create rollback failed task_id=%s", task_id, exc_info=True)
             raise HTTPException(status_code=500, detail="task_create_rollback_failed") from exc
 
+    async def _cleanup_failed_task_create(
+        self,
+        *,
+        payload: AskRequest,
+        task_id: str,
+        user_message_id: str,
+        assistant_message_id: str,
+        side_effects_started: bool,
+        request_record_started: bool,
+        quota_grant_id: str,
+    ) -> HTTPException | None:
+        rollback_error: HTTPException | None = None
+        if side_effects_started:
+            try:
+                await self._rollback_task_create(
+                    payload=payload,
+                    task_id=task_id,
+                    user_message_id=user_message_id,
+                    assistant_message_id=assistant_message_id,
+                )
+            except HTTPException as exc:
+                rollback_error = exc
+        if request_record_started:
+            self._delete_task_create_record(task_id)
+        await self._finalize_quota_grant(grant_id=quota_grant_id, success=False)
+        return rollback_error
+
+    def _delete_task_create_record(self, task_id: str) -> None:
+        try:
+            self.queue_store.delete_request(task_id)
+        except Exception:
+            logger.warning("gateway task create record cleanup failed task_id=%s", task_id, exc_info=True)
+
     async def _finalize_quota_grant(self, *, grant_id: str, success: bool):
         normalized_grant_id = str(grant_id or "").strip()
         if not normalized_grant_id:
@@ -731,6 +994,18 @@ class QATaskService:
             {"type": "state", "status": str(status or "").strip().lower()},
             ttl_seconds=self._task_ttl_seconds(task_id),
         )
+
+    def _append_state_if_needed(self, task_id: str, *, status: str) -> int:
+        frames = self.relay_store.get_frames(task_id, after_sequence=0)
+        if frames:
+            last_payload = dict(frames[-1].get("payload") or {})
+            if (
+                str(last_payload.get("type") or "").strip().lower() == "state"
+                and normalize_public_task_status(last_payload.get("status")) == normalize_public_task_status(status)
+            ):
+                return int(frames[-1].get("sequence") or 0)
+        appended = self._append_state_frame(task_id, status=status)
+        return int(appended.get("sequence") or 0)
 
     def _build_public_summary(self, record: dict[str, Any]) -> dict[str, Any]:
         task_id = str(record.get("request_id") or "").strip()
@@ -848,6 +1123,191 @@ class GatewayTaskExecutor:
         self.conversation_persistence_service = app.state.conversation_persistence_service
         self.quota_proxy_service = app.state.quota_proxy_service
 
+    def _new_progress_accumulator(self, *, persisted_last_seq: int = 0) -> dict[str, Any]:
+        return {
+            "status": "running",
+            "pending_content_delta": "",
+            "pending_content_events": 0,
+            "inflight_content_delta": "",
+            "inflight_content_events": 0,
+            "inflight_last_seq": max(0, int(persisted_last_seq)),
+            "observed_last_seq": max(0, int(persisted_last_seq)),
+            "persisted_last_seq": max(0, int(persisted_last_seq)),
+            "latest_steps": [],
+            "dirty": False,
+            "last_flush_monotonic": time.monotonic(),
+        }
+
+    def _observe_progress_accumulator(
+        self,
+        accumulator: dict[str, Any],
+        *,
+        status: str,
+        last_seq: int,
+        content_delta: str = "",
+        steps: list[dict[str, Any]] | None = None,
+    ) -> None:
+        accumulator["status"] = str(status or accumulator.get("status") or "running").strip().lower() or "running"
+        accumulator["observed_last_seq"] = max(
+            int(accumulator.get("observed_last_seq") or 0),
+            max(0, int(last_seq)),
+        )
+        if steps is not None:
+            accumulator["latest_steps"] = list(steps or [])
+        delta = str(content_delta or "")
+        if delta:
+            accumulator["pending_content_delta"] = f"{accumulator.get('pending_content_delta') or ''}{delta}"
+            accumulator["pending_content_events"] = int(accumulator.get("pending_content_events") or 0) + 1
+        accumulator["dirty"] = True
+
+    def _progress_accumulator_payload(self, accumulator: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "status": str(accumulator.get("status") or "running").strip().lower() or "running",
+            "last_seq": max(0, int(accumulator.get("observed_last_seq") or 0)),
+            "content_delta": str(accumulator.get("pending_content_delta") or ""),
+            "steps": list(accumulator.get("latest_steps") or []),
+        }
+
+    def _begin_progress_accumulator_flush(self, accumulator: dict[str, Any], *, force: bool = False) -> dict[str, Any] | None:
+        if int(accumulator.get("inflight_content_events") or 0) > 0 or str(accumulator.get("inflight_content_delta") or ""):
+            return None
+        if not self._progress_accumulator_should_flush(accumulator, force=force):
+            return None
+        payload = self._progress_accumulator_payload(accumulator)
+        accumulator["inflight_content_delta"] = str(accumulator.get("pending_content_delta") or "")
+        accumulator["inflight_content_events"] = int(accumulator.get("pending_content_events") or 0)
+        accumulator["inflight_last_seq"] = max(0, int(payload.get("last_seq") or 0))
+        accumulator["pending_content_delta"] = ""
+        accumulator["pending_content_events"] = 0
+        accumulator["dirty"] = False
+        return payload
+
+    def _finish_progress_accumulator_flush(self, accumulator: dict[str, Any], *, persisted_last_seq: int, success: bool) -> None:
+        accumulator["persisted_last_seq"] = max(
+            int(accumulator.get("persisted_last_seq") or 0),
+            max(0, int(persisted_last_seq)),
+        )
+        inflight_content_delta = str(accumulator.get("inflight_content_delta") or "")
+        inflight_content_events = int(accumulator.get("inflight_content_events") or 0)
+        if success:
+            accumulator["last_flush_monotonic"] = time.monotonic()
+        else:
+            accumulator["pending_content_delta"] = f"{inflight_content_delta}{accumulator.get('pending_content_delta') or ''}"
+            accumulator["pending_content_events"] = inflight_content_events + int(accumulator.get("pending_content_events") or 0)
+            accumulator["dirty"] = True
+        accumulator["inflight_content_delta"] = ""
+        accumulator["inflight_content_events"] = 0
+        accumulator["inflight_last_seq"] = max(0, int(accumulator.get("persisted_last_seq") or 0))
+
+    def _progress_accumulator_should_flush(self, accumulator: dict[str, Any], *, force: bool = False) -> bool:
+        if not bool(accumulator.get("dirty")):
+            return False
+        if force:
+            return True
+        if int(accumulator.get("pending_content_events") or 0) >= _PROGRESS_FLUSH_MAX_PENDING_EVENTS:
+            return True
+        return (time.monotonic() - float(accumulator.get("last_flush_monotonic") or 0.0)) >= _PROGRESS_FLUSH_MAX_IDLE_SECONDS
+
+    def _runtime_observe_progress(
+        self,
+        runtime: dict[str, Any],
+        *,
+        status: str,
+        last_seq: int,
+        content_delta: str = "",
+        steps: list[dict[str, Any]] | None = None,
+    ) -> None:
+        runtime_lock = runtime["lock"]
+        with runtime_lock:
+            self._observe_progress_accumulator(
+                runtime["progress_accumulator"],
+                status=status,
+                last_seq=last_seq,
+                content_delta=content_delta,
+                steps=steps,
+            )
+            runtime["latest_steps"] = list(runtime["progress_accumulator"].get("latest_steps") or [])
+            runtime["latest_observed_seq"] = max(
+                int(runtime.get("latest_observed_seq") or 0),
+                max(0, int(last_seq)),
+            )
+            delta = str(content_delta or "")
+            if delta:
+                runtime["answer_text"] = f"{runtime.get('answer_text') or ''}{delta}"
+
+    def _reconcile_runtime_progress_after_persist(self, runtime: dict[str, Any], *, success: bool, flushed_last_seq: int) -> None:
+        runtime_lock = runtime["lock"]
+        with runtime_lock:
+            accumulator = runtime["progress_accumulator"]
+            request = runtime["request"]
+            persisted_last_seq = int(
+                request.get("persisted_last_seq")
+                or accumulator.get("persisted_last_seq")
+                or 0
+            )
+            self._finish_progress_accumulator_flush(
+                accumulator,
+                persisted_last_seq=(
+                    max(persisted_last_seq, max(0, int(flushed_last_seq)))
+                    if success
+                    else max(0, int(persisted_last_seq))
+                ),
+                success=success,
+            )
+            runtime["progress_flush_task"] = None
+
+    async def _flush_runtime_progress(self, runtime: dict[str, Any], *, force: bool = False) -> bool:
+        while True:
+            runtime_lock = runtime["lock"]
+            with runtime_lock:
+                inflight_task = runtime.get("progress_flush_task")
+                if inflight_task is not None and not inflight_task.done():
+                    wait_for = inflight_task
+                else:
+                    wait_for = None
+                    accumulator = runtime["progress_accumulator"]
+                    payload = self._begin_progress_accumulator_flush(accumulator, force=force)
+                    if payload is None:
+                        return False
+                    request = runtime["request"]
+                    internal_request = runtime["internal_request"]
+                    flushed_last_seq = max(0, int(payload.get("last_seq") or 0))
+                    request_id = str(request.get("request_id") or "").strip()
+
+                    async def _persist_progress() -> bool:
+                        success = False
+                        try:
+                            await self._sync_progress_best_effort(
+                                request=request,
+                                internal_request=internal_request,
+                                **payload,
+                            )
+                            persisted_last_seq = max(0, int(request.get("persisted_last_seq") or 0))
+                            success = persisted_last_seq >= flushed_last_seq
+                        except Exception:
+                            logger.warning(
+                                "gateway task progress flush crashed request_id=%s",
+                                request_id,
+                                exc_info=True,
+                            )
+                        finally:
+                            self._reconcile_runtime_progress_after_persist(
+                                runtime,
+                                success=success,
+                                flushed_last_seq=flushed_last_seq,
+                            )
+                        return success
+
+                    wait_for = asyncio.create_task(_persist_progress())
+                    runtime["progress_flush_task"] = wait_for
+            if inflight_task is not None and not inflight_task.done():
+                if not force:
+                    return False
+                await wait_for
+                continue
+            await wait_for
+            return True
+
     def execute(self, request: dict[str, Any], lease: dict[str, Any], renew_lease=None):
         return anyio.run(self._execute_async, request or {}, lease or {}, renew_lease)
 
@@ -881,12 +1341,6 @@ class GatewayTaskExecutor:
         if running.outcome not in {"running"}:
             return AdmissionExecutionOutcome(outcome="failed", reason=f"task_running_transition_failed:{running.outcome}", terminal_status="failed")
         running_seq = self._append_state_if_needed(request_id, status="running")
-        await self._sync_progress_best_effort(
-            request=request,
-            internal_request=internal_request,
-            status="running",
-            last_seq=running_seq,
-        )
 
         target = self.backend_registry.get(str(request.get("actual_mode") or ""))
         path = f"/api/{str(request.get('actual_mode') or '').strip()}/ask_stream"
@@ -919,13 +1373,53 @@ class GatewayTaskExecutor:
             )
             return AdmissionExecutionOutcome(outcome="failed", reason=reason, terminal_status="failed")
 
-        self._register_live_handle(request_id, handle)
+        progress_accumulator = self._new_progress_accumulator(
+            persisted_last_seq=int(request.get("persisted_last_seq") or 0),
+        )
+        live_runtime = {
+            "handle": handle,
+            "lock": threading.RLock(),
+            "request": request,
+            "internal_request": internal_request,
+            "progress_accumulator": progress_accumulator,
+            "progress_flush_task": None,
+            "answer_text": "",
+            "latest_steps": [],
+            "latest_observed_seq": 0,
+        }
+
+        async def _flush_live_progress(*, force: bool = False) -> bool:
+            return await self._flush_runtime_progress(live_runtime, force=force)
+
+        live_runtime["flush_progress"] = _flush_live_progress
+        self._register_live_handle(request_id, live_runtime)
+        idle_flush_stop = asyncio.Event()
+
+        async def _idle_flush_loop() -> None:
+            while True:
+                try:
+                    await asyncio.wait_for(idle_flush_stop.wait(), timeout=_PROGRESS_FLUSH_MAX_IDLE_SECONDS)
+                    return
+                except asyncio.TimeoutError:
+                    try:
+                        await self._flush_runtime_progress(live_runtime)
+                    except Exception:
+                        logger.warning("gateway task idle progress flush failed request_id=%s", request_id, exc_info=True)
+
+        idle_flush_task = asyncio.create_task(_idle_flush_loop())
         frame_buffer = SSEFrameBuffer()
         content_parts: list[str] = []
         step_order: list[str] = []
         step_map: dict[str, dict[str, Any]] = {}
         thinking_count = 0
         latest_seq = max(admitted_seq, running_seq)
+        self._runtime_observe_progress(
+            live_runtime,
+            status="running",
+            last_seq=running_seq,
+            steps=[step_map[key] for key in step_order],
+        )
+        await self._flush_runtime_progress(live_runtime, force=True)
         try:
             async for chunk in handle.body_iter():
                 terminalized = self._terminalized_execution_outcome(request_id)
@@ -970,13 +1464,13 @@ class GatewayTaskExecutor:
                                 "data": {},
                             },
                         )
-                        await self._sync_progress_best_effort(
-                            request=request,
-                            internal_request=internal_request,
+                        self._runtime_observe_progress(
+                            live_runtime,
                             status="running",
                             last_seq=latest_seq,
                             steps=[step_map[key] for key in step_order],
                         )
+                        await self._flush_runtime_progress(live_runtime, force=True)
                         continue
                     if event_type == "step":
                         step_key = str(payload.get("step") or f"step_{len(step_order) + 1}").strip() or f"step_{len(step_order) + 1}"
@@ -992,32 +1486,39 @@ class GatewayTaskExecutor:
                                 "data": payload.get("data") if isinstance(payload.get("data"), dict) else {},
                             },
                         )
-                        await self._sync_progress_best_effort(
-                            request=request,
-                            internal_request=internal_request,
+                        self._runtime_observe_progress(
+                            live_runtime,
                             status="running",
                             last_seq=latest_seq,
                             steps=[step_map[key] for key in step_order],
                         )
+                        await self._flush_runtime_progress(live_runtime, force=True)
                         continue
                     if event_type == "content":
                         delta = str(payload.get("content") or payload.get("delta") or "")
                         if delta:
                             content_parts.append(delta)
-                        await self._sync_progress_best_effort(
-                            request=request,
-                            internal_request=internal_request,
+                        self._runtime_observe_progress(
+                            live_runtime,
                             status="running",
                             last_seq=latest_seq,
                             content_delta=delta,
                             steps=[step_map[key] for key in step_order],
                         )
+                        await self._flush_runtime_progress(live_runtime)
                         continue
                     if event_type == "done":
                         terminalized = self._terminalized_execution_outcome(request_id)
                         if terminalized is not None:
                             return terminalized
                         answer_text = str(payload.get("final_answer") or "".join(content_parts)).strip()
+                        self._runtime_observe_progress(
+                            live_runtime,
+                            status="running",
+                            last_seq=max(0, int(latest_seq - 1)),
+                            steps=[step_map[key] for key in step_order],
+                        )
+                        await self._flush_runtime_progress(live_runtime, force=True)
                         try:
                             await self.conversation_persistence_service.terminal_task_assistant(
                                 request=internal_request,
@@ -1046,7 +1547,8 @@ class GatewayTaskExecutor:
                                 terminal_status="completed",
                                 result_payload={"final_answer": answer_text},
                             )
-                        self._clear_progress_sync_pending(request_id)
+                        request["persisted_last_seq"] = max(int(request.get("persisted_last_seq") or 0), int(latest_seq))
+                        self._clear_progress_sync_pending(request_id, persisted_last_seq=latest_seq)
                         quota_result = await self._finalize_quota(
                             internal_request=internal_request,
                             grant_id=request.get("quota_grant_id"),
@@ -1070,15 +1572,27 @@ class GatewayTaskExecutor:
                         )
                     if event_type == "error":
                         reason = str(payload.get("message") or payload.get("error") or "upstream_error")
+                        self._runtime_observe_progress(
+                            live_runtime,
+                            status="running",
+                            last_seq=max(0, int(latest_seq - 1)),
+                            steps=[step_map[key] for key in step_order],
+                        )
+                        await self._flush_runtime_progress(live_runtime, force=True)
                         await self._terminalize_failure(
                             request=request,
                             internal_request=internal_request,
                             last_seq=latest_seq,
                             reason=reason,
+                            answer_text="".join(content_parts),
                             steps=[step_map[key] for key in step_order],
                         )
                         return AdmissionExecutionOutcome(outcome="failed", reason=reason, terminal_status="failed")
         finally:
+            idle_flush_stop.set()
+            idle_flush_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await idle_flush_task
             self._unregister_live_handle(request_id)
 
         terminalized = self._terminalized_execution_outcome(request_id)
@@ -1089,6 +1603,7 @@ class GatewayTaskExecutor:
             internal_request=internal_request,
             last_seq=latest_seq,
             reason="stream_ended_without_done",
+            answer_text="".join(content_parts),
             steps=[step_map[key] for key in step_order],
         )
         return AdmissionExecutionOutcome(outcome="failed", reason="stream_ended_without_done", terminal_status="failed")
@@ -1169,7 +1684,7 @@ class GatewayTaskExecutor:
         last_seq: int,
         content_delta: str = "",
         steps: list[dict[str, Any]] | None = None,
-    ) -> None:
+        ) -> None:
         try:
             await self._sync_progress(
                 request=request,
@@ -1179,7 +1694,14 @@ class GatewayTaskExecutor:
                 content_delta=content_delta,
                 steps=steps,
             )
-            self._clear_progress_sync_pending(str(request.get("request_id") or "").strip())
+            request["persisted_last_seq"] = max(
+                int(request.get("persisted_last_seq") or 0),
+                max(0, int(last_seq)),
+            )
+            self._clear_progress_sync_pending(
+                str(request.get("request_id") or "").strip(),
+                persisted_last_seq=max(0, int(last_seq)),
+            )
         except Exception:
             request_id = str(request.get("request_id") or "").strip()
             logger.warning("gateway task progress sync failed request_id=%s", request_id, exc_info=True)
@@ -1198,9 +1720,11 @@ class GatewayTaskExecutor:
         internal_request: Request,
         last_seq: int,
         reason: str,
+        answer_text: str = "",
         steps: list[dict[str, Any]] | None = None,
         ) -> None:
         failure_payload = {"message": str(reason or "execution_failed"), "error": str(reason or "execution_failed")}
+        terminal_write_succeeded = False
         try:
             await self.conversation_persistence_service.terminal_task_assistant(
                 request=internal_request,
@@ -1209,10 +1733,11 @@ class GatewayTaskExecutor:
                 task_id=str(request.get("request_id") or ""),
                 terminal_status="failed",
                 last_seq=max(0, int(last_seq)),
-                answer_text="",
+                answer_text=str(answer_text or ""),
                 steps=list(steps or []),
                 failure=failure_payload,
             )
+            terminal_write_succeeded = True
         except Exception:
             logger.warning(
                 "gateway task terminal failure write failed request_id=%s",
@@ -1223,7 +1748,7 @@ class GatewayTaskExecutor:
                 request=request,
                 terminal_status="failed",
                 last_seq=max(0, int(last_seq)),
-                answer_text="",
+                answer_text=str(answer_text or ""),
                 steps=list(steps or []),
                 failure=failure_payload,
                 quota_success=False,
@@ -1234,12 +1759,20 @@ class GatewayTaskExecutor:
                 request=request,
                 terminal_status="failed",
                 last_seq=max(0, int(last_seq)),
-                answer_text="",
+                answer_text=str(answer_text or ""),
                 steps=list(steps or []),
                 failure=failure_payload,
                 quota_success=False,
             )
-        self._clear_progress_sync_pending(str(request.get("request_id") or "").strip())
+        if terminal_write_succeeded:
+            request["persisted_last_seq"] = max(
+                int(request.get("persisted_last_seq") or 0),
+                max(0, int(last_seq)),
+            )
+            self._clear_progress_sync_pending(
+                str(request.get("request_id") or "").strip(),
+                persisted_last_seq=max(0, int(last_seq)),
+            )
 
     async def _finalize_quota(self, *, internal_request: Request, grant_id: Any, success: bool):
         normalized_grant_id = str(grant_id or "").strip()
@@ -1300,17 +1833,26 @@ class GatewayTaskExecutor:
         }
         self.queue_store.put_request(updated, ttl_seconds=max(_RELAY_RETENTION_FLOOR_SECONDS, int(ttl_seconds)))
 
-    def _clear_progress_sync_pending(self, request_id: str) -> None:
+    def _clear_progress_sync_pending(self, request_id: str, *, persisted_last_seq: int | None = None) -> None:
         normalized_id = str(request_id or "").strip()
         if not normalized_id:
             return
         record = self.queue_store.get_request(normalized_id)
         if not isinstance(record, dict):
             return
-        if not record.get("progress_sync_pending") and "progress_sync_payload" not in record:
+        if (
+            not record.get("progress_sync_pending")
+            and "progress_sync_payload" not in record
+            and persisted_last_seq is None
+        ):
             return
         ttl_seconds = self.queue_store.request_ttl_seconds(normalized_id) or self._task_ttl_seconds(normalized_id)
         updated = dict(record)
+        if persisted_last_seq is not None:
+            updated["persisted_last_seq"] = max(
+                int(updated.get("persisted_last_seq") or 0),
+                max(0, int(persisted_last_seq)),
+            )
         updated["progress_sync_pending"] = False
         updated.pop("progress_sync_payload", None)
         self.queue_store.put_request(updated, ttl_seconds=max(_RELAY_RETENTION_FLOOR_SECONDS, int(ttl_seconds)))

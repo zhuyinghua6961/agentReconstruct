@@ -158,6 +158,7 @@ def test_internal_authority_routes_registered_and_isolated_from_browser_auth():
     assert "/internal/conversations/{conversation_id}/context-snapshot" in paths
     assert "/internal/conversations/{conversation_id}/messages/assistant-async" in paths
     assert "/internal/conversations/{conversation_id}/messages/assistant-terminal-async" in paths
+    assert "/internal/conversations/{conversation_id}/tasks/{task_id}/create-turn" in paths
     assert "/internal/conversations/{conversation_id}/tasks/{task_id}/assistant-start" in paths
     assert "/internal/conversations/{conversation_id}/tasks/{task_id}/assistant-progress" in paths
     assert "/internal/conversations/{conversation_id}/tasks/{task_id}/assistant-terminal" in paths
@@ -166,6 +167,7 @@ def test_internal_authority_routes_registered_and_isolated_from_browser_auth():
     snapshot_route = _route_for("/internal/conversations/{conversation_id}/context-snapshot", "GET")
     assistant_route = _route_for("/internal/conversations/{conversation_id}/messages/assistant-async", "POST")
     assistant_terminal_route = _route_for("/internal/conversations/{conversation_id}/messages/assistant-terminal-async", "POST")
+    task_create_turn_route = _route_for("/internal/conversations/{conversation_id}/tasks/{task_id}/create-turn", "POST")
     task_start_route = _route_for("/internal/conversations/{conversation_id}/tasks/{task_id}/assistant-start", "POST")
     task_progress_route = _route_for("/internal/conversations/{conversation_id}/tasks/{task_id}/assistant-progress", "POST")
     task_terminal_route = _route_for("/internal/conversations/{conversation_id}/tasks/{task_id}/assistant-terminal", "POST")
@@ -174,6 +176,7 @@ def test_internal_authority_routes_registered_and_isolated_from_browser_auth():
     assert require_auth_context not in {dep.call for dep in snapshot_route.dependant.dependencies}
     assert require_auth_context not in {dep.call for dep in assistant_route.dependant.dependencies}
     assert require_auth_context not in {dep.call for dep in assistant_terminal_route.dependant.dependencies}
+    assert require_auth_context not in {dep.call for dep in task_create_turn_route.dependant.dependencies}
     assert require_auth_context not in {dep.call for dep in task_start_route.dependant.dependencies}
     assert require_auth_context not in {dep.call for dep in task_progress_route.dependant.dependencies}
     assert require_auth_context not in {dep.call for dep in task_terminal_route.dependant.dependencies}
@@ -182,6 +185,7 @@ def test_internal_authority_routes_registered_and_isolated_from_browser_auth():
     assert require_internal_authority in {dep.call for dep in snapshot_route.dependant.dependencies}
     assert require_internal_authority in {dep.call for dep in assistant_route.dependant.dependencies}
     assert require_internal_authority in {dep.call for dep in assistant_terminal_route.dependant.dependencies}
+    assert _require_gateway_internal_caller in {dep.call for dep in task_create_turn_route.dependant.dependencies}
     assert _require_gateway_internal_caller in {dep.call for dep in task_start_route.dependant.dependencies}
     assert _require_gateway_internal_caller in {dep.call for dep in task_progress_route.dependant.dependencies}
     assert _require_gateway_internal_caller in {dep.call for dep in task_terminal_route.dependant.dependencies}
@@ -350,6 +354,51 @@ def test_internal_user_write_allows_gateway_caller_for_gateway_owned_task_runtim
     assert payload["conversation_id"] == conversation_id
 
 
+def test_internal_task_create_turn_allows_gateway_caller_and_materializes_both_messages(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="gateway owned task create turn")
+        conversation_id = int(created["data"]["conversation_id"])
+        response = client.post(
+            f"/internal/conversations/{conversation_id}/tasks/task_gateway_create_001/create-turn",
+            json={
+                "conversation_id": conversation_id,
+                "user_id": 7,
+                "trace_id": "task-gateway-create-trace",
+                "source_service": "fastQA",
+                "route": "kb_qa",
+                "requested_mode": "fast",
+                "actual_mode": "fast",
+                "task_id": "task_gateway_create_001",
+                "message": {
+                    "role": "user",
+                    "content": "atomic gateway hello",
+                },
+                "context_hints": {
+                    "selected_file_ids": [3],
+                    "last_turn_route_hint": "kb_qa",
+                },
+                "status": "queued",
+                "last_seq": 0,
+            },
+            headers=_internal_headers("gateway"),
+        )
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["conversation_id"] == conversation_id
+    assert payload["task_id"] == "task_gateway_create_001"
+    assert payload["status"] == "queued"
+    assert payload["user_message_id"]
+    assert payload["assistant_message_id"]
+    assert [message["role"] for message in detail["data"]["messages"]] == ["user", "assistant"]
+    assert detail["data"]["messages"][0]["content"] == "atomic gateway hello"
+    assert detail["data"]["messages"][1]["metadata"]["task_id"] == "task_gateway_create_001"
+
+
 def test_internal_context_snapshot_rejects_invalid_source_service_policy(monkeypatch):
     monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
 
@@ -431,6 +480,59 @@ def test_internal_context_snapshot_allows_expired_recent_turns(monkeypatch):
     assert payload["recent_turns"][-1]["status"] == "expired"
     assert payload["recent_turns"][-1]["terminal_status"] == "expired"
     assert payload["user_id"] == 7
+
+
+def test_internal_context_snapshot_normalizes_completed_recent_turns_to_done(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="authority completed snapshot")
+        conversation_id = int(created["data"]["conversation_id"])
+        service.add_authority_user_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="completed-snapshot-user",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            idempotency_key=f"{conversation_id}:completed-snapshot-user:user",
+            content="hello completed snapshot",
+            context_hints={},
+        )
+        service.start_authority_task_assistant(
+            user_id=7,
+            conversation_id=conversation_id,
+            task_id="task_completed_snapshot",
+            trace_id="task-completed-snapshot",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            status="running",
+            last_seq=2,
+        )
+        service.terminal_authority_task_assistant(
+            user_id=7,
+            conversation_id=conversation_id,
+            task_id="task_completed_snapshot",
+            terminal_status="completed",
+            last_seq=3,
+            answer_text="done answer",
+        )
+
+        response = client.get(
+            f"/internal/conversations/{conversation_id}/context-snapshot",
+            params=_snapshot_query(conversation_id=conversation_id),
+            headers=_internal_headers("fastQA"),
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["conversation_id"] == conversation_id
+    assert payload["recent_turns"][-1]["status"] == "done"
+    assert payload["recent_turns"][-1]["terminal_status"] == "done"
+    assert payload["recent_turns"][-1]["content"] == "done answer"
 
 
 def test_internal_context_snapshot_allows_running_recent_turns(monkeypatch):

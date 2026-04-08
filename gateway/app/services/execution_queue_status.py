@@ -378,6 +378,33 @@ class ExecutionQueueStatusStore:
         payload = self._memory_requests.get(normalized_id)
         return deepcopy(payload) if isinstance(payload, dict) else None
 
+    def delete_request(self, request_id: str) -> bool:
+        normalized_id = str(request_id or "").strip()
+        if not normalized_id:
+            return False
+        existing = self.get_request(normalized_id)
+        if existing is None:
+            return False
+        if self.redis_service.available:
+            dirty_version = self._mark_redis_dirty()
+            self.redis_service.delete(self.request_key(normalized_id))
+            self.redis_service.srem(self.request_index_key(), normalized_id)
+            self.redis_service.zrem(self.request_expiry_key(), normalized_id)
+            self.redis_service.zrem(self.queued_index_key(), normalized_id)
+            self.redis_service.srem(self.admitted_index_key(), normalized_id)
+            self.redis_service.srem(self.terminal_index_key(), normalized_id)
+            self.redis_service.srem(self.cancellable_index_key(), normalized_id)
+            self._clear_redis_dirty(dirty_version)
+            return True
+        self._memory_requests.pop(normalized_id, None)
+        self._memory_request_expiry.pop(normalized_id, None)
+        self._memory_request_ids.discard(normalized_id)
+        self._memory_queued_ids.pop(normalized_id, None)
+        self._memory_admitted_ids.discard(normalized_id)
+        self._memory_terminal_ids.discard(normalized_id)
+        self._memory_cancellable_ids.discard(normalized_id)
+        return True
+
     def list_requests(self, *, status: str | None = None) -> list[dict[str, Any]]:
         normalized_status = str(status or "").strip().lower()
         records = self._request_records()

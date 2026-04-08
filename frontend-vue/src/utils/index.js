@@ -2,6 +2,14 @@
 
 import { marked } from 'marked'
 
+marked.setOptions({
+  breaks: true,
+  gfm: true,
+  tables: true,
+  mangle: false,
+  headerIds: false,
+})
+
 function isDigit(char) {
   return char >= '0' && char <= '9'
 }
@@ -417,13 +425,6 @@ export function formatTime(date) {
 }
 
 function renderMarkdownToHtml(text) {
-  marked.setOptions({
-    breaks: true,
-    gfm: true,
-    tables: true,
-    mangle: false,
-    headerIds: false
-  })
   return marked.parse(text)
 }
 

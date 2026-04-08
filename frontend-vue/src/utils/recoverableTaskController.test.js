@@ -24,6 +24,7 @@ function createHarness(options = {}) {
   let currentChatId = '42'
   let finishBusyCount = 0
   let persistCount = 0
+  let scheduledPersistCount = 0
 
   function normalizeChatId(chatId) {
     return String(chatId || '').trim()
@@ -40,6 +41,35 @@ function createHarness(options = {}) {
         return await options.ensureChatConversation(chatId, titleHint, { chat, chats, getChatById })
       }
       return getChatById(chatId)
+    },
+    addUserMessage: async (content, addOptions = {}) => {
+      if (typeof options.addUserMessage === 'function') {
+        return await options.addUserMessage(content, addOptions, { chat, chats, getChatById })
+      }
+      const target = getChatById(addOptions?.chatId || chat.id)
+      if (!target) return null
+      target.messages.push({ role: 'user', content: String(content || '') })
+      return target
+    },
+    addBotMessage: (message, addOptions = {}) => {
+      if (typeof options.addBotMessage === 'function') {
+        return options.addBotMessage(message, addOptions, { chat, chats, getChatById })
+      }
+      const target = getChatById(addOptions?.chatId || chat.id)
+      if (!target) return null
+      const botMessage = {
+        role: 'assistant',
+        content: '',
+        streamRequestId: '',
+        metadata: {},
+        isComplete: false,
+        steps: [],
+        references: [],
+        referenceLinks: [],
+        ...message,
+      }
+      target.messages.push(botMessage)
+      return botMessage
     },
     startChatBusyRuntime: (chatId, runtimeOptions = {}) => {
       if (typeof options.startChatBusyRuntime === 'function') {
@@ -68,6 +98,12 @@ function createHarness(options = {}) {
       if (target) target.lastTaskSeq = Number(seq || 0)
     },
     persistLocalState: () => {
+      persistCount += 1
+    },
+    scheduleTaskRecoveryPersist: () => {
+      scheduledPersistCount += 1
+    },
+    flushTaskRecoveryPersist: () => {
       persistCount += 1
     },
   }
@@ -227,6 +263,12 @@ function createHarness(options = {}) {
     }
     if (event.type === 'done') {
       assistant.content = String(event.final_answer || assistant.content || '')
+      assistant.isComplete = true
+      assistant.metadata = {
+        ...(assistant.metadata && typeof assistant.metadata === 'object' ? assistant.metadata : {}),
+        done_seen: true,
+        streaming_terminal_event: 'done',
+      }
       if (target.activeTask) {
         target.activeTask.status = 'completed'
       }
@@ -265,6 +307,7 @@ function createHarness(options = {}) {
     getClearedInput: () => clearedInput,
     getFinishBusyCount: () => finishBusyCount,
     getPersistCount: () => persistCount,
+    getScheduledPersistCount: () => scheduledPersistCount,
     getScrollCalls: () => scrollCalls,
   }
 }
@@ -319,7 +362,41 @@ test('recoverable task controller cancels through gateway task cancel and settle
   assert.equal(harness.chat.messages.length, 2)
   assert.equal(harness.chat.messages[1].status, 'canceled')
   assert.equal(harness.getRuntimeMap().size, 0)
-  assert.equal(harness.getFinishBusyCount(), 2)
+  assert.equal(harness.getFinishBusyCount(), 1)
+})
+
+test('recoverable task controller keeps busy/runtime active when gateway cancel fails', async () => {
+  const runtime = {
+    chatId: '42',
+    requestId: 'task_cancel_fail',
+    abortController: new AbortController(),
+    mode: 'task',
+  }
+  const harness = createHarness({
+    cancelTask: async () => {
+      throw new Error('cancel failed')
+    },
+  })
+  harness.chat.messages = [
+    { role: 'user', content: 'server question' },
+    { role: 'assistant', content: 'partial answer', status: 'running' },
+  ]
+  harness.chat.activeTask = {
+    task_id: 'task_cancel_fail',
+    status: 'running',
+    last_seq: 4,
+    replay_available: true,
+  }
+  harness.chat.lastTaskSeq = 4
+  harness.getRuntimeMap().set('42', runtime)
+
+  await harness.controller.cancelRecoverableTask('42', 'task_cancel_fail')
+
+  assert.deepEqual(harness.apiCalls.cancelTask, [['task_cancel_fail']])
+  assert.equal(harness.chat.activeTask?.task_id, 'task_cancel_fail')
+  assert.equal(harness.chat.messages[1].status, 'running')
+  assert.equal(harness.getRuntimeMap().get('42'), runtime)
+  assert.equal(harness.getFinishBusyCount(), 0)
 })
 
 test('recoverable task controller detaches local runtimes without canceling backend tasks', () => {
@@ -336,6 +413,7 @@ test('recoverable task controller detaches local runtimes without canceling back
   assert.equal(runtime.abortController.signal.aborted, true)
   assert.equal(harness.getRuntimeMap().size, 0)
   assert.equal(harness.apiCalls.cancelTask.length, 0)
+  assert.equal(harness.getPersistCount(), 1)
 })
 
 test('recoverable task controller keeps created task live when replay and fallback refresh both fail', async () => {
@@ -361,7 +439,7 @@ test('recoverable task controller keeps created task live when replay and fallba
   assert.equal(harness.apiCalls.createTask.length, 1)
   assert.equal(harness.getRuntimeMap().size, 0)
   assert.equal(harness.chat.activeTask?.task_id, 'task_42')
-  assert.equal(harness.chat.activeTask?.status, 'running')
+  assert.equal(harness.chat.activeTask?.status, 'queued')
   assert.equal(harness.getFinishBusyCount(), 1)
 })
 
@@ -397,7 +475,7 @@ test('recoverable task controller marks the chat busy before awaiting conversati
   await pending
 })
 
-test('recoverable task controller resumes replay after the persisted assistant cursor to avoid duplicating server content', async () => {
+test('recoverable task controller starts fresh task replay from the created task cursor instead of blocking on a server truth sync', async () => {
   const harness = createHarness({
     createTask: async () => ({
       task_id: 'task_42',
@@ -466,7 +544,7 @@ test('recoverable task controller resumes replay after the persisted assistant c
     requestAskMode: 'thinking',
   })
 
-  assert.deepEqual(harness.apiCalls.streamTaskEvents, [['task_42', 4]])
+  assert.deepEqual(harness.apiCalls.streamTaskEvents, [['task_42', 1]])
   assert.equal(harness.chat.messages[1].content, 'partial answer')
 })
 
@@ -619,4 +697,145 @@ test('recoverable task controller plain attach refreshes synced truth before rep
   assert.deepEqual(harness.apiCalls.streamTaskEvents, [])
   assert.equal(harness.chat.activeTask, null)
   assert.equal(harness.chat.lastTaskSeq, 11)
+})
+
+test('recoverable task controller schedules replay persistence during content streaming instead of force-persisting every event', async () => {
+  const harness = createHarness({
+    streamTaskEvents: async (_taskId, _afterSeq, streamOptions = {}) => {
+      for (let seq = 1; seq <= 100; seq += 1) {
+        streamOptions.onEvent?.({ seq, type: 'content', content: `chunk_${seq}` })
+      }
+      streamOptions.onEvent?.({ seq: 101, type: 'done', final_answer: 'final answer' })
+    },
+  })
+
+  await harness.controller.sendTaskMessage({
+    requestedChatId: '42',
+    message: 'hello controller',
+    titleHint: 'hello controller',
+    requestChatContext: { selected_ids: [] },
+    requestAskMode: 'fast',
+  })
+
+  assert.ok(harness.getScheduledPersistCount() > 0)
+  assert.ok(
+    harness.getPersistCount() <= 3,
+    `expected <= 3 forced persistence writes, got ${harness.getPersistCount()}`,
+  )
+})
+
+test('recoverable task controller seeds a local task placeholder and starts replay without blocking on full truth sync', async () => {
+  let createTaskCompletedAt = 0
+  let streamOpenedAt = 0
+  let nowMs = 1000
+  let releaseRefresh = () => {}
+  const blockedRefresh = new Promise((resolve) => {
+    releaseRefresh = resolve
+  })
+
+  const harness = createHarness({
+    createTask: async () => {
+      createTaskCompletedAt = nowMs
+      return {
+        task_id: 'task_42',
+        status: 'queued',
+        last_seq: 0,
+        replay_available: true,
+      }
+    },
+    refreshConversationTruth: async (_chatId, { chat: target }) => {
+      nowMs += 500
+      await blockedRefresh
+      return {
+        active_task: {
+          task_id: 'task_42',
+          status: 'running',
+          last_seq: 0,
+          replay_available: true,
+        },
+        messages: target.messages.map((message) => ({ ...message })),
+      }
+    },
+    refreshConversationTruthFallback: async (_chatId, lastSeq) => ({
+      detail: null,
+      keepRecovering: false,
+      cursor: {
+        taskId: '',
+        status: 'completed',
+        lastSeq: Number(lastSeq || 0),
+        recoverable: false,
+        replayAvailable: true,
+        terminal: true,
+      },
+    }),
+    streamTaskEvents: async (_taskId, _afterSeq, streamOptions = {}) => {
+      streamOpenedAt = nowMs
+      streamOptions.onEvent?.({ seq: 1, type: 'done', final_answer: 'final answer' })
+    },
+  })
+
+  const pending = harness.controller.sendTaskMessage({
+    requestedChatId: '42',
+    message: 'hello controller',
+    titleHint: 'hello controller',
+    requestChatContext: { selected_ids: [] },
+    requestAskMode: 'fast',
+  })
+
+  releaseRefresh()
+  await pending
+
+  assert.equal(harness.chat.messages.length, 2)
+  assert.deepEqual(
+    harness.chat.messages.map((message) => message.role),
+    ['user', 'assistant'],
+  )
+  assert.equal(harness.chat.messages[0].content, 'hello controller')
+  assert.equal(harness.chat.messages[1].streamRequestId, 'task_42')
+  assert.ok(
+    streamOpenedAt - createTaskCompletedAt <= 300,
+    `expected createTask -> replay attach to start within 300ms, got ${streamOpenedAt - createTaskCompletedAt}ms`,
+  )
+})
+
+test('recoverable task controller settles done locally and ignores trailing events after terminal', async () => {
+  let fallbackCalls = 0
+  const harness = createHarness({
+    refreshConversationTruthFallback: async (_chatId, lastSeq) => {
+      fallbackCalls += 1
+      return {
+        detail: null,
+        keepRecovering: false,
+        cursor: {
+          taskId: '',
+          status: 'completed',
+          lastSeq: Number(lastSeq || 0),
+          recoverable: false,
+          replayAvailable: true,
+          terminal: true,
+        },
+      }
+    },
+    streamTaskEvents: async (_taskId, _afterSeq, streamOptions = {}) => {
+      streamOptions.onEvent?.({ seq: 1, type: 'content', content: 'partial ' })
+      streamOptions.onEvent?.({ seq: 2, type: 'done', final_answer: 'final answer' })
+      streamOptions.onEvent?.({ seq: 3, type: 'content', content: 'ignored tail' })
+    },
+  })
+
+  await harness.controller.sendTaskMessage({
+    requestedChatId: '42',
+    message: 'hello controller',
+    titleHint: 'hello controller',
+    requestChatContext: { selected_ids: [] },
+    requestAskMode: 'thinking',
+  })
+
+  assert.equal(harness.chat.messages.length, 2)
+  assert.equal(harness.chat.messages[1].content, 'final answer')
+  assert.equal(harness.chat.messages[1].isComplete, true)
+  assert.equal(harness.chat.activeTask, null)
+  assert.equal(harness.chat.lastTaskSeq, 2)
+  assert.equal(harness.getRuntimeMap().size, 0)
+  assert.equal(fallbackCalls, 0)
 })

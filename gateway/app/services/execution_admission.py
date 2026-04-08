@@ -35,7 +35,7 @@ _PUBLIC_TASK_STATUS_MAP = {
     "cancelled": "canceled",
 }
 
-_LIVE_TASK_STATUSES = {"queued", "admitted", "running"}
+_LIVE_TASK_STATUSES = {"provisioning", "queued", "admitted", "running"}
 
 
 def normalize_public_task_status(status: Any) -> str:
