@@ -617,7 +617,7 @@ export const api = {
     }
   },
 
-  async createTask(question, chatHistory = [], conversationId = null, pdfContext = null, mode = 'thinking') {
+  async createTask(question, chatHistory = [], conversationId = null, pdfContext = null, mode = 'thinking', clientRequestId = '') {
     const normalizedMode = String(mode || 'thinking').trim().toLowerCase();
     const body = {
       question,
@@ -628,6 +628,7 @@ export const api = {
     const userId = readStoredUserId();
     if (userId) body.user_id = userId;
     if (pdfContext) body.pdf_context = pdfContext;
+    if (String(clientRequestId || '').trim()) body.client_request_id = String(clientRequestId).trim();
 
     return await requestJson(`${API_BASE}${V1}/v1/tasks`, {
       method: 'POST',

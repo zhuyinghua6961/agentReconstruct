@@ -234,14 +234,37 @@ function applyDoiLinksToHtml(html) {
 }
 
 function linkifyPatentTextSegment(text) {
-  return String(text || '').replace(
+  const renderPatentAnchor = (rawPatentId) => {
+    const patentId = normalizePatentIdForLink(rawPatentId)
+    if (!patentId) return null
+    return `<a href="#" class="doi-link patent-link" data-patent-id="${patentId}">${patentId}</a>`
+  }
+
+  let output = String(text || '').replace(
     /\(\s*patent_id\s*=\s*([A-Za-z0-9._/\-]+)\s*\)/gi,
-    (_match, rawPatentId) => {
-      const patentId = normalizePatentIdForLink(rawPatentId)
-      if (!patentId) return _match
-      return `(<a href="#" class="doi-link patent-link" data-patent-id="${patentId}">patent_id=${patentId}</a>)`
+    (match, rawPatentId) => {
+      const anchor = renderPatentAnchor(rawPatentId)
+      return anchor ? `(${anchor})` : match
     }
   )
+
+  output = output.replace(
+    /((?:专利号|公开号)\s*)([A-Za-z]{2}[A-Za-z0-9._/\-]{4,})/gi,
+    (match, prefix, rawPatentId) => {
+      const anchor = renderPatentAnchor(rawPatentId)
+      return anchor ? `${prefix}${anchor}` : match
+    }
+  )
+
+  output = output.replace(
+    /([\[(（])\s*([A-Za-z]{2}[A-Za-z0-9._/\-]{4,})\s*([\])）])/gi,
+    (match, openChar, rawPatentId, closeChar) => {
+      const anchor = renderPatentAnchor(rawPatentId)
+      return anchor ? `${openChar}${anchor}${closeChar}` : match
+    }
+  )
+
+  return output
 }
 
 function applyPatentLinksToHtml(html) {
@@ -357,6 +380,7 @@ function normalizeMarkdownForRender(text) {
       continue
     }
 
+    line = normalizeInlineBulletListLine(line)
     line = line.replace(/^(\s{0,3}#{1,6})([^\s#])/, '$1 $2')
     line = line.replace(/^(\s{0,3}[-*+])([^\s])/, '$1 $2')
     line = line.replace(/^(\s{0,3}\d+[.)])([^\s])/, '$1 $2')
@@ -376,6 +400,75 @@ function normalizeMarkdownForRender(text) {
   }
 
   return normalized.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+}
+
+function normalizeInlineBulletListLine(line) {
+  const source = String(line || '')
+  const triggerMatch = source.match(/^(.*?[：:；;])\s*([-*+])\s+(.+)$/)
+  if (!triggerMatch) return source
+
+  const prefix = triggerMatch[1]
+  const inlineSource = `${triggerMatch[2]} ${triggerMatch[3].trim()}`
+  const items = splitInlineBulletItems(inlineSource)
+  if (!items) return source
+
+  return [prefix, ...items.map(({ marker, text: itemText }) => `${marker} ${itemText}`)].join('\n')
+}
+
+function splitInlineBulletItems(text) {
+  const source = String(text || '').trim()
+  if (!source) return null
+
+  const items = []
+  let index = 0
+  while (index < source.length) {
+    while (index < source.length && /\s/.test(source[index])) index += 1
+    if (index >= source.length) break
+
+    const marker = source[index]
+    if (!['-', '*', '+'].includes(marker)) return null
+    index += 1
+
+    while (index < source.length && /\s/.test(source[index])) index += 1
+    if (index >= source.length) return null
+
+    const itemStart = index
+    let itemEnd = source.length
+
+    for (let cursor = index; cursor < source.length; cursor += 1) {
+      if (!/\s/.test(source[cursor])) continue
+      let lookahead = cursor
+      while (lookahead < source.length && /\s/.test(source[lookahead])) lookahead += 1
+      if (
+        lookahead < source.length
+        && ['-', '*', '+'].includes(source[lookahead])
+        && /\s/.test(source[lookahead + 1] || '')
+        && shouldSplitInlineBulletBoundary(source, lookahead)
+      ) {
+        itemEnd = cursor
+        index = lookahead
+        break
+      }
+    }
+
+    if (itemEnd === source.length) {
+      index = source.length
+    }
+
+    const itemText = source.slice(itemStart, itemEnd).trim()
+    if (!itemText) return null
+    items.push({ marker, text: itemText })
+  }
+
+  return items.length >= 1 ? items : null
+}
+
+function shouldSplitInlineBulletBoundary(source, markerIndex) {
+  let contentStart = markerIndex + 1
+  while (contentStart < source.length && /\s/.test(source[contentStart])) contentStart += 1
+  if (contentStart >= source.length) return false
+
+  return !/^[A-Za-z0-9](?:\s|$)/.test(source.slice(contentStart))
 }
 
 function containsStructuredMarkdown(text) {

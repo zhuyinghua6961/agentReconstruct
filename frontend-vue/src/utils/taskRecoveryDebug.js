@@ -28,6 +28,10 @@ function normalizeTaskId(value) {
   return String(value || '').trim()
 }
 
+function normalizeClientRequestId(value) {
+  return String(value || '').trim()
+}
+
 function normalizeSeq(value) {
   const numeric = Number(value)
   return Number.isFinite(numeric) && numeric >= 0 ? Math.trunc(numeric) : 0
@@ -100,6 +104,8 @@ export function summarizeTaskEventBatch(events = []) {
 export function createTaskRecoveryDebugLogger(options = {}) {
   const envFlagName = String(options?.envFlagName || 'VITE_TASK_RECOVERY_DEBUG').trim()
   const storageKey = String(options?.storageKey || 'agentcode.task-recovery-debug').trim()
+  const clientToTaskId = new Map()
+  const taskToClientRequestId = new Map()
   const sink = typeof options?.sink === 'function'
     ? options.sink
     : (entry) => {
@@ -112,9 +118,48 @@ export function createTaskRecoveryDebugLogger(options = {}) {
 
   function log(scope, payload = {}) {
     if (!isEnabled()) return
+    const normalizedPayload = payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? { ...payload }
+      : { value: payload }
+    const nestedRequestedTask = normalizedPayload.requestedTask && typeof normalizedPayload.requestedTask === 'object'
+      ? normalizedPayload.requestedTask
+      : {}
+    const rawTraceId = normalizeTaskId(normalizedPayload.traceId || normalizedPayload.trace_id)
+    let taskId = normalizeTaskId(
+      normalizedPayload.taskId
+      || normalizedPayload.task_id
+      || nestedRequestedTask.taskId
+      || nestedRequestedTask.task_id,
+    )
+    let clientRequestId = normalizeClientRequestId(
+      normalizedPayload.clientRequestId || normalizedPayload.client_request_id,
+    )
+
+    if (!taskId && rawTraceId.startsWith('task_')) {
+      taskId = rawTraceId
+    }
+    if (!taskId && clientRequestId) {
+      taskId = normalizeTaskId(clientToTaskId.get(clientRequestId) || '')
+    }
+    if (!clientRequestId && taskId) {
+      clientRequestId = normalizeClientRequestId(taskToClientRequestId.get(taskId) || '')
+    }
+    if (clientRequestId && taskId) {
+      clientToTaskId.set(clientRequestId, taskId)
+      taskToClientRequestId.set(taskId, clientRequestId)
+    }
+    if (taskId) {
+      normalizedPayload.taskId = taskId
+    }
+    if (clientRequestId) {
+      normalizedPayload.clientRequestId = clientRequestId
+    }
+    if (rawTraceId) {
+      normalizedPayload.traceId = rawTraceId
+    }
     sink({
       scope: String(scope || '').trim() || 'unknown',
-      payload,
+      payload: normalizedPayload,
     })
   }
 

@@ -21,6 +21,7 @@ function createHarness(options = {}) {
     getTask: [],
     cancelTask: [],
   }
+  const debugCalls = []
   let currentChatId = '42'
   let finishBusyCount = 0
   let persistCount = 0
@@ -296,6 +297,9 @@ function createHarness(options = {}) {
     scrollToBottom: (options = {}) => {
       scrollCalls.push(options)
     },
+    debugLog: (scope, payload) => {
+      debugCalls.push({ scope, payload })
+    },
   })
 
   return {
@@ -309,6 +313,7 @@ function createHarness(options = {}) {
     getPersistCount: () => persistCount,
     getScheduledPersistCount: () => scheduledPersistCount,
     getScrollCalls: () => scrollCalls,
+    getDebugCalls: () => debugCalls,
   }
 }
 
@@ -339,6 +344,41 @@ test('recoverable task controller creates task, replays server events, and avoid
   assert.equal(harness.getFinishBusyCount(), 2)
   assert.ok(harness.getPersistCount() >= 1)
   assert.deepEqual(harness.getScrollCalls(), [{ force: true }])
+})
+
+test('recoverable task controller logs a stable client_request_id before and after task creation', async () => {
+  const harness = createHarness({
+    createTask: async () => ({
+      task_id: 'task_corr_001',
+      trace_id: 'task_corr_001',
+      status: 'queued',
+      last_seq: 0,
+      replay_available: true,
+    }),
+    streamTaskEvents: async (_taskId, _afterSeq, streamOptions = {}) => {
+      streamOptions.onEvent?.({ seq: 1, type: 'done', final_answer: 'final answer' })
+    },
+  })
+
+  await harness.controller.sendTaskMessage({
+    requestedChatId: '42',
+    message: 'hello correlation',
+    titleHint: 'hello correlation',
+    requestChatContext: { selected_ids: [] },
+    requestAskMode: 'fast',
+  })
+
+  const sendStart = harness.getDebugCalls().find((entry) => entry.scope === 'send:start')
+  const taskCreated = harness.getDebugCalls().find((entry) => entry.scope === 'send:task-created')
+
+  assert.ok(sendStart)
+  assert.ok(taskCreated)
+  assert.match(String(sendStart.payload.clientRequestId || ''), /^client_/)
+  assert.equal(taskCreated.payload.clientRequestId, sendStart.payload.clientRequestId)
+  assert.equal(taskCreated.payload.taskId, 'task_corr_001')
+  assert.equal(taskCreated.payload.traceId, 'task_corr_001')
+  assert.equal(harness.apiCalls.createTask.length, 1)
+  assert.equal(harness.apiCalls.createTask[0][5], sendStart.payload.clientRequestId)
 })
 
 test('recoverable task controller cancels through gateway task cancel and settles from refreshed truth', async () => {

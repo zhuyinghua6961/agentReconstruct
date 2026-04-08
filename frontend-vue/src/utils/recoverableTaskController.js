@@ -8,6 +8,14 @@ function defaultNormalizeChatId(chatId) {
   return String(chatId || '').trim()
 }
 
+function createClientRequestId() {
+  const uuid = globalThis?.crypto?.randomUUID?.()
+  if (uuid) {
+    return `client_${String(uuid).replace(/-/g, '')}`
+  }
+  return `client_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`
+}
+
 export function createRecoverableTaskController(deps = {}) {
   const api = deps.api
   const store = deps.store
@@ -520,11 +528,18 @@ export function createRecoverableTaskController(deps = {}) {
     if (!targetRequestedChatId || !String(message || '').trim()) {
       return { ok: false, reason: 'invalid_request' }
     }
+    const clientRequestId = createClientRequestId()
 
     const busyStart = store.startChatBusyRuntime(targetRequestedChatId, { phase: 'dispatching' })
     if (!busyStart?.ok) {
       return { ok: false, reason: String(busyStart?.reason || 'busy_rejected') }
     }
+    debugLog('send:start', {
+      chatId: targetRequestedChatId,
+      clientRequestId,
+      requestedMode: requestAskMode,
+      conversationId: conversationId ?? null,
+    })
 
     let streamChatId = targetRequestedChatId
     try {
@@ -550,7 +565,15 @@ export function createRecoverableTaskController(deps = {}) {
         effectiveConversationId,
         requestChatContext,
         requestAskMode,
+        clientRequestId,
       )
+      debugLog('send:task-created', {
+        chatId: streamChatId,
+        clientRequestId,
+        taskId: String(taskSummary?.task_id || '').trim(),
+        traceId: String(taskSummary?.trace_id || taskSummary?.task_id || '').trim(),
+        conversationId: effectiveConversationId ?? null,
+      })
       await seedLocalTaskMessages(streamChatId, { message, taskSummary })
       store.finishChatBusyRuntime(streamChatId)
       await attachRecoverableTask({
@@ -561,6 +584,12 @@ export function createRecoverableTaskController(deps = {}) {
       return { ok: true, taskId: String(taskSummary?.task_id || '') }
     } catch (error) {
       store.finishChatBusyRuntime(streamChatId)
+      debugLog('send:error', {
+        chatId: streamChatId,
+        clientRequestId,
+        status: Number(error?.status || 0) || undefined,
+        code: String(error?.code || '').trim() || undefined,
+      })
       return {
         ok: false,
         reason: 'task_create_failed',

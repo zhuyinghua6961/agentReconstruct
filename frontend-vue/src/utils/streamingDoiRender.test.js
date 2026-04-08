@@ -53,6 +53,8 @@ test('streaming answer keeps patent citation clickable', async () => {
 
   assert.match(html, /class="doi-link patent-link"/)
   assert.match(html, /data-patent-id="CN100420075C"/)
+  assert.match(html, />CN100420075C</)
+  assert.doesNotMatch(html, />patent_id=CN100420075C</)
 })
 
 test('streaming answer repairs merged doi identifiers into separate clickable links', async () => {
