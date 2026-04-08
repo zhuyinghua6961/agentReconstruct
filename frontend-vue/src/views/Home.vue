@@ -8,7 +8,8 @@ import { buildMessageRenderMemoKey } from '../utils/messageRenderMemo'
 import { buildVisibleMessageWindow, resolveHiddenHistoryReveal } from '../utils/messageWindowing'
 import { resolveStreamingTarget } from '../utils/streamingTarget'
 import { buildChatRequestContext } from '../utils/chatRequestContext'
-import { buildQuestionOutlineItems, buildQuestionOutlineSignature, getQuestionAnchorId } from '../utils/questionOutline'
+import { focusQuestionItem } from '../utils/questionFocus'
+import { buildQuestionOutlineItems, buildQuestionOutlineSignature, getLastQuestionOutlineItem, getQuestionAnchorId } from '../utils/questionOutline'
 import { DEFAULT_NEAR_BOTTOM_THRESHOLD_PX, isNearBottom, shouldAutoScroll } from '../utils/scrollFollow'
 import { mergeSelectedFileIdsAfterUpload, resolveUploadedFileDisplayNumber } from '../utils/fileSelection'
 import { shouldIgnoreLateStreamError } from '../utils/streamingLifecycle'
@@ -55,6 +56,7 @@ let filePollInFlight = false
 const questionOutlineCollapsed = ref(false)
 const questionOutlineWidth = ref(300)
 const questionOutlineLastExpandedWidth = ref(300)
+const activeQuestionMessageIndex = ref(null)
 const highlightedQuestionMessageIndex = ref(null)
 const userMessageElements = new Map()
 const isPanelResizing = ref(false)
@@ -465,8 +467,19 @@ function clearQuestionHighlight() {
   }
 }
 
+function scheduleQuestionHighlightReset() {
+  if (questionHighlightTimer !== null) {
+    window.clearTimeout(questionHighlightTimer)
+  }
+  questionHighlightTimer = window.setTimeout(() => {
+    highlightedQuestionMessageIndex.value = null
+    questionHighlightTimer = null
+  }, 1800)
+}
+
 function resetQuestionOutlineState() {
   clearQuestionHighlight()
+  activeQuestionMessageIndex.value = null
   userMessageElements.clear()
 }
 
@@ -591,21 +604,50 @@ function startPanelResize(panel, event) {
 
 async function scrollToQuestion(item) {
   if (!item) return
-  const didReveal = revealHiddenHistory(item.messageIndex)
-  if (didReveal) {
-    await nextTick()
+  await focusQuestionItem({
+    item,
+    userMessageElements,
+    revealHiddenHistory,
+    nextTick,
+    setActiveQuestionMessageIndex: (value) => {
+      activeQuestionMessageIndex.value = value
+    },
+    setHighlightedQuestionMessageIndex: (value) => {
+      highlightedQuestionMessageIndex.value = value
+    },
+    scheduleHighlightReset: scheduleQuestionHighlightReset,
+    behavior: 'smooth',
+    highlight: true,
+  })
+}
+
+async function focusLastQuestionInView(options = {}) {
+  updateQuestionOutlineItems()
+  const lastQuestionItem = getLastQuestionOutlineItem(questionOutlineItems.value)
+  if (!lastQuestionItem) {
+    activeQuestionMessageIndex.value = null
+    return
   }
-  const target = userMessageElements.get(item.messageIndex)
-  if (!target) return
-  target.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  highlightedQuestionMessageIndex.value = item.messageIndex
-  if (questionHighlightTimer !== null) {
-    window.clearTimeout(questionHighlightTimer)
+  activeQuestionMessageIndex.value = lastQuestionItem.messageIndex
+  if (options?.scroll === false) {
+    return
   }
-  questionHighlightTimer = window.setTimeout(() => {
-    highlightedQuestionMessageIndex.value = null
-    questionHighlightTimer = null
-  }, 1800)
+  await focusQuestionItem({
+    item: lastQuestionItem,
+    userMessageElements,
+    revealHiddenHistory,
+    nextTick,
+    setActiveQuestionMessageIndex: (value) => {
+      activeQuestionMessageIndex.value = value
+    },
+    setHighlightedQuestionMessageIndex: (value) => {
+      highlightedQuestionMessageIndex.value = value
+    },
+    scheduleHighlightReset: scheduleQuestionHighlightReset,
+    behavior: options?.behavior || 'auto',
+    highlight: false,
+  })
+  clearQuestionHighlight()
 }
 
 function isStepsCollapsed(msg) {
@@ -1394,6 +1436,7 @@ onMounted(async () => {
     store.createChat()
   } else {
     await store.switchChat(store.currentChatId || store.chats[0].id)
+    await focusLastQuestionInView({ behavior: 'auto' })
   }
 
   documentClickHandler = (e) => {
@@ -1490,6 +1533,7 @@ async function switchChat(chatId) {
   resetQuestionOutlineState()
   await store.switchChat(nextChatId)
   if (requestSeq !== switchChatRequestSeq) return
+  await focusLastQuestionInView({ behavior: 'auto' })
   if (hasPendingFileProcessing()) {
     startFileStatusPolling()
   }
@@ -2076,6 +2120,7 @@ watch(
   () => [normalizeChatId(store.currentChatId), questionOutlineSignature.value],
   () => {
     updateQuestionOutlineItems()
+    focusLastQuestionInView({ scroll: false })
     nextTick(() => {
       updateNearBottomState()
     })
@@ -2500,7 +2545,7 @@ watch(
           v-for="item in questionOutlineItems"
           :key="item.anchorId"
           class="question-outline-item"
-          :class="{ active: highlightedQuestionMessageIndex === item.messageIndex }"
+          :class="{ active: activeQuestionMessageIndex === item.messageIndex }"
           type="button"
           @click="scrollToQuestion(item)"
         >

@@ -64,3 +64,22 @@ test('buildQuestionOutlineItems only contains user messages with stable absolute
   assert.match(items[1].preview, /^第二个问题会更长一些/)
   assert.ok(items[1].preview.length <= 51)
 })
+
+test('getLastQuestionOutlineItem returns the newest user turn and null for empty outlines', async () => {
+  const { buildQuestionOutlineItems, getLastQuestionOutlineItem } = await loadQuestionOutlineUtils()
+
+  assert.equal(typeof buildQuestionOutlineItems, 'function')
+  assert.equal(typeof getLastQuestionOutlineItem, 'function')
+
+  const items = buildQuestionOutlineItems([
+    { role: 'user', content: '第一个问题' },
+    { role: 'assistant', content: '回答一' },
+    { role: 'user', content: '第二个问题' },
+    { role: 'assistant', content: '回答二' },
+    { role: 'user', content: '第三个问题' },
+  ])
+
+  assert.equal(getLastQuestionOutlineItem([]), null)
+  assert.deepEqual(getLastQuestionOutlineItem(items), items[2])
+  assert.equal(getLastQuestionOutlineItem(items)?.messageIndex, 4)
+})

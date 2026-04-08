@@ -20,7 +20,7 @@ test('Home uses absolute message identity in the render list wiring', () => {
 test('Home imports and uses question anchor helper for stable user-message ids', () => {
   assert.match(
     source,
-    /import\s*\{\s*buildQuestionOutlineItems,\s*buildQuestionOutlineSignature,\s*getQuestionAnchorId\s*\}\s*from '\.\.\/utils\/questionOutline'/
+    /import\s*\{\s*buildQuestionOutlineItems,\s*buildQuestionOutlineSignature,\s*getLastQuestionOutlineItem,\s*getQuestionAnchorId\s*\}\s*from '\.\.\/utils\/questionOutline'/
   )
   assert.match(source, /:id="entry\.message\.role === 'user' \? getQuestionAnchorId\(entry\.absoluteMessageIndex\) : undefined"/)
   assert.match(source, /:ref="entry\.message\.role === 'user' \? \(el\) => setUserMessageElement\(entry\.absoluteMessageIndex, el\) : null"/)
@@ -42,16 +42,35 @@ test('Home adds hidden-history reveal flow on top of stable identity rendering',
 })
 
 test('Home routes outline jumps through reveal-first flow while preserving stable message identity', () => {
+  assert.match(source, /import \{ focusQuestionItem \} from '\.\.\/utils\/questionFocus'/)
   assert.match(source, /async function scrollToQuestion\(item\)/)
-  assert.match(source, /const didReveal = revealHiddenHistory\(item\.messageIndex\)/)
-  assert.match(source, /if \(didReveal\) \{\s*await nextTick\(\)\s*\}/)
-  assert.match(source, /const target = userMessageElements\.get\(item\.messageIndex\)/)
-  assert.match(source, /highlightedQuestionMessageIndex\.value = item\.messageIndex/)
+  assert.match(source, /await focusQuestionItem\(\{\s*item,\s*userMessageElements,\s*revealHiddenHistory,\s*nextTick,/s)
+  assert.match(source, /setActiveQuestionMessageIndex:\s*\(value\)\s*=>\s*\{\s*activeQuestionMessageIndex\.value = value\s*\}/s)
+  assert.match(source, /setHighlightedQuestionMessageIndex:\s*\(value\)\s*=>\s*\{\s*highlightedQuestionMessageIndex\.value = value\s*\}/s)
+  assert.match(source, /scheduleHighlightReset:\s*scheduleQuestionHighlightReset/)
+  assert.match(source, /behavior:\s*'smooth'/)
+  assert.match(source, /highlight:\s*true/)
   assert.match(source, /function getMessageByAbsoluteIndex\(messageIndex\)/)
   assert.match(source, /const messageElement = target\.closest\('\.message\[data-message-index\]'\)/)
   assert.match(source, /const currentMsg = getMessageByAbsoluteIndex\(messageIndex\)/)
   assert.match(source, /function toggleSteps\(index\) \{\s*const msg = getMessageByAbsoluteIndex\(index\)/s)
-  assert.match(source, /:class="\{ active: highlightedQuestionMessageIndex === item\.messageIndex \}"/)
+  assert.match(source, /:class="\{ active: activeQuestionMessageIndex === item\.messageIndex \}"/)
+})
+
+test('Home restores the current conversation to the newest question when entering or refreshing a chat', () => {
+  assert.match(source, /const activeQuestionMessageIndex = ref\(null\)/)
+  assert.match(source, /function resetQuestionOutlineState\(\) \{\s*clearQuestionHighlight\(\)\s*activeQuestionMessageIndex\.value = null\s*userMessageElements\.clear\(\)\s*\}/s)
+  assert.match(source, /function scheduleQuestionHighlightReset\(\) \{/)
+  assert.match(source, /async function focusLastQuestionInView\(options = \{\}\) \{/)
+  assert.match(source, /const lastQuestionItem = getLastQuestionOutlineItem\(questionOutlineItems\.value\)/)
+  assert.match(source, /activeQuestionMessageIndex\.value = lastQuestionItem\.messageIndex/)
+  assert.match(source, /await focusQuestionItem\(\{\s*item:\s*lastQuestionItem,\s*userMessageElements,\s*revealHiddenHistory,\s*nextTick,/s)
+  assert.match(source, /behavior:\s*options\?\.behavior \|\| 'auto'/)
+  assert.match(source, /highlight:\s*false/)
+  assert.match(source, /await focusLastQuestionInView\(\{ behavior: 'auto' \}\)/)
+  assert.match(source, /await store\.switchChat\(store\.currentChatId \|\| store\.chats\[0\]\.id\)\s*await focusLastQuestionInView\(\{ behavior: 'auto' \}\)/s)
+  assert.match(source, /await store\.switchChat\(nextChatId\)\s*if \(requestSeq !== switchChatRequestSeq\) return\s*await focusLastQuestionInView\(\{ behavior: 'auto' \}\)/s)
+  assert.match(source, /:class="\{ active: activeQuestionMessageIndex === item\.messageIndex \}"/)
 })
 
 test('Home renders quota limit cards inline for quota failures while keeping markdown fallback', () => {

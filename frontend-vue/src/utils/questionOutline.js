@@ -38,3 +38,8 @@ export function buildQuestionOutlineItems(messages = []) {
     return items
   }, [])
 }
+
+export function getLastQuestionOutlineItem(items = []) {
+  if (!Array.isArray(items) || items.length === 0) return null
+  return items[items.length - 1] || null
+}
