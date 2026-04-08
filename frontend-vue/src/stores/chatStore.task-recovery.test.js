@@ -143,3 +143,35 @@ test('chat store adopts server active_task during load and clears stale task sta
     api.getConversationDetail = originalGetConversationDetail
   }
 })
+
+test('chat store does not carry the previous task replay seq into a newly created follow-up task in the same chat', async () => {
+  installLocalStorageMock()
+  const store = await createStore()
+
+  const chat = store.createChat()
+  chat.synced = true
+  chat.lastTaskSeq = 128
+  chat.messages = [
+    { role: 'user', content: 'first question' },
+    {
+      role: 'assistant',
+      content: 'first answer',
+      status: 'completed',
+      metadata: {
+        task_id: 'task_old',
+        last_seq: 128,
+        terminal_status: 'completed',
+      },
+    },
+  ]
+
+  store.setChatActiveTask(chat.id, {
+    task_id: 'task_new_followup',
+    status: 'queued',
+    last_seq: 0,
+    replay_available: true,
+  }, { touch: false, persist: false })
+
+  assert.equal(store.getChatActiveTask(chat.id)?.task_id, 'task_new_followup')
+  assert.equal(store.getChatLastTaskSeq(chat.id), 0)
+})

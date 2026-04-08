@@ -488,6 +488,84 @@ def test_dispatcher_fails_patent_request_when_readiness_checker_rejects():
     assert slot_store.describe()["active_leases"] == 0
 
 
+def test_dispatcher_specific_claim_skips_older_non_patent_not_ready_request():
+    queue_store = _memory_queue_store()
+    slot_store = _memory_slot_store()
+    queue_store.put_request(
+        _queued_record("req_old_not_ready", actual_mode="fast", enqueued_at="2026-03-30T10:00:00+00:00"),
+        ttl_seconds=900,
+    )
+    queue_store.put_request(
+        _queued_record("req_current_ready", actual_mode="fast", enqueued_at="2026-03-30T10:00:01+00:00"),
+        ttl_seconds=900,
+    )
+    dispatcher = ExecutionAdmissionDispatcher(
+        settings=GatewaySettings.from_env(),
+        queue_status_store=queue_store,
+        slot_lease_store=slot_store,
+        readiness_checker=lambda record: (
+            str(record.get("request_id") or "").strip() != "req_old_not_ready",
+            "backend_not_ready" if str(record.get("request_id") or "").strip() == "req_old_not_ready" else "",
+        ),
+    )
+
+    result = dispatcher.claim_specific_request_if_eligible(
+        "req_current_ready",
+        owner_id="worker-a",
+        admitted_at="2026-03-30T10:00:05+00:00",
+        lease_ttl_seconds=30,
+    )
+
+    assert result.outcome == "claimed"
+    assert result.request_id == "req_current_ready"
+    assert queue_store.get_request("req_old_not_ready")["status"] == "queued"
+    assert queue_store.get_request("req_current_ready")["status"] == "admitted"
+
+
+def test_dispatcher_specific_claim_honors_reserved_thinking_selection():
+    queue_store = _memory_queue_store()
+    slot_store = _memory_slot_store()
+    queue_store.put_request(
+        _queued_record("req_fast_first", actual_mode="fast", enqueued_at="2026-03-30T10:00:00+00:00"),
+        ttl_seconds=900,
+    )
+    queue_store.put_request(
+        _queued_record("req_think_reserved", actual_mode="thinking", enqueued_at="2026-03-30T10:00:01+00:00"),
+        ttl_seconds=900,
+    )
+    slot_store.acquire(
+        request_id="req_existing_fast",
+        capacity_key="fast_or_patent",
+        owner_id="worker-z",
+        ttl_seconds=30,
+        acquired_at="2026-03-30T10:00:00+00:00",
+    )
+    settings = _settings_with_admission_overrides(
+        max_concurrent=2,
+        fast_or_patent_max_concurrent=20,
+        thinking_max_concurrent=5,
+        thinking_min_slots=1,
+    )
+    dispatcher = ExecutionAdmissionDispatcher(
+        settings=settings,
+        queue_status_store=queue_store,
+        slot_lease_store=slot_store,
+        thinking_starvation_seconds=300,
+    )
+
+    result = dispatcher.claim_specific_request_if_eligible(
+        "req_think_reserved",
+        owner_id="worker-a",
+        admitted_at="2026-03-30T10:00:05+00:00",
+        lease_ttl_seconds=30,
+    )
+
+    assert result.outcome == "claimed"
+    assert result.request_id == "req_think_reserved"
+    assert queue_store.get_request("req_fast_first")["status"] == "queued"
+    assert queue_store.get_request("req_think_reserved")["status"] == "admitted"
+
+
 def test_dispatcher_can_requeue_admitted_request_after_transient_failure():
     queue_store = _memory_queue_store()
     slot_store = _memory_slot_store()

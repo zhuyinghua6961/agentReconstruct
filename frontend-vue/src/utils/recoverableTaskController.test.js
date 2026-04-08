@@ -548,6 +548,47 @@ test('recoverable task controller starts fresh task replay from the created task
   assert.equal(harness.chat.messages[1].content, 'partial answer')
 })
 
+test('recoverable task controller does not reuse the previous task replay cursor when a same-chat follow-up question creates a new task', async () => {
+  const harness = createHarness({
+    createTask: async () => ({
+      task_id: 'task_new_followup',
+      status: 'queued',
+      last_seq: 0,
+      replay_available: true,
+    }),
+    streamTaskEvents: async (_taskId, _afterSeq, streamOptions = {}) => {
+      streamOptions.onEvent?.({ seq: 1, type: 'content', content: 'fresh answer' })
+      streamOptions.onEvent?.({ seq: 2, type: 'done', final_answer: 'fresh answer' })
+    },
+  })
+
+  harness.chat.messages = [
+    { role: 'user', content: 'first question' },
+    {
+      role: 'assistant',
+      content: 'first answer',
+      status: 'completed',
+      streamRequestId: 'task_old',
+      metadata: {
+        task_id: 'task_old',
+        last_seq: 128,
+        terminal_status: 'completed',
+      },
+    },
+  ]
+  harness.chat.lastTaskSeq = 128
+
+  await harness.controller.sendTaskMessage({
+    requestedChatId: '42',
+    message: 'second question',
+    titleHint: 'second question',
+    requestChatContext: { selected_ids: [] },
+    requestAskMode: 'fast',
+  })
+
+  assert.deepEqual(harness.apiCalls.streamTaskEvents, [['task_new_followup', 0]])
+})
+
 test('recoverable task controller plain attach also resumes from the recovered local assistant cursor', async () => {
   const harness = createHarness({
     streamTaskEvents: async (_taskId, _afterSeq, streamOptions = {}) => {

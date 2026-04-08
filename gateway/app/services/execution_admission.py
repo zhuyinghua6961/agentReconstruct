@@ -124,6 +124,13 @@ class AdmissionExecutionOutcome:
     terminal_status: str = "completed"
 
 
+@dataclass(frozen=True)
+class AdmissionCandidateSelection:
+    outcome: str
+    request: dict[str, Any] | None = None
+    reason: str = ""
+
+
 def build_admission_worker_owner_id(
     runtime_role: str,
     *,
@@ -191,52 +198,61 @@ class ExecutionAdmissionDispatcher:
         lease_ttl_seconds: int,
         now_epoch: float | None = None,
     ) -> AdmissionDispatchResult:
-        reserved_thinking = self._pick_reserved_thinking_request(now_epoch=now_epoch)
-        if reserved_thinking is not None:
-            ready, reason = self._ready_for_dispatch(reserved_thinking)
-            if ready and self._capacity_available("thinking"):
-                return self.claim_request(
-                    str(reserved_thinking.get("request_id") or "").strip(),
-                    owner_id=owner_id,
-                    admitted_at=admitted_at,
-                    lease_ttl_seconds=lease_ttl_seconds,
-                )
-        queued = sorted(
-            self.queue_status_store.list_requests(status="queued"),
-            key=lambda record: self.queue_priority_for_record(record, now_epoch=now_epoch),
+        selection = self._select_claim_candidate(now_epoch=now_epoch)
+        if selection.outcome != "selected":
+            return AdmissionDispatchResult(outcome=selection.outcome, reason=selection.reason)
+        selected = dict(selection.request or {})
+        return self.claim_request(
+            str(selected.get("request_id") or "").strip(),
+            owner_id=owner_id,
+            admitted_at=admitted_at,
+            lease_ttl_seconds=lease_ttl_seconds,
         )
-        if not queued:
-            return AdmissionDispatchResult(outcome="no_queued")
-        saw_capacity_exhausted = False
-        saw_not_ready = False
-        last_not_ready_reason = ""
-        for record in queued:
-            ready, reason = self._ready_for_dispatch(record)
-            if not ready:
-                if str(record.get("target_backend") or "").strip().lower() == "patent":
-                    return self.claim_request(
-                        str(record.get("request_id") or "").strip(),
-                        owner_id=owner_id,
-                        admitted_at=admitted_at,
-                        lease_ttl_seconds=lease_ttl_seconds,
-                    )
-                saw_not_ready = True
-                last_not_ready_reason = reason
-                continue
-            if not self._capacity_available(self.capacity_key_for_record(record)):
-                saw_capacity_exhausted = True
-                continue
+
+    def claim_specific_request_if_eligible(
+        self,
+        request_id: str,
+        *,
+        owner_id: str,
+        admitted_at: str,
+        lease_ttl_seconds: int,
+        now_epoch: float | None = None,
+    ) -> AdmissionDispatchResult:
+        normalized_request_id = str(request_id or "").strip()
+        if not normalized_request_id:
+            return AdmissionDispatchResult(outcome="missing_request_id")
+        record = self.queue_status_store.get_request(normalized_request_id)
+        if not isinstance(record, dict):
+            return AdmissionDispatchResult(outcome="not_found", request_id=normalized_request_id)
+        if str(record.get("status") or "").strip().lower() != "queued":
+            return AdmissionDispatchResult(outcome="not_queued", request_id=normalized_request_id, request=record)
+        selection = self._select_claim_candidate(now_epoch=now_epoch)
+        if selection.outcome == "selected":
+            selected = dict(selection.request or {})
+            if str(selected.get("request_id") or "").strip() != normalized_request_id:
+                return AdmissionDispatchResult(outcome="not_next", request_id=normalized_request_id, request=record)
             return self.claim_request(
-                str(record.get("request_id") or "").strip(),
+                normalized_request_id,
                 owner_id=owner_id,
                 admitted_at=admitted_at,
                 lease_ttl_seconds=lease_ttl_seconds,
             )
-        if saw_capacity_exhausted:
-            return AdmissionDispatchResult(outcome="capacity_exhausted")
-        if saw_not_ready:
-            return AdmissionDispatchResult(outcome="not_ready", reason=last_not_ready_reason)
-        return AdmissionDispatchResult(outcome="no_queued")
+        if selection.outcome == "no_queued":
+            return AdmissionDispatchResult(outcome="no_queued", request_id=normalized_request_id, request=record)
+        if selection.outcome == "not_ready":
+            return AdmissionDispatchResult(
+                outcome="not_ready",
+                request_id=normalized_request_id,
+                reason=selection.reason,
+                request=record,
+            )
+        if selection.outcome == "capacity_exhausted":
+            return AdmissionDispatchResult(
+                outcome="capacity_exhausted",
+                request_id=normalized_request_id,
+                request=record,
+            )
+        return AdmissionDispatchResult(outcome="not_next", request_id=normalized_request_id, request=record)
 
     def claim_request(
         self,
@@ -491,6 +507,39 @@ class ExecutionAdmissionDispatcher:
             key=lambda record: self.queue_priority_for_record(record, now_epoch=now_epoch),
         )
 
+    def _select_claim_candidate(self, *, now_epoch: float | None = None) -> AdmissionCandidateSelection:
+        reserved_thinking = self._pick_reserved_thinking_request(now_epoch=now_epoch)
+        if reserved_thinking is not None:
+            ready, _ = self._ready_for_dispatch(reserved_thinking)
+            if ready and self._capacity_available("thinking"):
+                return AdmissionCandidateSelection(outcome="selected", request=reserved_thinking)
+        queued = sorted(
+            self.queue_status_store.list_requests(status="queued"),
+            key=lambda record: self.queue_priority_for_record(record, now_epoch=now_epoch),
+        )
+        if not queued:
+            return AdmissionCandidateSelection(outcome="no_queued")
+        saw_capacity_exhausted = False
+        saw_not_ready = False
+        last_not_ready_reason = ""
+        for record in queued:
+            ready, reason = self._ready_for_dispatch(record)
+            if not ready:
+                if str(record.get("target_backend") or "").strip().lower() == "patent":
+                    return AdmissionCandidateSelection(outcome="selected", request=record)
+                saw_not_ready = True
+                last_not_ready_reason = reason
+                continue
+            if not self._capacity_available(self.capacity_key_for_record(record)):
+                saw_capacity_exhausted = True
+                continue
+            return AdmissionCandidateSelection(outcome="selected", request=record)
+        if saw_capacity_exhausted:
+            return AdmissionCandidateSelection(outcome="capacity_exhausted")
+        if saw_not_ready:
+            return AdmissionCandidateSelection(outcome="not_ready", reason=last_not_ready_reason)
+        return AdmissionCandidateSelection(outcome="no_queued")
+
     def _ready_for_dispatch(self, record: dict[str, Any]) -> tuple[bool, str]:
         if self.readiness_checker is None:
             return True, ""
@@ -582,6 +631,13 @@ class ExecutionAdmissionWorker:
             lease_ttl_seconds=self.lease_ttl_seconds,
             now_epoch=now_epoch,
         )
+        if claim.outcome != "claimed":
+            self._remember_result(claim)
+            return claim
+
+        return self.run_claimed_request(claim)
+
+    def run_claimed_request(self, claim: AdmissionDispatchResult) -> AdmissionDispatchResult:
         if claim.outcome != "claimed":
             self._remember_result(claim)
             return claim

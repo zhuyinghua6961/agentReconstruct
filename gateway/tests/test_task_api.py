@@ -1776,6 +1776,93 @@ def test_get_task_events_stream_replays_then_live_tails_until_terminal():
     assert payloads[2]["status"] == "canceled"
 
 
+def test_task_events_stream_immediately_dispatches_head_queued_task_without_waiting_for_worker_poll(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    app.state.settings = replace(
+        app.state.settings,
+        admission=replace(
+            app.state.settings.admission,
+            enabled=True,
+            dispatcher_enabled=True,
+        ),
+    )
+    queue_store = app.state.execution_queue_status_store
+    relay_store = app.state.execution_event_relay_store
+    queue_store.put_request(
+        _queued_task_record(
+            request_id="req_events_immediate_dispatch",
+            conversation_id=188,
+            assistant_message_id="msg_events_immediate_dispatch",
+            quota_grant_id="grant-events-immediate-dispatch",
+            execution_snapshot={
+                "question": "dispatch immediately",
+                "conversation_id": 188,
+                "user_id": 42,
+                "chat_history": [],
+                "requested_mode": "fast",
+                "actual_mode": "fast",
+                "route": "kb_qa",
+                "trace_id": "req_events_immediate_dispatch",
+                "options": {},
+            },
+        ),
+        ttl_seconds=900,
+    )
+    relay_store.append_frame("req_events_immediate_dispatch", {"type": "state", "status": "queued"}, ttl_seconds=900)
+
+    calls: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        payload = _json_request_body(request)
+        calls.append((path, payload))
+        if path == "/api/fast/ask_stream":
+            return httpx.Response(
+                200,
+                content=(
+                    b'data: {"type":"metadata","query_mode":"fast","route":"kb_qa","trace_id":"req_events_immediate_dispatch"}\n\n'
+                    b'data: {"type":"content","content":"hello"}\n\n'
+                    b'data: {"type":"done","final_answer":"hello","query_mode":"fast","route":"kb_qa","trace_id":"req_events_immediate_dispatch"}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        if path == "/internal/conversations/188/tasks/req_events_immediate_dispatch/assistant-progress":
+            return httpx.Response(200, json={"success": True, "status": payload.get("status")})
+        if path == "/internal/conversations/188/tasks/req_events_immediate_dispatch/assistant-terminal":
+            return httpx.Response(200, json={"success": True, "status": payload.get("terminal_status")})
+        if path == "/internal/quota/grants/grant-events-immediate-dispatch/finalize":
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"grant_id": "grant-events-immediate-dispatch", "counted": payload["success"], "idempotent": False}},
+            )
+        raise AssertionError(f"unexpected upstream path: {path}")
+
+    _set_task_transport(handler)
+    client = TestClient(app)
+
+    with client.stream(
+        "GET",
+        "/api/v1/tasks/req_events_immediate_dispatch/events",
+        params={"after_seq": 1},
+        headers={"accept": "text/event-stream"},
+    ) as response:
+        body = b"".join(response.iter_bytes())
+
+    assert response.status_code == 200
+    payloads = _sse_payloads(body)
+    assert [item["seq"] for item in payloads] == [2, 3, 4, 5]
+    assert payloads[0]["status"] == "admitted"
+    assert payloads[1]["status"] == "running"
+    assert payloads[2]["type"] == "content"
+    assert payloads[3]["type"] == "done"
+    assert queue_store.get_request("req_events_immediate_dispatch")["status"] == "completed"
+    call_paths = [path for path, _ in calls]
+    assert call_paths[0] == "/internal/conversations/188/tasks/req_events_immediate_dispatch/assistant-progress"
+    assert "/api/fast/ask_stream" in call_paths
+    assert "/internal/conversations/188/tasks/req_events_immediate_dispatch/assistant-terminal" in call_paths
+    assert call_paths[-1] == "/internal/quota/grants/grant-events-immediate-dispatch/finalize"
+
+
 def test_cancel_task_terminalizes_queued_request_persists_canceled_state_and_aborts_quota(monkeypatch):
     monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
     queue_store = app.state.execution_queue_status_store

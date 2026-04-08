@@ -60,6 +60,9 @@ export function createRecoverableTaskController(deps = {}) {
     const taskId = String(taskSummary?.task_id || '').trim()
     if (!targetChatId || !taskId) return
 
+    if (typeof store?.clearChatActiveTask === 'function') {
+      store.clearChatActiveTask(targetChatId, { persist: false, touch: false, resetLastSeq: true })
+    }
     if (typeof store?.addUserMessage === 'function') {
       await store.addUserMessage(message, { chatId: targetChatId, persist: false })
     }

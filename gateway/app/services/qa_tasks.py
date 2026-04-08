@@ -23,6 +23,7 @@ from app.models.ask import AskRequest
 from app.services.execution_admission import (
     AdmissionExecutionOutcome,
     ExecutionAdmissionDispatcher,
+    ExecutionAdmissionWorker,
     evaluate_task_create_admission,
     normalize_public_task_status,
 )
@@ -353,6 +354,7 @@ class QATaskService:
 
     async def stream_task_events(self, task_id: str, *, after_seq: int, auth_context: AuthContext) -> StreamingResponse:
         await self._ensure_task_record_ready(task_id, auth_context=auth_context)
+        self._try_fast_dispatch_streaming_task(task_id, auth_context=auth_context)
         self.build_task_summary(task_id, auth_context=auth_context)
         debug_enabled = _task_events_debug_enabled()
 
@@ -893,6 +895,47 @@ class QATaskService:
         if bool(probe.get("ok")):
             return
         raise HTTPException(status_code=503, detail="task_backend_unavailable")
+
+    def _try_fast_dispatch_streaming_task(self, task_id: str, *, auth_context: AuthContext) -> None:
+        if not bool(self.settings.admission.enabled and self.settings.admission.dispatcher_enabled):
+            return
+        record = self._get_owned_task_record(task_id, auth_context=auth_context)
+        if normalize_public_task_status(record.get("status")) != "queued":
+            return
+
+        dispatcher = ExecutionAdmissionDispatcher(
+            settings=self.settings,
+            queue_status_store=self.queue_store,
+            slot_lease_store=self.slot_lease_store,
+        )
+        owner_id = f"web-immediate:{os.getpid()}:{task_id}"
+        claim = dispatcher.claim_specific_request_if_eligible(
+            task_id,
+            owner_id=owner_id,
+            admitted_at=datetime.now(timezone.utc).isoformat(),
+            lease_ttl_seconds=max(30, int(self.settings.admission.poll_interval_seconds) * 4),
+            now_epoch=time.time(),
+        )
+        if claim.outcome != "claimed":
+            return
+
+        worker = ExecutionAdmissionWorker(
+            dispatcher=dispatcher,
+            owner_id=owner_id,
+            executor=GatewayTaskExecutor(self.app).execute,
+        )
+
+        def _run_claimed_request() -> None:
+            try:
+                worker.run_claimed_request(claim)
+            except Exception:
+                logger.exception("gateway immediate task dispatch crashed task_id=%s", task_id)
+
+        threading.Thread(
+            target=_run_claimed_request,
+            name=f"gateway-immediate-dispatch-{str(task_id or '')[:12]}",
+            daemon=True,
+        ).start()
 
     async def _rollback_task_create(
         self,
