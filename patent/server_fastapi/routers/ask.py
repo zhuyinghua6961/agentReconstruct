@@ -59,6 +59,15 @@ def _error_event(*, trace_id: str, seq: int, exc: Exception) -> dict[str, Any]:
     }
 
 
+def _is_truthy_header(value: str | None) -> bool:
+    if value is None:
+        return False
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return False
+    return normalized in {"1", "true", "yes", "on"}
+
+
 async def _read_json_payload(request: Request) -> dict[str, Any]:
     try:
         payload = await request.json()
@@ -83,6 +92,25 @@ async def _read_json_payload(request: Request) -> dict[str, Any]:
 
 async def _parse_patent_request_or_raise(request: Request):
     payload = await _read_json_payload(request)
+    gateway_task_execution = _is_truthy_header(request.headers.get("x-gateway-task-execution"))
+    gateway_owned_persistence = _is_truthy_header(request.headers.get("x-gateway-owned-persistence"))
+    existing_options = payload.get("options")
+    if isinstance(existing_options, dict):
+        normalized_options = dict(existing_options)
+        normalized_options.pop("gateway_task_execution", None)
+        normalized_options.pop("gateway_owned_persistence", None)
+        if gateway_task_execution:
+            normalized_options["gateway_task_execution"] = True
+        if gateway_owned_persistence:
+            normalized_options["gateway_owned_persistence"] = True
+        payload["options"] = normalized_options
+    elif gateway_task_execution or gateway_owned_persistence:
+        normalized_options: dict[str, Any] = {}
+        if gateway_task_execution:
+            normalized_options["gateway_task_execution"] = True
+        if gateway_owned_persistence:
+            normalized_options["gateway_owned_persistence"] = True
+        payload["options"] = normalized_options
     try:
         return parse_patent_request(payload)
     except ProtocolMismatchRequestError as exc:

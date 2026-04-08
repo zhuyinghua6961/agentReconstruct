@@ -262,6 +262,7 @@ class ChatPersistenceService:
         user_id: int | None,
     ) -> PreparedTurn:
         trace_id = self._resolve_trace_id(request.trace_id)
+        gateway_owned_persistence = bool(request.is_gateway_owned_persistence)
         if not request.is_durable:
             context = self.load_conversation_context(request=request, user_id=user_id, trace_id=trace_id)
             return {
@@ -270,6 +271,7 @@ class ChatPersistenceService:
                 "assistant_accept": None,
                 "assistant_accept_required": False,
                 "assistant_accept_skipped": False,
+                "gateway_owned_persistence": False,
             }
 
         resolved_user_id = _safe_positive_int(user_id)
@@ -394,11 +396,28 @@ class ChatPersistenceService:
                 "inflight_claimed": inflight_claimed,
                 "pending_claimed": pending_claimed,
                 "user_turn_written": user_turn_written,
+                "pending_clear_on_abort": gateway_owned_persistence,
                 "assistant_accept_committed": False,
                 "released": False,
             }
             self._start_runtime_guard_renewal(runtime_state)
-            if pending_claimed or not user_turn_written:
+            if gateway_owned_persistence:
+                if pending_claimed or not pending_user_written:
+                    if not self.execution_cache.mark_pending_turn_user_written(
+                        conversation_id=conversation_id,
+                        trace_id=trace_id,
+                        ttl_seconds=self.turn_state_ttl_seconds,
+                    ):
+                        raise APIError(
+                            code=codes.SERVICE_NOT_READY,
+                            message="durable patent pending turn marker could not be advanced for gateway-owned execution",
+                            status_code=503,
+                            error="service_not_ready",
+                            retriable=True,
+                        )
+                user_turn_written = True
+                runtime_state["user_turn_written"] = True
+            elif pending_claimed or not user_turn_written:
                 self._write_user_turn(
                     request=request,
                     user_id=int(resolved_user_id),
@@ -425,8 +444,9 @@ class ChatPersistenceService:
                 "trace_id": trace_id,
                 "context": context,
                 "assistant_accept": None,
-                "assistant_accept_required": True,
+                "assistant_accept_required": not gateway_owned_persistence,
                 "assistant_accept_skipped": False,
+                "gateway_owned_persistence": gateway_owned_persistence,
                 "_state": runtime_state,
             }
         except Exception:
@@ -438,6 +458,7 @@ class ChatPersistenceService:
                     "inflight_claimed": inflight_claimed,
                     "pending_claimed": pending_claimed,
                     "user_turn_written": user_turn_written,
+                    "pending_clear_on_abort": gateway_owned_persistence,
                 }
             )
             raise
@@ -454,6 +475,7 @@ class ChatPersistenceService:
         context = dict(prepared.get("context") or {})
         normalized_execution_result = dict(execution_result or {})
         assistant_accept_required = bool(prepared.get("assistant_accept_required", request.is_durable))
+        gateway_owned_persistence = bool(prepared.get("gateway_owned_persistence", request.is_gateway_owned_persistence))
 
         if prepared.get("assistant_accept_skipped"):
             return {
@@ -463,9 +485,10 @@ class ChatPersistenceService:
                 "assistant_accept": prepared.get("assistant_accept"),
                 "assistant_accept_required": assistant_accept_required,
                 "assistant_accept_skipped": True,
+                "gateway_owned_persistence": gateway_owned_persistence,
             }
 
-        if not assistant_accept_required:
+        if not assistant_accept_required and not gateway_owned_persistence:
             return {
                 "trace_id": trace_id,
                 "context": context,
@@ -473,9 +496,72 @@ class ChatPersistenceService:
                 "assistant_accept": None,
                 "assistant_accept_required": False,
                 "assistant_accept_skipped": False,
+                "gateway_owned_persistence": gateway_owned_persistence,
             }
 
         runtime_state = prepared.get("_state") if isinstance(prepared.get("_state"), dict) else {}
+        if gateway_owned_persistence:
+            try:
+                self._assert_runtime_state_healthy(runtime_state)
+                answer_text = _normalize_text(normalized_execution_result.get("answer_text") or normalized_execution_result.get("final_answer"))
+                conversation_id = int(runtime_state.get("conversation_id") or request.conversation_id or 0)
+                user_id = int(runtime_state.get("user_id") or 0)
+                if not self.execution_cache.set_turn_result(
+                    conversation_id=conversation_id,
+                    trace_id=trace_id,
+                    payload={
+                        "execution_result": normalized_execution_result,
+                    },
+                    ttl_seconds=self.turn_state_ttl_seconds,
+                ):
+                    raise APIError(
+                        code=codes.SERVICE_NOT_READY,
+                        message="durable patent turn result commit failed",
+                        status_code=503,
+                        error="service_not_ready",
+                        retriable=True,
+                    )
+                if answer_text and not self.execution_cache.set_overlay_assistant(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    payload={
+                        "trace_id": trace_id,
+                        "route": request.route,
+                        "assistant_content": answer_text,
+                    },
+                    ttl_seconds=self.overlay_ttl_seconds,
+                ):
+                    raise APIError(
+                        code=codes.SERVICE_NOT_READY,
+                        message="durable patent assistant overlay commit failed",
+                        status_code=503,
+                        error="service_not_ready",
+                        retriable=True,
+                    )
+                if not self.execution_cache.clear_pending_turn(
+                    conversation_id=int(runtime_state.get("conversation_id") or request.conversation_id or 0),
+                    trace_id=trace_id,
+                ):
+                    raise APIError(
+                        code=codes.SERVICE_NOT_READY,
+                        message="durable patent pending turn clear failed",
+                        status_code=503,
+                        error="service_not_ready",
+                        retriable=True,
+                    )
+                self._assert_runtime_state_healthy(runtime_state)
+                return {
+                    "trace_id": trace_id,
+                    "context": context,
+                    "execution_result": normalized_execution_result,
+                    "assistant_accept": None,
+                    "assistant_accept_required": False,
+                    "assistant_accept_skipped": True,
+                    "gateway_owned_persistence": True,
+                }
+            finally:
+                self._cleanup_runtime_state(runtime_state)
+
         try:
             self._assert_runtime_state_healthy(runtime_state)
             answer_text = _normalize_text(normalized_execution_result.get("answer_text") or normalized_execution_result.get("final_answer"))
@@ -549,6 +635,7 @@ class ChatPersistenceService:
                 "assistant_accept": assistant_accept,
                 "assistant_accept_required": True,
                 "assistant_accept_skipped": False,
+                "gateway_owned_persistence": gateway_owned_persistence,
             }
         finally:
             self._cleanup_runtime_state(runtime_state)
@@ -689,6 +776,7 @@ class ChatPersistenceService:
         cached_result: dict[str, Any],
     ) -> PreparedTurn:
         execution_result = cached_result.get("execution_result") if isinstance(cached_result, dict) else None
+        gateway_owned_persistence = bool(request.is_gateway_owned_persistence)
         context = self.load_conversation_context(request=request, user_id=user_id, trace_id=trace_id)
         if request.is_durable and request.conversation_id is not None:
             pending_state = self.execution_cache.get_pending_turn_state(
@@ -725,8 +813,9 @@ class ChatPersistenceService:
             "context": context,
             "execution_result": dict(execution_result or {}),
             "assistant_accept": None,
-            "assistant_accept_required": True,
+            "assistant_accept_required": not gateway_owned_persistence,
             "assistant_accept_skipped": True,
+            "gateway_owned_persistence": gateway_owned_persistence,
         }
 
     def _cleanup_runtime_state(self, runtime_state: dict[str, Any] | None) -> None:
@@ -757,7 +846,10 @@ class ChatPersistenceService:
             )
         if (
             bool(state.get("pending_claimed"))
-            and not bool(state.get("user_turn_written"))
+            and (
+                not bool(state.get("user_turn_written"))
+                or bool(state.get("pending_clear_on_abort"))
+            )
             and conversation_id is not None
             and trace_id
         ):

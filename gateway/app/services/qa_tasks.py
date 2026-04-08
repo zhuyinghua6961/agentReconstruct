@@ -170,6 +170,7 @@ class QATaskService:
                 quota_grant_id = str(grant_data.get("grant_id") or "").strip()
                 record = {
                     "request_id": task_id,
+                    "client_request_id": str(bound_payload.client_request_id or "").strip() or None,
                     "status": "provisioning",
                     "persisted_last_seq": 0,
                     "conversation_id": bound_payload.conversation_id,
@@ -218,6 +219,7 @@ class QATaskService:
                         "route_confidence": route_decision.route_confidence,
                         "classifier_used": route_decision.classifier_used,
                         "task_id": task_id,
+                        "client_request_id": str(bound_payload.client_request_id or "").strip() or None,
                         "user_message_id": "",
                         "assistant_message_id": "",
                         "pdf_context": dict(bound_payload.pdf_context or {}),
@@ -263,6 +265,16 @@ class QATaskService:
                 if not stored:
                     raise HTTPException(status_code=500, detail="task_create_failed")
                 self._append_state_frame(task_id, status="queued")
+                logger.info(
+                    "gateway task created task_id=%s client_request_id=%s conversation_id=%s user_id=%s requested_mode=%s actual_mode=%s route=%s",
+                    task_id,
+                    str(bound_payload.client_request_id or "").strip() or "-",
+                    conversation_id,
+                    user_id,
+                    bound_payload.requested_mode,
+                    route_decision.actual_mode,
+                    route_decision.route,
+                )
             except httpx.HTTPStatusError as exc:
                 cleanup_error = await self._cleanup_failed_task_create(
                     payload=bound_payload,

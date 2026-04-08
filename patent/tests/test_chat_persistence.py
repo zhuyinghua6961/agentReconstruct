@@ -455,7 +455,9 @@ def test_durable_stream_rejects_invalid_result_payload_before_assistant_accept()
 
     events = list(ask_service.stream_ask(_make_request(), user_id=42))
 
-    assert [event["type"] for event in events] == ["metadata", "error"]
+    assert events[0]["type"] == "metadata"
+    assert events[-1]["type"] == "error"
+    assert all(event["type"] != "done" for event in events)
     assert authority.assistant_accepts == []
     assert authority.assistant_terminal_accepts[0]["terminal_status"] == "failed"
     assert authority.assistant_terminal_accepts[0]["failure"]["code"] == codes.INTERNAL_ERROR
@@ -983,6 +985,97 @@ def test_split_phase_durable_flow_accepts_after_execution():
 
     assert authority.calls == ["user_write", "snapshot", "assistant_accept"]
     assert finalized["assistant_accept"]["accepted"] is True
+
+
+def test_gateway_owned_durable_flow_skips_authority_user_and_assistant_writes():
+    service, authority, _ = _build_service()
+
+    result = service.run_turn(
+        request=_make_request(
+            options={
+                "gateway_task_execution": True,
+                "gateway_owned_persistence": True,
+            }
+        ),
+        user_id=42,
+        execute_turn=lambda context: {"answer_text": "Patent answer", "timings": {"total_ms": 12}},
+    )
+
+    assert result["assistant_accept_required"] is False
+    assert result["assistant_accept"] is None
+    assert result["assistant_accept_skipped"] is True
+    assert authority.calls == ["snapshot"]
+    assert service.execution_cache.get_turn_result(conversation_id=123, trace_id="req_123") is not None
+    assert service.execution_cache.get_pending_turn(conversation_id=123) == ""
+
+
+def test_gateway_owned_terminal_failure_does_not_write_authority_terminal_event():
+    class _BrokenExecutor:
+        def execute(self, *, request, context):
+            return {
+                "answer_text": "Patent answer",
+                "route": "kb_qa",
+                "used_files": {"file_id": 1},
+                "timings": {"total_ms": 12},
+            }
+
+    persistence_service, authority, _ = _build_service()
+    ask_service = AskService(
+        patent_executor=_BrokenExecutor(),
+        persistence_service=persistence_service,
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    with pytest.raises(APIError) as exc_info:
+        ask_service.sync_ask(
+            _make_request(
+                options={
+                    "gateway_task_execution": True,
+                    "gateway_owned_persistence": True,
+                }
+            ),
+            user_id=42,
+        )
+
+    assert exc_info.value.code == codes.INTERNAL_ERROR
+    assert authority.calls == ["snapshot"]
+    assert authority.assistant_accepts == []
+    assert authority.assistant_terminal_accepts == []
+
+
+def test_gateway_owned_failure_clears_pending_turn_and_unblocks_new_trace():
+    service, authority, _ = _build_service()
+
+    with pytest.raises(RuntimeError):
+        service.run_turn(
+            request=_make_request(
+                options={
+                    "gateway_task_execution": True,
+                    "gateway_owned_persistence": True,
+                }
+            ),
+            user_id=42,
+            execute_turn=lambda context: (_ for _ in ()).throw(RuntimeError("executor boom")),
+        )
+
+    assert service.execution_cache.get_pending_turn(conversation_id=123) == ""
+
+    recovered = service.run_turn(
+        request=_make_request(
+            trace_id="req_456",
+            options={
+                "gateway_task_execution": True,
+                "gateway_owned_persistence": True,
+            },
+        ),
+        user_id=42,
+        execute_turn=lambda context: {"answer_text": "Patent answer"},
+    )
+
+    assert recovered["assistant_accept_required"] is False
+    assert recovered["assistant_accept"] is None
+    assert recovered["assistant_accept_skipped"] is True
+    assert authority.assistant_accepts == []
 
 
 def test_abort_turn_releases_inflight_and_lock_for_split_phase_streaming():

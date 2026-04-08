@@ -51,6 +51,28 @@ class PatentAskRequest:
     def is_durable(self) -> bool:
         return self.conversation_id is not None
 
+    @property
+    def is_gateway_task_execution(self) -> bool:
+        return _option_flag(self.options, "gateway_task_execution")
+
+    @property
+    def is_gateway_owned_persistence(self) -> bool:
+        return self.is_gateway_task_execution and _option_flag(self.options, "gateway_owned_persistence")
+
+
+def _option_flag(options: dict[str, Any] | None, key: str) -> bool:
+    value = (options or {}).get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if not normalized:
+            return False
+        return normalized in {"1", "true", "yes", "on"}
+    return False
+
 
 
 def _normalize_conversation_id(value: Any) -> int | None:

@@ -4,6 +4,7 @@ import logging
 import queue
 import re
 import threading
+from dataclasses import replace
 from typing import Any, Callable, Iterator
 
 from server.errors import codes
@@ -106,9 +107,12 @@ class AskService:
 
     def sync_ask(self, request: PatentAskRequest, *, user_id: int | None) -> dict[str, Any]:
         trace_token = set_trace_id(str(request.trace_id))
+        resolved_trace_id = str(request.trace_id)
+        prepared: dict[str, Any] = {}
         try:
-            self._logger.info("sync_ask start trace=%s durable=%s", request.trace_id, request.is_durable)
             prepared = self._prepare_turn(request=request, user_id=user_id)
+            resolved_trace_id = str(prepared.get("trace_id") or resolved_trace_id)
+            self._logger.info("sync_ask start trace_id=%s durable=%s", resolved_trace_id, request.is_durable)
             preflight_steps = _build_context_ready_steps(
                 request=request,
                 raw_context=dict(prepared.get("context") or {}),
@@ -120,17 +124,17 @@ class AskService:
                     preflight_steps=preflight_steps,
                 )
                 self._logger.info(
-                    "sync_ask complete trace=%s answer_chars=%s",
-                    turn_result.get("trace_id") or request.trace_id,
+                    "sync_ask complete trace_id=%s answer_chars=%s",
+                    turn_result.get("trace_id") or prepared.get("trace_id") or resolved_trace_id,
                     len(str(execution_result.get("answer_text") or "")),
                 )
                 return self._result_builder.build_sync_success(
                     request=request,
-                    trace_id=str(turn_result.get("trace_id") or prepared.get("trace_id") or request.trace_id),
+                    trace_id=str(turn_result.get("trace_id") or prepared.get("trace_id") or resolved_trace_id),
                     execution_result=execution_result,
                 )
             except Exception as exc:
-                self._logger.exception("sync_ask failed trace=%s error=%s", request.trace_id, exc)
+                self._logger.exception("sync_ask failed trace_id=%s error=%s", resolved_trace_id, exc)
                 self._persist_terminal_failure(request=request, prepared_turn=prepared, exc=exc)
                 self._abort_turn(prepared)
                 raise self._result_builder.to_api_error(exc) from exc
@@ -146,6 +150,7 @@ class AskService:
         try:
             prepared = self._prepare_turn(request=request, user_id=user_id)
             trace_id = str(prepared.get("trace_id") or trace_id)
+            self._logger.info("stream_ask start trace_id=%s durable=%s", trace_id, request.is_durable)
             preflight_steps = _build_context_ready_steps(
                 request=request,
                 raw_context=dict(prepared.get("context") or {}),
@@ -279,7 +284,7 @@ class AskService:
                 seq=seq,
             )
         except Exception as exc:
-            self._logger.exception("stream_ask failed trace=%s error=%s", trace_id, exc)
+            self._logger.exception("stream_ask failed trace_id=%s error=%s", trace_id, exc)
             self._persist_terminal_failure(request=request, prepared_turn=prepared, exc=exc)
             self._abort_turn(prepared)
             yield self._build_error_event(trace_id=trace_id, seq=seq, exc=exc)
@@ -294,16 +299,35 @@ class AskService:
             self._persistence_service.run_turn(
                 request=request,
                 user_id=user_id,
-                execute_turn=lambda context: self._validate_execution_result(
+                execute_turn=lambda context: self._execute_and_validate_fallback_turn(
                     request=request,
-                    trace_id=str(request.trace_id),
-                    execution_result=self._execute_turn(request=request, context=context),
+                    context=context,
                 ),
             )
             or {}
         )
         fallback_result["_completed_turn"] = True
         return fallback_result
+
+    def _execute_and_validate_fallback_turn(
+        self,
+        *,
+        request: PatentAskRequest,
+        context: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        resolved_trace_id = str((context or {}).get("trace_id") or request.trace_id).strip()
+        if resolved_trace_id and resolved_trace_id != str(request.trace_id):
+            effective_request = replace(request, trace_id=resolved_trace_id)
+        else:
+            effective_request = request
+        return self._validate_execution_result(
+            request=effective_request,
+            trace_id=resolved_trace_id or str(request.trace_id),
+            execution_result=self._execute_turn(
+                request=effective_request,
+                context=dict(context or {}),
+            ),
+        )
 
     def _finalize_turn(
         self,

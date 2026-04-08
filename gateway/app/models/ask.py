@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -26,7 +27,20 @@ class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     conversation_id: int | str | None = None
     user_id: int | str | None = None
+    client_request_id: str | None = Field(default=None, min_length=1, max_length=128)
     chat_history: list[ChatMessage] = Field(default_factory=list, max_length=20)
     requested_mode: Literal["fast", "thinking", "patent"]
     pdf_context: dict[str, Any] = Field(default_factory=dict)
     options: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("client_request_id", mode="before")
+    @classmethod
+    def _normalize_client_request_id(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", text):
+            raise ValueError("client_request_id contains invalid characters")
+        return text

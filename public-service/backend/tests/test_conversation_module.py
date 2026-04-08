@@ -1034,6 +1034,58 @@ def test_conversation_service_round_trip():
         assert deleted["success"] is True
 
 
+def test_conversation_service_add_message_and_detail_hide_raw_patent_id_citation_markers():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Patent Citation Visibility")
+        conversation_id = int(created["data"]["conversation_id"])
+
+        added_user = service.add_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            role="user",
+            content="请总结这个专利",
+        )
+        assert added_user["success"] is True
+
+        added_assistant = service.add_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            role="assistant",
+            content="结论来自专利 (patent_id=CN115132975B)。",
+            metadata={
+                "trace_id": "trace-patent-citation",
+                "source_service": "patentQA",
+                "requested_mode": "patent",
+                "actual_mode": "patent",
+                "route": "kb_qa",
+            },
+        )
+        assert added_assistant["success"] is True
+
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+        assert detail["success"] is True
+        assistant_message = detail["data"]["messages"][-1]
+        assert "patent_id=" not in assistant_message["content"]
+        assert "CN115132975B" in assistant_message["content"]
+
+
 def test_conversation_repository_list_uses_stable_ordering():
     class _QueryCapturingConversationRepo(ConversationRepository):
         def __init__(self) -> None:

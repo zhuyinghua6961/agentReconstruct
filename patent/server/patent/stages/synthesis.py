@@ -5,8 +5,10 @@ from dataclasses import asdict
 from typing import Any, Callable
 
 from server.patent.answering import (
+    PatentCitationStreamSanitizer,
     build_fallback_patent_answer,
     extract_cited_patent_ids,
+    render_patent_citations_for_user,
     sanitize_patent_id_citations,
 )
 from server.patent.retrieval_models import (
@@ -340,6 +342,7 @@ def run_stage4_synthesis_with_patent_evidence(
         stream_builder = getattr(answer_builder, "stream", None)
         if callable(stream_builder):
             streamed_chunks: list[str] = []
+            stream_sanitizer = PatentCitationStreamSanitizer(allowed_patent_ids=allowed_patent_ids)
             for chunk in stream_builder(
                 question=user_question,
                 retrieval_outcome=retrieval_outcome,
@@ -350,7 +353,13 @@ def run_stage4_synthesis_with_patent_evidence(
                     continue
                 streamed_chunks.append(text)
                 if callable(content_callback):
-                    content_callback(text)
+                    visible_delta = stream_sanitizer.consume(text)
+                    if visible_delta:
+                        content_callback(visible_delta)
+            if callable(content_callback):
+                trailing_visible_delta = stream_sanitizer.finalize()
+                if trailing_visible_delta:
+                    content_callback(trailing_visible_delta)
             raw_answer = "".join(streamed_chunks).strip()
             if raw_answer:
                 citation_mode = "answer_builder_stream"
@@ -395,14 +404,19 @@ def run_stage4_synthesis_with_patent_evidence(
         citation_mode = "answer_builder_validated"
     if used_fallback_builder and citation_mode == "fallback" and cited_patent_ids:
         citation_mode = "fallback_validated"
+    final_answer = render_patent_citations_for_user(
+        final_answer,
+        allowed_patent_ids=allowed_patent_ids,
+        trim=True,
+    )
     metadata = dict(dict(retrieval_results or {}).get("metadata") or {})
     metadata.update(
         {
             "source_ids": _normalize_source_ids(patent_evidence_bundle),
             "allowed_patent_ids": list(allowed_patent_ids),
-            "cited_patent_ids": list(cited_patent_ids or extract_cited_patent_ids(final_answer)),
+            "cited_patent_ids": list(cited_patent_ids),
             "invalid_cited_patent_ids": list(invalid_cited_patent_ids),
-            "citation_format": "(patent_id=公开号)",
+            "citation_format": "(公开号)",
             "citation_mode": citation_mode,
             "evidence_patent_count": len(list(patent_evidence_bundle.get("evidences") or []))
             or len(dict(patent_evidence_bundle.get("evidence_by_patent_id") or {})),

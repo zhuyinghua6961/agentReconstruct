@@ -2,6 +2,7 @@ import json
 import threading
 import time
 from dataclasses import replace
+import logging
 
 import anyio
 import httpx
@@ -290,6 +291,31 @@ def test_create_task_returns_gateway_managed_summary_and_persists_request_record
     assert stored["enqueued_at"] == stored["created_at"]
     assert stored["target_backend"] == "fast"
     assert stored["transport_kind"] == "sse"
+
+
+def test_create_task_logs_task_correlation_id(caplog):
+    _set_health_transport()
+    client = TestClient(app)
+
+    with caplog.at_level(logging.INFO, logger="app.services.qa_tasks"):
+        response = client.post("/api/v1/tasks", json=_request_body(client_request_id="client_req_001"))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert any(
+        f"task_id={payload['task_id']}" in record.getMessage()
+        and "client_request_id=client_req_001" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_create_task_rejects_client_request_id_with_control_chars():
+    _set_health_transport()
+    client = TestClient(app)
+
+    response = client.post("/api/v1/tasks", json=_request_body(client_request_id="client_req_\n001"))
+
+    assert response.status_code == 422
 
 
 def test_task_events_preserve_gateway_relay_sequence_instead_of_downstream_payload_seq():

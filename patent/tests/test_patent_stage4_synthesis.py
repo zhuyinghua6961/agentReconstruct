@@ -125,7 +125,7 @@ def test_stage4_synthesis_assembles_shell_compatible_result_from_patent_evidence
 
     assert result["success"] is True
     assert result["final_answer"].startswith("综合摘要：")
-    assert "(patent_id=CN115132975B)" in result["final_answer"]
+    assert "(CN115132975B)" in result["final_answer"]
     assert result["answer_text"] == result["final_answer"]
     assert result["references"] == ["CN115132975B"]
     assert result["reference_objects"][0]["canonical_patent_id"] == "CN115132975B"
@@ -172,7 +172,7 @@ def test_patent_runtime_stage4_synthesis_uses_runtime_answer_builder():
 
     assert result["success"] is True
     assert result["final_answer"].startswith("runtime synthesized answer")
-    assert "(patent_id=CN115132975B)" in result["final_answer"]
+    assert "(CN115132975B)" in result["final_answer"]
     assert result["references"] == ["CN115132975B"]
     assert captured["question"] == "如何评估该方案的替代窗口与风险？"
     assert captured["context"]["summary_for_llm"]["short_summary"] == "Earlier summary"
@@ -270,7 +270,7 @@ def test_stage4_synthesis_enforces_patent_id_whitelist_on_answer_builder_output(
         ),
     )
 
-    assert "(patent_id=CN115132975B)" in result["final_answer"]
+    assert "(CN115132975B)" in result["final_answer"]
     assert "CN000000000A" not in result["final_answer"]
     assert "另一篇外部专利也支持该结论" not in result["final_answer"]
     assert result["metadata"]["allowed_patent_ids"] == ["CN115132975B"]
@@ -289,7 +289,7 @@ def test_stage4_synthesis_repairs_uncited_answer_without_replacing_builder_conte
 
     assert result["success"] is True
     assert result["final_answer"].startswith("这是一个没有任何专利引用标记的答案。")
-    assert "(patent_id=CN115132975B)" in result["final_answer"]
+    assert "(CN115132975B)" in result["final_answer"]
     assert "围绕“" not in result["final_answer"]
     assert result["metadata"]["citation_mode"] == "programmatic_repair"
 
@@ -315,9 +315,11 @@ def test_stage4_synthesis_forwards_streamed_chunks_and_sanitizes_final_answer():
         content_callback=streamed_chunks.append,
     )
 
-    assert streamed_chunks == ["这是流式输出的答案", "，引用外部专利 (patent_id=CN000000000A)。"]
+    streamed_text = "".join(streamed_chunks)
+    assert "patent_id=" not in streamed_text
+    assert "这是流式输出的答案" in streamed_text
     assert result["success"] is True
-    assert result["final_answer"] == "这是流式输出的答案 (patent_id=CN115132975B)"
+    assert result["final_answer"] == "这是流式输出的答案 (CN115132975B)"
     assert result["metadata"]["citation_mode"] == "programmatic_repair"
     assert result["metadata"]["invalid_cited_patent_ids"] == ["CN000000000A"]
 

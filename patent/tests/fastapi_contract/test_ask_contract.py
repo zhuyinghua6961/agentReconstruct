@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import logging
 import threading
 from pathlib import Path
 
@@ -651,6 +652,7 @@ from server.patent.executor import PatentExecutor
 from server.patent.models import PatentRetrievalPlan
 from server.patent.retrieval_models import PatentCatalogRecord, PatentClaim, PatentDescriptionSnippet
 from server.patent.retrieval_service import PatentRetrievalService
+from server.patent.stages.synthesis import run_stage4_synthesis_with_patent_evidence
 from server.schemas.response_models import ErrorEvent
 from server.services.ask_service import AskService
 from server.runtime.request_context import clear_trace_id, set_trace_id
@@ -1028,6 +1030,56 @@ def test_stream_ask_emits_streaming_content_before_done_when_stage4_streams():
     assert events[-1]["final_answer"] == "streamed answer"
 
 
+def test_stream_ask_strips_raw_patent_id_from_streaming_and_done_payload():
+    class _ReadableCitationStageRuntime(_StageRuntime):
+        class _StreamingBuilder:
+            def __call__(self, **kwargs):
+                raise AssertionError("stream path should be used")
+
+            def stream(self, *, question, retrieval_outcome, context):
+                del question, retrieval_outcome, context
+                yield "结论来自专利 (patent_id=CN115132975B)。"
+                yield "另有外部引用 (patent_id=CN000000000A)。"
+
+        def stage4_synthesis_with_patent_evidence(
+            self,
+            *,
+            user_question: str,
+            deep_answer: str,
+            patent_evidence_bundle: dict[str, object],
+            retrieval_results: dict[str, object] | None = None,
+            should_cancel=None,
+            content_callback=None,
+            conversation_context=None,
+        ) -> dict[str, object]:
+            del should_cancel
+            return run_stage4_synthesis_with_patent_evidence(
+                user_question=user_question,
+                deep_answer=deep_answer,
+                patent_evidence_bundle=patent_evidence_bundle,
+                retrieval_results=retrieval_results,
+                answer_builder=self._StreamingBuilder(),
+                content_callback=content_callback,
+                conversation_context=conversation_context,
+            )
+
+    service = AskService(
+        patent_executor=PatentExecutor(runtime=_ReadableCitationStageRuntime()),
+        persistence_service=_FakePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    events = list(service.stream_ask(parse_patent_request(_base_payload()), user_id=42))
+    content_text = "".join(event["content"] for event in events if event["type"] == "content")
+    done_event = events[-1]
+
+    assert "patent_id=" not in content_text
+    assert "CN115132975B" in content_text
+    assert done_event["type"] == "done"
+    assert "patent_id=" not in done_event["final_answer"]
+    assert "CN115132975B" in done_event["final_answer"]
+
+
 def test_stream_ask_short_circuits_after_stage1_when_no_retrieval_claims_are_available():
     runtime = _Stage1OnlyRuntime()
     service = AskService(
@@ -1136,6 +1188,88 @@ def test_stream_uses_resolved_trace_id_before_first_frame():
 
     assert events[0]["trace_id"] == "req_generated"
     assert events[-1]["trace_id"] == "req_generated"
+
+
+def test_stream_logs_task_correlation_id(caplog):
+    request = parse_patent_request(_base_payload())
+    service = AskService(
+        patent_executor=PatentExecutor(),
+        persistence_service=_SplitPhasePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    with caplog.at_level(logging.INFO, logger="patent.ask_service"):
+        events = list(service.stream_ask(request, user_id=42))
+
+    assert events[0]["trace_id"] == "req_123"
+    assert any("trace_id=req_123" in record.getMessage() for record in caplog.records)
+
+
+def test_sync_logs_resolved_task_correlation_id(caplog):
+    request = parse_patent_request(_base_payload())
+    request = replace(request, trace_id="")
+    service = AskService(
+        patent_executor=PatentExecutor(),
+        persistence_service=_SplitPhasePersistenceService(resolved_trace_id="req_generated"),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    with caplog.at_level(logging.INFO, logger="patent.ask_service"):
+        payload = service.sync_ask(request, user_id=42)
+
+    assert payload["trace_id"] == "req_generated"
+    assert any("sync_ask start trace_id=req_generated" in record.getMessage() for record in caplog.records)
+    assert any("sync_ask complete trace_id=req_generated" in record.getMessage() for record in caplog.records)
+
+
+def test_sync_run_turn_fallback_executes_with_resolved_trace_id():
+    class _TraceCaptureExecutor:
+        def __init__(self):
+            self.seen_trace_ids = []
+
+        def execute(self, *, request, context):
+            self.seen_trace_ids.append(str(request.trace_id))
+            return {
+                "answer_text": "ok",
+                "route": request.route,
+                "source_scope": request.source_scope,
+                "references": [],
+                "reference_objects": [],
+                "reference_links": [],
+                "original_links": [],
+                "used_files": [],
+                "steps": [],
+                "timings": {},
+                "metadata": {"success": True},
+            }
+
+    class _RunTurnOnlyPersistenceService:
+        def run_turn(self, *, request, user_id, execute_turn):
+            resolved_trace_id = "req_generated"
+            context = {"trace_id": resolved_trace_id}
+            execution_result = execute_turn(context)
+            return {
+                "trace_id": resolved_trace_id,
+                "context": context,
+                "execution_result": execution_result,
+                "assistant_accept": {"accepted": True},
+                "assistant_accept_required": bool(request.is_durable),
+                "assistant_accept_skipped": False,
+            }
+
+    request = parse_patent_request(_base_payload())
+    request = replace(request, trace_id="")
+    executor = _TraceCaptureExecutor()
+    service = AskService(
+        patent_executor=executor,
+        persistence_service=_RunTurnOnlyPersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    payload = service.sync_ask(request, user_id=42)
+
+    assert payload["trace_id"] == "req_generated"
+    assert executor.seen_trace_ids == ["req_generated"]
 
 
 def test_stream_refuses_done_when_assistant_accept_signal_is_missing():
@@ -3028,6 +3162,255 @@ def test_durable_stream_request_blocks_when_dependencies_are_not_ready(monkeypat
     assert response.status_code == 503
     assert response.json()["code"] == codes.SERVICE_NOT_READY
     assert fake.stream_calls == []
+
+
+def test_durable_stream_gateway_owned_headers_are_injected_into_request_options(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", TEST_JWT_SECRET)
+    monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_REDIS_ENABLED", "true")
+    monkeypatch.setenv("PATENT_DURABLE_AUTHORITY_ENABLED", "true")
+    monkeypatch.setenv("PATENT_AUTHORITY_INTERNAL_TOKEN", "secret-token")
+    app = create_app()
+    class _OptionCaptureAskService:
+        def __init__(self):
+            self.stream_calls = []
+
+        def sync_ask(self, request, *, user_id):
+            raise NotImplementedError
+
+        def stream_ask(self, request, *, user_id):
+            self.stream_calls.append(
+                {
+                    "trace_id": request.trace_id,
+                    "user_id": user_id,
+                    "route": request.route,
+                    "source_scope": request.source_scope,
+                    "options": dict(request.options or {}),
+                }
+            )
+            return iter(
+                [
+                    {
+                        "type": "metadata",
+                        "requested_mode": "patent",
+                        "actual_mode": "patent",
+                        "route": request.route,
+                        "query_mode": get_patent_mode_profile(request.route).query_mode,
+                        "source_scope": request.source_scope,
+                        "metadata": {},
+                        "trace_id": request.trace_id,
+                        "seq": 0,
+                        "ts": "2026-03-26T00:00:00Z",
+                    },
+                    {
+                        "type": "done",
+                        "final_answer": "route stub",
+                        "query_mode": get_patent_mode_profile(request.route).query_mode,
+                        "route": request.route,
+                        "requested_mode": "patent",
+                        "actual_mode": "patent",
+                        "source_scope": request.source_scope,
+                        "timings": {},
+                        "references": [],
+                        "reference_objects": [],
+                        "trace_id": request.trace_id,
+                        "used_files": list(request.used_files),
+                        "reference_links": [],
+                        "original_links": [],
+                        "metadata": {},
+                        "file_selection": dict(request.file_selection),
+                        "seq": 1,
+                        "ts": "2026-03-26T00:00:00Z",
+                    },
+                ]
+            )
+
+    fake = _OptionCaptureAskService()
+    app.state.ask_service = fake
+    app.state.component_status["redis"]["ready"] = True
+    app.state.component_status["authority"]["ready"] = True
+    token = _make_auth_token(42)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/ask_stream",
+            json=_base_payload(),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Gateway-Task-Execution": "1",
+                "X-Gateway-Owned-Persistence": "1",
+            },
+        )
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    assert events[-1]["type"] == "done"
+    assert fake.stream_calls[0]["options"]["gateway_task_execution"] is True
+    assert fake.stream_calls[0]["options"]["gateway_owned_persistence"] is True
+
+
+def test_durable_sync_gateway_owned_headers_are_injected_into_request_options(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", TEST_JWT_SECRET)
+    monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_REDIS_ENABLED", "true")
+    monkeypatch.setenv("PATENT_DURABLE_AUTHORITY_ENABLED", "true")
+    monkeypatch.setenv("PATENT_AUTHORITY_INTERNAL_TOKEN", "secret-token")
+    app = create_app()
+
+    class _OptionCaptureSyncAskService(_RouteFakeAskService):
+        def __init__(self):
+            super().__init__()
+            self.sync_options = {}
+
+        def sync_ask(self, request, *, user_id):
+            self.sync_options = dict(request.options or {})
+            return super().sync_ask(request, user_id=user_id)
+
+    fake = _OptionCaptureSyncAskService()
+    app.state.ask_service = fake
+    app.state.component_status["redis"]["ready"] = True
+    app.state.component_status["authority"]["ready"] = True
+    token = _make_auth_token(42)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/ask",
+            json=_base_payload(),
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Gateway-Task-Execution": "1",
+                "X-Gateway-Owned-Persistence": "1",
+            },
+        )
+
+    assert response.status_code == 200
+    assert fake.sync_options["gateway_task_execution"] is True
+    assert fake.sync_options["gateway_owned_persistence"] is True
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"X-Gateway-Task-Execution": "1"},
+        {"X-Gateway-Owned-Persistence": "1"},
+    ],
+)
+def test_durable_stream_single_gateway_header_does_not_enable_gateway_owned_options(monkeypatch, headers):
+    monkeypatch.setenv("JWT_SECRET", TEST_JWT_SECRET)
+    monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_REDIS_ENABLED", "true")
+    monkeypatch.setenv("PATENT_DURABLE_AUTHORITY_ENABLED", "true")
+    monkeypatch.setenv("PATENT_AUTHORITY_INTERNAL_TOKEN", "secret-token")
+    app = create_app()
+
+    class _OptionCaptureAskService:
+        def __init__(self):
+            self.stream_options = {}
+
+        def sync_ask(self, request, *, user_id):
+            raise NotImplementedError
+
+        def stream_ask(self, request, *, user_id):
+            self.stream_options = dict(request.options or {})
+            return iter(
+                [
+                    {
+                        "type": "metadata",
+                        "requested_mode": "patent",
+                        "actual_mode": "patent",
+                        "route": request.route,
+                        "query_mode": get_patent_mode_profile(request.route).query_mode,
+                        "source_scope": request.source_scope,
+                        "metadata": {},
+                        "trace_id": request.trace_id,
+                        "seq": 0,
+                        "ts": "2026-03-26T00:00:00Z",
+                    },
+                    {
+                        "type": "done",
+                        "final_answer": "route stub",
+                        "query_mode": get_patent_mode_profile(request.route).query_mode,
+                        "route": request.route,
+                        "requested_mode": "patent",
+                        "actual_mode": "patent",
+                        "source_scope": request.source_scope,
+                        "timings": {},
+                        "references": [],
+                        "reference_objects": [],
+                        "trace_id": request.trace_id,
+                        "used_files": list(request.used_files),
+                        "reference_links": [],
+                        "original_links": [],
+                        "metadata": {},
+                        "file_selection": dict(request.file_selection),
+                        "seq": 1,
+                        "ts": "2026-03-26T00:00:00Z",
+                    },
+                ]
+            )
+
+    fake = _OptionCaptureAskService()
+    app.state.ask_service = fake
+    app.state.component_status["redis"]["ready"] = True
+    app.state.component_status["authority"]["ready"] = True
+    token = _make_auth_token(42)
+    request_headers = {"Authorization": f"Bearer {token}"}
+    request_headers.update(headers)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/ask_stream",
+            json=_base_payload(),
+            headers=request_headers,
+        )
+
+    assert response.status_code == 200
+    if "X-Gateway-Task-Execution" in headers:
+        assert fake.stream_options["gateway_task_execution"] is True
+        assert "gateway_owned_persistence" not in fake.stream_options
+    else:
+        assert fake.stream_options["gateway_owned_persistence"] is True
+        assert "gateway_task_execution" not in fake.stream_options
+
+
+def test_durable_stream_body_gateway_owned_options_are_ignored_without_trusted_headers(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", TEST_JWT_SECRET)
+    monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_REDIS_ENABLED", "true")
+    monkeypatch.setenv("PATENT_DURABLE_AUTHORITY_ENABLED", "true")
+    monkeypatch.setenv("PATENT_AUTHORITY_INTERNAL_TOKEN", "secret-token")
+    app = create_app()
+
+    class _OptionCaptureAskService(_RouteFakeAskService):
+        def __init__(self):
+            super().__init__()
+            self.stream_options = {}
+
+        def stream_ask(self, request, *, user_id):
+            self.stream_options = dict(request.options or {})
+            return super().stream_ask(request, user_id=user_id)
+
+    fake = _OptionCaptureAskService()
+    app.state.ask_service = fake
+    app.state.component_status["redis"]["ready"] = True
+    app.state.component_status["authority"]["ready"] = True
+    token = _make_auth_token(42)
+    payload = _base_payload()
+    payload["options"] = {
+        "gateway_task_execution": True,
+        "gateway_owned_persistence": True,
+    }
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/ask_stream",
+            json=payload,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert "gateway_task_execution" not in fake.stream_options
+    assert "gateway_owned_persistence" not in fake.stream_options
 
 
 def test_durable_stream_requires_auth_before_dependency_readiness(monkeypatch):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,8 @@ from app.modules.conversation.outbox import ConversationOutboxRepository
 from app.modules.conversation.repository import ConversationRepository
 from app.modules.storage.service import storage_service
 from app.integrations.storage.factory import get_storage_backend
+
+_PATENT_ID_INLINE_CITATION_RE = re.compile(r"\(\s*patent_id\s*=\s*([A-Za-z0-9._/\-]+)\s*\)", re.IGNORECASE)
 
 
 class ConversationService:
@@ -110,6 +113,27 @@ class ConversationService:
             return int(value)
         except (TypeError, ValueError):
             return int(default)
+
+    def _is_patent_task_payload(self, *, source_service: Any, requested_mode: Any, actual_mode: Any) -> bool:
+        source = str(source_service or "").strip().lower()
+        requested = str(requested_mode or "").strip().lower()
+        actual = str(actual_mode or "").strip().lower()
+        return source == "patentqa" or requested == "patent" or actual == "patent"
+
+    def _normalize_user_visible_patent_citations(self, value: Any, *, trim: bool) -> str:
+        text = str(value or "")
+        if "patent_id" not in text.lower():
+            return text.strip() if trim else text
+
+        rendered = _PATENT_ID_INLINE_CITATION_RE.sub(lambda match: f"({str(match.group(1) or '').strip().upper()})", text)
+        rendered = re.sub(r"patent_id\s*=\s*", "", rendered, flags=re.IGNORECASE)
+        rendered = re.sub(r"\(\s+\)", "", rendered)
+        rendered = re.sub(r"\s+([，。！？；：,.;!?])", r"\1", rendered)
+        rendered = re.sub(r"\n{3,}", "\n\n", rendered)
+        if trim:
+            rendered = re.sub(r"[ \t]{2,}", " ", rendered)
+            return rendered.strip()
+        return rendered
 
     def _normalize_parse_status(self, value: Any, *, default: str = "uploaded") -> str:
         text = str(value or "").strip().lower() or default
@@ -663,12 +687,16 @@ class ConversationService:
             if "done_seen" in item and "done_seen" not in metadata:
                 metadata["done_seen"] = bool(item.get("done_seen"))
             status = self._message_terminal_status(item)
+            role_text = str(item.get("role") or "assistant")
+            content_text = str(item.get("content") or "")
+            if role_text.strip().lower() == "assistant" and "patent_id" in content_text.lower():
+                content_text = self._normalize_user_visible_patent_citations(content_text, trim=True)
             rows.append(
                 {
                     "id": self._message_numeric_id(item, idx),
                     "message_id": str(item.get("message_id") or f"m_{self._message_numeric_id(item, idx):06d}"),
-                    "role": str(item.get("role") or "assistant"),
-                    "content": str(item.get("content") or ""),
+                    "role": role_text,
+                    "content": content_text,
                     "metadata": metadata,
                     "created_at": self._to_iso(item.get("created_at"), fallback=self._now_iso()),
                     "status": status,
@@ -2035,6 +2063,12 @@ class ConversationService:
                         assistant_message=assistant_message,
                     )
                 delta = str(content_delta or "")
+                if self._is_patent_task_payload(
+                    source_service=metadata.get("source_service"),
+                    requested_mode=metadata.get("requested_mode"),
+                    actual_mode=metadata.get("actual_mode"),
+                ):
+                    delta = self._normalize_user_visible_patent_citations(delta, trim=False)
                 if delta:
                     updated["content"] = f"{str(updated.get('content') or '')}{delta}"
                 metadata["task_id"] = str(task_id or "").strip()
@@ -2112,7 +2146,14 @@ class ConversationService:
                 updated = dict(assistant_message)
                 metadata = updated.get("metadata") if isinstance(updated.get("metadata"), dict) else {}
                 if str(answer_text or "").strip():
-                    updated["content"] = str(answer_text or "").strip()
+                    resolved_answer_text = str(answer_text or "").strip()
+                    if self._is_patent_task_payload(
+                        source_service=metadata.get("source_service"),
+                        requested_mode=metadata.get("requested_mode"),
+                        actual_mode=metadata.get("actual_mode"),
+                    ):
+                        resolved_answer_text = self._normalize_user_visible_patent_citations(resolved_answer_text, trim=True)
+                    updated["content"] = resolved_answer_text
                 metadata["task_id"] = str(task_id or "").strip()
                 metadata["task_status"] = normalized_status
                 metadata["terminal_status"] = normalized_status
@@ -2347,6 +2388,12 @@ class ConversationService:
             default="done",
         )
         answer_text = str(event_payload.get("answer_text") or refreshed_task.get("content") or "").strip()
+        if self._is_patent_task_payload(
+            source_service=metadata.get("source_service"),
+            requested_mode=metadata.get("requested_mode"),
+            actual_mode=metadata.get("actual_mode"),
+        ):
+            answer_text = self._normalize_user_visible_patent_citations(answer_text, trim=True)
         if self._is_completed_status(terminal_status) and not answer_text:
             return {"success": False, "error": "empty_answer_text", "code": "VALIDATION_ERROR"}
         try:
@@ -2476,7 +2523,10 @@ class ConversationService:
         role_text = (role or "").strip().lower()
         if role_text not in {"user", "assistant"}:
             return {"success": False, "error": "invalid_role", "code": "VALIDATION_ERROR"}
+        metadata_payload = metadata if isinstance(metadata, dict) else {}
         content_text = (content or "").strip()
+        if role_text == "assistant" and "patent_id" in content_text.lower():
+            content_text = self._normalize_user_visible_patent_citations(content_text, trim=True)
         if not content_text:
             return {"success": False, "error": "empty_content", "code": "VALIDATION_ERROR"}
         try:
@@ -2501,25 +2551,25 @@ class ConversationService:
                     "content": content_text,
                     "created_at": now_iso,
                     "status": message_status,
-                    "metadata": metadata or {},
+                    "metadata": metadata_payload,
                 }
-                if role_text == "assistant" and isinstance(metadata, dict):
-                    if metadata.get("query_mode"):
-                        message_payload["query_mode"] = metadata.get("query_mode")
-                    if isinstance(metadata.get("references"), list):
-                        message_payload["references"] = metadata.get("references")
-                    if isinstance(metadata.get("reference_objects"), list):
-                        message_payload["reference_objects"] = metadata.get("reference_objects")
-                    if isinstance(metadata.get("reference_links"), list):
-                        message_payload["reference_links"] = metadata.get("reference_links")
-                    if isinstance(metadata.get("pdf_links"), list):
-                        message_payload["pdf_links"] = metadata.get("pdf_links")
-                    if isinstance(metadata.get("doi_locations"), dict):
-                        message_payload["doi_locations"] = metadata.get("doi_locations")
-                    if isinstance(metadata.get("steps"), list):
-                        message_payload["steps"] = metadata.get("steps")
-                    if "done_seen" in metadata:
-                        message_payload["done_seen"] = bool(metadata.get("done_seen"))
+                if role_text == "assistant":
+                    if metadata_payload.get("query_mode"):
+                        message_payload["query_mode"] = metadata_payload.get("query_mode")
+                    if isinstance(metadata_payload.get("references"), list):
+                        message_payload["references"] = metadata_payload.get("references")
+                    if isinstance(metadata_payload.get("reference_objects"), list):
+                        message_payload["reference_objects"] = metadata_payload.get("reference_objects")
+                    if isinstance(metadata_payload.get("reference_links"), list):
+                        message_payload["reference_links"] = metadata_payload.get("reference_links")
+                    if isinstance(metadata_payload.get("pdf_links"), list):
+                        message_payload["pdf_links"] = metadata_payload.get("pdf_links")
+                    if isinstance(metadata_payload.get("doi_locations"), dict):
+                        message_payload["doi_locations"] = metadata_payload.get("doi_locations")
+                    if isinstance(metadata_payload.get("steps"), list):
+                        message_payload["steps"] = metadata_payload.get("steps")
+                    if "done_seen" in metadata_payload:
+                        message_payload["done_seen"] = bool(metadata_payload.get("done_seen"))
                 messages.append(message_payload)
                 doc["messages"] = messages
                 meta = doc.get("meta") if isinstance(doc.get("meta"), dict) else {}

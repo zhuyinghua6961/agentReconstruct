@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -29,6 +30,7 @@ from app.modules.conversation.task_schemas import (
 
 
 router = APIRouter(tags=["conversation-internal"])
+logger = logging.getLogger(__name__)
 
 _INTERNAL_TOKEN_ENV = "PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN"
 _SOURCE_SERVICE_POLICY: dict[str, dict[str, set[str]]] = {
@@ -45,6 +47,15 @@ _SOURCE_SERVICE_POLICY: dict[str, dict[str, set[str]]] = {
         "actual_modes": {"patent"},
     },
 }
+
+
+def _should_log_progress_info(*, status: str, last_seq: int) -> bool:
+    normalized_status = str(status or "").strip().lower()
+    if normalized_status != "running":
+        return True
+    if last_seq <= 1:
+        return True
+    return last_seq % 50 == 0
 
 
 @dataclass(frozen=True)
@@ -411,6 +422,14 @@ def start_task_assistant(
         last_seq=payload.last_seq,
     )
     _raise_service_error(result=result, ok_status=200)
+    logger.info(
+        "authority task start task_id=%s conversation_id=%s user_id=%s trace_id=%s status=%s",
+        payload.task_id,
+        payload.conversation_id,
+        payload.user_id,
+        payload.trace_id,
+        payload.status,
+    )
     return JSONResponse(status_code=200, content=jsonable_encoder(result))
 
 
@@ -443,6 +462,14 @@ def create_task_turn(
         last_seq=payload.last_seq,
     )
     _raise_service_error(result=result, ok_status=200)
+    logger.info(
+        "authority task create-turn task_id=%s conversation_id=%s user_id=%s trace_id=%s status=%s",
+        payload.task_id,
+        payload.conversation_id,
+        payload.user_id,
+        payload.trace_id,
+        payload.status,
+    )
     return JSONResponse(status_code=200, content=jsonable_encoder(result))
 
 
@@ -470,6 +497,15 @@ def progress_task_assistant(
         last_seq=payload.last_seq,
     )
     _raise_service_error(result=result, ok_status=200)
+    if _should_log_progress_info(status=payload.status, last_seq=int(payload.last_seq or 0)):
+        logger.info(
+            "authority task progress task_id=%s conversation_id=%s user_id=%s status=%s last_seq=%s",
+            payload.task_id,
+            payload.conversation_id,
+            payload.user_id,
+            payload.status,
+            payload.last_seq,
+        )
     return JSONResponse(status_code=200, content=jsonable_encoder(result))
 
 
@@ -498,6 +534,14 @@ def terminal_task_assistant(
         failure=payload.failure,
     )
     _raise_service_error(result=result, ok_status=200)
+    logger.info(
+        "authority task terminal task_id=%s conversation_id=%s user_id=%s terminal_status=%s last_seq=%s",
+        payload.task_id,
+        payload.conversation_id,
+        payload.user_id,
+        payload.terminal_status,
+        payload.last_seq,
+    )
     return JSONResponse(status_code=200, content=jsonable_encoder(result))
 
 

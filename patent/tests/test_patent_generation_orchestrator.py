@@ -8,6 +8,7 @@ from server.patent.cache_keys import PatentKeyFactory
 from server.patent.models import PatentRetrievalClaim, PatentRetrievalPlan
 from server.patent.orchestrators.generation import PatentGenerationOrchestrator
 from server.patent.runtime import PatentRuntime
+from server.patent.stages.synthesis import run_stage4_synthesis_with_patent_evidence
 from server.services.execution_cache import ExecutionCache
 
 
@@ -120,6 +121,55 @@ def test_orchestrator_runs_patent_stages_in_order_and_marks_stage25_skip():
         "阶段三：已完成专利证据与表格组装",
         "阶段四：已完成答案生成",
     ]
+
+
+def test_orchestrator_stream_and_final_payloads_do_not_expose_raw_patent_id_citations():
+    class _ReadableCitationRuntime(_FakeRuntime):
+        class _StreamingBuilder:
+            def __call__(self, **kwargs):
+                raise AssertionError("stream path should be used")
+
+            def stream(self, *, question, retrieval_outcome, context):
+                del question, retrieval_outcome, context
+                yield "结论来自专利 (patent_id=CN115132975B)。"
+                yield "外部来源 (patent_id=CN000000000A)。"
+
+        def stage4_synthesis_with_patent_evidence(
+            self,
+            *,
+            user_question: str,
+            deep_answer: str,
+            patent_evidence_bundle: dict[str, object],
+            retrieval_results: dict[str, object] | None = None,
+            should_cancel=None,
+            content_callback=None,
+            conversation_context=None,
+        ) -> dict[str, object]:
+            self.calls.append("stage4")
+            del should_cancel
+            return run_stage4_synthesis_with_patent_evidence(
+                user_question=user_question,
+                deep_answer=deep_answer,
+                patent_evidence_bundle=patent_evidence_bundle,
+                retrieval_results=retrieval_results,
+                answer_builder=self._StreamingBuilder(),
+                content_callback=content_callback,
+                conversation_context=conversation_context,
+            )
+
+    streamed_chunks: list[str] = []
+    result = PatentGenerationOrchestrator().run(
+        question="How should we compare replacement risk?",
+        runtime=_ReadableCitationRuntime(),
+        conversation_context={"recent_turns_for_llm": [{"role": "user", "content": "Earlier context"}]},
+        content_callback=streamed_chunks.append,
+    )
+
+    stream_text = "".join(streamed_chunks)
+    assert "patent_id=" not in stream_text
+    assert "CN115132975B" in stream_text
+    assert "patent_id=" not in result.final_answer
+    assert "CN115132975B" in result.final_answer
 
 
 def test_orchestrator_logs_stage_progress_with_trace(caplog):

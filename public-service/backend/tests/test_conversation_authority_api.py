@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import logging
 from tempfile import TemporaryDirectory
 
 from fastapi.testclient import TestClient
@@ -239,6 +240,115 @@ def test_internal_task_progress_rejects_wrong_source_service(monkeypatch):
     assert response.json()["code"] == "INTERNAL_SOURCE_SERVICE_FORBIDDEN"
 
 
+def test_internal_task_progress_logs_task_id(monkeypatch, caplog):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="task progress logs")
+        conversation_id = int(created["data"]["conversation_id"])
+        service.start_authority_task_assistant(
+            user_id=7,
+            conversation_id=conversation_id,
+            task_id="task_progress_log_001",
+            trace_id="task-progress-log-trace",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            status="queued",
+        )
+        with caplog.at_level(logging.INFO, logger="app.modules.conversation.internal_api"):
+            response = client.post(
+                f"/internal/conversations/{conversation_id}/tasks/task_progress_log_001/assistant-progress",
+                json={
+                    "conversation_id": conversation_id,
+                    "user_id": 7,
+                    "task_id": "task_progress_log_001",
+                    "status": "running",
+                    "content_delta": "delta",
+                    "steps": [],
+                    "last_seq": 1,
+                },
+                headers=_internal_headers("gateway"),
+            )
+
+    assert response.status_code == 200
+    assert any("task_id=task_progress_log_001" in record.getMessage() for record in caplog.records)
+
+
+def test_internal_task_progress_skips_info_log_for_midstream_running_updates(monkeypatch, caplog):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="task progress midstream")
+        conversation_id = int(created["data"]["conversation_id"])
+        service.start_authority_task_assistant(
+            user_id=7,
+            conversation_id=conversation_id,
+            task_id="task_progress_log_050",
+            trace_id="task-progress-log-trace-050",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            status="queued",
+        )
+        with caplog.at_level(logging.INFO, logger="app.modules.conversation.internal_api"):
+            response = client.post(
+                f"/internal/conversations/{conversation_id}/tasks/task_progress_log_050/assistant-progress",
+                json={
+                    "conversation_id": conversation_id,
+                    "user_id": 7,
+                    "task_id": "task_progress_log_050",
+                    "status": "running",
+                    "content_delta": "delta",
+                    "steps": [],
+                    "last_seq": 37,
+                },
+                headers=_internal_headers("gateway"),
+            )
+
+    assert response.status_code == 200
+    assert not any("authority task progress task_id=task_progress_log_050" in record.getMessage() for record in caplog.records)
+
+
+def test_internal_task_terminal_logs_task_id(monkeypatch, caplog):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="task terminal logs")
+        conversation_id = int(created["data"]["conversation_id"])
+        service.start_authority_task_assistant(
+            user_id=7,
+            conversation_id=conversation_id,
+            task_id="task_terminal_log_001",
+            trace_id="task-terminal-log-trace",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            status="queued",
+        )
+        with caplog.at_level(logging.INFO, logger="app.modules.conversation.internal_api"):
+            response = client.post(
+                f"/internal/conversations/{conversation_id}/tasks/task_terminal_log_001/assistant-terminal",
+                json={
+                    "conversation_id": conversation_id,
+                    "user_id": 7,
+                    "task_id": "task_terminal_log_001",
+                    "terminal_status": "completed",
+                    "last_seq": 2,
+                    "answer_text": "done",
+                    "steps": [],
+                    "failure": {},
+                },
+                headers=_internal_headers("gateway"),
+            )
+
+    assert response.status_code == 200
+    assert any("task_id=task_terminal_log_001" in record.getMessage() for record in caplog.records)
+
+
 def test_internal_task_terminal_rejects_wrong_source_service(monkeypatch):
     monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
 
@@ -352,6 +462,68 @@ def test_internal_user_write_allows_gateway_caller_for_gateway_owned_task_runtim
     payload = response.json()
     assert payload["success"] is True
     assert payload["conversation_id"] == conversation_id
+
+
+def test_internal_gateway_task_runtime_normalizes_patent_citations_before_user_visible_storage(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="gateway owned patent citation normalization")
+        conversation_id = int(created["data"]["conversation_id"])
+
+        start_response = client.post(
+            f"/internal/conversations/{conversation_id}/tasks/task_patent_norm_001/assistant-start",
+            json={
+                "conversation_id": conversation_id,
+                "user_id": 7,
+                "trace_id": "task-patent-norm-trace",
+                "source_service": "patentQA",
+                "route": "kb_qa",
+                "requested_mode": "patent",
+                "actual_mode": "patent",
+                "task_id": "task_patent_norm_001",
+                "status": "queued",
+                "last_seq": 0,
+            },
+            headers=_internal_headers("gateway"),
+        )
+        progress_response = client.post(
+            f"/internal/conversations/{conversation_id}/tasks/task_patent_norm_001/assistant-progress",
+            json={
+                "conversation_id": conversation_id,
+                "user_id": 7,
+                "task_id": "task_patent_norm_001",
+                "status": "running",
+                "content_delta": "结论来自专利 (patent_id=CN115132975B)。",
+                "steps": [],
+                "last_seq": 1,
+            },
+            headers=_internal_headers("gateway"),
+        )
+        terminal_response = client.post(
+            f"/internal/conversations/{conversation_id}/tasks/task_patent_norm_001/assistant-terminal",
+            json={
+                "conversation_id": conversation_id,
+                "user_id": 7,
+                "task_id": "task_patent_norm_001",
+                "terminal_status": "completed",
+                "last_seq": 2,
+                "answer_text": "结论来自专利 (patent_id=CN115132975B)。",
+                "steps": [],
+                "failure": {},
+            },
+            headers=_internal_headers("gateway"),
+        )
+
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+
+    assert start_response.status_code == 200
+    assert progress_response.status_code == 200
+    assert terminal_response.status_code == 200
+    assert detail["success"] is True
+    assistant_message = detail["data"]["messages"][-1]
+    assert "patent_id=" not in str(assistant_message.get("content") or "")
+    assert "CN115132975B" in str(assistant_message.get("content") or "")
 
 
 def test_internal_task_create_turn_allows_gateway_caller_and_materializes_both_messages(monkeypatch):

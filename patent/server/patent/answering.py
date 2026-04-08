@@ -14,6 +14,7 @@ from server.patent.retrieval_models import PatentEvidence, PatentRetrievalOutcom
 _LOGGER = logging.getLogger("patent.answering")
 _PATENT_ID_CITATION_RE = re.compile(r"\(\s*patent_id\s*=\s*([A-Za-z0-9._/\-]+)\s*\)", re.IGNORECASE)
 _CLAUSE_BOUNDARIES = "\n。！？!?；;，,"
+_STREAM_CITATION_TAIL_HOLD = 160
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -86,6 +87,63 @@ def extract_cited_patent_ids(answer_text: str) -> list[str]:
         if patent_id and patent_id not in cited:
             cited.append(patent_id)
     return cited
+
+
+def render_patent_citations_for_user(
+    answer_text: str,
+    *,
+    allowed_patent_ids: list[str] | None,
+    trim: bool = True,
+) -> str:
+    allowed = set(_normalize_patent_id_list(allowed_patent_ids))
+
+    def _replace(match: re.Match[str]) -> str:
+        patent_id = _normalize_patent_id(match.group(1))
+        if patent_id and (not allowed or patent_id in allowed):
+            return f"({patent_id})"
+        return ""
+
+    rendered = _PATENT_ID_CITATION_RE.sub(_replace, str(answer_text or ""))
+    rendered = re.sub(r"patent_id\s*=\s*", "", rendered, flags=re.IGNORECASE)
+    rendered = re.sub(r"\(\s+\)", "", rendered)
+    rendered = re.sub(r"\s+([，。！？；：,.;!?])", r"\1", rendered)
+    rendered = re.sub(r"\n{3,}", "\n\n", rendered)
+    if trim:
+        rendered = re.sub(r"[ \t]{2,}", " ", rendered)
+        return rendered.strip()
+    return rendered
+
+
+class PatentCitationStreamSanitizer:
+    def __init__(self, *, allowed_patent_ids: list[str] | None) -> None:
+        self._allowed_patent_ids = _normalize_patent_id_list(allowed_patent_ids)
+        self._tail = ""
+
+    def consume(self, chunk: str) -> str:
+        text = str(chunk or "")
+        if not text:
+            return ""
+        self._tail = f"{self._tail}{text}"
+        if len(self._tail) <= _STREAM_CITATION_TAIL_HOLD:
+            return ""
+        flushable = self._tail[:-_STREAM_CITATION_TAIL_HOLD]
+        self._tail = self._tail[-_STREAM_CITATION_TAIL_HOLD:]
+        return render_patent_citations_for_user(
+            flushable,
+            allowed_patent_ids=self._allowed_patent_ids,
+            trim=False,
+        )
+
+    def finalize(self) -> str:
+        if not self._tail:
+            return ""
+        remaining = self._tail
+        self._tail = ""
+        return render_patent_citations_for_user(
+            remaining,
+            allowed_patent_ids=self._allowed_patent_ids,
+            trim=False,
+        )
 
 
 def _remove_segment_around_marker(text: str, marker: str) -> str:

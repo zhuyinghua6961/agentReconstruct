@@ -5,6 +5,7 @@ from server.errors.core import APIError
 from server.patent.executor import PatentExecutor
 from server.patent.kb_service import PatentKbService
 from server.patent.pdf_service import PatentPdfService
+from server.patent.stages.synthesis import run_stage4_synthesis_with_patent_evidence
 from server.patent.tabular_service import PatentTabularService
 from server.patent.models import PatentRetrievalClaim, PatentRetrievalPlan
 from server.patent.retrieval_models import PatentCatalogRecord, PatentClaim, PatentDescriptionSnippet
@@ -437,6 +438,62 @@ def test_executor_normalizes_raw_persistence_context_before_staged_runtime():
             "source_selection": {"source_scope": "kb", "selected_file_ids": []},
         }
     ]
+
+
+def test_executor_staged_runtime_emits_readable_patent_citations_for_stream_and_final_payload():
+    class _ReadableCitationRuntime(_RecordingStagedRuntime):
+        class _StreamingBuilder:
+            def __call__(self, **kwargs):
+                raise AssertionError("stream path should be used")
+
+            def stream(self, *, question, retrieval_outcome, context):
+                del question, retrieval_outcome, context
+                yield "结论来自专利 (patent_id=CN115132975B)。"
+                yield "另有外部专利 (patent_id=CN000000000A)。"
+
+        def stage4_synthesis_with_patent_evidence(
+            self,
+            *,
+            user_question: str,
+            deep_answer: str,
+            patent_evidence_bundle: dict[str, object],
+            retrieval_results: dict[str, object] | None = None,
+            should_cancel=None,
+            content_callback=None,
+            conversation_context=None,
+        ) -> dict[str, object]:
+            self.calls.append("stage4")
+            del should_cancel
+            return run_stage4_synthesis_with_patent_evidence(
+                user_question=user_question,
+                deep_answer=deep_answer,
+                patent_evidence_bundle=patent_evidence_bundle,
+                retrieval_results=retrieval_results,
+                answer_builder=self._StreamingBuilder(),
+                content_callback=content_callback,
+                conversation_context=conversation_context,
+            )
+
+    runtime = _ReadableCitationRuntime()
+    executor = PatentExecutor(runtime=runtime)
+    streamed_chunks: list[str] = []
+
+    result = executor.execute_with_progress(
+        request=_make_request(question="staged execution"),
+        context={
+            "trace_id": "req_ctx",
+            "chat_history": [{"role": "assistant", "content": "Earlier turn"}],
+            "summary": {"short_summary": "Earlier patent context"},
+            "conversation_state": {"last_turn_route": "kb_qa"},
+        },
+        content_callback=streamed_chunks.append,
+    )
+
+    combined_stream = "".join(streamed_chunks)
+    assert "patent_id=" not in combined_stream
+    assert "CN115132975B" in combined_stream
+    assert "patent_id=" not in str(result["answer_text"] or "")
+    assert "CN115132975B" in str(result["answer_text"] or "")
 
 
 def test_executor_dispatches_pdf_route_to_patent_pdf_service():

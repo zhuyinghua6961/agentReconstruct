@@ -655,3 +655,68 @@ def test_task_create_rollback_can_preserve_user_turn_while_clearing_placeholder_
     assert detail["data"]["messages"][0]["role"] == "user"
     assert detail["data"]["messages"][0]["message_id"] == str(user_result["message_id"])
     assert document["meta"].get("active_task_id") in {None, ""}
+
+
+def test_atomic_create_plus_task_lifecycle_keeps_single_user_and_assistant_turn():
+    with _task_runtime_harness() as service:
+        created = service.create_conversation(user_id=7, title="task atomic lifecycle")
+        conversation_id = int(created["data"]["conversation_id"])
+
+        created_turn = service.create_authority_task_turn(
+            user_id=7,
+            conversation_id=conversation_id,
+            task_id="task_atomic_lifecycle_001",
+            trace_id="task-atomic-lifecycle-001",
+            source_service="patentQA",
+            route="kb_qa",
+            requested_mode="patent",
+            actual_mode="patent",
+            content="请总结这个专利",
+            context_hints={"selected_file_ids": [], "last_turn_route_hint": "kb_qa"},
+            status="queued",
+            last_seq=0,
+        )
+        service.start_authority_task_assistant(
+            user_id=7,
+            conversation_id=conversation_id,
+            task_id="task_atomic_lifecycle_001",
+            trace_id="task-atomic-lifecycle-001",
+            source_service="patentQA",
+            route="kb_qa",
+            requested_mode="patent",
+            actual_mode="patent",
+            status="queued",
+            last_seq=0,
+        )
+        service.progress_authority_task_assistant(
+            user_id=7,
+            conversation_id=conversation_id,
+            task_id="task_atomic_lifecycle_001",
+            status="running",
+            content_delta="专利摘要输出中",
+            steps=[{"step": "retrieve", "status": "success"}],
+            last_seq=1,
+        )
+        service.terminal_authority_task_assistant(
+            user_id=7,
+            conversation_id=conversation_id,
+            task_id="task_atomic_lifecycle_001",
+            terminal_status="completed",
+            answer_text="专利摘要输出中",
+            steps=[{"step": "retrieve", "status": "success"}],
+            last_seq=2,
+            failure={},
+        )
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+        document = service._json_store.load_document(user_id=7, conversation_id=conversation_id)
+
+    assert created_turn["success"] is True
+    assert len(detail["data"]["messages"]) == 2
+    assert [message["role"] for message in detail["data"]["messages"]] == ["user", "assistant"]
+    assistant = detail["data"]["messages"][1]
+    assert assistant["message_id"] == created_turn["assistant_message_id"]
+    assert assistant["status"] == "completed"
+    assert assistant["metadata"]["task_id"] == "task_atomic_lifecycle_001"
+    assert assistant["metadata"]["requested_mode"] == "patent"
+    assert assistant["metadata"]["actual_mode"] == "patent"
+    assert document["meta"].get("active_task_id") in {None, ""}

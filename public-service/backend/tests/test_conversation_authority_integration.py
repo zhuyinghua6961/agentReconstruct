@@ -504,6 +504,126 @@ def test_gateway_owned_patent_task_runtime_keeps_single_user_and_assistant_turn(
             client.app.dependency_overrides.clear()
 
 
+def test_gateway_owned_patent_task_runtime_persists_readable_citation_text(monkeypatch):
+    monkeypatch.setenv(_INTERNAL_TOKEN_ENV, "authority-test-token")
+
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir, TestClient(app) as client:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(project_root=tempdir, storage_backend=storage_backend)
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+        original_service = conversation_service
+        set_conversation_service(service)
+        client.app.state.runtime.conversation_service = service
+        client.app.state.runtime.conversation_repository = repo
+        client.app.state.runtime.redis_service = redis_service
+        client.app.dependency_overrides[require_auth_context] = lambda: AuthContext(user_id=7, role="user", username="user7")
+
+        try:
+            created = service.create_conversation(user_id=7, title="gateway owned patent citation readable")
+            conversation_id = int(created["data"]["conversation_id"])
+
+            user_response = client.post(
+                f"/internal/conversations/{conversation_id}/messages/user",
+                json={
+                    "conversation_id": conversation_id,
+                    "user_id": 7,
+                    "trace_id": "trace-it-user-patent-readable",
+                    "source_service": "patentQA",
+                    "route": "kb_qa",
+                    "requested_mode": "patent",
+                    "actual_mode": "patent",
+                    "idempotency_key": f"{conversation_id}:trace-it-user-patent-readable:user",
+                    "message": {
+                        "role": "user",
+                        "content": "给我总结一下这个专利",
+                    },
+                    "context_hints": {},
+                },
+                headers={
+                    "X-Internal-Service-Name": "gateway",
+                    "X-Internal-Service-Token": "authority-test-token",
+                },
+            )
+            assert user_response.status_code == 201
+
+            start_response = client.post(
+                f"/internal/conversations/{conversation_id}/tasks/task_patent_readable_001/assistant-start",
+                json={
+                    "conversation_id": conversation_id,
+                    "user_id": 7,
+                    "trace_id": "task-patent-readable-trace",
+                    "source_service": "patentQA",
+                    "route": "kb_qa",
+                    "requested_mode": "patent",
+                    "actual_mode": "patent",
+                    "task_id": "task_patent_readable_001",
+                    "status": "queued",
+                    "last_seq": 0,
+                },
+                headers={
+                    "X-Internal-Service-Name": "gateway",
+                    "X-Internal-Service-Token": "authority-test-token",
+                },
+            )
+
+            progress_response = client.post(
+                f"/internal/conversations/{conversation_id}/tasks/task_patent_readable_001/assistant-progress",
+                json={
+                    "conversation_id": conversation_id,
+                    "user_id": 7,
+                    "task_id": "task_patent_readable_001",
+                    "status": "running",
+                    "content_delta": "结论来自专利 (patent_id=CN115132975B)。",
+                    "steps": [{"step": "retrieve", "status": "success"}],
+                    "last_seq": 1,
+                },
+                headers={
+                    "X-Internal-Service-Name": "gateway",
+                    "X-Internal-Service-Token": "authority-test-token",
+                },
+            )
+            terminal_response = client.post(
+                f"/internal/conversations/{conversation_id}/tasks/task_patent_readable_001/assistant-terminal",
+                json={
+                    "conversation_id": conversation_id,
+                    "user_id": 7,
+                    "task_id": "task_patent_readable_001",
+                    "terminal_status": "completed",
+                    "last_seq": 2,
+                    "answer_text": "结论来自专利 (patent_id=CN115132975B)。",
+                    "steps": [{"step": "retrieve", "status": "success"}],
+                    "failure": {},
+                },
+                headers={
+                    "X-Internal-Service-Name": "gateway",
+                    "X-Internal-Service-Token": "authority-test-token",
+                },
+            )
+
+            assert start_response.status_code == 200
+            assert progress_response.status_code == 200
+            assert terminal_response.status_code == 200
+
+            detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+            assert detail["success"] is True
+            assistant_message = detail["data"]["messages"][-1]
+            assert "patent_id=" not in str(assistant_message.get("content") or "")
+            assert "CN115132975B" in str(assistant_message.get("content") or "")
+        finally:
+            set_conversation_service(original_service)
+            client.app.dependency_overrides.clear()
+
+
 def test_internal_terminal_authority_route_materializes_failed_turn(monkeypatch):
     monkeypatch.setenv(_INTERNAL_TOKEN_ENV, "authority-test-token")
 
