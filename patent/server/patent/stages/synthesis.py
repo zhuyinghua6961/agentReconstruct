@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import asdict
 from typing import Any, Callable
 
@@ -20,6 +21,17 @@ from server.patent.retrieval_models import (
 )
 
 _LOGGER = logging.getLogger("patent.stage4")
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1, maximum: int = 100) -> int:
+    raw = str(os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(parsed, maximum))
 
 
 def _normalize_source_ids(patent_evidence_bundle: dict[str, Any]) -> list[str]:
@@ -262,15 +274,19 @@ def _programmatic_repair_patent_citations(
     answer_text: str,
     retrieval_outcome: PatentRetrievalOutcome,
     allowed_patent_ids: list[str],
+    min_distinct_citations: int,
 ) -> str:
     text = str(answer_text or "").strip()
     if not text or not allowed_patent_ids:
         return text
-    if extract_cited_patent_ids(text):
+    normalized_allowed = list(dict.fromkeys(str(item).strip().upper() for item in allowed_patent_ids if str(item).strip()))
+    if not normalized_allowed:
         return text
-
-    normalized_allowed = [str(item).strip().upper() for item in allowed_patent_ids if str(item).strip()]
-    chosen_patent_id = normalized_allowed[0]
+    required = max(1, min(int(min_distinct_citations), len(normalized_allowed)))
+    cited_existing = extract_cited_patent_ids(text)
+    cited_existing_set = set(cited_existing)
+    if len(cited_existing_set) >= required:
+        return text
     evidence_texts = {
         patent_id: " ".join(
             str(piece or "").strip()
@@ -287,20 +303,25 @@ def _programmatic_repair_patent_citations(
         for patent_id in normalized_allowed
     }
     lowered_answer = text.lower()
-    scored = [
+    scored_with_index = [
         (
             sum(1 for token in set(lowered_answer.split()) if token and token in evidence_texts.get(patent_id, "")),
+            index,
             patent_id,
         )
-        for patent_id in normalized_allowed
+        for index, patent_id in enumerate(normalized_allowed)
     ]
-    scored.sort(reverse=True)
-    if scored and scored[0][0] > 0:
-        chosen_patent_id = scored[0][1]
-
-    if text.endswith(("。", "！", "？", ".", "!", "?")):
-        return f"{text} (patent_id={chosen_patent_id})"
-    return f"{text} (patent_id={chosen_patent_id})"
+    scored_with_index.sort(key=lambda item: (-item[0], item[1]))
+    ranked_patent_ids = [patent_id for _score, _index, patent_id in scored_with_index]
+    missing_patent_ids = [patent_id for patent_id in ranked_patent_ids if patent_id not in cited_existing_set]
+    required_additional = max(0, required - len(cited_existing_set))
+    if required_additional <= 0 or not missing_patent_ids:
+        return text
+    appended_patent_ids = missing_patent_ids[:required_additional]
+    appended_citations = " ".join(f"(patent_id={patent_id})" for patent_id in appended_patent_ids)
+    if not text:
+        return appended_citations
+    return f"{text} {appended_citations}".strip()
 
 
 def run_stage4_synthesis_with_patent_evidence(
@@ -322,27 +343,39 @@ def run_stage4_synthesis_with_patent_evidence(
         for item in list(retrieval_outcome.references)
         if str(item).strip()
     ]
+    stage4_reference_topk = _env_int("PATENT_STAGE4_REFERENCE_TOPK", 20, minimum=1, maximum=100)
+    stage4_min_citations_configured = _env_int("PATENT_STAGE4_MIN_CITATIONS", 10, minimum=1, maximum=100)
+    stage4_allowed_patent_ids = list(allowed_patent_ids[:stage4_reference_topk])
+    stage4_min_citations_required = min(stage4_min_citations_configured, len(stage4_allowed_patent_ids))
     synthesis_context = dict(conversation_context or {})
     if deep_answer:
         synthesis_context["stage1_deep_answer"] = str(deep_answer)
-    synthesis_context["allowed_patent_ids"] = list(allowed_patent_ids)
+    synthesis_context["allowed_patent_ids"] = list(stage4_allowed_patent_ids)
+    synthesis_context["allowed_patent_ids_all"] = list(allowed_patent_ids)
+    synthesis_context["stage4_reference_topk"] = stage4_reference_topk
+    synthesis_context["stage4_min_citations_required"] = stage4_min_citations_required
+    synthesis_context["stage4_min_citations_configured"] = stage4_min_citations_configured
     synthesis_context["stage2_retrieval_results"] = dict(retrieval_results or {})
     citation_mode = "fallback"
     used_fallback_builder = False
     _LOGGER.info(
-        "patent stage4 synthesis start allowed_patent_ids=%s evidence_count=%s references=%s answer_builder=%s deep_answer_chars=%s",
+        "patent stage4 synthesis start source_allowed_patent_ids=%s stage4_allowed_patent_ids=%s evidence_count=%s references=%s answer_builder=%s deep_answer_chars=%s stage4_topk=%s stage4_min_citations_configured=%s stage4_min_citations_required=%s",
         allowed_patent_ids,
+        stage4_allowed_patent_ids,
         len(list(retrieval_outcome.evidences)),
         len(list(retrieval_outcome.references)),
         callable(answer_builder),
         len(str(deep_answer or "")),
+        stage4_reference_topk,
+        stage4_min_citations_configured,
+        stage4_min_citations_required,
     )
     if callable(answer_builder):
         raw_answer = ""
         stream_builder = getattr(answer_builder, "stream", None)
         if callable(stream_builder):
             streamed_chunks: list[str] = []
-            stream_sanitizer = PatentCitationStreamSanitizer(allowed_patent_ids=allowed_patent_ids)
+            stream_sanitizer = PatentCitationStreamSanitizer(allowed_patent_ids=stage4_allowed_patent_ids)
             for chunk in stream_builder(
                 question=user_question,
                 retrieval_outcome=retrieval_outcome,
@@ -383,17 +416,18 @@ def run_stage4_synthesis_with_patent_evidence(
         _LOGGER.warning("patent stage4 synthesis using fallback answer builder because no callable answer_builder is configured")
     final_answer, cited_patent_ids, invalid_cited_patent_ids = sanitize_patent_id_citations(
         raw_answer,
-        allowed_patent_ids=allowed_patent_ids,
+        allowed_patent_ids=stage4_allowed_patent_ids,
     )
-    if allowed_patent_ids and not cited_patent_ids and final_answer:
+    if stage4_allowed_patent_ids and len(cited_patent_ids) < stage4_min_citations_required and final_answer:
         repaired_candidate = _programmatic_repair_patent_citations(
             answer_text=final_answer,
             retrieval_outcome=retrieval_outcome,
-            allowed_patent_ids=allowed_patent_ids,
+            allowed_patent_ids=stage4_allowed_patent_ids,
+            min_distinct_citations=stage4_min_citations_required,
         )
         repaired_answer, repaired_cited_patent_ids, repaired_invalid_cited_patent_ids = sanitize_patent_id_citations(
             repaired_candidate,
-            allowed_patent_ids=allowed_patent_ids,
+            allowed_patent_ids=stage4_allowed_patent_ids,
         )
         if repaired_answer and repaired_cited_patent_ids:
             final_answer = repaired_answer
@@ -406,18 +440,22 @@ def run_stage4_synthesis_with_patent_evidence(
         citation_mode = "fallback_validated"
     final_answer = render_patent_citations_for_user(
         final_answer,
-        allowed_patent_ids=allowed_patent_ids,
+        allowed_patent_ids=stage4_allowed_patent_ids,
         trim=True,
     )
     metadata = dict(dict(retrieval_results or {}).get("metadata") or {})
     metadata.update(
         {
             "source_ids": _normalize_source_ids(patent_evidence_bundle),
-            "allowed_patent_ids": list(allowed_patent_ids),
+            "allowed_patent_ids": list(stage4_allowed_patent_ids),
+            "allowed_patent_ids_all": list(allowed_patent_ids),
             "cited_patent_ids": list(cited_patent_ids),
             "invalid_cited_patent_ids": list(invalid_cited_patent_ids),
             "citation_format": "(公开号)",
             "citation_mode": citation_mode,
+            "stage4_reference_topk": stage4_reference_topk,
+            "stage4_min_citations_configured": stage4_min_citations_configured,
+            "stage4_min_citations_required": stage4_min_citations_required,
             "evidence_patent_count": len(list(patent_evidence_bundle.get("evidences") or []))
             or len(dict(patent_evidence_bundle.get("evidence_by_patent_id") or {})),
             "matched_evidence_count": sum(

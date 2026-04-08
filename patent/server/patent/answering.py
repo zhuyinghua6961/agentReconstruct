@@ -44,6 +44,23 @@ def _normalize_patent_id_list(values: list[object] | tuple[object, ...] | None) 
     return normalized
 
 
+def _resolve_min_distinct_citations(*, context: dict[str, Any], allowed_patent_ids: list[str]) -> int:
+    if not allowed_patent_ids:
+        return 0
+
+    def _coerce_int(value: Any, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    raw_required = context.get("stage4_min_citations_required")
+    raw_configured = context.get("stage4_min_citations_configured")
+    configured_default = max(1, _coerce_int(raw_configured, 10))
+    required = _coerce_int(raw_required, configured_default)
+    return max(1, min(required, len(allowed_patent_ids)))
+
+
 def _extract_content_fragments(value: Any) -> list[str]:
     if isinstance(value, str):
         return [value]
@@ -387,6 +404,7 @@ class PatentAnswerBuilder:
                 allowed_patent_ids=allowed_patent_ids,
             )
         prompt = self._build_prompt(question=question, retrieval_outcome=retrieval_outcome, context=context)
+        min_distinct_citations = _resolve_min_distinct_citations(context=context, allowed_patent_ids=allowed_patent_ids)
         _LOGGER.info(
             "patent answer builder request start model=%s allowed_patent_ids=%s evidence_count=%s prompt_chars=%s",
             self.model,
@@ -401,23 +419,12 @@ class PatentAnswerBuilder:
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "model": self.model,
-                    "temperature": 0.2,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": (
-                                "你是专利分析助手。只能基于给定证据回答，不要虚构未出现的事实；"
-                                "如果表格存在，必须把表格数据纳入分析；"
-                                "要区分背景/法律套话与真正的技术证据；"
-                                "引用必须使用 `(patent_id=公开号)`，不能使用 DOI；"
-                                f"最终答案里只允许引用这些公开号：{', '.join(allowed_patent_ids) if allowed_patent_ids else '无'}。"
-                            ),
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                },
+                json=self._build_request_payload(
+                    prompt=prompt,
+                    allowed_patent_ids=allowed_patent_ids,
+                    stream=False,
+                    min_distinct_citations=min_distinct_citations,
+                ),
             )
             response.raise_for_status()
             payload = response.json()
@@ -471,6 +478,7 @@ class PatentAnswerBuilder:
                 yield fallback
             return
         prompt = self._build_prompt(question=question, retrieval_outcome=retrieval_outcome, context=context)
+        min_distinct_citations = _resolve_min_distinct_citations(context=context, allowed_patent_ids=allowed_patent_ids)
         streamed_any = False
         try:
             with self._client.stream(
@@ -480,7 +488,12 @@ class PatentAnswerBuilder:
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
                 },
-                json=self._build_request_payload(prompt=prompt, allowed_patent_ids=allowed_patent_ids, stream=True),
+                json=self._build_request_payload(
+                    prompt=prompt,
+                    allowed_patent_ids=allowed_patent_ids,
+                    stream=True,
+                    min_distinct_citations=min_distinct_citations,
+                ),
             ) as response:
                 response.raise_for_status()
                 for line in response.iter_lines():
@@ -556,6 +569,10 @@ class PatentAnswerBuilder:
         allowed_patent_ids = _normalize_patent_id_list(
             list(context.get("allowed_patent_ids") or []) or list(retrieval_outcome.references)
         )
+        min_distinct_citations = _resolve_min_distinct_citations(
+            context=context,
+            allowed_patent_ids=allowed_patent_ids,
+        )
         lines = [f"用户问题: {question}"]
         summary = dict(context.get("summary_for_llm") or context.get("summary") or {})
         short_summary = str(summary.get("short_summary") or "").strip()
@@ -572,6 +589,8 @@ class PatentAnswerBuilder:
         if allowed_patent_ids:
             lines.append(f"允许引用的专利白名单: {', '.join(allowed_patent_ids)}")
         lines.append("最终答案中的引用格式必须严格使用 `(patent_id=公开号)`，并且只能引用上面的白名单公开号。")
+        if min_distinct_citations > 0:
+            lines.append(f"最终答案至少引用 {min_distinct_citations} 个不同公开号。")
         lines.append("检索证据:")
         for index, (_, patent_evidences) in enumerate(_group_evidences_by_patent(list(retrieval_outcome.evidences)), start=1):
             evidence = patent_evidences[0]
@@ -587,7 +606,12 @@ class PatentAnswerBuilder:
             if reference_summary:
                 lines.append(f"   原文定位: {reference_summary}")
         lines.append("请输出简洁但完整的专利分析，明确区分背景/法律套话与实质技术证据。")
-        lines.append("每个有证据支撑的关键结论后面都要补一个 `(patent_id=公开号)`，不能输出白名单之外的公开号。")
+        lines.append(
+            "每个有证据支撑的关键结论后面都要补一个 `(patent_id=公开号)`，"
+            "不能输出白名单之外的公开号。"
+        )
+        if min_distinct_citations > 0:
+            lines.append(f"整段答案必须覆盖至少 {min_distinct_citations} 个不同公开号。")
         return "\n".join(lines)
 
     def _build_request_payload(
@@ -596,7 +620,13 @@ class PatentAnswerBuilder:
         prompt: str,
         allowed_patent_ids: list[str],
         stream: bool,
+        min_distinct_citations: int,
     ) -> dict[str, Any]:
+        min_citation_clause = (
+            f"最终答案至少引用 {int(min_distinct_citations)} 个不同公开号；"
+            if int(min_distinct_citations) > 0
+            else ""
+        )
         return {
             "model": self.model,
             "temperature": 0.2,
@@ -609,6 +639,7 @@ class PatentAnswerBuilder:
                         "如果表格存在，必须把表格数据纳入分析；"
                         "要区分背景/法律套话与真正的技术证据；"
                         "引用必须使用 `(patent_id=公开号)`，不能使用 DOI；"
+                        f"{min_citation_clause}"
                         f"最终答案里只允许引用这些公开号：{', '.join(allowed_patent_ids) if allowed_patent_ids else '无'}。"
                     ),
                 },

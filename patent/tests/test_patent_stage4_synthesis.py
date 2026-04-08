@@ -102,6 +102,71 @@ def _sample_evidence_bundle() -> dict[str, object]:
     }
 
 
+def _sample_multi_patent_retrieval_results(patent_ids: list[str]) -> dict[str, object]:
+    return {
+        "references": list(patent_ids),
+        "reference_objects": [
+            {
+                "source_type": "patent",
+                "canonical_patent_id": patent_id,
+                "publication_number": patent_id,
+                "application_number": f"{patent_id}-APP",
+                "country": "CN",
+                "kind_code": "A",
+                "title": f"专利 {patent_id}",
+                "provider": "patent_archive",
+                "original_available": True,
+            }
+            for patent_id in patent_ids
+        ],
+        "reference_links": [],
+        "original_links": [],
+        "metadata": {
+            "retrieval_backend": "vector_hybrid",
+            "retrieval_version": "retrieval-v2",
+            "catalog_index_version": "catalog-v2",
+        },
+    }
+
+
+def _sample_multi_patent_evidence_bundle(patent_ids: list[str]) -> dict[str, object]:
+    evidences: list[dict[str, object]] = []
+    for patent_id in patent_ids:
+        evidences.append(
+            {
+                "canonical_patent_id": patent_id,
+                "title": f"专利 {patent_id}",
+                "abstract_text": f"{patent_id} 的核心技术包括电压窗口控制与倍率优化。",
+                "matched_evidence": [
+                    {
+                        "section_type": "claim",
+                        "section_label": "Claim 1",
+                        "text": f"{patent_id} 命中片段：用于提升循环稳定性。",
+                        "anchor": {"claim_number": 1, "paragraph_id": None},
+                        "scores": {"chunk_score": 0.9},
+                    }
+                ],
+                "table_supplements": [],
+                "reference_object": {
+                    "canonical_patent_id": patent_id,
+                    "publication_number": patent_id,
+                    "title": f"专利 {patent_id}",
+                    "provider": "patent_archive",
+                    "original_available": True,
+                },
+                "reference_link": {},
+                "original_links": [],
+                "scores": {"chunk_score": 0.9},
+                "metadata": {"publication_number": patent_id},
+            }
+        )
+    return {
+        "source_ids": list(patent_ids),
+        "evidences": evidences,
+        "metadata": {"force_pdf": False},
+    }
+
+
 def test_stage4_synthesis_assembles_shell_compatible_result_from_patent_evidence():
     captured: dict[str, object] = {}
 
@@ -292,6 +357,136 @@ def test_stage4_synthesis_repairs_uncited_answer_without_replacing_builder_conte
     assert "(CN115132975B)" in result["final_answer"]
     assert "围绕“" not in result["final_answer"]
     assert result["metadata"]["citation_mode"] == "programmatic_repair"
+
+
+def test_stage4_synthesis_repairs_to_meet_min_distinct_citations(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE4_MIN_CITATIONS", "3")
+    monkeypatch.setenv("PATENT_STAGE4_REFERENCE_TOPK", "4")
+    patent_ids = ["P1", "P2", "P3", "P4"]
+    result = run_stage4_synthesis_with_patent_evidence(
+        user_question="请给出多专利证据汇总结论",
+        deep_answer="先看关键技术要点。",
+        patent_evidence_bundle=_sample_multi_patent_evidence_bundle(patent_ids),
+        retrieval_results=_sample_multi_patent_retrieval_results(patent_ids),
+        answer_builder=lambda **kwargs: "该结论需要结合多篇专利共同判断。",
+    )
+
+    assert result["success"] is True
+    assert result["metadata"]["stage4_min_citations_configured"] == 3
+    assert result["metadata"]["stage4_min_citations_required"] == 3
+    assert result["metadata"]["citation_mode"] == "programmatic_repair"
+    assert len(result["metadata"]["cited_patent_ids"]) >= 3
+    assert "(P1)" in result["final_answer"]
+    assert "(P2)" in result["final_answer"]
+    assert "(P3)" in result["final_answer"]
+
+
+def test_stage4_min_citations_is_clamped_by_available_patents(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE4_MIN_CITATIONS", "10")
+    monkeypatch.setenv("PATENT_STAGE4_REFERENCE_TOPK", "20")
+    patent_ids = ["P1", "P2"]
+    result = run_stage4_synthesis_with_patent_evidence(
+        user_question="请给出双专利证据汇总结论",
+        deep_answer="先看关键技术要点。",
+        patent_evidence_bundle=_sample_multi_patent_evidence_bundle(patent_ids),
+        retrieval_results=_sample_multi_patent_retrieval_results(patent_ids),
+        answer_builder=lambda **kwargs: "已验证第一项证据 (patent_id=P1)。",
+    )
+
+    assert result["success"] is True
+    assert result["metadata"]["stage4_min_citations_configured"] == 10
+    assert result["metadata"]["stage4_min_citations_required"] == 2
+    assert result["metadata"]["citation_mode"] == "programmatic_repair"
+    assert set(result["metadata"]["cited_patent_ids"]) == {"P1", "P2"}
+    assert "(P1)" in result["final_answer"]
+    assert "(P2)" in result["final_answer"]
+
+
+def test_stage4_reference_topk_is_enforced_as_citation_whitelist(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE4_MIN_CITATIONS", "2")
+    monkeypatch.setenv("PATENT_STAGE4_REFERENCE_TOPK", "2")
+    patent_ids = ["P1", "P2", "P3", "P4"]
+    result = run_stage4_synthesis_with_patent_evidence(
+        user_question="请给出 topk 专利证据汇总结论",
+        deep_answer="先看关键技术要点。",
+        patent_evidence_bundle=_sample_multi_patent_evidence_bundle(patent_ids),
+        retrieval_results=_sample_multi_patent_retrieval_results(patent_ids),
+        answer_builder=lambda **kwargs: (
+            "主结论来自专利一 (patent_id=P1)。"
+            "另有外部旁证 (patent_id=P3)。"
+        ),
+    )
+
+    assert result["success"] is True
+    assert result["metadata"]["allowed_patent_ids"] == ["P1", "P2"]
+    assert result["metadata"]["allowed_patent_ids_all"] == ["P1", "P2", "P3", "P4"]
+    assert result["metadata"]["stage4_min_citations_required"] == 2
+    assert set(result["metadata"]["cited_patent_ids"]) == {"P1", "P2"}
+    assert result["metadata"]["invalid_cited_patent_ids"] == ["P3"]
+    assert "(P1)" in result["final_answer"]
+    assert "(P2)" in result["final_answer"]
+    assert "P3" not in result["final_answer"]
+
+
+def test_stage4_context_allowed_patent_ids_is_trimmed_by_topk(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE4_MIN_CITATIONS", "2")
+    monkeypatch.setenv("PATENT_STAGE4_REFERENCE_TOPK", "2")
+    patent_ids = ["P1", "P2", "P3", "P4"]
+    captured: dict[str, object] = {}
+
+    def _answer_builder(*, context, **kwargs):
+        del kwargs
+        captured["context"] = context
+        return "已验证第一项证据 (patent_id=P1)。"
+
+    result = run_stage4_synthesis_with_patent_evidence(
+        user_question="请给出 topk 专利证据汇总结论",
+        deep_answer="先看关键技术要点。",
+        patent_evidence_bundle=_sample_multi_patent_evidence_bundle(patent_ids),
+        retrieval_results=_sample_multi_patent_retrieval_results(patent_ids),
+        answer_builder=_answer_builder,
+    )
+
+    assert result["success"] is True
+    assert captured["context"]["allowed_patent_ids"] == ["P1", "P2"]
+    assert captured["context"]["allowed_patent_ids_all"] == ["P1", "P2", "P3", "P4"]
+
+
+def test_stage4_streaming_respects_topk_whitelist_and_repairs_min_citations(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE4_MIN_CITATIONS", "2")
+    monkeypatch.setenv("PATENT_STAGE4_REFERENCE_TOPK", "2")
+    patent_ids = ["P1", "P2", "P3", "P4"]
+    streamed_chunks: list[str] = []
+
+    class _StreamingAnswerBuilder:
+        def __call__(self, **kwargs):
+            raise AssertionError("stream path should be preferred when available")
+
+        def stream(self, *, question, retrieval_outcome, context):
+            del question, retrieval_outcome, context
+            yield "主结论来自专利一 (patent_id=P1)。"
+            yield "另有外部旁证 (patent_id=P3)。"
+
+    result = run_stage4_synthesis_with_patent_evidence(
+        user_question="请给出 topk 专利证据汇总结论",
+        deep_answer="先看关键技术要点。",
+        patent_evidence_bundle=_sample_multi_patent_evidence_bundle(patent_ids),
+        retrieval_results=_sample_multi_patent_retrieval_results(patent_ids),
+        answer_builder=_StreamingAnswerBuilder(),
+        content_callback=streamed_chunks.append,
+    )
+
+    streamed_text = "".join(streamed_chunks)
+    assert result["success"] is True
+    assert result["metadata"]["allowed_patent_ids"] == ["P1", "P2"]
+    assert result["metadata"]["allowed_patent_ids_all"] == ["P1", "P2", "P3", "P4"]
+    assert result["metadata"]["stage4_min_citations_required"] == 2
+    assert result["metadata"]["invalid_cited_patent_ids"] == ["P3"]
+    assert set(result["metadata"]["cited_patent_ids"]) == {"P1", "P2"}
+    assert "(P1)" in result["final_answer"]
+    assert "(P2)" in result["final_answer"]
+    assert "P3" not in result["final_answer"]
+    assert "P3" not in streamed_text
 
 
 def test_stage4_synthesis_forwards_streamed_chunks_and_sanitizes_final_answer():
