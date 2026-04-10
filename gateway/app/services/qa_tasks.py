@@ -79,6 +79,66 @@ def _normalized_positive_int(value: Any) -> int | None:
     return normalized if normalized > 0 else None
 
 
+def _epoch_ms() -> int:
+    return max(0, int(time.time() * 1000))
+
+
+def _normalized_epoch_ms(value: Any) -> int | None:
+    return _normalized_positive_int(value)
+
+
+def _merge_task_telemetry(*sources: Any) -> dict[str, int]:
+    merged: dict[str, int] = {}
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key, value in source.items():
+            normalized = _normalized_epoch_ms(value)
+            if normalized is None:
+                continue
+            merged[str(key)] = normalized
+    return merged
+
+
+def _public_task_telemetry(record: dict[str, Any]) -> dict[str, int]:
+    telemetry = _merge_task_telemetry(record.get("telemetry"))
+    public: dict[str, int] = {}
+    for field_name in (
+        "accepted_at_ms",
+        "dispatch_started_at_ms",
+        "backend_stream_opened_at_ms",
+        "first_step_at_ms",
+        "first_content_at_ms",
+    ):
+        normalized = _normalized_epoch_ms(telemetry.get(field_name))
+        if normalized is not None:
+            public[field_name] = normalized
+
+    def _append_latency(metric_name: str, *, start_field: str, end_field: str) -> None:
+        start = _normalized_epoch_ms(public.get(start_field))
+        end = _normalized_epoch_ms(public.get(end_field))
+        if start is None or end is None or end < start:
+            return
+        public[metric_name] = end - start
+
+    _append_latency(
+        "accepted_to_first_step_ms",
+        start_field="accepted_at_ms",
+        end_field="first_step_at_ms",
+    )
+    _append_latency(
+        "dispatch_to_first_step_ms",
+        start_field="dispatch_started_at_ms",
+        end_field="first_step_at_ms",
+    )
+    _append_latency(
+        "accepted_to_first_content_ms",
+        start_field="accepted_at_ms",
+        end_field="first_content_at_ms",
+    )
+    return public
+
+
 def _live_runtime_handle(entry: Any) -> Any:
     if isinstance(entry, dict):
         return entry.get("handle")
@@ -144,6 +204,7 @@ class QATaskService:
             await self._assert_backend_ready(route_decision.actual_mode)
             task_id = f"task_{uuid4().hex}"
             created_at = datetime.now(timezone.utc)
+            accepted_at_ms = max(0, int(created_at.timestamp() * 1000))
             expires_at = created_at + timedelta(seconds=int(self.settings.admission.queued_ttl_seconds))
             persistence_service = self.app.state.conversation_persistence_service
             quota_proxy = self.app.state.quota_proxy_service
@@ -190,6 +251,7 @@ class QATaskService:
                     "updated_at": created_at.isoformat(),
                     "enqueued_at": created_at.isoformat(),
                     "expires_at": expires_at.isoformat(),
+                    "telemetry": {"accepted_at_ms": accepted_at_ms},
                     "cancel_allowed": False,
                     "transport_kind": "sse",
                     "user_id": bound_payload.user_id,
@@ -1089,6 +1151,7 @@ class QATaskService:
             "cancel_allowed": public_status not in _TERMINAL_TASK_STATUSES,
             "replay_available": bool(relay_state.get("frames_tracked")),
             "terminal": public_status in _TERMINAL_TASK_STATUSES,
+            "telemetry": _public_task_telemetry(record),
             "error": record.get("failure_reason"),
             "events_url": self._task_url(task_id, "events"),
             "cancel_url": self._task_url(task_id, "cancel"),
@@ -1366,6 +1429,31 @@ class GatewayTaskExecutor:
     def execute(self, request: dict[str, Any], lease: dict[str, Any], renew_lease=None):
         return anyio.run(self._execute_async, request or {}, lease or {}, renew_lease)
 
+    def _persist_request_telemetry(self, request: dict[str, Any], updates: dict[str, Any] | None = None, **fields: Any) -> dict[str, int]:
+        request_id = str(request.get("request_id") or "").strip()
+        merged_request_telemetry = _merge_task_telemetry(
+            request.get("telemetry"),
+            dict(updates or {}),
+            fields,
+        )
+        request["telemetry"] = merged_request_telemetry
+        if not request_id or not merged_request_telemetry:
+            return merged_request_telemetry
+        current = self.queue_store.get_request(request_id)
+        if not isinstance(current, dict):
+            return merged_request_telemetry
+        ttl_seconds = self.queue_store.request_ttl_seconds(request_id)
+        if ttl_seconds is None or ttl_seconds <= 0:
+            ttl_seconds = int(self.settings.admission.post_admit_attach_ttl_seconds)
+        updated = dict(current)
+        updated["telemetry"] = _merge_task_telemetry(
+            current.get("telemetry"),
+            merged_request_telemetry,
+        )
+        if self.queue_store.put_request(updated, ttl_seconds=max(_RELAY_RETENTION_FLOOR_SECONDS, int(ttl_seconds))):
+            request["telemetry"] = dict(updated.get("telemetry") or {})
+        return dict(request.get("telemetry") or {})
+
     async def _execute_async(self, request: dict[str, Any], lease: dict[str, Any], renew_lease=None):
         request_id = str(request.get("request_id") or "").strip()
         if not request_id:
@@ -1395,6 +1483,7 @@ class GatewayTaskExecutor:
         )
         if running.outcome not in {"running"}:
             return AdmissionExecutionOutcome(outcome="failed", reason=f"task_running_transition_failed:{running.outcome}", terminal_status="failed")
+        self._persist_request_telemetry(request, dispatch_started_at_ms=_epoch_ms())
         running_seq = self._append_state_if_needed(request_id, status="running")
 
         target = self.backend_registry.get(str(request.get("actual_mode") or ""))
@@ -1493,7 +1582,14 @@ class GatewayTaskExecutor:
                     if not isinstance(payload, dict):
                         continue
                     event_type = str(payload.get("type") or "").strip().lower()
+                    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+                    telemetry = metadata.get("telemetry") if isinstance(metadata.get("telemetry"), dict) else {}
+                    merged_telemetry = _merge_task_telemetry(request.get("telemetry"))
+                    if telemetry:
+                        merged_telemetry = self._persist_request_telemetry(request, updates=telemetry)
                     if event_type == "metadata":
+                        if _normalized_epoch_ms(merged_telemetry.get("backend_stream_opened_at_ms")) is None:
+                            self._persist_request_telemetry(request, backend_stream_opened_at_ms=_epoch_ms())
                         continue
                     appended = self.relay_store.append_frame(
                         request_id,
@@ -1501,10 +1597,14 @@ class GatewayTaskExecutor:
                         ttl_seconds=self._task_ttl_seconds(request_id),
                     )
                     latest_seq = int(appended.get("sequence") or latest_seq)
+                    if bool(appended.get("ignored")):
+                        continue
                     terminalized = self._terminalized_execution_outcome(request_id)
                     if terminalized is not None:
                         return terminalized
                     if event_type == "thinking":
+                        if _normalized_epoch_ms((request.get("telemetry") or {}).get("first_step_at_ms")) is None:
+                            self._persist_request_telemetry(request, first_step_at_ms=_epoch_ms())
                         thinking_count += 1
                         step_key = f"thinking_{thinking_count}"
                         self._upsert_step(
@@ -1528,6 +1628,8 @@ class GatewayTaskExecutor:
                         await self._flush_runtime_progress(live_runtime, force=True)
                         continue
                     if event_type == "step":
+                        if _normalized_epoch_ms((request.get("telemetry") or {}).get("first_step_at_ms")) is None:
+                            self._persist_request_telemetry(request, first_step_at_ms=_epoch_ms())
                         step_key = str(payload.get("step") or f"step_{len(step_order) + 1}").strip() or f"step_{len(step_order) + 1}"
                         self._upsert_step(
                             step_order=step_order,
@@ -1550,6 +1652,8 @@ class GatewayTaskExecutor:
                         await self._flush_runtime_progress(live_runtime, force=True)
                         continue
                     if event_type == "content":
+                        if _normalized_epoch_ms((request.get("telemetry") or {}).get("first_content_at_ms")) is None:
+                            self._persist_request_telemetry(request, first_content_at_ms=_epoch_ms())
                         delta = str(payload.get("content") or payload.get("delta") or "")
                         if delta:
                             content_parts.append(delta)

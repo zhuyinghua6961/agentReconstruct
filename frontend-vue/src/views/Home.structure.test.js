@@ -101,10 +101,16 @@ test('Home renders failed terminal assistant messages as terminal cards instead 
 })
 
 test('Home ignores late stream errors after a done event has already completed the message', () => {
-  assert.match(source, /import \{ shouldIgnoreLateStreamError \} from '\.\.\/utils\/streamingLifecycle'/)
+  assert.match(source, /import \{[^}]*shouldIgnoreLateStreamError[^}]*\} from '\.\.\/utils\/streamingLifecycle'/)
   assert.match(source, /streaming_terminal_event:\s*'done'/)
   assert.match(source, /done_seen:\s*true/)
   assert.match(source, /if \(shouldIgnoreLateStreamError\(targetMessage\)\) \{\s*return\s*\}/)
+})
+
+test('Home ignores late content frames and drops buffered leftovers after a done event', () => {
+  assert.match(source, /import \{ shouldIgnoreLateStreamContent, shouldIgnoreLateStreamError \} from '\.\.\/utils\/streamingLifecycle'/)
+  assert.match(source, /if \(data\.type === 'content'\) \{[\s\S]*const targetMessage = getStreamingTargetMessage\(chatId\)\?\.message \|\| \{\}[\s\S]*if \(shouldIgnoreLateStreamContent\(targetMessage\)\) \{\s*activeRuntime\.pendingContent = ''[\s\S]*return \{ terminal: false, skipped: true \}\s*\}/s)
+  assert.match(source, /function flushPendingStreamContent\(chatId\) \{[\s\S]*const target = getStreamingTargetMessage\(chatId\)[\s\S]*if \(shouldIgnoreLateStreamContent\(target\?\.message \|\| \{\}\)\) \{\s*runtime\.pendingContent = ''\s*return\s*\}/s)
 })
 
 test('Home scopes busy controls to the current chat instead of globally locking the page', () => {
@@ -199,4 +205,21 @@ test('Home flushes buffered recoverable content before settling canceled or expi
   assert.match(source, /if \(status === 'canceled' \|\| status === 'expired'\) \{\s*flushPendingStreamContent\(chatId\)/s)
   assert.match(source, /streaming_terminal_event:\s*status/)
   assert.match(source, /finalizeRecoverableTaskLocally\(chatId, \{ lastSeq: data\.seq \}\)/)
+})
+
+test('Home invalidates streaming and final render caches when a message flips into terminal markdown rendering', () => {
+  assert.match(
+    source,
+    /const renderStreamingMessageHtml = createStreamingHtmlRenderer\(\{\s*terminalFormatter:\s*\(text,\s*message\)\s*=>\s*formatAnswer\(text,\s*Array\.isArray\(message\?\.referenceLinks\) \? message\.referenceLinks : \[\]\)\s*\}\)/s
+  )
+  assert.match(source, /const isComplete = msg\?\.isComplete === true/)
+  assert.match(source, /const doneSeen = Boolean\(msg\?\.doneSeen \?\? msg\?\.done_seen \?\? msg\?\.metadata\?\.done_seen\)/)
+  assert.match(
+    source,
+    /const terminalStatus = String\(\s*msg\?\.terminalStatus\s*\?\?\s*msg\?\.terminal_status\s*\?\?\s*msg\?\.status\s*\?\?\s*msg\?\.metadata\?\.terminal_status\s*\?\?\s*msg\?\.metadata\?\.status\s*\?\?\s*msg\?\.metadata\?\.streaming_terminal_event\s*\?\?\s*''\s*\)\.trim\(\)\.toLowerCase\(\)/s
+  )
+  assert.match(source, /cached\.isComplete === isComplete/)
+  assert.match(source, /cached\.doneSeen === doneSeen/)
+  assert.match(source, /cached\.terminalStatus === terminalStatus/)
+  assert.match(source, /renderedMessageCache\.set\(msg, \{ content, referenceLinks, isComplete, doneSeen, terminalStatus, html \}\)/)
 })

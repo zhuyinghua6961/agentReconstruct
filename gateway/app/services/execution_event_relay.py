@@ -8,6 +8,9 @@ from typing import Any
 
 from app.integrations.redis.service import RedisService
 
+_TERMINAL_RELAY_EVENT_TYPES = {"done", "error"}
+_TERMINAL_RELAY_STATE_STATUSES = {"completed", "failed", "canceled", "cancelled", "expired"}
+
 
 class ExecutionEventRelayStore:
     def __init__(self, *, redis_service: RedisService) -> None:
@@ -17,6 +20,7 @@ class ExecutionEventRelayStore:
         self._memory_request_ids: set[str] = set()
         self._memory_total_frames = 0
         self._memory_latest_sequence: dict[str, int] = {}
+        self._memory_latest_upstream_sequence: dict[str, int] = {}
 
     def frames_key(self, request_id: str) -> str:
         return self.redis_service.key_factory.relay(request_id, "frames")
@@ -26,6 +30,9 @@ class ExecutionEventRelayStore:
 
     def cursor_key(self, request_id: str) -> str:
         return self.redis_service.key_factory.relay(request_id, "cursor")
+
+    def upstream_sequence_key(self, request_id: str) -> str:
+        return self.redis_service.key_factory.relay(request_id, "upstream_sequence")
 
     def frame_count_key(self, request_id: str) -> str:
         return self.redis_service.key_factory.relay(request_id, "frame_count")
@@ -57,6 +64,7 @@ class ExecutionEventRelayStore:
             self._memory_request_ids.discard(request_id)
             self._memory_total_frames = max(0, self._memory_total_frames - len(frames))
             self._memory_latest_sequence.pop(request_id, None)
+            self._memory_latest_upstream_sequence.pop(request_id, None)
 
     def _prune_redis(self) -> None:
         expired_ids = self.redis_service.zrangebyscore(
@@ -78,6 +86,7 @@ class ExecutionEventRelayStore:
                     self.frames_key(request_id),
                     self.sequence_key(request_id),
                     self.cursor_key(request_id),
+                    self.upstream_sequence_key(request_id),
                     self.frame_count_key(request_id),
                 ]
             )
@@ -129,12 +138,22 @@ class ExecutionEventRelayStore:
             frames = [item for item in self.redis_service.lrange_json(key) if isinstance(item, dict)]
             frame_count = len(frames)
             latest_sequence = max([int(item.get("sequence") or 0) for item in frames], default=0)
+            highest_upstream_sequence = max(
+                [self._payload_upstream_sequence(dict(item.get("payload") or {})) or 0 for item in frames],
+                default=0,
+            )
             ttl_seconds = self.redis_service.ttl(key)
             if frame_count <= 0 or ttl_seconds is None or ttl_seconds <= 0:
                 continue
             total_frames += frame_count
             self.redis_service.set_json(self.sequence_key(request_id), latest_sequence, ttl_seconds=int(ttl_seconds))
             self.redis_service.set_json(self.frame_count_key(request_id), frame_count, ttl_seconds=int(ttl_seconds))
+            if highest_upstream_sequence > 0:
+                self.redis_service.set_json(
+                    self.upstream_sequence_key(request_id),
+                    highest_upstream_sequence,
+                    ttl_seconds=int(ttl_seconds),
+                )
             current_cursor = self.redis_service.get_int(self.cursor_key(request_id), default=0)
             self.redis_service.set_json(
                 self.cursor_key(request_id),
@@ -156,6 +175,7 @@ class ExecutionEventRelayStore:
         request_id: str,
         expected_total_frames: int | None = None,
         expected_latest_sequence: int | None = None,
+        expected_latest_upstream_sequence: int | None = None,
         expected_frame_count: int | None = None,
     ) -> bool:
         request_ids = set(self.redis_service.smembers(self.request_index_key()))
@@ -177,6 +197,11 @@ class ExecutionEventRelayStore:
             self.frame_count_key(request_id),
             default=0,
         ) != max(0, int(expected_frame_count)):
+            return False
+        if expected_latest_upstream_sequence is not None and self.redis_service.get_int(
+            self.upstream_sequence_key(request_id),
+            default=0,
+        ) != max(0, int(expected_latest_upstream_sequence)):
             return False
         if expected_total_frames is None:
             return True
@@ -214,10 +239,105 @@ class ExecutionEventRelayStore:
             if isinstance(frames, list)
         ]
 
+    def _frame_payload(self, frame: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(frame, dict):
+            return {}
+        payload = frame.get("payload")
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    def _payload_type(self, payload: dict[str, Any] | None) -> str:
+        return str((payload or {}).get("type") or "").strip().lower()
+
+    def _payload_status(self, payload: dict[str, Any] | None) -> str:
+        return str((payload or {}).get("status") or "").strip().lower()
+
+    def _payload_upstream_sequence(self, payload: dict[str, Any] | None) -> int | None:
+        try:
+            sequence = int((payload or {}).get("seq"))
+        except Exception:
+            return None
+        return sequence if sequence > 0 else None
+
+    def _payload_is_terminal(self, payload: dict[str, Any] | None) -> bool:
+        event_type = self._payload_type(payload)
+        if event_type in _TERMINAL_RELAY_EVENT_TYPES:
+            return True
+        return event_type == "state" and self._payload_status(payload) in _TERMINAL_RELAY_STATE_STATUSES
+
+    def _ignored_record(
+        self,
+        last_record: dict[str, Any] | None,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if last_record is None:
+            return {"sequence": 0, "payload": deepcopy(payload), "ignored": True}
+        ignored = deepcopy(last_record)
+        ignored["ignored"] = True
+        return ignored
+
+    def _scan_replay_prefix(self, frames: list[dict[str, Any]]) -> tuple[int, bool]:
+        highest_upstream_sequence = 0
+        terminal_seen = False
+        for item in frames:
+            if not isinstance(item, dict):
+                continue
+            payload = self._frame_payload(item)
+            upstream_sequence = self._payload_upstream_sequence(payload)
+            if upstream_sequence is not None and upstream_sequence > highest_upstream_sequence:
+                highest_upstream_sequence = upstream_sequence
+            if self._payload_is_terminal(payload):
+                terminal_seen = True
+                break
+        return highest_upstream_sequence, terminal_seen
+
+    def _get_last_frame_record(self, request_id: str) -> dict[str, Any] | None:
+        normalized_id = str(request_id or "").strip()
+        if not normalized_id:
+            return None
+        if self.redis_service.available:
+            frames = self.redis_service.lrange_json(self.frames_key(normalized_id), start=-1, stop=-1)
+            for item in reversed(frames):
+                if isinstance(item, dict):
+                    return deepcopy(item)
+            return None
+        self._prune_memory_frames()
+        frames = self._memory_frames.get(normalized_id, [])
+        if not frames:
+            return None
+        last = frames[-1]
+        return deepcopy(last) if isinstance(last, dict) else None
+
+    def _get_latest_upstream_sequence(self, request_id: str) -> int:
+        normalized_id = str(request_id or "").strip()
+        if not normalized_id:
+            return 0
+        if self.redis_service.available:
+            cached = max(0, self.redis_service.get_int(self.upstream_sequence_key(normalized_id), default=0))
+            if cached > 0:
+                return cached
+            frames = self.redis_service.lrange_json(self.frames_key(normalized_id), start=0, stop=-1)
+            highest_upstream_sequence, _terminal_seen = self._scan_replay_prefix(
+                [item for item in frames if isinstance(item, dict)]
+            )
+            return highest_upstream_sequence
+        self._prune_memory_frames()
+        return max(0, int(self._memory_latest_upstream_sequence.get(normalized_id, 0)))
+
     def append_frame(self, request_id: str, payload: dict[str, Any], *, ttl_seconds: int) -> dict[str, Any]:
         normalized_id = str(request_id or "").strip()
         if not normalized_id:
             raise ValueError("request_id is required")
+        last_record = self._get_last_frame_record(normalized_id)
+        last_payload = self._frame_payload(last_record)
+        if self._payload_is_terminal(last_payload):
+            return self._ignored_record(last_record, payload)
+        next_upstream_sequence = self._payload_upstream_sequence(payload)
+        if (
+            last_record is not None
+            and next_upstream_sequence is not None
+            and next_upstream_sequence <= self._get_latest_upstream_sequence(normalized_id)
+        ):
+            return self._ignored_record(last_record, payload)
 
         if self.redis_service.available:
             dirty_version = self._mark_redis_dirty()
@@ -233,6 +353,12 @@ class ExecutionEventRelayStore:
             self.redis_service.set_json(self.frame_count_key(normalized_id), pushed, ttl_seconds=int(ttl_seconds))
             self.redis_service.expire(self.cursor_key(normalized_id), ttl_seconds)
             self.redis_service.expire(self.frames_key(normalized_id), ttl_seconds)
+            if next_upstream_sequence is not None and next_upstream_sequence > 0:
+                self.redis_service.set_json(
+                    self.upstream_sequence_key(normalized_id),
+                    next_upstream_sequence,
+                    ttl_seconds=int(ttl_seconds),
+                )
             self.redis_service.sadd(self.request_index_key(), normalized_id)
             self.redis_service.zadd(
                 self.expiry_index_key(),
@@ -242,6 +368,7 @@ class ExecutionEventRelayStore:
             if total_frames is not None and self._redis_indexes_consistent_for_request(
                 request_id=normalized_id,
                 expected_latest_sequence=next_sequence,
+                expected_latest_upstream_sequence=next_upstream_sequence if next_upstream_sequence is not None and next_upstream_sequence > 0 else None,
                 expected_frame_count=pushed,
             ):
                 self._clear_redis_dirty(dirty_version)
@@ -256,6 +383,11 @@ class ExecutionEventRelayStore:
         self._memory_request_ids.add(normalized_id)
         self._memory_total_frames += 1
         self._memory_latest_sequence[normalized_id] = next_sequence
+        if next_upstream_sequence is not None and next_upstream_sequence > 0:
+            self._memory_latest_upstream_sequence[normalized_id] = max(
+                int(self._memory_latest_upstream_sequence.get(normalized_id, 0)),
+                next_upstream_sequence,
+            )
         return record
 
     def get_frames(self, request_id: str, *, after_sequence: int) -> list[dict[str, Any]]:
@@ -263,19 +395,56 @@ class ExecutionEventRelayStore:
         if not normalized_id:
             return []
         start_index = max(0, int(after_sequence))
+        highest_upstream_sequence = 0
         if self.redis_service.available:
-            frames = self.redis_service.lrange_json(self.frames_key(normalized_id), start=start_index, stop=-1)
+            latest_sequence = max(0, self.redis_service.get_int(self.sequence_key(normalized_id), default=0))
+            frame_count = max(0, self.redis_service.get_int(self.frame_count_key(normalized_id), default=0))
+            if frame_count <= 0:
+                frames = self.redis_service.lrange_json(self.frames_key(normalized_id), start=0, stop=-1)
+                frame_count = len(frames)
+            else:
+                frames = []
+            if latest_sequence > frame_count:
+                if not frames:
+                    frames = self.redis_service.lrange_json(self.frames_key(normalized_id), start=0, stop=-1)
+            else:
+                if start_index > 0:
+                    prefix_frames = self.redis_service.lrange_json(self.frames_key(normalized_id), start=0, stop=start_index - 1)
+                    highest_upstream_sequence, terminal_seen = self._scan_replay_prefix(prefix_frames)
+                    if terminal_seen:
+                        return []
+                frames = self.redis_service.lrange_json(self.frames_key(normalized_id), start=start_index, stop=-1)
         else:
             self._prune_memory_frames()
-            frames = list(self._memory_frames.get(normalized_id, []))[start_index:]
+            all_frames = list(self._memory_frames.get(normalized_id, []))
+            latest_sequence = max(0, int(self._memory_latest_sequence.get(normalized_id, 0)))
+            if latest_sequence > len(all_frames):
+                frames = all_frames
+            else:
+                if start_index > 0:
+                    highest_upstream_sequence, terminal_seen = self._scan_replay_prefix(all_frames[:start_index])
+                    if terminal_seen:
+                        return []
+                frames = all_frames[start_index:]
         output: list[dict[str, Any]] = []
         for item in frames:
             if not isinstance(item, dict):
                 continue
+            payload = self._frame_payload(item)
+            upstream_sequence = self._payload_upstream_sequence(payload)
+            is_duplicate_upstream_sequence = (
+                upstream_sequence is not None and upstream_sequence <= highest_upstream_sequence
+            )
+            if upstream_sequence is not None and upstream_sequence > highest_upstream_sequence:
+                highest_upstream_sequence = upstream_sequence
             sequence = int(item.get("sequence") or 0)
-            if sequence <= int(after_sequence):
+            if sequence <= int(after_sequence) or is_duplicate_upstream_sequence:
+                if self._payload_is_terminal(payload):
+                    break
                 continue
             output.append(deepcopy(item))
+            if self._payload_is_terminal(payload):
+                break
         return output
 
     def clear(self, request_id: str) -> int:
@@ -292,6 +461,7 @@ class ExecutionEventRelayStore:
                 self.frames_key(normalized_id),
                 self.sequence_key(normalized_id),
                 self.cursor_key(normalized_id),
+                self.upstream_sequence_key(normalized_id),
                 self.frame_count_key(normalized_id),
             )
             if frame_count:
@@ -310,6 +480,7 @@ class ExecutionEventRelayStore:
         self._memory_request_ids.discard(normalized_id)
         self._memory_total_frames = max(0, self._memory_total_frames - len(frames))
         self._memory_latest_sequence.pop(normalized_id, None)
+        self._memory_latest_upstream_sequence.pop(normalized_id, None)
         return 1 if had_value else 0
 
     def describe(self) -> dict[str, Any]:

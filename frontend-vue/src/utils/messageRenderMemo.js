@@ -47,12 +47,32 @@ function normalizeDoiLocations(doiLocations = {}) {
     }, {})
 }
 
+function normalizeTerminalStatus(message = {}) {
+  const metadata = message?.metadata && typeof message.metadata === 'object' ? message.metadata : {}
+  return normalizeString(
+    message?.terminalStatus
+    ?? message?.terminal_status
+    ?? message?.status
+    ?? metadata?.terminal_status
+    ?? metadata?.status
+    ?? metadata?.streaming_terminal_event
+    ?? '',
+  ).trim().toLowerCase()
+}
+
+function normalizeDoneSeen(message = {}) {
+  const metadata = message?.metadata && typeof message.metadata === 'object' ? message.metadata : {}
+  return Boolean(message?.doneSeen ?? message?.done_seen ?? metadata?.done_seen)
+}
+
 function buildRenderSnapshot(message = {}) {
   return {
     role: normalizeString(message?.role),
     content: normalizeString(message?.content),
     queryMode: normalizeString(message?.queryMode),
     isComplete: Boolean(message?.isComplete),
+    doneSeen: normalizeDoneSeen(message),
+    terminalStatus: normalizeTerminalStatus(message),
     stepsCollapsed: Boolean(message?.stepsCollapsed),
     stepsRef: Array.isArray(message?.steps) ? message.steps : null,
     referencesRef: Array.isArray(message?.references) ? message.references : null,
@@ -67,6 +87,8 @@ function hasSameRenderSnapshot(left, right) {
     && left.content === right.content
     && left.queryMode === right.queryMode
     && left.isComplete === right.isComplete
+    && left.doneSeen === right.doneSeen
+    && left.terminalStatus === right.terminalStatus
     && left.stepsCollapsed === right.stepsCollapsed
     && left.stepsRef === right.stepsRef
     && left.referencesRef === right.referencesRef
@@ -90,6 +112,8 @@ export function buildMessageRenderMemoKey(message = {}) {
     content: snapshot.content,
     queryMode: snapshot.queryMode,
     isComplete: snapshot.isComplete,
+    doneSeen: snapshot.doneSeen,
+    terminalStatus: snapshot.terminalStatus,
     stepsCollapsed: snapshot.stepsCollapsed,
     steps: Array.isArray(snapshot.stepsRef) ? snapshot.stepsRef.map(normalizeStep) : [],
     references: Array.isArray(snapshot.referencesRef) ? snapshot.referencesRef.map(normalizeReference) : [],

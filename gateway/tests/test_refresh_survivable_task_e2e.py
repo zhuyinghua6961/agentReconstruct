@@ -174,6 +174,52 @@ def test_refresh_survivable_task_end_to_end_replays_after_seq_then_cancels_witho
                 200,
                 json={"success": True, "data": {"grant_id": "grant-e2e-task", "counted": bool(payload.get("success")), "idempotent": False}},
             )
+        if path.endswith("/create-turn"):
+            state["user_create_calls"] += 1
+            state["assistant_start_calls"] += 1
+            if state["user_create_calls"] > 1:
+                raise AssertionError("task create-turn path called more than once")
+            task_id = path.split("/")[-2]
+            task_id_holder["task_id"] = task_id
+            state["active_task_id"] = task_id
+            state["assistant_message_id"] = "m_assistant_e2e"
+            state["messages"].append(
+                {
+                    "message_id": "m_user_e2e",
+                    "role": "user",
+                    "content": payload["message"]["content"],
+                    "metadata": {
+                        "route": payload.get("route"),
+                        "requested_mode": payload.get("requested_mode"),
+                        "actual_mode": payload.get("actual_mode"),
+                    },
+                }
+            )
+            state["messages"].append(
+                {
+                    "message_id": "m_assistant_e2e",
+                    "role": "assistant",
+                    "content": "",
+                    "status": payload.get("status") or "queued",
+                    "metadata": {
+                        "task_id": task_id,
+                        "task_status": payload.get("status") or "queued",
+                        "last_seq": int(payload.get("last_seq") or 0),
+                    },
+                }
+            )
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "conversation_id": 123,
+                    "task_id": task_id,
+                    "user_message_id": "m_user_e2e",
+                    "assistant_message_id": "m_assistant_e2e",
+                    "status": payload.get("status") or "queued",
+                    "deduped": False,
+                },
+            )
         if path == "/internal/conversations/123/messages/user":
             state["user_create_calls"] += 1
             if state["user_create_calls"] > 1:
@@ -465,6 +511,52 @@ def test_refresh_survivable_task_end_to_end_replays_after_seq_then_completes_wit
             return httpx.Response(
                 200,
                 json={"success": True, "data": {"grant_id": "grant-e2e-done-task", "counted": bool(payload.get("success")), "idempotent": False}},
+            )
+        if path.endswith("/create-turn"):
+            state["user_create_calls"] += 1
+            state["assistant_start_calls"] += 1
+            if state["user_create_calls"] > 1:
+                raise AssertionError("task create-turn path called more than once")
+            task_id = path.split("/")[-2]
+            task_id_holder["task_id"] = task_id
+            state["active_task_id"] = task_id
+            state["assistant_message_id"] = "m_assistant_e2e_done"
+            state["messages"].append(
+                {
+                    "message_id": "m_user_e2e_done",
+                    "role": "user",
+                    "content": payload["message"]["content"],
+                    "metadata": {
+                        "route": payload.get("route"),
+                        "requested_mode": payload.get("requested_mode"),
+                        "actual_mode": payload.get("actual_mode"),
+                    },
+                }
+            )
+            state["messages"].append(
+                {
+                    "message_id": "m_assistant_e2e_done",
+                    "role": "assistant",
+                    "content": "",
+                    "status": payload.get("status") or "queued",
+                    "metadata": {
+                        "task_id": task_id,
+                        "task_status": payload.get("status") or "queued",
+                        "last_seq": int(payload.get("last_seq") or 0),
+                    },
+                }
+            )
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "conversation_id": 123,
+                    "task_id": task_id,
+                    "user_message_id": "m_user_e2e_done",
+                    "assistant_message_id": "m_assistant_e2e_done",
+                    "status": payload.get("status") or "queued",
+                    "deduped": False,
+                },
             )
         if path == "/internal/conversations/123/messages/user":
             state["user_create_calls"] += 1

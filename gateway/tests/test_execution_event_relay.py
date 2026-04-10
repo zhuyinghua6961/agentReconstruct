@@ -394,3 +394,132 @@ def test_execution_event_relay_clear_reconciles_total_frames_when_frame_count_ke
     assert cleared >= 1
     assert payload["requests_tracked"] == 0
     assert payload["frames_tracked"] == 0
+
+
+def test_execution_event_relay_resume_after_sequence_handles_sparse_storage_indexes():
+    redis = _FakeRedis()
+    store = ExecutionEventRelayStore(redis_service=RedisService.from_prefix(client=redis, key_prefix="gateway"))
+    original_rpush = redis.rpush
+    failed = {"done": False}
+
+    def _flaky_rpush(key: str, value: str):
+        if not failed["done"]:
+            failed["done"] = True
+            raise RuntimeError("rpush failed")
+        return original_rpush(key, value)
+
+    redis.rpush = _flaky_rpush  # type: ignore[assignment]
+
+    try:
+        store.append_frame("req_sparse_after", {"type": "metadata"}, ttl_seconds=600)
+    except RuntimeError:
+        pass
+
+    store.append_frame("req_sparse_after", {"type": "done"}, ttl_seconds=600)
+    frames = store.get_frames("req_sparse_after", after_sequence=1)
+
+    assert [item["sequence"] for item in frames] == [2]
+
+
+def test_execution_event_relay_drops_duplicate_upstream_seq_and_blocks_post_terminal_frames():
+    store = _store()
+
+    first = store.append_frame("req_terminal_guard", {"type": "content", "seq": 7, "content": "hello"}, ttl_seconds=600)
+    duplicate = store.append_frame("req_terminal_guard", {"type": "content", "seq": 7, "content": "hello"}, ttl_seconds=600)
+    terminal = store.append_frame("req_terminal_guard", {"type": "done", "seq": 8, "final_answer": "hello"}, ttl_seconds=600)
+    after_terminal = store.append_frame("req_terminal_guard", {"type": "content", "seq": 9, "content": "should_not_surface"}, ttl_seconds=600)
+
+    frames = store.get_frames("req_terminal_guard", after_sequence=0)
+
+    assert first["sequence"] == 1
+    assert duplicate["sequence"] == 1
+    assert terminal["sequence"] == 2
+    assert after_terminal["sequence"] == 2
+    assert [item["payload"]["type"] for item in frames] == ["content", "done"]
+
+
+def test_execution_event_relay_drops_duplicate_upstream_seq_even_when_seq_less_frames_are_interleaved():
+    store = _store()
+
+    first = store.append_frame("req_interleaved_duplicate", {"type": "content", "seq": 7, "content": "hello"}, ttl_seconds=600)
+    middle = store.append_frame("req_interleaved_duplicate", {"type": "step", "step": "retrieve", "status": "processing"}, ttl_seconds=600)
+    duplicate = store.append_frame("req_interleaved_duplicate", {"type": "content", "seq": 7, "content": "hello"}, ttl_seconds=600)
+    terminal = store.append_frame("req_interleaved_duplicate", {"type": "done", "seq": 8, "final_answer": "hello"}, ttl_seconds=600)
+
+    frames = store.get_frames("req_interleaved_duplicate", after_sequence=0)
+
+    assert first["sequence"] == 1
+    assert middle["sequence"] == 2
+    assert duplicate["ignored"] is True
+    assert duplicate["sequence"] == 2
+    assert terminal["sequence"] == 3
+    assert [item["payload"]["type"] for item in frames] == ["content", "step", "done"]
+
+
+def test_execution_event_relay_hides_post_terminal_frames_from_an_already_polluted_replay_window():
+    store = _store()
+    store._memory_frames["req_polluted_terminal"] = [
+        {"sequence": 1, "payload": {"type": "content", "content": "hello"}},
+        {"sequence": 2, "payload": {"type": "done", "final_answer": "hello"}},
+        {"sequence": 3, "payload": {"type": "content", "content": "should_not_surface"}},
+    ]
+    store._memory_expiry["req_polluted_terminal"] = store._now() + 600
+    store._memory_request_ids.add("req_polluted_terminal")
+    store._memory_total_frames = 3
+    store._memory_latest_sequence["req_polluted_terminal"] = 3
+
+    frames = store.get_frames("req_polluted_terminal", after_sequence=2)
+
+    assert frames == []
+
+
+def test_execution_event_relay_replay_window_tracks_upstream_seq_seen_before_after_sequence():
+    store = _store()
+    store._memory_frames["req_polluted_duplicate"] = [
+        {"sequence": 1, "payload": {"type": "content", "seq": 7, "content": "hello"}},
+        {"sequence": 2, "payload": {"type": "content", "seq": 7, "content": "hello"}},
+        {"sequence": 3, "payload": {"type": "done", "seq": 8, "final_answer": "hello"}},
+    ]
+    store._memory_expiry["req_polluted_duplicate"] = store._now() + 600
+    store._memory_request_ids.add("req_polluted_duplicate")
+    store._memory_total_frames = 3
+    store._memory_latest_sequence["req_polluted_duplicate"] = 3
+
+    frames = store.get_frames("req_polluted_duplicate", after_sequence=1)
+
+    assert [item["sequence"] for item in frames] == [3]
+    assert [item["payload"]["type"] for item in frames] == ["done"]
+
+
+def test_execution_event_relay_redis_keeps_dirty_and_dedupes_when_upstream_sequence_write_fails():
+    redis = _FakeRedis()
+    store = ExecutionEventRelayStore(redis_service=RedisService.from_prefix(client=redis, key_prefix="gateway"))
+    original_set = redis.set
+    failed = {"done": False}
+
+    def _flaky_set(key: str, value: str, ex: int | None = None, nx: bool = False):
+        if key == store.upstream_sequence_key("req_upstream_key_gap") and not failed["done"]:
+            failed["done"] = True
+            return False
+        return original_set(key, value, ex=ex, nx=nx)
+
+    redis.set = _flaky_set  # type: ignore[assignment]
+
+    first = store.append_frame("req_upstream_key_gap", {"type": "content", "seq": 7, "content": "hello"}, ttl_seconds=600)
+    dirty_after_first = store._redis_dirty()
+    upstream_after_first = store.redis_service.get_int(store.upstream_sequence_key("req_upstream_key_gap"), default=0)
+    middle = store.append_frame(
+        "req_upstream_key_gap",
+        {"type": "step", "step": "retrieve", "status": "processing"},
+        ttl_seconds=600,
+    )
+    duplicate = store.append_frame("req_upstream_key_gap", {"type": "content", "seq": 7, "content": "hello"}, ttl_seconds=600)
+    frames = store.get_frames("req_upstream_key_gap", after_sequence=0)
+
+    assert first["sequence"] == 1
+    assert dirty_after_first is True
+    assert upstream_after_first == 0
+    assert middle["sequence"] == 2
+    assert duplicate["ignored"] is True
+    assert duplicate["sequence"] == 2
+    assert [item["payload"]["type"] for item in frames] == ["content", "step"]

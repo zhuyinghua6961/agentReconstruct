@@ -184,3 +184,33 @@ test('buildMessageRenderMemoKey changes for the active streaming message when sa
 
   assert.notEqual(first, second)
 })
+
+test('buildMessageRenderMemoKey changes when terminal render flags change without changing content', async () => {
+  const { buildMessageRenderMemoKey } = await loadMessageRenderMemoUtils()
+
+  assert.equal(typeof buildMessageRenderMemoKey, 'function')
+
+  const base = {
+    role: 'assistant',
+    content: '## 标题\n正文',
+    isComplete: true,
+    metadata: {
+      done_seen: false,
+      streaming_terminal_event: '',
+      terminal_status: '',
+    },
+  }
+
+  const first = buildMessageRenderMemoKey(base)
+  const second = buildMessageRenderMemoKey({
+    ...base,
+    metadata: {
+      ...base.metadata,
+      done_seen: true,
+      streaming_terminal_event: 'done',
+      terminal_status: 'completed',
+    },
+  })
+
+  assert.notEqual(first, second)
+})

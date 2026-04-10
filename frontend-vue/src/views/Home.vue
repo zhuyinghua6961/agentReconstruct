@@ -12,7 +12,7 @@ import { focusQuestionItem } from '../utils/questionFocus'
 import { buildQuestionOutlineItems, buildQuestionOutlineSignature, getLastQuestionOutlineItem, getQuestionAnchorId } from '../utils/questionOutline'
 import { DEFAULT_NEAR_BOTTOM_THRESHOLD_PX, isNearBottom, shouldAutoScroll } from '../utils/scrollFollow'
 import { mergeSelectedFileIdsAfterUpload, resolveUploadedFileDisplayNumber } from '../utils/fileSelection'
-import { shouldIgnoreLateStreamError } from '../utils/streamingLifecycle'
+import { shouldIgnoreLateStreamContent, shouldIgnoreLateStreamError } from '../utils/streamingLifecycle'
 import { normalizeTaskReplayCursor } from '../utils/taskReplayCursor'
 import { consumePendingStreamContent, shouldClearRecoveredActiveTask } from '../utils/taskRecoveryRuntime'
 import { createTaskRecoveryDebugLogger, summarizeTaskRecoveryDetail } from '../utils/taskRecoveryDebug'
@@ -137,7 +137,7 @@ const isNearBottomRef = ref(true)
 const pendingAutoScroll = ref(false)
 
 const renderedMessageCache = new WeakMap()
-const renderStreamingMessageHtml = createStreamingHtmlRenderer()
+const renderStreamingMessageHtml = createStreamingHtmlRenderer({ terminalFormatter: (text, message) => formatAnswer(text, Array.isArray(message?.referenceLinks) ? message.referenceLinks : []) })
 const taskRecoveryDebug = createTaskRecoveryDebugLogger()
 
 function normalizeAskMode(mode) {
@@ -984,6 +984,17 @@ function applyGatewayEvent(chatId, data, runtime = getStreamRuntime(chatId)) {
   if (data.type === 'content') {
     const activeRuntime = getStreamRuntime(chatId)
     if (!activeRuntime) return { terminal: false }
+    const targetMessage = getStreamingTargetMessage(chatId)?.message || {}
+    if (shouldIgnoreLateStreamContent(targetMessage)) {
+      activeRuntime.pendingContent = ''
+      taskRecoveryDebug.log('home:event-content-ignored-after-done', {
+        chatId,
+        taskId: String(activeRuntime?.requestId || ''),
+        seq: Number(data.seq || 0) || 0,
+        deltaLength: String(data.content || data.delta || '').length,
+      })
+      return { terminal: false, skipped: true }
+    }
     activeRuntime.pendingContent += String(data.content || data.delta || '')
     taskRecoveryDebug.log('home:event-content', {
       chatId,
@@ -1115,13 +1126,31 @@ function applyGatewayEvent(chatId, data, runtime = getStreamRuntime(chatId)) {
 
 function getRenderedMessageHtml(msg) {
   const content = String(msg?.content || '')
-  const referenceLinks = Array.isArray(msg?.referenceLinks) ? msg.referenceLinks : []
+  const referenceLinks = Array.isArray(msg?.referenceLinks) ? msg.referenceLinks : null
+  const isComplete = msg?.isComplete === true
+  const doneSeen = Boolean(msg?.doneSeen ?? msg?.done_seen ?? msg?.metadata?.done_seen)
+  const terminalStatus = String(
+    msg?.terminalStatus
+    ?? msg?.terminal_status
+    ?? msg?.status
+    ?? msg?.metadata?.terminal_status
+    ?? msg?.metadata?.status
+    ?? msg?.metadata?.streaming_terminal_event
+    ?? ''
+  ).trim().toLowerCase()
   const cached = renderedMessageCache.get(msg)
-  if (cached && cached.content === content && cached.referenceLinks === referenceLinks) {
+  if (
+    cached
+    && cached.content === content
+    && cached.referenceLinks === referenceLinks
+    && cached.isComplete === isComplete
+    && cached.doneSeen === doneSeen
+    && cached.terminalStatus === terminalStatus
+  ) {
     return cached.html
   }
-  const html = formatAnswer(content, referenceLinks)
-  renderedMessageCache.set(msg, { content, referenceLinks, html })
+  const html = formatAnswer(content, referenceLinks || [])
+  renderedMessageCache.set(msg, { content, referenceLinks, isComplete, doneSeen, terminalStatus, html })
   return html
 }
 
@@ -1149,6 +1178,10 @@ function flushPendingStreamContent(chatId) {
   const runtime = getStreamRuntime(chatId)
   if (!runtime?.pendingContent) return
   const target = getStreamingTargetMessage(chatId)
+  if (shouldIgnoreLateStreamContent(target?.message || {})) {
+    runtime.pendingContent = ''
+    return
+  }
   const existingContent = String(target?.message?.content || '')
   const { nextContent, remainingPending } = consumePendingStreamContent({
     existingContent,

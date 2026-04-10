@@ -87,3 +87,67 @@ test('shouldIgnoreLateStreamError normalizes uppercase done terminal events', as
     true,
   )
 })
+
+test('shouldIgnoreLateStreamContent returns true after a done terminal event', async () => {
+  const { shouldIgnoreLateStreamContent } = await loadStreamingLifecycleUtils()
+
+  assert.equal(typeof shouldIgnoreLateStreamContent, 'function')
+  assert.equal(
+    shouldIgnoreLateStreamContent({
+      isComplete: true,
+      content: '最终答案',
+      metadata: {
+        done_seen: true,
+        streaming_terminal_event: 'done',
+      },
+    }),
+    true,
+  )
+})
+
+test('shouldIgnoreLateStreamContent returns false before completion or for non-done terminals', async () => {
+  const { shouldIgnoreLateStreamContent } = await loadStreamingLifecycleUtils()
+
+  assert.equal(typeof shouldIgnoreLateStreamContent, 'function')
+  assert.equal(
+    shouldIgnoreLateStreamContent({
+      isComplete: false,
+      content: '输出中',
+      metadata: {},
+    }),
+    false,
+  )
+  assert.equal(
+    shouldIgnoreLateStreamContent({
+      isComplete: true,
+      content: '已取消',
+      metadata: {
+        streaming_terminal_event: 'canceled',
+      },
+    }),
+    false,
+  )
+})
+
+test('late-stream guards also recognize top-level completed markers from recovered messages', async () => {
+  const { shouldIgnoreLateStreamContent, shouldIgnoreLateStreamError } = await loadStreamingLifecycleUtils()
+
+  assert.equal(typeof shouldIgnoreLateStreamContent, 'function')
+  assert.equal(typeof shouldIgnoreLateStreamError, 'function')
+  assert.equal(
+    shouldIgnoreLateStreamContent({
+      isComplete: true,
+      status: 'completed',
+      content: '恢复出的最终答案',
+    }),
+    true,
+  )
+  assert.equal(
+    shouldIgnoreLateStreamError({
+      isComplete: true,
+      doneSeen: true,
+      content: '恢复出的最终答案',
+    }),
+    true,
+  )
+})

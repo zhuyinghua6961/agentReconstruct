@@ -293,6 +293,22 @@ def test_create_task_returns_gateway_managed_summary_and_persists_request_record
     assert stored["transport_kind"] == "sse"
 
 
+def test_create_task_summary_exposes_accept_timestamp_telemetry():
+    _set_health_transport()
+    client = TestClient(app)
+
+    response = client.post("/api/v1/tasks", json=_request_body())
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert isinstance(payload["telemetry"]["accepted_at_ms"], int)
+    assert payload["telemetry"]["accepted_at_ms"] > 0
+
+    stored = app.state.execution_queue_status_store.get_request(payload["task_id"])
+    assert stored is not None
+    assert stored["telemetry"]["accepted_at_ms"] == payload["telemetry"]["accepted_at_ms"]
+
+
 def test_create_task_logs_task_correlation_id(caplog):
     _set_health_transport()
     client = TestClient(app)
@@ -1802,6 +1818,81 @@ def test_get_task_events_stream_replays_then_live_tails_until_terminal():
     assert payloads[2]["status"] == "canceled"
 
 
+def test_get_task_events_filters_duplicate_upstream_seq_and_ignores_post_terminal_replay_frames():
+    _set_health_transport()
+    queue_store = app.state.execution_queue_status_store
+    relay_store = app.state.execution_event_relay_store
+    queue_store.put_request(
+        {
+            "request_id": "req_events_guard",
+            "status": "completed",
+            "conversation_id": 89,
+            "user_id": 42,
+            "assistant_message_id": "msg_89",
+            "requested_mode": "fast",
+            "actual_mode": "fast",
+            "route": "kb_qa",
+            "queue_tier": "high",
+            "created_at": "2026-04-06T10:00:00+00:00",
+            "updated_at": "2026-04-06T10:00:10+00:00",
+            "started_at": "2026-04-06T10:00:05+00:00",
+        },
+        ttl_seconds=900,
+    )
+    relay_store.append_frame("req_events_guard", {"type": "content", "seq": 7, "content": "hello"}, ttl_seconds=900)
+    relay_store.append_frame("req_events_guard", {"type": "content", "seq": 7, "content": "hello"}, ttl_seconds=900)
+    relay_store.append_frame("req_events_guard", {"type": "done", "seq": 8, "final_answer": "hello"}, ttl_seconds=900)
+    relay_store.append_frame("req_events_guard", {"type": "content", "seq": 9, "content": "should_not_surface"}, ttl_seconds=900)
+    client = TestClient(app)
+
+    response = client.get("/api/v1/tasks/req_events_guard/events", params={"after_seq": 0})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["seq"] for item in payload["events"]] == [1, 2]
+    assert [item["type"] for item in payload["events"]] == ["content", "done"]
+    replay = client.get("/api/v1/tasks/req_events_guard/events", params={"after_seq": 1}).json()["events"]
+    assert [item["type"] for item in replay] == ["done"]
+
+
+def test_get_task_events_hides_already_polluted_frames_after_a_terminal_replay_window():
+    _set_health_transport()
+    queue_store = app.state.execution_queue_status_store
+    relay_store = app.state.execution_event_relay_store
+    queue_store.put_request(
+        {
+            "request_id": "req_events_polluted_terminal",
+            "status": "completed",
+            "conversation_id": 90,
+            "user_id": 42,
+            "assistant_message_id": "msg_90",
+            "requested_mode": "fast",
+            "actual_mode": "fast",
+            "route": "kb_qa",
+            "queue_tier": "high",
+            "created_at": "2026-04-06T10:00:00+00:00",
+            "updated_at": "2026-04-06T10:00:10+00:00",
+            "started_at": "2026-04-06T10:00:05+00:00",
+        },
+        ttl_seconds=900,
+    )
+    relay_store._memory_frames["req_events_polluted_terminal"] = [
+        {"sequence": 1, "payload": {"type": "content", "content": "hello"}},
+        {"sequence": 2, "payload": {"type": "done", "final_answer": "hello"}},
+        {"sequence": 3, "payload": {"type": "content", "content": "should_not_surface"}},
+    ]
+    relay_store._memory_expiry["req_events_polluted_terminal"] = relay_store._now() + 900
+    relay_store._memory_request_ids.add("req_events_polluted_terminal")
+    relay_store._memory_total_frames = 3
+    relay_store._memory_latest_sequence["req_events_polluted_terminal"] = 3
+    client = TestClient(app)
+
+    response = client.get("/api/v1/tasks/req_events_polluted_terminal/events", params={"after_seq": 2})
+
+    assert response.status_code == 200
+    assert response.json()["events"] == []
+
+
 def test_task_events_stream_immediately_dispatches_head_queued_task_without_waiting_for_worker_poll(monkeypatch):
     monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
     app.state.settings = replace(
@@ -1887,6 +1978,339 @@ def test_task_events_stream_immediately_dispatches_head_queued_task_without_wait
     assert "/api/fast/ask_stream" in call_paths
     assert "/internal/conversations/188/tasks/req_events_immediate_dispatch/assistant-terminal" in call_paths
     assert call_paths[-1] == "/internal/quota/grants/grant-events-immediate-dispatch/finalize"
+
+
+def test_get_task_summary_exposes_first_chunk_latency_chain_after_immediate_dispatch(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    app.state.settings = replace(
+        app.state.settings,
+        admission=replace(
+            app.state.settings.admission,
+            enabled=True,
+            dispatcher_enabled=True,
+        ),
+    )
+    queue_store = app.state.execution_queue_status_store
+    relay_store = app.state.execution_event_relay_store
+    queue_store.put_request(
+        _queued_task_record(
+            request_id="req_events_latency_chain",
+            conversation_id=188,
+            assistant_message_id="msg_events_latency_chain",
+            quota_grant_id="grant-events-latency-chain",
+            telemetry={"accepted_at_ms": 1000},
+            execution_snapshot={
+                "question": "dispatch with latency chain",
+                "conversation_id": 188,
+                "user_id": 42,
+                "chat_history": [],
+                "requested_mode": "fast",
+                "actual_mode": "fast",
+                "route": "kb_qa",
+                "trace_id": "req_events_latency_chain",
+                "options": {},
+            },
+        ),
+        ttl_seconds=900,
+    )
+    relay_store.append_frame("req_events_latency_chain", {"type": "state", "status": "queued"}, ttl_seconds=900)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        payload = _json_request_body(request)
+        if path == "/api/fast/ask_stream":
+            return httpx.Response(
+                200,
+                content=(
+                    b'data: {"type":"metadata","query_mode":"fast","route":"kb_qa","trace_id":"req_events_latency_chain","metadata":{"telemetry":{"backend_stream_opened_at_ms":1200}}}\n\n'
+                    b'data: {"type":"step","step":"stage1","status":"processing","message":"stage1"}\n\n'
+                    b'data: {"type":"content","content":"hello"}\n\n'
+                    b'data: {"type":"done","final_answer":"hello","query_mode":"fast","route":"kb_qa","trace_id":"req_events_latency_chain"}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        if path == "/internal/conversations/188/tasks/req_events_latency_chain/assistant-progress":
+            return httpx.Response(200, json={"success": True, "status": payload.get("status")})
+        if path == "/internal/conversations/188/tasks/req_events_latency_chain/assistant-terminal":
+            return httpx.Response(200, json={"success": True, "status": payload.get("terminal_status")})
+        if path == "/internal/quota/grants/grant-events-latency-chain/finalize":
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"grant_id": "grant-events-latency-chain", "counted": payload["success"], "idempotent": False}},
+            )
+        raise AssertionError(f"unexpected upstream path: {path}")
+
+    _set_task_transport(handler)
+    client = TestClient(app)
+
+    with client.stream(
+        "GET",
+        "/api/v1/tasks/req_events_latency_chain/events",
+        params={"after_seq": 1},
+        headers={"accept": "text/event-stream"},
+    ) as response:
+        body = b"".join(response.iter_bytes())
+
+    assert response.status_code == 200
+    assert _sse_payloads(body)[-1]["type"] == "done"
+
+    summary = client.get("/api/v1/tasks/req_events_latency_chain").json()
+    telemetry = summary["telemetry"]
+
+    assert telemetry["accepted_at_ms"] == 1000
+    assert isinstance(telemetry["dispatch_started_at_ms"], int)
+    assert isinstance(telemetry["backend_stream_opened_at_ms"], int)
+    assert telemetry["backend_stream_opened_at_ms"] == 1200
+    assert isinstance(telemetry["first_step_at_ms"], int)
+    assert isinstance(telemetry["first_content_at_ms"], int)
+    assert telemetry["accepted_to_first_step_ms"] >= 0
+    assert telemetry["dispatch_to_first_step_ms"] >= 0
+    assert telemetry["accepted_to_first_content_ms"] >= 0
+
+
+def test_get_task_summary_prefers_done_telemetry_when_done_arrives_without_content_frame(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    app.state.settings = replace(
+        app.state.settings,
+        admission=replace(
+            app.state.settings.admission,
+            enabled=True,
+            dispatcher_enabled=True,
+        ),
+    )
+    queue_store = app.state.execution_queue_status_store
+    relay_store = app.state.execution_event_relay_store
+    queue_store.put_request(
+        _queued_task_record(
+            request_id="req_events_done_latency_chain",
+            conversation_id=190,
+            assistant_message_id="msg_events_done_latency_chain",
+            quota_grant_id="grant-events-done-latency-chain",
+            telemetry={"accepted_at_ms": 1000},
+            execution_snapshot={
+                "question": "dispatch done telemetry only",
+                "conversation_id": 190,
+                "user_id": 42,
+                "chat_history": [],
+                "requested_mode": "fast",
+                "actual_mode": "fast",
+                "route": "kb_qa",
+                "trace_id": "req_events_done_latency_chain",
+                "options": {},
+            },
+        ),
+        ttl_seconds=900,
+    )
+    relay_store.append_frame("req_events_done_latency_chain", {"type": "state", "status": "queued"}, ttl_seconds=900)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        payload = _json_request_body(request)
+        if path == "/api/fast/ask_stream":
+            return httpx.Response(
+                200,
+                content=(
+                    b'data: {"type":"metadata","query_mode":"fast","route":"kb_qa","trace_id":"req_events_done_latency_chain","metadata":{"telemetry":{"backend_stream_opened_at_ms":1200}}}\n\n'
+                    b'data: {"type":"step","step":"stage1","status":"processing","message":"stage1"}\n\n'
+                    b'data: {"type":"done","final_answer":"hello","query_mode":"fast","route":"kb_qa","trace_id":"req_events_done_latency_chain","metadata":{"telemetry":{"first_step_at_ms":1300,"first_content_at_ms":1450}}}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        if path == "/internal/conversations/190/tasks/req_events_done_latency_chain/assistant-progress":
+            return httpx.Response(200, json={"success": True, "status": payload.get("status")})
+        if path == "/internal/conversations/190/tasks/req_events_done_latency_chain/assistant-terminal":
+            return httpx.Response(200, json={"success": True, "status": payload.get("terminal_status")})
+        if path == "/internal/quota/grants/grant-events-done-latency-chain/finalize":
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"grant_id": "grant-events-done-latency-chain", "counted": payload["success"], "idempotent": False}},
+            )
+        raise AssertionError(f"unexpected upstream path: {path}")
+
+    _set_task_transport(handler)
+    client = TestClient(app)
+
+    with client.stream(
+        "GET",
+        "/api/v1/tasks/req_events_done_latency_chain/events",
+        params={"after_seq": 1},
+        headers={"accept": "text/event-stream"},
+    ) as response:
+        body = b"".join(response.iter_bytes())
+
+    assert response.status_code == 200
+    assert _sse_payloads(body)[-1]["type"] == "done"
+
+    summary = client.get("/api/v1/tasks/req_events_done_latency_chain").json()
+    telemetry = summary["telemetry"]
+
+    assert telemetry["accepted_at_ms"] == 1000
+    assert telemetry["backend_stream_opened_at_ms"] == 1200
+    assert telemetry["first_step_at_ms"] == 1300
+    assert telemetry["first_content_at_ms"] == 1450
+    assert telemetry["accepted_to_first_step_ms"] == 300
+    assert telemetry["accepted_to_first_content_ms"] == 450
+
+
+def test_task_events_immediate_dispatch_does_not_double_count_duplicate_upstream_seq_in_terminal_answer(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    app.state.settings = replace(
+        app.state.settings,
+        admission=replace(
+            app.state.settings.admission,
+            enabled=True,
+            dispatcher_enabled=True,
+        ),
+    )
+    queue_store = app.state.execution_queue_status_store
+    relay_store = app.state.execution_event_relay_store
+    queue_store.put_request(
+        _queued_task_record(
+            request_id="req_events_duplicate_live",
+            conversation_id=189,
+            assistant_message_id="msg_events_duplicate_live",
+            quota_grant_id="grant-events-duplicate-live",
+            execution_snapshot={
+                "question": "dedupe duplicate upstream seq",
+                "conversation_id": 189,
+                "user_id": 42,
+                "chat_history": [],
+                "requested_mode": "fast",
+                "actual_mode": "fast",
+                "route": "kb_qa",
+                "trace_id": "req_events_duplicate_live",
+                "options": {},
+            },
+        ),
+        ttl_seconds=900,
+    )
+    relay_store.append_frame("req_events_duplicate_live", {"type": "state", "status": "queued"}, ttl_seconds=900)
+
+    terminal_payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        payload = _json_request_body(request)
+        if path == "/api/fast/ask_stream":
+            return httpx.Response(
+                200,
+                content=(
+                    b'data: {"type":"metadata","query_mode":"fast","route":"kb_qa","trace_id":"req_events_duplicate_live"}\n\n'
+                    b'data: {"type":"content","seq":7,"content":"hello"}\n\n'
+                    b'data: {"type":"content","seq":7,"content":"hello"}\n\n'
+                    b'data: {"type":"done","query_mode":"fast","route":"kb_qa","trace_id":"req_events_duplicate_live"}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        if path == "/internal/conversations/189/tasks/req_events_duplicate_live/assistant-progress":
+            return httpx.Response(200, json={"success": True, "status": payload.get("status")})
+        if path == "/internal/conversations/189/tasks/req_events_duplicate_live/assistant-terminal":
+            terminal_payloads.append(payload)
+            return httpx.Response(200, json={"success": True, "status": payload.get("terminal_status")})
+        if path == "/internal/quota/grants/grant-events-duplicate-live/finalize":
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"grant_id": "grant-events-duplicate-live", "counted": payload["success"], "idempotent": False}},
+            )
+        raise AssertionError(f"unexpected upstream path: {path}")
+
+    _set_task_transport(handler)
+    client = TestClient(app)
+
+    with client.stream(
+        "GET",
+        "/api/v1/tasks/req_events_duplicate_live/events",
+        params={"after_seq": 1},
+        headers={"accept": "text/event-stream"},
+    ) as response:
+        body = b"".join(response.iter_bytes())
+
+    assert response.status_code == 200
+    payloads = _sse_payloads(body)
+    assert [item["seq"] for item in payloads] == [2, 3, 4, 5]
+    assert [item["type"] for item in payloads if item["type"] != "state"] == ["content", "done"]
+    assert terminal_payloads[-1]["answer_text"] == "hello"
+
+
+def test_task_events_immediate_dispatch_does_not_double_count_duplicate_upstream_seq_after_seq_less_step(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    app.state.settings = replace(
+        app.state.settings,
+        admission=replace(
+            app.state.settings.admission,
+            enabled=True,
+            dispatcher_enabled=True,
+        ),
+    )
+    queue_store = app.state.execution_queue_status_store
+    relay_store = app.state.execution_event_relay_store
+    queue_store.put_request(
+        _queued_task_record(
+            request_id="req_events_duplicate_interleaved",
+            conversation_id=190,
+            assistant_message_id="msg_events_duplicate_interleaved",
+            quota_grant_id="grant-events-duplicate-interleaved",
+            execution_snapshot={
+                "question": "dedupe duplicate upstream seq after step",
+                "conversation_id": 190,
+                "user_id": 42,
+                "chat_history": [],
+                "requested_mode": "fast",
+                "actual_mode": "fast",
+                "route": "kb_qa",
+                "trace_id": "req_events_duplicate_interleaved",
+                "options": {},
+            },
+        ),
+        ttl_seconds=900,
+    )
+    relay_store.append_frame("req_events_duplicate_interleaved", {"type": "state", "status": "queued"}, ttl_seconds=900)
+
+    terminal_payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        payload = _json_request_body(request)
+        if path == "/api/fast/ask_stream":
+            return httpx.Response(
+                200,
+                content=(
+                    b'data: {"type":"metadata","query_mode":"fast","route":"kb_qa","trace_id":"req_events_duplicate_interleaved"}\n\n'
+                    b'data: {"type":"content","seq":7,"content":"hello"}\n\n'
+                    b'data: {"type":"step","step":"retrieve","status":"processing","message":"retrieving"}\n\n'
+                    b'data: {"type":"content","seq":7,"content":"hello"}\n\n'
+                    b'data: {"type":"done","query_mode":"fast","route":"kb_qa","trace_id":"req_events_duplicate_interleaved"}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        if path == "/internal/conversations/190/tasks/req_events_duplicate_interleaved/assistant-progress":
+            return httpx.Response(200, json={"success": True, "status": payload.get("status")})
+        if path == "/internal/conversations/190/tasks/req_events_duplicate_interleaved/assistant-terminal":
+            terminal_payloads.append(payload)
+            return httpx.Response(200, json={"success": True, "status": payload.get("terminal_status")})
+        if path == "/internal/quota/grants/grant-events-duplicate-interleaved/finalize":
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"grant_id": "grant-events-duplicate-interleaved", "counted": payload["success"], "idempotent": False}},
+            )
+        raise AssertionError(f"unexpected upstream path: {path}")
+
+    _set_task_transport(handler)
+    client = TestClient(app)
+
+    with client.stream(
+        "GET",
+        "/api/v1/tasks/req_events_duplicate_interleaved/events",
+        params={"after_seq": 1},
+        headers={"accept": "text/event-stream"},
+    ) as response:
+        body = b"".join(response.iter_bytes())
+
+    assert response.status_code == 200
+    payloads = _sse_payloads(body)
+    assert [item["seq"] for item in payloads] == [2, 3, 4, 5, 6]
+    assert [item["type"] for item in payloads if item["type"] != "state"] == ["content", "step", "done"]
+    assert terminal_payloads[-1]["answer_text"] == "hello"
 
 
 def test_cancel_task_terminalizes_queued_request_persists_canceled_state_and_aborts_quota(monkeypatch):

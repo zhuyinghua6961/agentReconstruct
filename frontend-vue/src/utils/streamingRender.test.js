@@ -88,3 +88,35 @@ test('createStreamingHtmlRenderer updates more frequently under the default adap
   assert.equal(render(message), '<p>AB</p>')
   assert.equal(callCount, 2)
 })
+
+test('createStreamingHtmlRenderer rerenders with the terminal formatter once a message completes even if content is unchanged', async () => {
+  const { createStreamingHtmlRenderer } = await loadStreamingRenderUtils()
+
+  assert.equal(typeof createStreamingHtmlRenderer, 'function')
+
+  let streamingCalls = 0
+  let terminalCalls = 0
+  const render = createStreamingHtmlRenderer({
+    formatter: (text) => {
+      streamingCalls += 1
+      return `<stream>${text}</stream>`
+    },
+    terminalFormatter: (text) => {
+      terminalCalls += 1
+      return `<final>${text}</final>`
+    },
+  })
+
+  const message = { content: '## 标题', isComplete: false, metadata: {} }
+
+  assert.equal(render(message), '<stream>## 标题</stream>')
+  assert.equal(streamingCalls, 1)
+  assert.equal(terminalCalls, 0)
+
+  message.isComplete = true
+  message.metadata.done_seen = true
+
+  assert.equal(render(message), '<final>## 标题</final>')
+  assert.equal(streamingCalls, 1)
+  assert.equal(terminalCalls, 1)
+})
