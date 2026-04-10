@@ -30,6 +30,96 @@ def _truncate(value: object, limit: int) -> str:
     return text[: max(1, limit - 1)].rstrip() + "…"
 
 
+def _find_table_support_points(text: str, *, max_items: int = 3) -> list[str]:
+    points: list[str] = []
+    for raw_line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").splitlines():
+        line = _collapse_whitespace(re.sub(r"^[#>\-\*\d\.\)\s]+", "", raw_line))
+        if len(line) < 12:
+            continue
+        if line.startswith("文件:"):
+            continue
+        if line in points:
+            continue
+        points.append(_truncate(line, 220))
+        if len(points) >= max_items:
+            break
+    return points
+
+
+def _has_fastqa_markdown_sections(text: str) -> bool:
+    normalized = str(text or "")
+    last_end = -1
+    for label in ("结论", "证据", "对比", "限制"):
+        matched = re.search(rf"(^|\n)\s*(?:#{{1,6}}\s*)?{label}\s*[：:]?", normalized, flags=re.MULTILINE)
+        if matched is None or matched.start() <= last_end:
+            return False
+        last_end = matched.start()
+    return True
+
+
+def _ensure_fastqa_table_summary_structure(
+    *,
+    answer: str,
+    table_text: str,
+    include_kb: bool,
+    route_hint: str = "tabular_qa",
+    source_scope: str = "table",
+) -> str:
+    normalized_answer = str(answer or "").strip()
+    if not normalized_answer:
+        return normalized_answer
+    if _has_fastqa_markdown_sections(normalized_answer):
+        return normalized_answer
+
+    evidence_points = _find_table_support_points(table_text, max_items=3)
+    if not evidence_points:
+        evidence_points = _find_table_support_points(normalized_answer, max_items=3)
+    if not evidence_points:
+        evidence_points = ["当前可读表格证据有限，仅能保留主结论。"]
+    hybrid_mode = str(route_hint or "tabular_qa").strip().lower() == "hybrid_qa"
+    normalized_scope = str(source_scope or "table").strip() or "table"
+
+    sections = [
+        "## 结论",
+        normalized_answer,
+        "",
+        "## 证据",
+        *[f"- {item}" for item in evidence_points],
+        "",
+        "## 对比",
+        *(
+            [
+                "- 当前为混合问答中的表格证据子结论；可用于后续与 PDF 或知识库交叉验证，不能单独覆盖其他文件或知识库结论。",
+                f"- 当前 source_scope={normalized_scope}；这里仅保留表格结果能够直接支持的对照点。",
+            ]
+            if hybrid_mode
+            else ["- 当前问题主要基于单个表格文件，未提供可直接对照的第二份文件证据。"]
+        ),
+        "",
+        "## 限制",
+        *(
+            [
+                "- 当前结论受表格抽取范围与命中字段限制影响，仍需与其他已选文件或知识库证据综合判断。",
+                (
+                    "- 知识库若参与，仅可用于验证，不应覆盖当前表格执行结果。"
+                    if include_kb
+                    else "- 当前未引入知识库补充；若后续纳入其他来源，综合结论可能继续收敛。"
+                ),
+            ]
+            if hybrid_mode
+            else [
+                "- 当前结论受表格抽取范围与命中字段限制影响，未命中的列不会被补写为确定结论。",
+                (
+                    "- 知识库若参与，仅可用于验证，不应覆盖当前表格执行结果。"
+                    if include_kb
+                    else "- 当前未引入知识库补充，本回答不代表跨来源统一结论。"
+                ),
+            ]
+        ),
+    ]
+    return "\n".join(sections).strip()
+
+
 def _is_summary_question(question: str) -> bool:
     lower = str(question or "").strip().lower()
     hints = ("总结", "概括", "摘要", "summarize", "summary", "overview", "main points")
@@ -91,6 +181,80 @@ def _table_fallback_answer(*, question: str, table_text: str) -> str:
     return "\n".join([prefix, *[f"{index}. {item}" for index, item in enumerate(selected, start=1)]])
 
 
+def _build_patent_tabular_prompt(
+    *,
+    question: str,
+    table_text: str,
+    route_hint: str,
+    source_scope: str,
+    include_kb: bool,
+) -> str:
+    normalized_route = str(route_hint or "tabular_qa").strip().lower() or "tabular_qa"
+    normalized_scope = str(source_scope or "table").strip() or "table"
+    summary_mode = _is_summary_question(question)
+    if normalized_route == "hybrid_qa":
+        return "\n".join(
+            [
+                "你是一位专利/文献表格证据分析助手。",
+                "当前任务属于 patent 混合文件问答中的表格证据分析环节。",
+                "表格执行结果来自当前专利/文献文件的真实提取或计算结果，必须作为当前子任务的主依据。",
+                f"当前 source_scope={normalized_scope}",
+                "知识库或其他文件只能用于后续交叉验证，不能覆盖这里的表格结论。",
+                "请先给出这份表格单独能够支持的判断，再指出可供后续跨来源比较的指标或差异。",
+                "",
+                "用户问题:",
+                str(question or ""),
+                "",
+                "表格证据:",
+                str(table_text or ""),
+                "",
+                "请按以下 Markdown 结构回答：",
+                "## 结论",
+                "## 证据",
+                "## 对比",
+                "## 限制",
+                "- 结论只写当前表格能够直接支持的判断",
+                "- 证据列出 2-4 条关键数据、字段或代表性行",
+                "- 对比说明这些表格证据后续可与 PDF/知识库对照的点；若当前无对照对象，直接说明",
+                "- 限制说明字段缺失、抽取范围限制或仍待其他来源验证的部分",
+                "- 不要编造表格中不存在的列、数值或结论",
+                (
+                    "- 即使当前允许知识库参与，也只能在后续总结合成里交叉验证，不能把知识库结论写成当前表格事实"
+                    if include_kb
+                    else "- 当前未引入知识库补充，本轮回答仍需明确边界"
+                ),
+            ]
+        ).strip()
+
+    intro = "你是一位专利/文献表格分析助手。表格执行结果来自当前专利/文献文件的真实提取或计算结果，不允许编造。"
+    if summary_mode:
+        intro += " 对于概览类问题，优先总结整体分布、差异和异常，再补充少量代表性数据点。"
+    else:
+        intro += " 对于定向问题，只回答表格证据能够直接支持的内容；证据不足时要明确指出。"
+    return "\n".join(
+        [
+            intro,
+            f"当前 route={normalized_route}，source_scope={normalized_scope}",
+            "",
+            "用户问题:",
+            str(question or ""),
+            "",
+            "表格证据:",
+            str(table_text or ""),
+            "",
+            "请按以下 Markdown 结构回答：",
+            "## 结论",
+            "## 证据",
+            "## 对比",
+            "## 限制",
+            "- 结论需要先回答用户最关心的判断",
+            "- 证据列出关键字段、数值、样例行或统计摘要",
+            "- 对比说明当前是否缺少第二份表格或其他来源可用于对照",
+            "- 限制说明抽取范围、字段缺失或原表未提及的部分",
+        ]
+    ).strip()
+
+
 class PatentTabularService:
     def __init__(
         self,
@@ -148,6 +312,8 @@ class PatentTabularService:
                 question=contract.question,
                 table_text=table_text,
                 include_kb=include_kb,
+                route_hint=contract.route,
+                source_scope=contract.source_scope,
                 content_callback=content_callback,
             )
             answer_mode = "table_text_summary"
@@ -269,18 +435,37 @@ class PatentTabularService:
         question: str,
         table_text: str,
         include_kb: bool,
+        route_hint: str,
+        source_scope: str,
         content_callback: Callable[[str], None] | None = None,
     ) -> str:
+        prompt = _build_patent_tabular_prompt(
+            question=question,
+            table_text=table_text,
+            route_hint=route_hint,
+            source_scope=source_scope,
+            include_kb=include_kb,
+        )
         if callable(self._answer_question_fn):
             output = self._answer_question_fn(
                 question=question,
                 table_text=table_text,
                 include_kb=include_kb,
+                prompt=prompt,
+                route_hint=route_hint,
+                source_scope=source_scope,
             )
             if isinstance(output, (str, bytes)):
                 answer = str(output or "").strip()
-                emit_text_chunks(answer, content_callback=content_callback)
                 if answer:
+                    answer = _ensure_fastqa_table_summary_structure(
+                        answer=answer,
+                        table_text=table_text,
+                        include_kb=include_kb,
+                        route_hint=route_hint,
+                        source_scope=source_scope,
+                    )
+                    emit_text_chunks(answer, content_callback=content_callback)
                     return answer
             else:
                 answer_parts: list[str] = []
@@ -289,14 +474,27 @@ class PatentTabularService:
                     if not text:
                         continue
                     answer_parts.append(text)
-                    if callable(content_callback):
-                        content_callback(text)
                 answer = "".join(answer_parts).strip()
                 if answer:
+                    answer = _ensure_fastqa_table_summary_structure(
+                        answer=answer,
+                        table_text=table_text,
+                        include_kb=include_kb,
+                        route_hint=route_hint,
+                        source_scope=source_scope,
+                    )
+                    emit_text_chunks(answer, content_callback=content_callback)
                     return answer
         fallback = _table_fallback_answer(question=question, table_text=table_text)
-        emit_text_chunks(fallback, content_callback=content_callback)
-        return fallback
+        answer = _ensure_fastqa_table_summary_structure(
+            answer=fallback,
+            table_text=table_text,
+            include_kb=include_kb,
+            route_hint=route_hint,
+            source_scope=source_scope,
+        )
+        emit_text_chunks(answer, content_callback=content_callback)
+        return answer
 
     @staticmethod
     def _extract_table_text(

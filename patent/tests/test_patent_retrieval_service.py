@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
+
+import pytest
 
 from server.patent.cache_keys import PatentKeyFactory
 from server.patent.models import PatentRetrievalClaim, PatentRetrievalPlan
@@ -12,6 +16,7 @@ from server.patent.retrieval_models import (
 )
 from server.patent.retrieval_service import PatentRetrievalService
 from server.patent.runtime import PatentRuntime
+from server.patent.stages.retrieval import run_stage2_targeted_retrieval
 from server.services.execution_cache import ExecutionCache
 
 
@@ -366,6 +371,7 @@ def test_targeted_retrieval_constrains_chunk_localization_to_abstract_recalled_c
                 application_number="CN202110320984.1",
                 title="一种锂离子电池及动力车辆",
                 abstract_text="通过 LMFP/LFP/三元复配改善充电安全与低 SOC 放电功率。",
+                claims=[PatentClaim(claim_number=1, text="一种锂离子电池，其正极活性材料包括 LMFP。")],
             )
         ],
         retrieval_version="retrieval-v2",
@@ -429,6 +435,7 @@ def test_targeted_retrieval_merges_and_dedups_multi_query_results():
                 application_number="CN202110320984.1",
                 title="一种锂离子电池及动力车辆",
                 abstract_text="通过 LMFP/LFP/三元复配改善充电安全与低 SOC 放电功率。",
+                claims=[PatentClaim(claim_number=1, text="一种锂离子电池，其正极活性材料包括 LMFP。")],
             )
         ],
         retrieval_version="retrieval-v2",
@@ -703,6 +710,276 @@ def test_targeted_retrieval_merges_multi_claim_results_and_dedups_by_document_pr
     assert any(item["patent_id"] == "US20240001234A1" for item in payload["metadatas"])
 
 
+def test_targeted_retrieval_parallel_matches_serial_output_and_order():
+    query_to_chunk = {
+        "query-a": [
+            {
+                "patent_id": "CN115132975B",
+                "distance": 0.04,
+                "source_file": "说明书.json",
+                "json_stem": "CN115132975B",
+                "chunk_index": 1,
+                "document": "重复证据段。后缀A",
+            },
+            {
+                "patent_id": "CN115132975B",
+                "distance": 0.06,
+                "source_file": "说明书.json",
+                "json_stem": "CN115132975B",
+                "chunk_index": 2,
+                "document": "独立证据A",
+            },
+        ],
+        "query-b": [
+            {
+                "patent_id": "CN115132975B",
+                "distance": 0.02,
+                "source_file": "说明书.json",
+                "json_stem": "CN115132975B",
+                "chunk_index": 3,
+                "document": "重复证据段。后缀B",
+            },
+            {
+                "patent_id": "US20240001234A1",
+                "distance": 0.05,
+                "source_file": "说明书.json",
+                "json_stem": "US20240001234A1",
+                "chunk_index": 4,
+                "document": "独立证据B",
+            },
+        ],
+    }
+
+    service = PatentRetrievalService(
+        identity_registry={
+            "CN115132975B": "CN115132975B",
+            "US20240001234A1": "US20240001234A1",
+        },
+        catalog_records=[
+            PatentCatalogRecord(
+                canonical_patent_id="CN115132975B",
+                publication_number="CN115132975B",
+                application_number="CN202110320984.1",
+                title="一种锂离子电池及动力车辆",
+                abstract_text="通过 LMFP/LFP/三元复配改善充电安全与低 SOC 放电功率。",
+            ),
+            PatentCatalogRecord(
+                canonical_patent_id="US20240001234A1",
+                publication_number="US20240001234A1",
+                application_number="US18/000,123",
+                title="Electrode manufacturing method",
+                abstract_text="An electrode manufacturing process.",
+            ),
+        ],
+        retrieval_version="retrieval-v2",
+        catalog_index_version="catalog-v2",
+        abstract_vector_search=lambda question, top_k: [
+            {"patent_id": "CN115132975B", "distance": 0.10, "document": "通过 LMFP/LFP/三元复配改善充电安全与低 SOC 放电功率。"},
+            {"patent_id": "US20240001234A1", "distance": 0.12, "document": "An electrode manufacturing process."},
+        ],
+        chunk_vector_search=lambda question, candidate_patent_ids, top_k: query_to_chunk[question],
+    )
+
+    serial_payload = service.targeted_retrieve(
+        retrieval_claims=[
+            PatentRetrievalClaim(claim="claim-a", keywords=["A"]),
+            PatentRetrievalClaim(claim="claim-b", keywords=["B"]),
+        ],
+        user_question="user question",
+        frozen_claim_queries=[["query-a"], ["query-b"]],
+        parallel_workers=1,
+    )
+    parallel_payload = service.targeted_retrieve(
+        retrieval_claims=[
+            PatentRetrievalClaim(claim="claim-a", keywords=["A"]),
+            PatentRetrievalClaim(claim="claim-b", keywords=["B"]),
+        ],
+        user_question="user question",
+        frozen_claim_queries=[["query-a"], ["query-b"]],
+        parallel_workers=2,
+    )
+
+    assert serial_payload["documents"] == parallel_payload["documents"]
+    assert serial_payload["metadatas"] == parallel_payload["metadatas"]
+    assert serial_payload["source_ids"] == parallel_payload["source_ids"]
+    assert serial_payload["metadata"]["retrieval_plan_queries"] == parallel_payload["metadata"]["retrieval_plan_queries"]
+
+
+def test_targeted_retrieval_parallel_worker_one_falls_back_to_serial():
+    service = PatentRetrievalService(
+        identity_registry={"CN115132975B": "CN115132975B"},
+        catalog_records=[
+            PatentCatalogRecord(
+                canonical_patent_id="CN115132975B",
+                publication_number="CN115132975B",
+                application_number="CN202110320984.1",
+                title="一种锂离子电池及动力车辆",
+                abstract_text="通过 LMFP/LFP/三元复配改善充电安全与低 SOC 放电功率。",
+                claims=[PatentClaim(claim_number=1, text="一种锂离子电池，其正极活性材料包括 LMFP。")],
+            )
+        ],
+        retrieval_version="retrieval-v2",
+        catalog_index_version="catalog-v2",
+        abstract_vector_search=lambda question, top_k: [
+            {"patent_id": "CN115132975B", "distance": 0.10, "document": "通过 LMFP/LFP/三元复配改善充电安全与低 SOC 放电功率。"},
+        ],
+        chunk_vector_search=lambda question, candidate_patent_ids, top_k: [],
+    )
+
+    serial_payload = service.targeted_retrieve(
+        retrieval_claims=[PatentRetrievalClaim(claim="claim-a", keywords=["A"])],
+        user_question="user question",
+        frozen_claim_queries=[["query-a"]],
+        parallel_workers=1,
+    )
+    parallel_payload = service.targeted_retrieve(
+        retrieval_claims=[PatentRetrievalClaim(claim="claim-a", keywords=["A"])],
+        user_question="user question",
+        frozen_claim_queries=[["query-a"]],
+        parallel_workers=4,
+    )
+
+    assert serial_payload == parallel_payload
+
+
+def test_targeted_retrieval_parallel_honors_explicit_should_cancel():
+    service = PatentRetrievalService(
+        identity_registry={"CN115132975B": "CN115132975B"},
+        catalog_records=[
+            PatentCatalogRecord(
+                canonical_patent_id="CN115132975B",
+                publication_number="CN115132975B",
+                application_number="CN202110320984.1",
+                title="一种锂离子电池及动力车辆",
+                abstract_text="通过 LMFP/LFP/三元复配改善充电安全与低 SOC 放电功率。",
+            )
+        ],
+        retrieval_version="retrieval-v2",
+        catalog_index_version="catalog-v2",
+        abstract_vector_search=lambda question, top_k: [
+            {"patent_id": "CN115132975B", "distance": 0.10, "document": "通过 LMFP/LFP/三元复配改善充电安全与低 SOC 放电功率。"},
+        ],
+        chunk_vector_search=lambda question, candidate_patent_ids, top_k: [],
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[PatentRetrievalClaim(claim="claim-a", keywords=["A"])],
+        user_question="user question",
+        frozen_claim_queries=[["query-a"]],
+        parallel_workers=2,
+        should_cancel=lambda: True,
+    )
+
+    assert payload["documents"] == []
+    assert payload["metadata"]["cancelled"] is True
+
+
+def test_targeted_retrieval_parallel_midflight_cancel_returns_without_waiting():
+    release = threading.Event()
+    started = threading.Event()
+
+    service = PatentRetrievalService(
+        identity_registry={"CN115132975B": "CN115132975B"},
+        catalog_records=[
+            PatentCatalogRecord(
+                canonical_patent_id="CN115132975B",
+                publication_number="CN115132975B",
+                application_number="CN202110320984.1",
+                title="一种锂离子电池及动力车辆",
+                abstract_text="通过 LMFP/LFP/三元复配改善充电安全与低 SOC 放电功率。",
+            )
+        ],
+        retrieval_version="retrieval-v2",
+        catalog_index_version="catalog-v2",
+        abstract_vector_search=lambda question, top_k: started.set() or release.wait(timeout=0.5) or [],
+        chunk_vector_search=lambda question, candidate_patent_ids, top_k: [],
+    )
+
+    started_at = time.perf_counter()
+    try:
+        payload = service.targeted_retrieve(
+            retrieval_claims=[
+                PatentRetrievalClaim(claim="claim-a", keywords=["A"]),
+                PatentRetrievalClaim(claim="claim-b", keywords=["B"]),
+            ],
+            user_question="user question",
+            frozen_claim_queries=[["query-a"], ["query-b"]],
+            parallel_workers=2,
+            should_cancel=lambda: started.is_set(),
+        )
+    finally:
+        release.set()
+
+    elapsed = time.perf_counter() - started_at
+    assert elapsed < 0.3
+    assert payload["documents"] == []
+    assert payload["metadata"]["cancelled"] is True
+
+
+@pytest.mark.parametrize("parallel_workers", [1, 2])
+def test_targeted_retrieval_claim_local_failure_is_logged_and_other_claims_survive(monkeypatch, caplog, parallel_workers):
+    service = PatentRetrievalService(
+        identity_registry={
+            "CN115132975B": "CN115132975B",
+            "US20240001234A1": "US20240001234A1",
+        },
+        catalog_records=[
+            PatentCatalogRecord(
+                canonical_patent_id="CN115132975B",
+                publication_number="CN115132975B",
+                application_number="CN202110320984.1",
+                title="一种锂离子电池及动力车辆",
+                abstract_text="通过 LMFP/LFP/三元复配改善充电安全与低 SOC 放电功率。",
+            ),
+            PatentCatalogRecord(
+                canonical_patent_id="US20240001234A1",
+                publication_number="US20240001234A1",
+                application_number="US18/000,123",
+                title="Electrode manufacturing method",
+                abstract_text="An electrode manufacturing process.",
+            ),
+        ],
+        retrieval_version="retrieval-v2",
+        catalog_index_version="catalog-v2",
+        abstract_vector_search=lambda question, top_k: [{"patent_id": "CN115132975B", "distance": 0.10, "document": "摘要证据"}],
+        chunk_vector_search=lambda question, candidate_patent_ids, top_k: [
+            {
+                "patent_id": "CN115132975B" if question == "query-a" else "US20240001234A1",
+                "distance": 0.04,
+                "source_file": "说明书.json",
+                "json_stem": "CN115132975B" if question == "query-a" else "US20240001234A1",
+                "chunk_index": 1,
+                "document": "证据A" if question == "query-a" else "证据B",
+            }
+        ],
+    )
+
+    original_match_from_chunk_hit = service._match_from_chunk_hit
+
+    def _failing_match_from_chunk_hit(hit):
+        if hit.get("document") == "证据B":
+            raise RuntimeError("bad claim")
+        return original_match_from_chunk_hit(hit)
+
+    monkeypatch.setattr(service, "_match_from_chunk_hit", _failing_match_from_chunk_hit)
+
+    with caplog.at_level("WARNING", logger="patent.retrieval"):
+        payload = service.targeted_retrieve(
+            retrieval_claims=[
+                PatentRetrievalClaim(claim="claim-a", keywords=["A"]),
+                PatentRetrievalClaim(claim="claim-b", keywords=["B"]),
+            ],
+            user_question="user question",
+            frozen_claim_queries=[["query-a"], ["query-b"]],
+            parallel_workers=parallel_workers,
+        )
+
+    assert payload["references"] == ["CN115132975B"]
+    assert "证据A" in payload["documents"]
+    assert all("证据B" != item for item in payload["documents"])
+    assert any("claim retrieval failed" in record.message for record in caplog.records)
+
+
 def test_extract_source_ids_prefers_metadata_patent_id_order_from_stage2_payload():
     service = _service(identity_registry={})
 
@@ -793,6 +1070,153 @@ def test_retrieval_degrades_to_no_vector_path_when_vector_search_fails_at_reques
     assert first.references == ["CN123456789A"]
     assert second.references == ["CN123456789A"]
     assert vector_calls == {"abstract": 1, "chunk": 0}
+
+
+def test_targeted_retrieval_parallel_keeps_vector_degrade_semantics():
+    vector_calls = {"abstract": 0, "chunk": 0}
+    service = PatentRetrievalService(
+        identity_registry={"CN123456789A": "CN123456789A"},
+        catalog_records=[
+            PatentCatalogRecord(
+                canonical_patent_id="CN123456789A",
+                publication_number="CN123456789A",
+                application_number="CN202410001234X",
+                title="Battery thermal management system for electric vehicles",
+                abstract_text="A thermal control system for electric vehicle battery packs.",
+                claims=[PatentClaim(claim_number=1, text="A battery thermal management system configured for electric vehicles.")],
+                description_snippets=[PatentDescriptionSnippet(paragraph_id="p-001", text="Battery temperature control.")],
+            )
+        ],
+        retrieval_version="retrieval-v2",
+        catalog_index_version="catalog-v2",
+        abstract_vector_search=lambda question, top_k: vector_calls.__setitem__("abstract", vector_calls["abstract"] + 1) or (_ for _ in ()).throw(RuntimeError("embedding endpoint unavailable")),
+        chunk_vector_search=lambda question, candidate_patent_ids, top_k: vector_calls.__setitem__("chunk", vector_calls["chunk"] + 1) or [],
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[PatentRetrievalClaim(claim="claim-a", keywords=["thermal management"])],
+        user_question="Which patent covers battery thermal management for electric vehicles?",
+        frozen_claim_queries=[["battery thermal management electric vehicles"]],
+        parallel_workers=2,
+    )
+
+    assert service._vector_runtime_enabled is False
+    assert payload["references"] == ["CN123456789A"]
+    assert vector_calls == {"abstract": 1, "chunk": 0}
+
+
+def test_targeted_retrieval_claim_path_does_not_call_answer_builder():
+    answer_builder_calls: list[dict[str, object]] = []
+    service = PatentRetrievalService(
+        identity_registry={"CN115132975B": "CN115132975B"},
+        catalog_records=[
+            PatentCatalogRecord(
+                canonical_patent_id="CN115132975B",
+                publication_number="CN115132975B",
+                application_number="CN202110320984.1",
+                title="一种锂离子电池及动力车辆",
+                abstract_text="通过 LMFP/LFP/三元复配改善充电安全与低 SOC 放电功率。",
+            )
+        ],
+        retrieval_version="retrieval-v2",
+        catalog_index_version="catalog-v2",
+        abstract_vector_search=lambda question, top_k: [
+            {"patent_id": "CN115132975B", "distance": 0.10, "document": "摘要证据"}
+        ],
+        chunk_vector_search=lambda question, candidate_patent_ids, top_k: [],
+        answer_builder=lambda **kwargs: answer_builder_calls.append(kwargs) or "stage2 should not build answer",
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[PatentRetrievalClaim(claim="claim-a", keywords=["A"])],
+        user_question="user question",
+        frozen_claim_queries=[["query-a"]],
+        parallel_workers=2,
+    )
+
+    assert payload["references"] == ["CN115132975B"]
+    assert answer_builder_calls == []
+    assert "answer_build_ms" not in payload["timings"]
+
+
+def test_targeted_retrieval_plan_path_does_not_call_answer_builder():
+    answer_builder_calls: list[dict[str, object]] = []
+    service = PatentRetrievalService(
+        identity_registry={"CN115132975B": "CN115132975B"},
+        catalog_records=[
+            PatentCatalogRecord(
+                canonical_patent_id="CN115132975B",
+                publication_number="CN115132975B",
+                application_number="CN202110320984.1",
+                title="一种锂离子电池及动力车辆",
+                abstract_text="通过 LMFP/LFP/三元复配改善充电安全与低 SOC 放电功率。",
+            )
+        ],
+        retrieval_version="retrieval-v2",
+        catalog_index_version="catalog-v2",
+        abstract_vector_search=lambda question, top_k: [
+            {"patent_id": "CN115132975B", "distance": 0.10, "document": "摘要证据"}
+        ],
+        chunk_vector_search=lambda question, candidate_patent_ids, top_k: [
+            {
+                "patent_id": "CN115132975B",
+                "distance": 0.04,
+                "source_file": "说明书.json",
+                "json_stem": "CN115132975B",
+                "chunk_index": 1,
+                "document": "说明书证据",
+            }
+        ],
+        answer_builder=lambda **kwargs: answer_builder_calls.append(kwargs) or "stage2 should not build answer",
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_plan={
+            "candidate_recall_queries": ["battery thermal management"],
+            "evidence_localization_queries": ["battery thermal management"],
+            "explicit_patent_ids": [],
+            "preferred_sections": [],
+            "filters": {},
+        },
+        user_question="Which patent covers battery thermal management?",
+    )
+
+    assert payload["references"] == ["CN115132975B"]
+    assert answer_builder_calls == []
+    assert "answer_build_ms" not in payload["timings"]
+
+
+def test_targeted_retrieval_claim_fallback_path_does_not_call_answer_builder():
+    answer_builder_calls: list[dict[str, object]] = []
+    service = PatentRetrievalService(
+        identity_registry={"CN115132975B": "CN115132975B"},
+        catalog_records=[
+            PatentCatalogRecord(
+                canonical_patent_id="CN115132975B",
+                publication_number="CN115132975B",
+                application_number="CN202110320984.1",
+                title="LMFP battery safety platform",
+                abstract_text="Improves charge safety.",
+                claims=[PatentClaim(claim_number=1, text="A battery safety platform for LMFP cells.")],
+            )
+        ],
+        retrieval_version="retrieval-v2",
+        catalog_index_version="catalog-v2",
+        abstract_vector_search=lambda question, top_k: [],
+        chunk_vector_search=lambda question, candidate_patent_ids, top_k: [],
+        answer_builder=lambda **kwargs: answer_builder_calls.append(kwargs) or "stage2 should not build answer",
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[PatentRetrievalClaim(claim="unmatched claim", keywords=["unmatched"])],
+        user_question="LMFP battery safety platform",
+        frozen_claim_queries=[["unmatched query"]],
+        parallel_workers=2,
+    )
+
+    assert payload["references"] == ["CN115132975B"]
+    assert answer_builder_calls == []
+    assert "answer_build_ms" not in payload["timings"]
 
 
 def test_build_default_patent_runtime_builds_no_vector_lexical_catalog_from_archive(monkeypatch, tmp_path: Path):
@@ -893,6 +1317,228 @@ def test_runtime_stage2_targeted_retrieval_delegates_to_patent_retrieval_stage_a
 
     assert payload["references"] == ["CN123456789A"]
     assert runtime._extract_patent_ids_from_results(payload) == ["CN123456789A"]
+
+
+def test_runtime_stage2_targeted_retrieval_passes_parallel_workers_and_should_cancel(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_run_stage2_targeted_retrieval(**kwargs):
+        captured.update(kwargs)
+        return {
+            "references": ["CN123456789A"],
+            "reference_objects": [{"canonical_patent_id": "CN123456789A"}],
+            "metadata": {},
+        }
+
+    monkeypatch.setattr("server.patent.runtime.run_stage2_targeted_retrieval", _fake_run_stage2_targeted_retrieval)
+
+    runtime = PatentRuntime(
+        retrieval_service=_service(identity_registry={"CN123456789A": "CN123456789A"}),
+        resources=[],
+        stage2_parallel_workers=6,
+    )
+    should_cancel = object()
+
+    runtime.stage2_targeted_retrieval(
+        [PatentRetrievalClaim(claim="claim-a", keywords=["A"])],
+        user_question="从专利角度如何评估 LMFP 对 LFP 的替代窗口和风险？",
+        should_cancel=should_cancel,
+        active_stream_count=9,
+    )
+
+    assert captured["should_cancel"] is should_cancel
+    assert captured["active_stream_count"] == 9
+    assert captured["parallel_workers"] == 6
+
+
+def test_run_stage2_targeted_retrieval_passes_active_stream_count_to_service():
+    captured: dict[str, object] = {}
+
+    class _RetrievalService:
+        def targeted_retrieve(self, **kwargs):
+            captured.update(kwargs)
+            return {
+                "references": ["CN123456789A"],
+                "reference_objects": [{"canonical_patent_id": "CN123456789A"}],
+                "metadata": {},
+            }
+
+    run_stage2_targeted_retrieval(
+        retrieval_service=_RetrievalService(),
+        retrieval_claims=[PatentRetrievalClaim(claim="claim-a", keywords=["A"])],
+        user_question="user question",
+        query_client=None,
+        query_model="",
+        logger=None,
+        should_cancel=None,
+        active_stream_count=9,
+        parallel_workers=2,
+    )
+
+    assert captured["active_stream_count"] == 9
+
+
+def test_run_stage2_targeted_retrieval_logs_parallel_workers(caplog):
+    class _RetrievalService:
+        def targeted_retrieve(self, **kwargs):
+            return {
+                "source_ids": ["CN123456789A"],
+                "references": ["CN123456789A"],
+                "reference_objects": [{"canonical_patent_id": "CN123456789A"}],
+                "metadata": {"retrieval_plan_queries": ["query-a"]},
+            }
+
+    class _Logger:
+        def info(self, message, *args):
+            import logging
+
+            logging.getLogger("patent.retrieval.test").info(message, *args)
+
+        def warning(self, message, *args):
+            import logging
+
+            logging.getLogger("patent.retrieval.test").warning(message, *args)
+
+    with caplog.at_level("INFO", logger="patent.retrieval.test"):
+        run_stage2_targeted_retrieval(
+            retrieval_service=_RetrievalService(),
+            retrieval_claims=[PatentRetrievalClaim(claim="claim-a", keywords=["a"])],
+            user_question="user question",
+            query_client=None,
+            query_model="planner-model",
+            logger=_Logger(),
+            parallel_workers=3,
+        )
+
+    messages = [record.message for record in caplog.records if record.name == "patent.retrieval.test"]
+    assert any(
+        "patent stage2 targeted retrieval start" in message
+        and "claim_count=1" in message
+        and "query_model=planner-model" in message
+        and "parallel_workers=3" in message
+        for message in messages
+    )
+
+
+def test_patent_runtime_direct_construction_keeps_safe_parallel_worker_defaults():
+    runtime = PatentRuntime(
+        retrieval_service=_service(identity_registry={"CN123456789A": "CN123456789A"}),
+        resources=[],
+    )
+
+    assert runtime.stage2_parallel_workers >= 1
+    assert runtime.stage3_parallel_workers >= 1
+
+
+def test_build_default_patent_runtime_reads_parallel_worker_envs(monkeypatch, tmp_path: Path):
+    resource_root = tmp_path / "resource" / "patentQA"
+    archive_dir = resource_root / "__archive__"
+    archive_dir.mkdir(parents=True)
+
+    from server.patent.resource_registry import PatentResourceRegistry
+    from server.patent.runtime import build_default_patent_runtime
+
+    class _AnswerBuilder:
+        def __call__(self, **kwargs):
+            return ""
+
+        def close(self):
+            return None
+
+    monkeypatch.setenv("PATENT_STAGE2_PARALLEL_WORKERS", "4")
+    monkeypatch.setenv("PATENT_STAGE3_PARALLEL_WORKERS", "3")
+    monkeypatch.setattr(
+        "server.patent.runtime.PatentResourceRegistry.discover",
+        lambda: PatentResourceRegistry(
+            repo_root=tmp_path,
+            abstract_db_path=resource_root / "vector_db_patent_abstracts",
+            chunk_db_path=resource_root / "vector_db_patent_chunks",
+            archive_root=archive_dir,
+        ),
+    )
+    monkeypatch.setattr("server.patent.runtime.PatentAnswerBuilder.from_env", lambda: _AnswerBuilder())
+
+    runtime = build_default_patent_runtime()
+
+    assert runtime.stage2_parallel_workers == 4
+    assert runtime.stage3_parallel_workers == 3
+
+
+def test_stage2_query_generation_is_frozen_serially_before_parallel_dispatch(monkeypatch):
+    generated_claims: list[str] = []
+    captured: dict[str, object] = {}
+
+    class _RetrievalService:
+        def targeted_retrieve(self, **kwargs):
+            captured.update(kwargs)
+            return {
+                "source_ids": ["CN115132975B"],
+                "references": ["CN115132975B"],
+                "metadata": {"retrieval_plan_queries": ["query:claim-a", "query:claim-b", "query:claim-c"]},
+            }
+
+    class _Logger:
+        def info(self, *args, **kwargs):
+            return None
+
+    def _fake_build_queries(*, user_question, retrieval_claim, client, model, logger):
+        del user_question, client, model, logger
+        generated_claims.append(retrieval_claim.claim)
+        return [f"query:{retrieval_claim.claim}"]
+
+    monkeypatch.setattr("server.patent.stages.retrieval.build_stage2_queries_for_claim", _fake_build_queries)
+
+    run_stage2_targeted_retrieval(
+        retrieval_service=_RetrievalService(),
+        retrieval_claims=[
+            PatentRetrievalClaim(claim="claim-a", keywords=["a"]),
+            PatentRetrievalClaim(claim="claim-b", keywords=["b"]),
+            PatentRetrievalClaim(claim="claim-c", keywords=["c"]),
+        ],
+        user_question="user question",
+        query_client=object(),
+        query_model="planner-model",
+        logger=_Logger(),
+    )
+
+    assert generated_claims == ["claim-a", "claim-b", "claim-c"]
+    assert captured["query_generation_fn"] is None
+    assert captured["frozen_claim_queries"] == [
+        ["query:claim-a"],
+        ["query:claim-b"],
+        ["query:claim-c"],
+    ]
+
+
+def test_stage2_query_generation_freeze_does_not_depend_on_logger(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _RetrievalService:
+        def targeted_retrieve(self, **kwargs):
+            captured.update(kwargs)
+            return {
+                "source_ids": ["CN115132975B"],
+                "references": ["CN115132975B"],
+                "metadata": {"retrieval_plan_queries": ["query:claim-a"]},
+            }
+
+    def _fake_build_queries(*, user_question, retrieval_claim, client, model, logger):
+        del user_question, client, model, logger
+        return [f"query:{retrieval_claim.claim}"]
+
+    monkeypatch.setattr("server.patent.stages.retrieval.build_stage2_queries_for_claim", _fake_build_queries)
+
+    run_stage2_targeted_retrieval(
+        retrieval_service=_RetrievalService(),
+        retrieval_claims=[PatentRetrievalClaim(claim="claim-a", keywords=["a"])],
+        user_question="user question",
+        query_client=object(),
+        query_model="planner-model",
+        logger=None,
+    )
+
+    assert captured["query_generation_fn"] is None
+    assert captured["frozen_claim_queries"] == [["query:claim-a"]]
 
 
 def test_targeted_retrieval_keeps_explicit_patent_ids_authoritative_even_when_vector_search_is_enabled():

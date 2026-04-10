@@ -24,6 +24,14 @@ DEFAULT_PATENT_STAGE2_QUERY_PROMPT = """
 _OUTER_JSON_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*(.*)\s*```\s*$", re.IGNORECASE | re.DOTALL)
 
 
+class _NullLogger:
+    def info(self, *args, **kwargs) -> None:
+        return None
+
+    def warning(self, *args, **kwargs) -> None:
+        return None
+
+
 def _is_response_format_capability_error(exc: Exception) -> bool:
     message = " ".join(str(exc or "").split()).lower()
     if not message:
@@ -231,29 +239,38 @@ def run_stage2_targeted_retrieval(
     query_client: Any | None = None,
     query_model: str = "",
     logger: Any | None = None,
+    should_cancel: Any | None = None,
+    active_stream_count: int | None = None,
+    parallel_workers: int = 1,
     context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     log = logger
+    planning_log = logger or _NullLogger()
+    frozen_claim_queries = [
+        build_stage2_queries_for_claim(
+            user_question=user_question,
+            retrieval_claim=claim,
+            client=query_client,
+            model=query_model,
+            logger=planning_log,
+        )
+        for claim in list(retrieval_claims or [])
+    ]
     if log is not None:
         log.info(
-            "patent stage2 targeted retrieval start claim_count=%s query_model=%s",
+            "patent stage2 targeted retrieval start claim_count=%s query_model=%s parallel_workers=%s",
             len(list(retrieval_claims or [])),
             str(query_model or "").strip(),
+            max(1, int(parallel_workers or 1)),
         )
     result = retrieval_service.targeted_retrieve(
         retrieval_claims=list(retrieval_claims or []),
         user_question=user_question,
-        query_generation_fn=(
-            None
-            if log is None
-            else lambda *, user_question, retrieval_claim: build_stage2_queries_for_claim(
-                user_question=user_question,
-                retrieval_claim=retrieval_claim,
-                client=query_client,
-                model=query_model,
-                logger=log,
-            )
-        ),
+        query_generation_fn=None,
+        frozen_claim_queries=frozen_claim_queries,
+        parallel_workers=parallel_workers,
+        should_cancel=should_cancel,
+        active_stream_count=active_stream_count,
         context=context,
     )
     if log is not None:

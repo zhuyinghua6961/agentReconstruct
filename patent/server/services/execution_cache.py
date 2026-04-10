@@ -256,25 +256,20 @@ class ExecutionCache:
         key = self._keys.stage_cache(stage, fingerprint)
         return self.get_json_cache(key=key)
 
-    def claim_stage_singleflight(self, *, stage: str, fingerprint: str, ttl_seconds: int) -> str:
+    def _claim_singleflight(self, *, key: str, ttl_seconds: int, already_held_error: str) -> str:
         if self._client is None:
             self.last_error = "redis client unavailable"
             return ""
-        key = self._keys.stage_singleflight(stage, fingerprint)
         setter = getattr(self._client, "set", None)
         if not callable(setter):
             self.last_error = "redis set helper unavailable"
             return ""
         token = uuid.uuid4().hex
         claimed = bool(setter(key, token, ex=max(1, int(ttl_seconds)), nx=True))
-        self.last_error = "" if claimed else "stage singleflight already held"
+        self.last_error = "" if claimed else already_held_error
         return token if claimed else ""
 
-    def get_stage_singleflight_owner(self, *, stage: str, fingerprint: str) -> str:
-        key = self._keys.stage_singleflight(stage, fingerprint)
-        return self._read_text_value(key)
-
-    def renew_stage_singleflight(self, *, stage: str, fingerprint: str, token: str, ttl_seconds: int) -> bool:
+    def _renew_singleflight(self, *, key: str, token: str, ttl_seconds: int, renew_rejected_error: str) -> bool:
         if self._client is None:
             self.last_error = "redis client unavailable"
             return False
@@ -282,20 +277,18 @@ class ExecutionCache:
         if not callable(compare_expire):
             self.last_error = "atomic compare_expire helper unavailable"
             return False
-        key = self._keys.stage_singleflight(stage, fingerprint)
         try:
             renewed = bool(compare_expire(key, str(token or ""), max(1, int(ttl_seconds))))
         except Exception as exc:
             self.last_error = str(exc)
             return False
-        self.last_error = "" if renewed else "stage singleflight renew rejected"
+        self.last_error = "" if renewed else renew_rejected_error
         return renewed
 
-    def clear_stage_singleflight(self, *, stage: str, fingerprint: str, token: str) -> bool:
+    def _clear_singleflight(self, *, key: str, token: str, clear_rejected_error: str) -> bool:
         if self._client is None:
             self.last_error = "redis client unavailable"
             return False
-        key = self._keys.stage_singleflight(stage, fingerprint)
         compare_delete = getattr(self._client, "compare_delete", None)
         if not callable(compare_delete):
             self.last_error = "atomic compare_delete helper unavailable"
@@ -305,8 +298,74 @@ class ExecutionCache:
         except Exception as exc:
             self.last_error = str(exc)
             return False
-        self.last_error = "" if cleared else "stage singleflight clear rejected"
+        self.last_error = "" if cleared else clear_rejected_error
         return cleared
+
+    def claim_stage_singleflight(self, *, stage: str, fingerprint: str, ttl_seconds: int) -> str:
+        key = self._keys.stage_singleflight(stage, fingerprint)
+        return self._claim_singleflight(
+            key=key,
+            ttl_seconds=ttl_seconds,
+            already_held_error="stage singleflight already held",
+        )
+
+    def get_stage_singleflight_owner(self, *, stage: str, fingerprint: str) -> str:
+        key = self._keys.stage_singleflight(stage, fingerprint)
+        return self._read_text_value(key)
+
+    def renew_stage_singleflight(self, *, stage: str, fingerprint: str, token: str, ttl_seconds: int) -> bool:
+        key = self._keys.stage_singleflight(stage, fingerprint)
+        return self._renew_singleflight(
+            key=key,
+            token=token,
+            ttl_seconds=ttl_seconds,
+            renew_rejected_error="stage singleflight renew rejected",
+        )
+
+    def clear_stage_singleflight(self, *, stage: str, fingerprint: str, token: str) -> bool:
+        key = self._keys.stage_singleflight(stage, fingerprint)
+        return self._clear_singleflight(
+            key=key,
+            token=token,
+            clear_rejected_error="stage singleflight clear rejected",
+        )
+
+    def set_file_route_cache(self, *, fingerprint: str, payload: dict[str, Any], ttl_seconds: int) -> bool:
+        key = self._keys.file_route_cache(fingerprint)
+        return self.set_json_cache(key=key, payload=payload, ttl_seconds=ttl_seconds)
+
+    def get_file_route_cache(self, *, fingerprint: str) -> dict[str, Any] | None:
+        key = self._keys.file_route_cache(fingerprint)
+        return self.get_json_cache(key=key)
+
+    def claim_file_route_singleflight(self, *, fingerprint: str, ttl_seconds: int) -> str:
+        key = self._keys.file_route_singleflight(fingerprint)
+        return self._claim_singleflight(
+            key=key,
+            ttl_seconds=ttl_seconds,
+            already_held_error="file-route singleflight already held",
+        )
+
+    def get_file_route_singleflight_owner(self, *, fingerprint: str) -> str:
+        key = self._keys.file_route_singleflight(fingerprint)
+        return self._read_text_value(key)
+
+    def renew_file_route_singleflight(self, *, fingerprint: str, token: str, ttl_seconds: int) -> bool:
+        key = self._keys.file_route_singleflight(fingerprint)
+        return self._renew_singleflight(
+            key=key,
+            token=token,
+            ttl_seconds=ttl_seconds,
+            renew_rejected_error="file-route singleflight renew rejected",
+        )
+
+    def clear_file_route_singleflight(self, *, fingerprint: str, token: str) -> bool:
+        key = self._keys.file_route_singleflight(fingerprint)
+        return self._clear_singleflight(
+            key=key,
+            token=token,
+            clear_rejected_error="file-route singleflight clear rejected",
+        )
 
     def set_retrieval_cache(self, *, normalized_query_key: object, payload: dict[str, Any], ttl_seconds: int) -> bool:
         key = self._keys.retrieval_cache(normalized_query_key)

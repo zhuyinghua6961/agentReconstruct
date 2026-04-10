@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
+
+import pytest
 
 from server.patent.archive_loader import PatentArchiveLoader
 from server.patent.pdf_service import PatentPdfService
@@ -170,6 +174,196 @@ def test_stage3_evidence_loading_force_pdf_adds_pdf_text_evidence_and_keeps_tabl
     assert len(table_items) == 1
     assert evidence["table_supplements"][0]["table_title"] == "表1 各实施例性能对比"
     assert evidence["metadata"]["pdf_document"]["filename"] == "CN115132975B.pdf"
+
+
+def test_stage3_parallel_matches_serial_success_bundle_order():
+    retrieval_results = {
+        "documents": [
+            "CN115132975B 摘要证据",
+            "US20240001234A1 摘要证据",
+        ],
+        "metadatas": [
+            {"patent_id": "CN115132975B", "section_type": "abstract", "section_label": "Abstract", "distance": 0.12},
+            {"patent_id": "US20240001234A1", "section_type": "abstract", "section_label": "Abstract", "distance": 0.18},
+        ],
+        "distances": [0.12, 0.18],
+        "reference_objects": [
+            {"canonical_patent_id": "CN115132975B", "publication_number": "CN115132975B", "title": "专利一"},
+            {"canonical_patent_id": "US20240001234A1", "publication_number": "US20240001234A1", "title": "专利二"},
+        ],
+    }
+
+    def _catalog_loader(patent_id: str) -> PatentCatalogRecord:
+        return PatentCatalogRecord(
+            canonical_patent_id=patent_id,
+            publication_number=patent_id,
+            application_number=None,
+            title="专利一" if patent_id == "CN115132975B" else "专利二",
+            abstract_text=f"{patent_id} abstract",
+        )
+
+    serial_bundle = run_stage3_load_patent_evidence(
+        retrieval_results=retrieval_results,
+        source_ids=["CN115132975B", "US20240001234A1"],
+        catalog_loader=_catalog_loader,
+        parallel_workers=1,
+    )
+    parallel_bundle = run_stage3_load_patent_evidence(
+        retrieval_results=retrieval_results,
+        source_ids=["CN115132975B", "US20240001234A1"],
+        catalog_loader=_catalog_loader,
+        parallel_workers=2,
+    )
+
+    assert serial_bundle["source_ids"] == parallel_bundle["source_ids"]
+    assert [item["canonical_patent_id"] for item in parallel_bundle["evidences"]] == parallel_bundle["source_ids"]
+    assert serial_bundle["evidences"] == parallel_bundle["evidences"]
+
+
+def test_stage3_parallel_drops_failed_patents_from_source_ids_and_keeps_alignment():
+    retrieval_results = {
+        "documents": ["CN115132975B 摘要证据", "US20240001234A1 摘要证据"],
+        "metadatas": [
+            {"patent_id": "CN115132975B", "section_type": "abstract", "section_label": "Abstract", "distance": 0.12},
+            {"patent_id": "US20240001234A1", "section_type": "abstract", "section_label": "Abstract", "distance": 0.18},
+        ],
+        "distances": [0.12, 0.18],
+        "reference_objects": [
+            {"canonical_patent_id": "CN115132975B", "publication_number": "CN115132975B", "title": "专利一"},
+            {"canonical_patent_id": "US20240001234A1", "publication_number": "US20240001234A1", "title": "专利二"},
+        ],
+    }
+
+    def _catalog_loader(patent_id: str) -> PatentCatalogRecord:
+        if patent_id == "US20240001234A1":
+            raise RuntimeError("bad patent")
+        return PatentCatalogRecord(
+            canonical_patent_id=patent_id,
+            publication_number=patent_id,
+            application_number=None,
+            title="专利一",
+            abstract_text=f"{patent_id} abstract",
+        )
+
+    bundle = run_stage3_load_patent_evidence(
+        retrieval_results=retrieval_results,
+        source_ids=["CN115132975B", "US20240001234A1"],
+        catalog_loader=_catalog_loader,
+        parallel_workers=2,
+    )
+
+    assert bundle["source_ids"] == ["CN115132975B"]
+    assert [item["canonical_patent_id"] for item in bundle["evidences"]] == ["CN115132975B"]
+
+
+def test_stage3_parallel_raises_when_all_patents_fail():
+    with pytest.raises(RuntimeError, match="stage3 evidence loading produced no successful patent bundles"):
+        run_stage3_load_patent_evidence(
+            retrieval_results={"documents": [], "metadatas": [], "reference_objects": []},
+            source_ids=["CN115132975B", "US20240001234A1"],
+            catalog_loader=lambda _patent_id: (_ for _ in ()).throw(RuntimeError("bad patent")),
+            parallel_workers=2,
+        )
+
+
+def test_stage3_parallel_force_pdf_keeps_pdf_chunks_on_the_right_patent():
+    bundle = run_stage3_load_patent_evidence(
+        retrieval_results={"documents": [], "metadatas": [], "reference_objects": []},
+        source_ids=["CN115132975B", "US20240001234A1"],
+        pdf_loader=lambda patent_id: {
+            "path": f"/tmp/{patent_id}.pdf",
+            "filename": f"{patent_id}.pdf",
+            "size_bytes": 8,
+        },
+        pdf_text_extractor=lambda pdf_path: f"{Path(pdf_path).stem} PDF段落一\n\n{Path(pdf_path).stem} PDF段落二",
+        force_pdf=True,
+        parallel_workers=2,
+    )
+
+    assert bundle["source_ids"] == ["CN115132975B", "US20240001234A1"]
+    first = bundle["evidences"][0]
+    second = bundle["evidences"][1]
+    assert all("CN115132975B" in item["text"] for item in first["matched_evidence"] if item["section_type"] == "pdf_paragraph")
+    assert all("US20240001234A1" in item["text"] for item in second["matched_evidence"] if item["section_type"] == "pdf_paragraph")
+
+
+def test_stage3_parallel_honors_explicit_should_cancel():
+    release = threading.Event()
+    started = threading.Event()
+
+    def _catalog_loader(patent_id: str) -> PatentCatalogRecord:
+        started.set()
+        release.wait(timeout=0.5)
+        return PatentCatalogRecord(
+            canonical_patent_id=patent_id,
+            publication_number=patent_id,
+            application_number=None,
+            title=patent_id,
+            abstract_text=f"{patent_id} abstract",
+        )
+
+    started_at = time.perf_counter()
+    try:
+        bundle = run_stage3_load_patent_evidence(
+            retrieval_results={"documents": [], "metadatas": [], "reference_objects": []},
+            source_ids=["CN115132975B", "US20240001234A1"],
+            catalog_loader=_catalog_loader,
+            parallel_workers=2,
+            should_cancel=lambda: started.is_set(),
+        )
+    finally:
+        release.set()
+
+    elapsed = time.perf_counter() - started_at
+    assert elapsed < 0.3
+    assert bundle["source_ids"] == []
+    assert bundle["metadata"]["cancelled"] is True
+
+
+def test_stage3_logs_parallel_workers_and_source_id_count(caplog):
+    with caplog.at_level("INFO", logger="patent.stage3"):
+        bundle = run_stage3_load_patent_evidence(
+            retrieval_results={"documents": [], "metadatas": [], "reference_objects": []},
+            source_ids=["CN115132975B", "US20240001234A1"],
+            parallel_workers=2,
+            force_pdf=True,
+        )
+
+    assert bundle["source_ids"] == ["CN115132975B", "US20240001234A1"]
+    messages = [record.message for record in caplog.records if record.name == "patent.stage3"]
+    assert any(
+        "patent stage3 evidence loading start" in message
+        and "source_id_count=2" in message
+        and "parallel_workers=2" in message
+        and "force_pdf=True" in message
+        for message in messages
+    )
+
+
+def test_runtime_stage3_passes_parallel_workers_and_should_cancel(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_run_stage3_load_patent_evidence(**kwargs):
+        captured.update(kwargs)
+        return {"source_ids": ["CN115132975B"], "evidences": [], "metadata": {}}
+
+    monkeypatch.setattr("server.patent.runtime.run_stage3_load_patent_evidence", _fake_run_stage3_load_patent_evidence)
+
+    runtime = PatentRuntime(
+        retrieval_service=object(),  # type: ignore[arg-type]
+        resources=[],
+        stage3_parallel_workers=5,
+    )
+    should_cancel = object()
+
+    runtime.stage3_load_patent_evidence(
+        retrieval_results={"documents": [], "metadatas": [], "reference_objects": []},
+        source_ids=["CN115132975B"],
+        should_cancel=should_cancel,
+    )
+
+    assert captured["parallel_workers"] == 5
+    assert captured["should_cancel"] is should_cancel
 
 
 def test_patent_runtime_stage3_load_patent_evidence_uses_archive_tables_and_pdf_chunks(tmp_path: Path, monkeypatch):

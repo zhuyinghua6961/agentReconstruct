@@ -14,6 +14,7 @@ from server.patent.file_routes import (
     synthesize_patent_hybrid_answer,
 )
 from server.patent.kb_service import PatentKbService
+from server.patent.orchestrators.generation import PatentGenerationOrchestrator
 from server.patent.pdf_service import PatentPdfService
 from server.patent.retrieval_service import PatentRetrievalService
 from server.patent.streaming import emit_text_chunks
@@ -30,6 +31,19 @@ _FILE_ROUTES = {"pdf_qa", "tabular_qa", "hybrid_qa"}
 _LOGGER = logging.getLogger("patent.executor")
 
 
+def _file_route_cache_metadata(metadata: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    namespace = str(metadata.get("cache_namespace") or "").strip()
+    fingerprint = str(metadata.get("cache_fingerprint") or "").strip()
+    cache_hit = bool(metadata.get("cache_hit")) or bool(payload.get("cache_hit"))
+    if namespace != "file-route" and not fingerprint and "cache_hit" not in metadata and "cache_hit" not in payload:
+        return {}
+    return {
+        "file_route_cache_hit": cache_hit,
+        "file_route_cache_namespace": namespace,
+        "file_route_cache_fingerprint": fingerprint,
+    }
+
+
 class PatentExecutor:
     def __init__(
         self,
@@ -40,12 +54,15 @@ class PatentExecutor:
         pdf_service: PatentPdfService | None = None,
         tabular_service: PatentTabularService | None = None,
         runtime: Any | None = None,
+        execution_cache: Any | None = None,
         runtime_required: bool = False,
     ) -> None:
         self._mode_profile = mode_profile or get_patent_mode_profile()
         self._runtime = runtime
+        self._execution_cache = execution_cache
         self._runtime_required = bool(runtime_required)
         self._kb_service = kb_service or PatentKbService(
+            orchestrator=PatentGenerationOrchestrator(execution_cache=execution_cache),
             retrieval_service=retrieval_service,
             mode_profile=self._mode_profile,
             runtime=runtime,
@@ -121,6 +138,7 @@ class PatentExecutor:
             contract=contract,
             pdf_service=self._pdf_service,
             tabular_service=self._tabular_service,
+            execution_cache=self._execution_cache,
             progress_callback=progress_callback,
             content_callback=None if contract.includes_kb else content_callback,
         )
@@ -253,6 +271,7 @@ class PatentExecutor:
         merged["metadata"] = {
             **file_metadata,
             **kb_metadata,
+            **_file_route_cache_metadata(file_metadata, merged),
             "kb_participated": True,
             "answer_mode": "hybrid_unified_synthesis",
             "synthesis_contract": dict(synthesis_contract),

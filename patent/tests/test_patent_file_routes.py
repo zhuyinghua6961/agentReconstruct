@@ -321,6 +321,46 @@ def test_dispatch_pdf_route_uses_real_pdf_text_summary_when_local_path_is_availa
     assert "Patent PDF route answered" not in result["answer_text"]
 
 
+def test_dispatch_pdf_route_summary_aligns_to_fastqa_markdown_sections(tmp_path):
+    pdf_path = tmp_path / "battery-paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="请总结这篇文献的研究内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11],
+        primary_file_id=11,
+        execution_files=[{**PDF_FILE, "local_path": str(pdf_path)}],
+        file_selection={"strategy": "explicit_selection"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: (
+            "This paper studies LMFP/LFP blending for safer charging. "
+            "Results show lower polarization under high-rate charging. "
+            "The discussion attributes the gain to improved transport stability. "
+            "The conclusion notes that long-cycle validation is still limited."
+        ),
+        answer_question_fn=lambda **kwargs: "本文研究 LMFP/LFP 复配，并指出高倍率充电下的安全性得到改善。",
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=service,
+        tabular_service=PatentTabularService(),
+    )
+
+    answer = result["answer_text"]
+    assert "## 结论" in answer
+    assert "## 证据" in answer
+    assert "## 对比" in answer
+    assert "## 限制" in answer
+    assert answer.count("\n- ") >= 3
+    assert "LMFP/LFP" in answer
+    assert "PDF中未提供跨文献对比对象" in answer
+
+
 def test_dispatch_pdf_route_negative_compare_question_targets_only_first_document(tmp_path):
     pdf_path_a = tmp_path / "paper-a.pdf"
     pdf_path_b = tmp_path / "paper-b.pdf"
@@ -532,6 +572,64 @@ def test_dispatch_pdf_route_compare_answer_restructures_when_markers_are_out_of_
 
     answer = result["answer_text"]
     assert answer.index("各自概要") < answer.index("相同点") < answer.index("差异点") < answer.index("总结")
+
+
+def test_dispatch_pdf_route_compare_answer_preserves_valid_numbered_markdown_structure(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "Abstract A discusses manganese-rich cathodes.\n\n"
+                "Results A show 15% efficiency improvement.\n\n"
+                "Conclusion A favors route A."
+                if path == str(pdf_path_a)
+                else "Abstract B studies phosphate stabilization.\n\n"
+                "Results B keep 200-cycle retention.\n\n"
+                "Conclusion B favors route B."
+            ),
+            answer_question_fn=lambda **kwargs: (
+                "两篇文献对比分析\n\n"
+                "## 1. 文献概要\n"
+                "- paper-a.pdf：强调 15% efficiency improvement，并倾向 route A。\n"
+                "- paper-b.pdf：强调 200-cycle retention，并倾向 route B。\n\n"
+                "## 2. 研究主题/目标\n"
+                "- 两篇都围绕正极体系优化展开，但关注点不同。\n\n"
+                "## 3. 相同点\n"
+                "- 都提供了实验结果和明确结论。\n\n"
+                "## 4. 差异点\n"
+                "- 第一篇更强调效率提升，第二篇更强调循环保持。\n\n"
+                "## 5. 总结\n"
+                "- 两篇文献分别代表效率导向与稳定性导向。"
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    answer = result["answer_text"]
+    assert "## 1. 文献概要" in answer
+    assert "## 5. 总结" in answer
+    assert "各自概要：" not in answer
+    assert "两篇文献对比分析 ## 1." not in answer
+    assert answer.count("## 5. 总结") == 1
 
 
 def test_dispatch_pdf_route_compare_answer_restructures_when_headings_exist_but_document_facts_are_missing(tmp_path):
@@ -1357,6 +1455,46 @@ def test_dispatch_tabular_route_uses_real_table_content_when_local_path_is_avail
     assert "Patent tabular route answered" not in result["answer_text"]
 
 
+def test_dispatch_tabular_route_passes_patent_adapted_prompt_to_answer_fn(tmp_path):
+    csv_path = tmp_path / "cells.csv"
+    _write_csv(csv_path)
+    contract = build_patent_file_contract(
+        question="请总结这个表格的重点",
+        route="tabular_qa",
+        source_scope="table",
+        selected_file_ids=[33],
+        primary_file_id=33,
+        execution_files=[{"file_id": 33, "file_type": "csv", "file_name": "cells.csv", "local_path": str(csv_path)}],
+        file_selection={"strategy": "explicit_selection"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    captured: dict[str, str] = {}
+    service = PatentTabularService(
+        answer_question_fn=lambda **kwargs: captured.update(
+            {
+                "prompt": str(kwargs.get("prompt") or ""),
+                "route_hint": str(kwargs.get("route_hint") or ""),
+                "source_scope": str(kwargs.get("source_scope") or ""),
+            }
+        )
+        or "真实表格总结：LMFP 方案容量 120mAh，LFP 更安全，NCM 能量更高。",
+    )
+
+    dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(),
+        tabular_service=service,
+    )
+
+    assert captured["route_hint"] == "tabular_qa"
+    assert captured["source_scope"] == "table"
+    assert "表格执行结果来自当前专利/文献文件的真实提取或计算结果" in captured["prompt"]
+    assert "## 结论" in captured["prompt"]
+    assert "## 证据" in captured["prompt"]
+    assert "## 限制" in captured["prompt"]
+
+
 def test_dispatch_tabular_route_uses_file_name_suffix_when_local_path_has_no_extension(tmp_path):
     opaque_path = tmp_path / "upload_blob"
     _write_csv(opaque_path)
@@ -1437,6 +1575,106 @@ def test_dispatch_hybrid_route_uses_real_pdf_and_table_content_when_local_paths_
     }.issubset(set(result["metadata"]["synthesis_contract"].keys()))
     assert "旧 pdf summary 壳子" not in result["answer_text"]
     assert "旧 table summary 壳子" not in result["answer_text"]
+
+
+def test_dispatch_hybrid_route_passes_patent_adapted_prompts_to_pdf_and_tabular_subanswers(tmp_path):
+    pdf_path = tmp_path / "battery-paper.pdf"
+    csv_path = tmp_path / "cells.csv"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    _write_csv(csv_path)
+    contract = build_patent_file_contract(
+        question="请结合 PDF、表格和知识库总结结论",
+        route="hybrid_qa",
+        source_scope="pdf+table+kb",
+        selected_file_ids=[11, 33],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "local_path": str(pdf_path)},
+            {"file_id": 33, "file_type": "csv", "file_name": "cells.csv", "local_path": str(csv_path)},
+        ],
+        file_selection={"strategy": "explicit_selection", "source_scope": "pdf+table+kb"},
+        kb_enabled=True,
+        allow_kb_verification=True,
+    )
+    captured: dict[str, str] = {}
+    pdf_service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: "This paper studies LMFP/LFP blending and reports safer charging behavior.",
+        answer_question_fn=lambda **kwargs: captured.update(
+            {
+                "pdf_prompt": str(kwargs.get("prompt") or ""),
+                "pdf_route_hint": str(kwargs.get("route_hint") or ""),
+                "pdf_source_scope": str(kwargs.get("source_scope") or ""),
+            }
+        )
+        or "真实 PDF 总结：LMFP/LFP 复配改善了充电安全性。",
+    )
+    tabular_service = PatentTabularService(
+        answer_question_fn=lambda **kwargs: captured.update(
+            {
+                "table_prompt": str(kwargs.get("prompt") or ""),
+                "table_route_hint": str(kwargs.get("route_hint") or ""),
+                "table_source_scope": str(kwargs.get("source_scope") or ""),
+            }
+        )
+        or "真实表格总结：LMFP 120mAh，LFP 115mAh，NCM 140mAh。",
+    )
+
+    dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=pdf_service,
+        tabular_service=tabular_service,
+    )
+
+    assert captured["pdf_route_hint"] == "hybrid_qa"
+    assert captured["pdf_source_scope"] == "pdf+table+kb"
+    assert "当前任务属于 patent 混合文件问答中的 PDF 证据分析环节" in captured["pdf_prompt"]
+    assert "不要把知识库验证信息改写成 PDF 原文结论" in captured["pdf_prompt"]
+    assert captured["table_route_hint"] == "hybrid_qa"
+    assert captured["table_source_scope"] == "pdf+table+kb"
+    assert "当前任务属于 patent 混合文件问答中的表格证据分析环节" in captured["table_prompt"]
+    assert "知识库或其他文件只能用于后续交叉验证" in captured["table_prompt"]
+    assert "## 结论" in captured["table_prompt"]
+
+
+def test_dispatch_hybrid_route_preserves_hybrid_boundary_in_wrapped_pdf_and_table_subanswers(tmp_path):
+    pdf_path = tmp_path / "battery-paper.pdf"
+    csv_path = tmp_path / "cells.csv"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    _write_csv(csv_path)
+    contract = build_patent_file_contract(
+        question="请结合 PDF、表格和知识库总结结论",
+        route="hybrid_qa",
+        source_scope="pdf+table+kb",
+        selected_file_ids=[11, 33],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "local_path": str(pdf_path)},
+            {"file_id": 33, "file_type": "csv", "file_name": "cells.csv", "local_path": str(csv_path)},
+        ],
+        file_selection={"strategy": "explicit_selection", "source_scope": "pdf+table+kb"},
+        kb_enabled=True,
+        allow_kb_verification=True,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "This paper studies LMFP/LFP blending and reports safer charging behavior.",
+            answer_question_fn=lambda **kwargs: "真实 PDF 总结：LMFP/LFP 复配改善了充电安全性。",
+        ),
+        tabular_service=PatentTabularService(
+            answer_question_fn=lambda **kwargs: "真实表格总结：LMFP 120mAh，LFP 115mAh，NCM 140mAh。",
+        ),
+    )
+
+    pdf_answer = result["metadata"]["synthesis_contract"]["pdf_answer"]
+    table_answer = result["metadata"]["synthesis_contract"]["tabular_answer"]
+    assert "当前为混合问答中的 PDF 证据子结论" in pdf_answer
+    assert "不能单独替代全局综合结论" in pdf_answer
+    assert "PDF中未提供跨文献对比对象；当前回答仅基于单篇文件证据。" not in pdf_answer
+    assert "当前为混合问答中的表格证据子结论" in table_answer
+    assert "不能单独覆盖其他文件或知识库结论" in table_answer
+    assert "当前问题主要基于单个表格文件，未提供可直接对照的第二份文件证据。" not in table_answer
 
 
 def test_dispatch_hybrid_route_with_kb_defers_hybrid_step_until_executor_merge(tmp_path):
@@ -1579,3 +1817,203 @@ def test_hybrid_route_planning_covers_all_supported_source_scopes(source_scope, 
     assert result["query_mode"] == "patent_hybrid_qa"
     assert result["answer_text"]
     assert result["kb_enabled"] is include_kb
+
+
+class _ExplodingExecuteService:
+    def execute(self, **kwargs):
+        raise AssertionError("service execute should not run on cache hit")
+
+
+@pytest.mark.parametrize(
+    ("route", "source_scope", "selected_file_ids", "primary_file_id", "execution_files", "cached_payload"),
+    [
+        (
+            "pdf_qa",
+            "pdf",
+            [11],
+            11,
+            [PDF_FILE],
+            {
+                "handler": "pdf",
+                "answer_text": "cached pdf answer",
+                "route": "pdf_qa",
+                "query_mode": "patent_pdf_qa",
+                "source_scope": "pdf",
+                "steps": [{"step": "dispatch", "title": "进入 PDF 分支", "message": "进入 PDF 问答分支", "status": "success"}],
+                "metadata": {"answer_mode": "pdf_text_summary"},
+                "timings": {"patent_pdf_route_ms": 1},
+                "used_files": [PDF_FILE],
+                "selected_file_ids": [11],
+                "file_selection": {"strategy": "explicit_selection", "selected_file_ids": [11]},
+                "kb_enabled": False,
+            },
+        ),
+        (
+            "tabular_qa",
+            "table",
+            [33],
+            33,
+            [TABLE_FILE],
+            {
+                "handler": "tabular",
+                "answer_text": "cached table answer",
+                "route": "tabular_qa",
+                "query_mode": "patent_tabular_qa",
+                "source_scope": "table",
+                "steps": [{"step": "dispatch", "title": "进入文件分支", "message": "进入表格/混合问答分支", "status": "success"}],
+                "metadata": {"answer_mode": "table_text_summary"},
+                "timings": {"patent_table_route_ms": 1},
+                "used_files": [TABLE_FILE],
+                "selected_file_ids": [33],
+                "file_selection": {"strategy": "explicit_selection", "selected_file_ids": [33]},
+                "kb_enabled": False,
+            },
+        ),
+        (
+            "hybrid_qa",
+            "pdf+table",
+            [11, 33],
+            11,
+            [PDF_FILE, TABLE_FILE],
+            {
+                "handler": "hybrid",
+                "answer_text": "cached hybrid answer",
+                "route": "hybrid_qa",
+                "query_mode": "patent_hybrid_qa",
+                "source_scope": "pdf+table",
+                "steps": [{"step": "dispatch", "title": "进入文件分支", "message": "进入表格/混合问答分支", "status": "success"}],
+                "metadata": {"answer_mode": "hybrid_unified_synthesis"},
+                "timings": {"patent_hybrid_route_ms": 1},
+                "used_files": [PDF_FILE, TABLE_FILE],
+                "selected_file_ids": [11, 33],
+                "file_selection": {"strategy": "explicit_selection", "selected_file_ids": [11, 33]},
+                "kb_enabled": False,
+            },
+        ),
+    ],
+)
+def test_dispatch_file_route_marks_cache_metadata_for_all_handlers(
+    route,
+    source_scope,
+    selected_file_ids,
+    primary_file_id,
+    execution_files,
+    cached_payload,
+):
+    class _CacheHitStub:
+        def get_file_route_cache(self, *, fingerprint: str):
+            return dict(cached_payload)
+
+    contract = build_patent_file_contract(
+        question="请总结选中的文件",
+        route=route,
+        source_scope=source_scope,
+        selected_file_ids=selected_file_ids,
+        primary_file_id=primary_file_id,
+        execution_files=execution_files,
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": list(selected_file_ids)},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=_ExplodingExecuteService(),
+        tabular_service=_ExplodingExecuteService(),
+        execution_cache=_CacheHitStub(),
+    )
+
+    assert result["answer_text"] == cached_payload["answer_text"]
+    assert result["metadata"]["cache_hit"] is True
+    assert result["metadata"]["cache_namespace"] == "file-route"
+    assert result["metadata"]["cache_fingerprint"]
+
+
+def test_dispatch_file_route_singleflight_is_scoped_to_fingerprint_not_global_lock():
+    class _FingerprintScopedLockCache:
+        def __init__(self) -> None:
+            self.blocked_fingerprint = ""
+            self.claimed_fingerprints: list[str] = []
+
+        def get_file_route_cache(self, *, fingerprint: str):
+            return None
+
+        def set_file_route_cache(self, *, fingerprint: str, payload, ttl_seconds: int):
+            return True
+
+        def claim_file_route_singleflight(self, *, fingerprint: str, ttl_seconds: int):
+            self.claimed_fingerprints.append(fingerprint)
+            if not self.blocked_fingerprint:
+                self.blocked_fingerprint = fingerprint
+            if fingerprint == self.blocked_fingerprint:
+                return ""
+            return f"token-{len(self.claimed_fingerprints)}"
+
+        def get_file_route_singleflight_owner(self, *, fingerprint: str):
+            return "other-owner" if fingerprint == self.blocked_fingerprint else ""
+
+        def clear_file_route_singleflight(self, *, fingerprint: str, token: str):
+            return True
+
+    class _PdfServiceStub:
+        def execute(self, **kwargs):
+            return {
+                "handler": "pdf",
+                "answer_text": "fresh pdf answer",
+                "route": "pdf_qa",
+                "query_mode": "patent_pdf_qa",
+                "source_scope": "pdf",
+                "steps": [],
+                "metadata": {"answer_mode": "pdf_text_summary"},
+                "timings": {"patent_pdf_route_ms": 1},
+                "used_files": [kwargs["contract"].selected_execution_files[0].as_payload()],
+                "selected_file_ids": list(kwargs["contract"].selected_file_ids),
+                "file_selection": dict(kwargs["contract"].file_selection),
+                "kb_enabled": bool(kwargs.get("include_kb")),
+            }
+
+    cache = _FingerprintScopedLockCache()
+    blocked_contract = build_patent_file_contract(
+        question="请总结第一篇 PDF",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11],
+        primary_file_id=11,
+        execution_files=[PDF_FILE],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11]},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    other_contract = build_patent_file_contract(
+        question="请总结第二篇 PDF",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[12],
+        primary_file_id=12,
+        execution_files=[PDF_FILE_2],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [12]},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    with pytest.raises(TimeoutError, match="singleflight wait timed out"):
+        dispatch_patent_file_route(
+            contract=blocked_contract,
+            pdf_service=_PdfServiceStub(),
+            tabular_service=PatentTabularService(),
+            execution_cache=cache,
+            singleflight_poll_interval_seconds=0.0,
+            singleflight_wait_timeout_seconds=0.0,
+        )
+
+    result = dispatch_patent_file_route(
+        contract=other_contract,
+        pdf_service=_PdfServiceStub(),
+        tabular_service=PatentTabularService(),
+        execution_cache=cache,
+        singleflight_poll_interval_seconds=0.0,
+        singleflight_wait_timeout_seconds=0.0,
+    )
+
+    assert result["answer_text"] == "fresh pdf answer"
+    assert cache.claimed_fingerprints[0] != cache.claimed_fingerprints[1]

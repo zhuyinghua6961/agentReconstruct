@@ -92,6 +92,7 @@ def _bootstrap_service_state(app: FastAPI) -> None:
         ask_service = AskService(
             patent_executor=PatentExecutor(
                 runtime=patent_runtime,
+                execution_cache=execution_cache,
                 runtime_required=True,
             ),
             persistence_service=chat_persistence_service,

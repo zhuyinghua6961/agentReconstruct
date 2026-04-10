@@ -4,6 +4,7 @@ import logging
 import queue
 import re
 import threading
+import time
 from dataclasses import replace
 from typing import Any, Callable, Iterator
 
@@ -18,6 +19,22 @@ from server.services.conversation_context_builder import (
     normalize_patent_conversation_context,
 )
 from server.services.mode_profiles import PatentModeProfile, get_patent_mode_profile
+
+
+def _epoch_ms() -> int:
+    return max(0, int(time.time() * 1000))
+
+
+def _attach_event_telemetry(event: dict[str, Any], telemetry: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(event or {})
+    metadata = dict(payload.get("metadata") or {})
+    metadata["telemetry"] = {
+        key: int(value)
+        for key, value in dict(telemetry or {}).items()
+        if isinstance(value, int) and value >= 0
+    }
+    payload["metadata"] = metadata
+    return payload
 
 
 def _build_context_ready_steps(*, request: PatentAskRequest, raw_context: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -51,6 +68,16 @@ def _build_context_ready_steps(*, request: PatentAskRequest, raw_context: dict[s
             },
         }
     ]
+
+
+def _build_gateway_prestream_step() -> dict[str, Any]:
+    return {
+        "step": "stage1",
+        "title": "阶段一",
+        "message": "阶段一：已开始上下文准备与检索规划",
+        "status": "processing",
+        "data": {"preparing_context": True},
+    }
 
 
 def _prepend_steps(*, steps: list[dict[str, Any]], leading_steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -146,23 +173,60 @@ class AskService:
         prepared: dict[str, Any] = {}
         trace_id = str(request.trace_id)
         seq = 0
+        telemetry: dict[str, int] = {}
+        prepare_queue: queue.Queue[tuple[str, Any]] | None = None
+
+        def _mark_telemetry_once(field_name: str) -> None:
+            if field_name not in telemetry:
+                telemetry[field_name] = _epoch_ms()
 
         try:
-            prepared = self._prepare_turn(request=request, user_id=user_id)
-            trace_id = str(prepared.get("trace_id") or trace_id)
+            if request.is_gateway_owned_persistence and request.is_durable:
+                prepare_queue = queue.Queue(maxsize=1)
+
+                def _prepare_turn_worker() -> None:
+                    worker_trace_token = set_trace_id(trace_id)
+                    try:
+                        prepare_queue.put(("prepared", self._prepare_turn(request=request, user_id=user_id)))
+                    except Exception as exc:
+                        prepare_queue.put(("exception", exc))
+                    finally:
+                        clear_trace_id(worker_trace_token)
+
+                threading.Thread(
+                    target=_prepare_turn_worker,
+                    name=f"patent-prepare-{trace_id or 'unknown'}",
+                    daemon=True,
+                ).start()
+            else:
+                prepared = self._prepare_turn(request=request, user_id=user_id)
+                trace_id = str(prepared.get("trace_id") or trace_id)
             self._logger.info("stream_ask start trace_id=%s durable=%s", trace_id, request.is_durable)
+            _mark_telemetry_once("backend_stream_opened_at_ms")
+            yield _attach_event_telemetry(
+                self._result_builder.build_metadata_event(
+                    trace_id=trace_id,
+                    seq=seq,
+                    route=request.route,
+                    query_mode=get_patent_mode_profile(request.route).query_mode,
+                    source_scope=request.source_scope,
+                ),
+                telemetry,
+            )
+            seq += 1
+            if prepare_queue is not None:
+                _mark_telemetry_once("first_step_at_ms")
+                yield self._result_builder.build_step_event(seq=seq, step=_build_gateway_prestream_step())
+                seq += 1
+                prepare_result_type, prepare_payload = prepare_queue.get()
+                if prepare_result_type == "exception":
+                    raise prepare_payload
+                prepared = dict(prepare_payload or {})
+                trace_id = str(prepared.get("trace_id") or trace_id)
             preflight_steps = _build_context_ready_steps(
                 request=request,
                 raw_context=dict(prepared.get("context") or {}),
             )
-            yield self._result_builder.build_metadata_event(
-                trace_id=trace_id,
-                seq=seq,
-                route=request.route,
-                query_mode=get_patent_mode_profile(request.route).query_mode,
-                source_scope=request.source_scope,
-            )
-            seq += 1
             if prepared.get("assistant_accept_skipped") and isinstance(prepared.get("execution_result"), dict):
                 execution_result = _attach_preflight_steps(
                     execution_result=self._validate_execution_result(
@@ -179,19 +243,27 @@ class AskService:
                     )
                 )
                 for event in progress_events:
+                    if str(event.get("type") or "") == "step":
+                        _mark_telemetry_once("first_step_at_ms")
+                    if str(event.get("type") or "") == "content":
+                        _mark_telemetry_once("first_content_at_ms")
                     yield event
                 seq += len(progress_events)
                 self._ensure_done_allowed(prepared)
-                yield self._result_builder.build_done_event(
-                    request=request,
-                    trace_id=trace_id,
-                    execution_result=execution_result,
-                    seq=seq,
+                yield _attach_event_telemetry(
+                    self._result_builder.build_done_event(
+                        request=request,
+                        trace_id=trace_id,
+                        execution_result=execution_result,
+                        seq=seq,
+                    ),
+                    telemetry,
                 )
                 return
 
             progress_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
             for step in preflight_steps:
+                _mark_telemetry_once("first_step_at_ms")
                 yield self._result_builder.build_step_event(seq=seq, step=step)
                 seq += 1
 
@@ -235,6 +307,7 @@ class AskService:
             while execution_result is None:
                 event_type, payload = progress_queue.get()
                 if event_type == "progress":
+                    _mark_telemetry_once("first_step_at_ms")
                     yield self._result_builder.build_step_event(seq=seq, step=dict(payload or {}))
                     seq += 1
                     streamed_step_count += 1
@@ -242,6 +315,7 @@ class AskService:
                 if event_type == "content":
                     chunk = str(payload or "")
                     if chunk:
+                        _mark_telemetry_once("first_content_at_ms")
                         yield self._result_builder.build_content_event(seq=seq, content=chunk)
                         seq += 1
                         streamed_content_count += 1
@@ -260,13 +334,19 @@ class AskService:
                     execution_result=execution_result,
                     starting_seq=seq,
                 ):
-                    if streamed_content_count > 0 and str(event.get("type") or "") == "content":
+                    event_type = str(event.get("type") or "")
+                    if streamed_content_count > 0 and event_type == "content":
                         continue
+                    if event_type == "step":
+                        _mark_telemetry_once("first_step_at_ms")
+                    if event_type == "content":
+                        _mark_telemetry_once("first_content_at_ms")
                     yield event
                     seq += 1
             else:
                 answer_text = str(execution_result.get("answer_text") or "")
                 if answer_text and streamed_content_count == 0:
+                    _mark_telemetry_once("first_content_at_ms")
                     yield self._result_builder.build_content_event(seq=seq, content=answer_text)
                     seq += 1
 
@@ -277,11 +357,14 @@ class AskService:
             )
             trace_id = str(turn_result.get("trace_id") or trace_id)
             self._ensure_done_allowed(turn_result)
-            yield self._result_builder.build_done_event(
-                request=request,
-                trace_id=trace_id,
-                execution_result=dict(turn_result.get("execution_result") or {}),
-                seq=seq,
+            yield _attach_event_telemetry(
+                self._result_builder.build_done_event(
+                    request=request,
+                    trace_id=trace_id,
+                    execution_result=dict(turn_result.get("execution_result") or {}),
+                    seq=seq,
+                ),
+                telemetry,
             )
         except Exception as exc:
             self._logger.exception("stream_ask failed trace_id=%s error=%s", trace_id, exc)

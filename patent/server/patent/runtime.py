@@ -45,6 +45,15 @@ def _first_env(*names: str, default: str = "") -> str:
     return str(default or "").strip()
 
 
+def _positive_int_env(*names: str, default: int) -> int:
+    raw = _first_env(*names, default=str(default))
+    try:
+        value = int(str(raw).strip())
+    except Exception:
+        return int(default)
+    return value if value >= 1 else int(default)
+
+
 def _resolve_local_embedding_model_path(repo_root: Path) -> str:
     configured = _first_env("PATENT_EMBEDDING_MODEL_PATH", "EMBEDDING_MODEL_PATH")
     if configured:
@@ -279,6 +288,8 @@ class PatentRuntime:
     stage25_is_noop: bool = True
     stage25_skip_reason: str = "patent_mode_no_md_expansion"
     stage3_force_pdf: bool = False
+    stage2_parallel_workers: int = 4
+    stage3_parallel_workers: int = 4
 
     def stage1_pre_answer_and_planning(
         self,
@@ -327,6 +338,9 @@ class PatentRuntime:
             query_client=self.planning_client,
             query_model=self.planning_model,
             logger=_LOGGER,
+            should_cancel=should_cancel,
+            active_stream_count=active_stream_count,
+            parallel_workers=self.stage2_parallel_workers,
         )
 
     def _extract_patent_ids_from_results(self, retrieval_results: dict[str, Any]) -> list[str]:
@@ -355,7 +369,6 @@ class PatentRuntime:
         source_ids: list[str],
         should_cancel: Any | None = None,
     ) -> dict[str, Any]:
-        del should_cancel
         return run_stage3_load_patent_evidence(
             retrieval_results=retrieval_results,
             source_ids=source_ids,
@@ -363,6 +376,8 @@ class PatentRuntime:
             table_loader=self.archive_loader.load_tables if self.archive_loader is not None else None,
             pdf_loader=self.archive_loader.load_pdf_document if self.archive_loader is not None else None,
             force_pdf=self.stage3_force_pdf,
+            parallel_workers=self.stage3_parallel_workers,
+            should_cancel=should_cancel,
         )
 
     def stage4_synthesis_with_patent_evidence(
@@ -477,4 +492,6 @@ def build_default_patent_runtime() -> PatentRuntime | None:
         planning_client=planning_client,
         planning_model=planning_model,
         stage3_force_pdf=_first_env("PATENT_STAGE3_FORCE_PDF", default="false").lower() in {"1", "true", "yes", "on"},
+        stage2_parallel_workers=_positive_int_env("PATENT_STAGE2_PARALLEL_WORKERS", default=4),
+        stage3_parallel_workers=_positive_int_env("PATENT_STAGE3_PARALLEL_WORKERS", default=4),
     )

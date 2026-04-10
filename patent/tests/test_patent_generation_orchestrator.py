@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -333,6 +334,18 @@ def test_orchestrator_reads_cached_stage_results_before_recomputing():
                     "source_ids": ["CN115132975B"],
                     "evidence_by_patent_id": {"CN115132975B": [{"kind": "table", "text": "cached evidence"}]},
                 },
+                ("stage4",): {
+                    "final_answer": "cached final answer",
+                    "references": ["CN115132975B"],
+                    "reference_objects": [{"canonical_patent_id": "CN115132975B"}],
+                    "reference_links": [{"type": "reference_link", "canonical_patent_id": "CN115132975B"}],
+                    "original_links": [{"type": "original_view", "canonical_patent_id": "CN115132975B"}],
+                    "metadata": {
+                        "retrieval_backend": "vector_hybrid",
+                        "references": ["CN115132975B"],
+                        "original_links": [{"type": "original_view", "canonical_patent_id": "CN115132975B"}],
+                    },
+                },
             }
             self.claims: list[str] = []
 
@@ -362,11 +375,14 @@ def test_orchestrator_reads_cached_stage_results_before_recomputing():
         conversation_context={"recent_turns_for_llm": [{"role": "user", "content": "Earlier context"}]},
     )
 
-    assert runtime.calls == ["extract", "stage4"]
-    assert result.final_answer == "stage4 synthesized answer"
+    assert runtime.calls == ["extract"]
+    assert result.final_answer == "cached final answer"
+    assert result.raw["reference_links"] == [{"type": "reference_link", "canonical_patent_id": "CN115132975B"}]
+    assert result.raw["original_links"] == [{"type": "original_view", "canonical_patent_id": "CN115132975B"}]
+    assert result.raw["metadata"]["references"] == ["CN115132975B"]
 
 
-def test_orchestrator_establishes_singleflight_boundaries_for_stage1_to_stage3():
+def test_orchestrator_establishes_singleflight_boundaries_for_stage1_to_stage4():
     class _CacheRecorder:
         def __init__(self) -> None:
             self.claims: list[str] = []
@@ -394,7 +410,209 @@ def test_orchestrator_establishes_singleflight_boundaries_for_stage1_to_stage3()
         conversation_context={"recent_turns_for_llm": [{"role": "user", "content": "Earlier context"}]},
     )
 
-    assert cache.claims == ["stage1", "stage2", "stage25", "stage3"]
+    assert cache.claims == ["stage1", "stage2", "stage25", "stage3", "stage4"]
+
+
+def test_orchestrator_stage4_fingerprint_changes_when_answer_runtime_signature_changes():
+    class _FingerprintCache:
+        def __init__(self) -> None:
+            self.fingerprints: dict[str, list[str]] = {}
+
+        def get_stage_cache(self, *, stage: str, fingerprint: str):
+            return None
+
+        def set_stage_cache(self, *, stage: str, fingerprint: str, payload, ttl_seconds: int):
+            return True
+
+        def claim_stage_singleflight(self, *, stage: str, fingerprint: str, ttl_seconds: int):
+            self.fingerprints.setdefault(stage, []).append(fingerprint)
+            return f"token-{stage}-{len(self.fingerprints[stage])}"
+
+        def clear_stage_singleflight(self, *, stage: str, fingerprint: str, token: str):
+            return True
+
+    class _AnswerBuilderRuntime(_FakeRuntime):
+        def __init__(self, model: str) -> None:
+            super().__init__()
+            self.answer_builder = SimpleNamespace(
+                model=model,
+                base_url="https://llm.example.com/v1",
+                timeout_seconds=30.0,
+            )
+
+    cache = _FingerprintCache()
+    orchestrator = PatentGenerationOrchestrator(execution_cache=cache)
+
+    orchestrator.run(
+        question="How should we compare replacement risk?",
+        runtime=_AnswerBuilderRuntime("deepseek-v3.1"),
+        conversation_context={"recent_turns_for_llm": [{"role": "user", "content": "Earlier context"}]},
+    )
+    orchestrator.run(
+        question="How should we compare replacement risk?",
+        runtime=_AnswerBuilderRuntime("deepseek-v3.2"),
+        conversation_context={"recent_turns_for_llm": [{"role": "user", "content": "Earlier context"}]},
+    )
+
+    assert cache.fingerprints["stage3"][0] == cache.fingerprints["stage3"][1]
+    assert cache.fingerprints["stage4"][0] != cache.fingerprints["stage4"][1]
+
+
+def test_orchestrator_stage4_fingerprint_changes_when_stage1_deep_answer_changes():
+    class _FingerprintCache:
+        def __init__(self) -> None:
+            self.fingerprints: dict[str, list[str]] = {}
+
+        def get_stage_cache(self, *, stage: str, fingerprint: str):
+            return None
+
+        def set_stage_cache(self, *, stage: str, fingerprint: str, payload, ttl_seconds: int):
+            return True
+
+        def claim_stage_singleflight(self, *, stage: str, fingerprint: str, ttl_seconds: int):
+            self.fingerprints.setdefault(stage, []).append(fingerprint)
+            return f"token-{stage}-{len(self.fingerprints[stage])}"
+
+        def clear_stage_singleflight(self, *, stage: str, fingerprint: str, token: str):
+            return True
+
+    class _DeepAnswerRuntime(_FakeRuntime):
+        def __init__(self, deep_answer: str) -> None:
+            super().__init__()
+            self._deep_answer = deep_answer
+
+        def stage1_pre_answer_and_planning(self, user_question: str, conversation_context=None) -> dict[str, object]:
+            payload = super().stage1_pre_answer_and_planning(
+                user_question=user_question,
+                conversation_context=conversation_context,
+            )
+            payload["deep_answer"] = self._deep_answer
+            return payload
+
+    cache = _FingerprintCache()
+    orchestrator = PatentGenerationOrchestrator(execution_cache=cache)
+
+    orchestrator.run(
+        question="How should we compare replacement risk?",
+        runtime=_DeepAnswerRuntime("draft answer v1"),
+        conversation_context={"recent_turns_for_llm": [{"role": "user", "content": "Earlier context"}]},
+    )
+    orchestrator.run(
+        question="How should we compare replacement risk?",
+        runtime=_DeepAnswerRuntime("draft answer v2"),
+        conversation_context={"recent_turns_for_llm": [{"role": "user", "content": "Earlier context"}]},
+    )
+
+    assert cache.fingerprints["stage3"][0] == cache.fingerprints["stage3"][1]
+    assert cache.fingerprints["stage4"][0] != cache.fingerprints["stage4"][1]
+
+
+def test_orchestrator_stage4_fingerprint_changes_when_conversation_context_changes():
+    class _FingerprintCache:
+        def __init__(self) -> None:
+            self.fingerprints: dict[str, list[str]] = {}
+
+        def get_stage_cache(self, *, stage: str, fingerprint: str):
+            return None
+
+        def set_stage_cache(self, *, stage: str, fingerprint: str, payload, ttl_seconds: int):
+            return True
+
+        def claim_stage_singleflight(self, *, stage: str, fingerprint: str, ttl_seconds: int):
+            self.fingerprints.setdefault(stage, []).append(fingerprint)
+            return f"token-{stage}-{len(self.fingerprints[stage])}"
+
+        def clear_stage_singleflight(self, *, stage: str, fingerprint: str, token: str):
+            return True
+
+    cache = _FingerprintCache()
+    orchestrator = PatentGenerationOrchestrator(execution_cache=cache)
+
+    orchestrator.run(
+        question="How should we compare replacement risk?",
+        runtime=_FakeRuntime(),
+        conversation_context={"recent_turns_for_llm": [{"role": "user", "content": "Earlier context"}]},
+    )
+    orchestrator.run(
+        question="How should we compare replacement risk?",
+        runtime=_FakeRuntime(),
+        conversation_context={"recent_turns_for_llm": [{"role": "user", "content": "Updated context"}]},
+    )
+
+    assert cache.fingerprints["stage3"][0] == cache.fingerprints["stage3"][1]
+    assert cache.fingerprints["stage4"][0] != cache.fingerprints["stage4"][1]
+
+
+def test_orchestrator_runtime_retrieval_signature_excludes_parallel_worker_counts(monkeypatch):
+    captured: dict[str, dict[str, object]] = {}
+
+    class _SignatureRuntime(_FakeRuntime):
+        def __init__(self) -> None:
+            super().__init__()
+            self.retrieval_service = SimpleNamespace(
+                retrieval_version="retrieval-v2",
+                catalog_index_version="catalog-v2",
+            )
+            self.planning_model = "planner-model"
+            self.stage2_parallel_workers = 4
+            self.stage3_parallel_workers = 3
+
+    def _capture_stage2(*, question, retrieval_claims, retrieval_plan, runtime_signature):
+        del question, retrieval_claims, retrieval_plan
+        captured["stage2"] = dict(runtime_signature or {})
+        return "stage2-fingerprint"
+
+    def _capture_stage3(*, retrieval_results, source_ids, force_pdf, runtime_signature):
+        del retrieval_results, source_ids, force_pdf
+        captured["stage3"] = dict(runtime_signature or {})
+        return "stage3-fingerprint"
+
+    monkeypatch.setattr("server.patent.orchestrators.generation.build_stage2_cache_fingerprint", _capture_stage2)
+    monkeypatch.setattr("server.patent.orchestrators.generation.build_stage3_cache_fingerprint", _capture_stage3)
+
+    PatentGenerationOrchestrator().run(
+        question="How should we compare replacement risk?",
+        runtime=_SignatureRuntime(),
+        conversation_context={"recent_turns_for_llm": [{"role": "user", "content": "Earlier context"}]},
+    )
+
+    assert "stage2_parallel_workers" not in captured["stage2"]
+    assert "stage3_parallel_workers" not in captured["stage2"]
+    assert "stage2_parallel_workers" not in captured["stage3"]
+    assert "stage3_parallel_workers" not in captured["stage3"]
+
+
+def test_orchestrator_continues_passing_none_for_should_cancel():
+    captured: dict[str, object] = {}
+
+    class _CancelCaptureRuntime(_FakeRuntime):
+        def stage2_targeted_retrieval(self, retrieval_plan: PatentRetrievalPlan, *, user_question: str, should_cancel=None, active_stream_count=None) -> dict[str, object]:
+            captured["stage2_should_cancel"] = should_cancel
+            captured["stage2_active_stream_count"] = active_stream_count
+            return super().stage2_targeted_retrieval(
+                retrieval_plan,
+                user_question=user_question,
+                should_cancel=should_cancel,
+                active_stream_count=active_stream_count,
+            )
+
+        def stage3_load_patent_evidence(self, *, retrieval_results: dict[str, object], source_ids: list[str], should_cancel=None) -> dict[str, object]:
+            captured["stage3_should_cancel"] = should_cancel
+            return super().stage3_load_patent_evidence(
+                retrieval_results=retrieval_results,
+                source_ids=source_ids,
+                should_cancel=should_cancel,
+            )
+
+    PatentGenerationOrchestrator().run(
+        question="How should we compare replacement risk?",
+        runtime=_CancelCaptureRuntime(),
+        conversation_context={"recent_turns_for_llm": [{"role": "user", "content": "Earlier context"}]},
+    )
+
+    assert captured["stage2_should_cancel"] is None
+    assert captured["stage2_active_stream_count"] is None
+    assert captured["stage3_should_cancel"] is None
 
 
 def test_orchestrator_waits_for_existing_singleflight_owner_to_fill_stage_cache():

@@ -24,6 +24,17 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
+def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = str(os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(parsed, maximum))
+
+
 def _truncate(value: str, *, limit: int = 180) -> str:
     text = " ".join(str(value or "").split())
     if len(text) <= limit:
@@ -296,6 +307,59 @@ def _reference_summary(
     return anchor
 
 
+def _build_stage4_evidence_section(
+    *,
+    retrieval_outcome: PatentRetrievalOutcome,
+    allowed_patent_ids: list[str],
+) -> tuple[list[str], dict[str, int]]:
+    allowed_set = set(_normalize_patent_id_list(allowed_patent_ids))
+    filtered_evidences = [
+        evidence
+        for evidence in list(retrieval_outcome.evidences)
+        if not allowed_set or _normalize_patent_id(evidence.canonical_patent_id) in allowed_set
+    ]
+    grouped_evidences = _group_evidences_by_patent(
+        filtered_evidences,
+        max_patents=len(allowed_patent_ids) if allowed_patent_ids else None,
+    )
+    snippets_per_patent = _env_int("PATENT_STAGE4_EVIDENCE_SNIPPETS_PER_PATENT", 3, minimum=1, maximum=10)
+    snippet_max_chars = _env_int("PATENT_STAGE4_EVIDENCE_SNIPPET_MAX_CHARS", 600, minimum=80, maximum=5000)
+    abstract_max_chars = _env_int("PATENT_STAGE4_EVIDENCE_ABSTRACT_MAX_CHARS", 400, minimum=80, maximum=5000)
+    tables_per_patent = _env_int("PATENT_STAGE4_EVIDENCE_TABLES_PER_PATENT", 2, minimum=1, maximum=10)
+    table_max_chars = _env_int("PATENT_STAGE4_EVIDENCE_TABLE_MAX_CHARS", 400, minimum=80, maximum=5000)
+
+    lines = ["", "6. 检索证据（已按专利归并）："]
+    snippet_count = 0
+    table_count = 0
+    for index, (_, patent_evidences) in enumerate(grouped_evidences, start=1):
+        evidence = patent_evidences[0]
+        lines.append(f"{index}. 专利: {evidence.title} ({evidence.canonical_patent_id})")
+        if evidence.abstract_text:
+            lines.append(f"   摘要: {_truncate(evidence.abstract_text, limit=abstract_max_chars)}")
+        for snippet in patent_evidences[:snippets_per_patent]:
+            if snippet.matched_section_label and snippet.matched_snippet:
+                snippet_count += 1
+                lines.append(
+                    f"   命中片段[{snippet.matched_section_label}]: "
+                    f"{_truncate(snippet.matched_snippet, limit=snippet_max_chars)}"
+                )
+        for table in evidence.table_supplements[:tables_per_patent]:
+            table_count += 1
+            lines.append(f"   表格: {_truncate(_table_summary(table), limit=table_max_chars)}")
+        reference_summary = _reference_summary(retrieval_outcome=retrieval_outcome, patent_id=evidence.canonical_patent_id)
+        if reference_summary:
+            lines.append(f"   原文定位: {reference_summary}")
+
+    evidence_text = "\n".join(lines)
+    return lines, {
+        "evidence_chars": len(evidence_text),
+        "evidence_patent_count": len(grouped_evidences),
+        "evidence_item_count": len(filtered_evidences),
+        "snippet_count": snippet_count,
+        "table_count": table_count,
+    }
+
+
 def _is_boilerplate_snippet(evidence: PatentEvidence) -> bool:
     section_type = str(evidence.matched_section_type or "").strip().lower()
     section_label = str(evidence.matched_section_label or "").strip().lower()
@@ -403,13 +467,18 @@ class PatentAnswerBuilder:
                 context=context,
                 allowed_patent_ids=allowed_patent_ids,
             )
-        prompt = self._build_prompt(question=question, retrieval_outcome=retrieval_outcome, context=context)
+        prompt, prompt_metadata = self._build_prompt_with_metadata(
+            question=question,
+            retrieval_outcome=retrieval_outcome,
+            context=context,
+        )
         min_distinct_citations = _resolve_min_distinct_citations(context=context, allowed_patent_ids=allowed_patent_ids)
         _LOGGER.info(
-            "patent answer builder request start model=%s allowed_patent_ids=%s evidence_count=%s prompt_chars=%s",
+            "patent answer builder request start model=%s allowed_patent_ids=%s evidence_count=%s evidence_chars=%s prompt_chars=%s",
             self.model,
             allowed_patent_ids,
-            len(list(retrieval_outcome.evidences)),
+            int(prompt_metadata.get("evidence_item_count", 0)),
+            int(prompt_metadata.get("evidence_chars", 0)),
             len(prompt),
         )
         try:
@@ -477,8 +546,20 @@ class PatentAnswerBuilder:
             if fallback:
                 yield fallback
             return
-        prompt = self._build_prompt(question=question, retrieval_outcome=retrieval_outcome, context=context)
+        prompt, prompt_metadata = self._build_prompt_with_metadata(
+            question=question,
+            retrieval_outcome=retrieval_outcome,
+            context=context,
+        )
         min_distinct_citations = _resolve_min_distinct_citations(context=context, allowed_patent_ids=allowed_patent_ids)
+        _LOGGER.info(
+            "patent answer builder stream start model=%s allowed_patent_ids=%s evidence_count=%s evidence_chars=%s prompt_chars=%s",
+            self.model,
+            allowed_patent_ids,
+            int(prompt_metadata.get("evidence_item_count", 0)),
+            int(prompt_metadata.get("evidence_chars", 0)),
+            len(prompt),
+        )
         streamed_any = False
         try:
             with self._client.stream(
@@ -565,6 +646,19 @@ class PatentAnswerBuilder:
         retrieval_outcome: PatentRetrievalOutcome,
         context: dict[str, Any] | None,
     ) -> str:
+        return self._build_prompt_with_metadata(
+            question=question,
+            retrieval_outcome=retrieval_outcome,
+            context=context,
+        )[0]
+
+    def _build_prompt_with_metadata(
+        self,
+        *,
+        question: str,
+        retrieval_outcome: PatentRetrievalOutcome,
+        context: dict[str, Any] | None,
+    ) -> tuple[str, dict[str, int]]:
         context = dict(context or {})
         allowed_patent_ids = _normalize_patent_id_list(
             list(context.get("allowed_patent_ids") or []) or list(retrieval_outcome.references)
@@ -573,46 +667,61 @@ class PatentAnswerBuilder:
             context=context,
             allowed_patent_ids=allowed_patent_ids,
         )
-        lines = [f"用户问题: {question}"]
+        lines = [
+            "你是一名最终的专利答案润色与校验专家。",
+            "",
+            "请基于以下材料生成最终答案：",
+            "",
+            f"1. 原始问题：{question}",
+        ]
         summary = dict(context.get("summary_for_llm") or context.get("summary") or {})
         short_summary = str(summary.get("short_summary") or "").strip()
         if short_summary:
-            lines.append(f"会话摘要: {short_summary}")
+            lines.extend(["", f"2. 会话摘要（仅用于承接上文指代）：{short_summary}"])
         stage1_deep_answer = str(context.get("stage1_deep_answer") or "").strip()
         if stage1_deep_answer:
-            lines.append(f"阶段1预分析: {stage1_deep_answer}")
+            lines.extend(
+                [
+                    "",
+                    "3. 阶段1预分析（仅供结构、比较维度和核验线索参考，不能直接当作事实来源）：",
+                    stage1_deep_answer,
+                ]
+            )
         turns_source = context.get("recent_turns_for_llm") or context.get("chat_history") or []
         turns = [str(item.get("content") or "").strip() for item in list(turns_source)[-4:] if isinstance(item, dict)]
         if turns:
-            lines.append("最近对话:")
+            lines.extend(["", "4. 最近对话（仅用于承接当前问题，不可覆盖专利证据）："])
             lines.extend(f"- {item}" for item in turns if item)
         if allowed_patent_ids:
-            lines.append(f"允许引用的专利白名单: {', '.join(allowed_patent_ids)}")
+            lines.extend(["", f"5. 允许引用的专利白名单：{', '.join(allowed_patent_ids)}"])
+        else:
+            lines.extend(["", "5. 允许引用的专利白名单：无"])
         lines.append("最终答案中的引用格式必须严格使用 `(patent_id=公开号)`，并且只能引用上面的白名单公开号。")
         if min_distinct_citations > 0:
             lines.append(f"最终答案至少引用 {min_distinct_citations} 个不同公开号。")
-        lines.append("检索证据:")
-        for index, (_, patent_evidences) in enumerate(_group_evidences_by_patent(list(retrieval_outcome.evidences)), start=1):
-            evidence = patent_evidences[0]
-            lines.append(f"{index}. 专利: {evidence.title} ({evidence.canonical_patent_id})")
-            if evidence.abstract_text:
-                lines.append(f"   摘要: {evidence.abstract_text}")
-            for snippet in patent_evidences[:3]:
-                if snippet.matched_section_label and snippet.matched_snippet:
-                    lines.append(f"   命中片段[{snippet.matched_section_label}]: {snippet.matched_snippet}")
-            for table in evidence.table_supplements[:2]:
-                lines.append(f"   表格: {_table_summary(table)}")
-            reference_summary = _reference_summary(retrieval_outcome=retrieval_outcome, patent_id=evidence.canonical_patent_id)
-            if reference_summary:
-                lines.append(f"   原文定位: {reference_summary}")
-        lines.append("请输出简洁但完整的专利分析，明确区分背景/法律套话与实质技术证据。")
-        lines.append(
-            "每个有证据支撑的关键结论后面都要补一个 `(patent_id=公开号)`，"
-            "不能输出白名单之外的公开号。"
+        evidence_lines, evidence_metadata = _build_stage4_evidence_section(
+            retrieval_outcome=retrieval_outcome,
+            allowed_patent_ids=allowed_patent_ids,
+        )
+        lines.extend(evidence_lines)
+        lines.extend(
+            [
+                "",
+                "写作与引用要求：",
+                "- 答案必须基于“检索证据”生成，而不是直接照搬“阶段1预分析”。",
+                "- 阶段1预分析只能作为结构、比较维度和核验线索；若与证据冲突，以证据为准。",
+                "- 如果表格与正文片段同时存在，容量、倍率、循环等数值优先采用表格证据；配比、工艺窗口等结构化参数也应优先使用表格，正文片段用于补充条件、对象和机理。",
+                "- 每个核心要点都应尽量同时给出：实质技术结论、对应证据、必要的机理解释或工程含义。",
+                "- 具体数值、工艺参数、性能结论必须来自给定证据；证据不足时可以保守表述，但不能伪造引用。",
+                "- 要明确区分背景/法律套话与实质技术证据，优先保留真正支持结论的片段。",
+                "- 每个有证据支撑的关键结论后面都要补一个 `(patent_id=公开号)`，不能输出白名单之外的公开号。",
+                "- 不要机械地在每句话后重复标注同一公开号；同一逻辑块优先在段落末或要点末标注 1 次。",
+                "- 输出使用清晰、规整的 Markdown；避免只罗列碎片证据。",
+            ]
         )
         if min_distinct_citations > 0:
             lines.append(f"整段答案必须覆盖至少 {min_distinct_citations} 个不同公开号。")
-        return "\n".join(lines)
+        return "\n".join(lines), evidence_metadata
 
     def _build_request_payload(
         self,
@@ -636,8 +745,11 @@ class PatentAnswerBuilder:
                     "role": "system",
                     "content": (
                         "你是专利分析助手。只能基于给定证据回答，不要虚构未出现的事实；"
-                        "如果表格存在，必须把表格数据纳入分析；"
+                        "阶段1预分析只能作为结构和核验线索，不能直接当作事实来源；"
+                        "如果表格存在，必须优先采用表格中的容量、倍率、循环、配比和工艺窗口等数值，再用正文片段补充机理与条件；"
                         "要区分背景/法律套话与真正的技术证据；"
+                        "每个核心要点尽量同时包含实质技术结论、关键证据和必要的机理或工程含义；"
+                        "不要机械地在每句话后重复标注同一公开号，同一逻辑块优先在段落末或要点末标注 1 次；"
                         "引用必须使用 `(patent_id=公开号)`，不能使用 DOI；"
                         f"{min_citation_clause}"
                         f"最终答案里只允许引用这些公开号：{', '.join(allowed_patent_ids) if allowed_patent_ids else '无'}。"

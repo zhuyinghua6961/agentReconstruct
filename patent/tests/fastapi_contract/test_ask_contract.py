@@ -903,7 +903,7 @@ def test_stream_done_is_emitted_only_after_accept_success():
 
     assert success_events[0]["type"] == "metadata"
     assert success_events[0]["query_mode"] == "patent_kb_qa"
-    assert success_events[0]["metadata"] == {}
+    assert isinstance(success_events[0]["metadata"]["telemetry"]["backend_stream_opened_at_ms"], int)
     assert success_events[1]["type"] == "step"
     assert success_events[1]["step"] == "context_ready"
     assert "最近 1 条消息" in success_events[1]["message"]
@@ -989,6 +989,91 @@ def test_stream_ask_emits_stage_progress_before_later_stage_completion():
     assert remaining_events[-1]["type"] == "done"
 
 
+def test_gateway_owned_stream_ask_emits_stage1_before_slow_prepare_turn_finishes():
+    prepare_started = threading.Event()
+    allow_prepare_finish = threading.Event()
+
+    class _SlowGatewayPersistence(_FakePersistenceService):
+        def prepare_turn(self, *, request, user_id):
+            prepare_started.set()
+            assert allow_prepare_finish.wait(timeout=2), "prepare_turn finish gate was not released"
+            return super().prepare_turn(request=request, user_id=user_id)
+
+    request_payload = _base_payload()
+    request_payload["options"] = {
+        "gateway_task_execution": True,
+        "gateway_owned_persistence": True,
+    }
+    service = AskService(
+        patent_executor=PatentExecutor(),
+        persistence_service=_SlowGatewayPersistence(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    stream = service.stream_ask(parse_patent_request(request_payload), user_id=42)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        first_event = pool.submit(next, stream).result(timeout=0.5)
+        assert first_event["type"] == "metadata"
+        assert prepare_started.is_set() is True
+
+        second_event = pool.submit(next, stream).result(timeout=0.5)
+        assert second_event["type"] == "step"
+        assert second_event["step"] == "stage1"
+        assert second_event["status"] == "processing"
+
+        allow_prepare_finish.set()
+
+    remaining_events = list(stream)
+    assert any(event["type"] == "step" and event.get("step") == "context_ready" for event in remaining_events)
+    assert remaining_events[-1]["type"] == "done"
+
+
+def test_gateway_owned_stream_ask_failure_still_emits_stage1_before_prepare_error():
+    prepare_started = threading.Event()
+    allow_prepare_finish = threading.Event()
+
+    class _FailingGatewayPersistence(_FakePersistenceService):
+        def prepare_turn(self, *, request, user_id):
+            prepare_started.set()
+            assert allow_prepare_finish.wait(timeout=2), "prepare_turn finish gate was not released"
+            raise APIError(
+                code=codes.AUTHORITY_UNAVAILABLE,
+                message="context snapshot failed",
+                status_code=503,
+                error="authority_unavailable",
+                retriable=True,
+            )
+
+    request_payload = _base_payload()
+    request_payload["options"] = {
+        "gateway_task_execution": True,
+        "gateway_owned_persistence": True,
+    }
+    service = AskService(
+        patent_executor=PatentExecutor(),
+        persistence_service=_FailingGatewayPersistence(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    stream = service.stream_ask(parse_patent_request(request_payload), user_id=42)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        first_event = pool.submit(next, stream).result(timeout=0.5)
+        assert first_event["type"] == "metadata"
+        assert prepare_started.is_set() is True
+
+        second_event = pool.submit(next, stream).result(timeout=0.5)
+        assert second_event["type"] == "step"
+        assert second_event["step"] == "stage1"
+        assert second_event["status"] == "processing"
+
+        allow_prepare_finish.set()
+
+    remaining_events = list(stream)
+    assert remaining_events[-1]["type"] == "error"
+
+
 def test_stream_ask_emits_streaming_content_before_done_when_stage4_streams():
     class _StreamingStageRuntime(_StageRuntime):
         def stage4_synthesis_with_patent_evidence(
@@ -1028,6 +1113,52 @@ def test_stream_ask_emits_streaming_content_before_done_when_stage4_streams():
     assert events.index(content_events[0]) < len(events) - 1
     assert events[-1]["type"] == "done", events
     assert events[-1]["final_answer"] == "streamed answer"
+
+
+def test_stream_ask_emits_first_chunk_latency_telemetry_in_metadata_and_done():
+    class _StreamingStageRuntime(_StageRuntime):
+        def stage4_synthesis_with_patent_evidence(
+            self,
+            *,
+            user_question: str,
+            deep_answer: str,
+            patent_evidence_bundle: dict[str, object],
+            retrieval_results: dict[str, object] | None = None,
+            should_cancel=None,
+            content_callback=None,
+            conversation_context=None,
+        ) -> dict[str, object]:
+            if callable(content_callback):
+                content_callback("streamed ")
+                content_callback("answer")
+            return {
+                "success": True,
+                "final_answer": "streamed answer",
+                "references": ["CN115132975B"],
+                "reference_objects": [{"canonical_patent_id": "CN115132975B"}],
+                "reference_links": [],
+                "original_links": [],
+                "metadata": {"retrieval_backend": "vector_hybrid"},
+            }
+
+    service = AskService(
+        patent_executor=PatentExecutor(runtime=_StreamingStageRuntime()),
+        persistence_service=_FakePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    events = list(service.stream_ask(parse_patent_request(_base_payload()), user_id=42))
+
+    metadata_telemetry = events[0]["metadata"]["telemetry"]
+    done_telemetry = events[-1]["metadata"]["telemetry"]
+
+    assert isinstance(metadata_telemetry["backend_stream_opened_at_ms"], int)
+    assert metadata_telemetry["backend_stream_opened_at_ms"] > 0
+    assert isinstance(done_telemetry["backend_stream_opened_at_ms"], int)
+    assert isinstance(done_telemetry["first_step_at_ms"], int)
+    assert isinstance(done_telemetry["first_content_at_ms"], int)
+    assert done_telemetry["backend_stream_opened_at_ms"] <= done_telemetry["first_step_at_ms"]
+    assert done_telemetry["first_step_at_ms"] <= done_telemetry["first_content_at_ms"]
 
 
 def test_stream_ask_strips_raw_patent_id_from_streaming_and_done_payload():

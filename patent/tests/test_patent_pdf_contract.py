@@ -53,7 +53,7 @@ def test_system_prompt_matches_fastqa_contract():
     assert PDF_QA_SYSTEM_MESSAGE == FASTQA_PROMPTING.PDF_QA_SYSTEM_MESSAGE
 
 
-def test_non_compare_summary_prompt_matches_fastqa_contract():
+def test_non_compare_summary_prompt_adapts_fastqa_structure_for_patent():
     kb_section = build_kb_section({"kb_answer": "KB evidence"})
 
     patent_prompt = build_patent_pdf_answer_prompt(
@@ -64,17 +64,16 @@ def test_non_compare_summary_prompt_matches_fastqa_contract():
         is_compare=False,
         selected_file_labels=["paper-a.pdf"],
     )
-    fastqa_prompt = FASTQA_PROMPTING.build_pdf_answer_prompt(
-        question="请总结这篇文献",
-        pdf_content="标题: A study\nAbstract text\nResults text",
-        kb_section=kb_section,
-        is_summary=True,
-    )
+    assert "## 结论" in patent_prompt
+    assert "## 证据" in patent_prompt
+    assert "## 对比" in patent_prompt
+    assert "## 限制" in patent_prompt
+    assert "知识库信息仅用于验证" in patent_prompt or "知识库信息仅可用于验证" in patent_prompt
+    assert "不要把知识库信息当作新的 PDF 事实" in patent_prompt
+    assert "专利/文献" in patent_prompt
 
-    assert patent_prompt == fastqa_prompt
 
-
-def test_non_compare_non_summary_prompt_matches_fastqa_contract():
+def test_non_compare_non_summary_prompt_adapts_fastqa_structure_for_patent():
     patent_prompt = build_patent_pdf_answer_prompt(
         question="这篇文献里报告了什么结果？",
         pdf_content="标题: A study\nAbstract text\nResults text",
@@ -83,14 +82,32 @@ def test_non_compare_non_summary_prompt_matches_fastqa_contract():
         is_compare=False,
         selected_file_labels=["paper-a.pdf"],
     )
-    fastqa_prompt = FASTQA_PROMPTING.build_pdf_answer_prompt(
-        question="这篇文献里报告了什么结果？",
+    assert "## 结论" in patent_prompt
+    assert "## 证据" in patent_prompt
+    assert "## 对比" in patent_prompt
+    assert "## 限制" in patent_prompt
+    assert "只允许使用 PDF 原文中明确出现的内容" in patent_prompt
+    assert "不得把未在 PDF 出现的信息补写成结论" in patent_prompt
+
+
+def test_hybrid_pdf_prompt_requires_file_side_scope_and_no_kb_override():
+    prompt = build_patent_pdf_answer_prompt(
+        question="请结合 PDF 和知识库给出结论",
         pdf_content="标题: A study\nAbstract text\nResults text",
-        kb_section="",
+        kb_section=build_kb_section({"kb_answer": "KB evidence"}),
         is_summary=False,
+        is_compare=False,
+        selected_file_labels=["paper-a.pdf"],
+        route_hint="hybrid_qa",
+        source_scope="pdf+kb",
     )
 
-    assert patent_prompt == fastqa_prompt
+    assert "当前任务属于 patent 混合文件问答中的 PDF 证据分析环节" in prompt
+    assert "先给出这份 PDF 单独能够支持的判断" in prompt
+    assert "不要把知识库验证信息改写成 PDF 原文结论" in prompt
+    assert "## 结论" in prompt
+    assert "## 证据" in prompt
+    assert "## 限制" in prompt
 
 
 def test_request_payload_includes_kb_boundary_section_when_include_kb_is_enabled():

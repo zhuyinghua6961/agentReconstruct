@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import os
 import threading
 import time
 from typing import Any
@@ -11,9 +12,11 @@ from server.patent.cache_keys import (
     build_stage2_cache_fingerprint,
     build_stage25_cache_fingerprint,
     build_stage3_cache_fingerprint,
+    build_stage4_cache_fingerprint,
 )
 from server.patent.models import PatentQaExecutionMetadata, PatentQaExecutionResult, PatentRetrievalPlan
 from server.patent.models import PatentRetrievalClaim
+from server.patent.streaming import emit_text_chunks
 
 _LOGGER = logging.getLogger("patent.generation")
 
@@ -96,6 +99,52 @@ def _callable_accepts_keyword(fn: Any, keyword: str) -> bool:
         if parameter.name == keyword:
             return True
     return False
+
+
+def _mark_cached_payload(*, payload: dict[str, Any] | None, stage: str, fingerprint: str) -> dict[str, Any]:
+    resolved = dict(payload or {})
+    metadata = dict(resolved.get("metadata") or {})
+    metadata.update(
+        {
+            "cache_hit": True,
+            "cache_namespace": "qa-core",
+            "cache_stage": str(stage or "").strip(),
+            "cache_fingerprint": str(fingerprint or "").strip(),
+        }
+    )
+    resolved["cache_hit"] = True
+    resolved["metadata"] = metadata
+    return resolved
+
+
+def _payload_cache_hit(payload: dict[str, Any] | None) -> bool:
+    resolved = dict(payload or {})
+    if bool(resolved.get("cache_hit")):
+        return True
+    metadata = dict(resolved.get("metadata") or {})
+    return bool(metadata.get("cache_hit"))
+
+
+def _stage4_runtime_signature(runtime: Any) -> dict[str, Any]:
+    retrieval_service = getattr(runtime, "retrieval_service", None)
+    answer_builder = getattr(runtime, "answer_builder", None)
+    signature = {
+        "runtime_type": type(runtime).__name__,
+        "retrieval_version": getattr(retrieval_service, "retrieval_version", ""),
+        "catalog_index_version": getattr(retrieval_service, "catalog_index_version", ""),
+        "answer_builder_type": type(answer_builder).__name__ if answer_builder is not None else "",
+        "answer_model": getattr(answer_builder, "model", ""),
+        "answer_base_url": getattr(answer_builder, "base_url", ""),
+        "answer_timeout_seconds": getattr(answer_builder, "timeout_seconds", ""),
+        "stage4_reference_topk": str(os.getenv("PATENT_STAGE4_REFERENCE_TOPK") or "").strip(),
+        "stage4_min_citations": str(os.getenv("PATENT_STAGE4_MIN_CITATIONS") or "").strip(),
+    }
+    extra_signature = getattr(runtime, "stage4_runtime_signature", None)
+    if callable(extra_signature):
+        extra_signature = extra_signature()
+    if isinstance(extra_signature, dict):
+        signature.update(extra_signature)
+    return signature
 
 
 def _emit_progress_step(
@@ -212,7 +261,8 @@ class PatentGenerationOrchestrator:
         except Exception:
             return compute()
         if cached is not None:
-            return cached
+            _LOGGER.info("patent %s cache hit fingerprint=%s", stage, str(fingerprint or "")[:16])
+            return _mark_cached_payload(payload=dict(cached or {}), stage=stage, fingerprint=fingerprint)
 
         try:
             token = cache.claim_stage_singleflight(
@@ -240,7 +290,8 @@ class PatentGenerationOrchestrator:
                     except Exception:
                         return compute()
                     if cached is not None:
-                        return cached
+                        _LOGGER.info("patent %s cache hit after singleflight wait fingerprint=%s", stage, str(fingerprint or "")[:16])
+                        return _mark_cached_payload(payload=dict(cached or {}), stage=stage, fingerprint=fingerprint)
                     try:
                         owner = str(
                             getattr(cache, "get_stage_singleflight_owner", lambda **_kwargs: "")(
@@ -268,7 +319,8 @@ class PatentGenerationOrchestrator:
                         except Exception:
                             return compute()
                         if cached is not None:
-                            return cached
+                            _LOGGER.info("patent %s cache hit after contention handoff fingerprint=%s", stage, str(fingerprint or "")[:16])
+                            return _mark_cached_payload(payload=dict(cached or {}), stage=stage, fingerprint=fingerprint)
                         try:
                             owner = str(
                                 getattr(cache, "get_stage_singleflight_owner", lambda **_kwargs: "")(
@@ -419,6 +471,9 @@ class PatentGenerationOrchestrator:
                     stage25_result={},
                     success=success,
                 )
+                stage_cache_hits = {
+                    "stage1": _payload_cache_hit(dict(stage1_result or {})),
+                }
                 _LOGGER.info(
                     "patent pipeline short-circuit trace=%s success=%s reason=stage1_no_retrieval_claims deep_answer_chars=%s timings=%s",
                     normalized_trace_id,
@@ -442,7 +497,11 @@ class PatentGenerationOrchestrator:
                         "reference_objects": [],
                         "reference_links": [],
                         "original_links": [],
-                        "metadata": {"stage1_short_circuit": True},
+                        "metadata": {
+                            "stage1_short_circuit": True,
+                            "cache_hit": any(stage_cache_hits.values()),
+                            "stage_cache_hits": stage_cache_hits,
+                        },
                         "steps": steps,
                     },
                 )
@@ -592,21 +651,44 @@ class PatentGenerationOrchestrator:
             }
             if callable(content_callback) and _callable_accepts_keyword(stage4_fn, "content_callback"):
                 stage4_kwargs["content_callback"] = content_callback
+            stage4_fingerprint = build_stage4_cache_fingerprint(
+                question=question,
+                deep_answer=deep_answer,
+                retrieval_results=stage3_input,
+                patent_evidence_bundle=stage3_result,
+                conversation_context=conversation_context,
+                runtime_signature=_stage4_runtime_signature(runtime),
+            )
             stage4_result = self._timed(
                 timings,
                 "stage4",
-                lambda: stage4_fn(**stage4_kwargs),
+                lambda: self._run_cached_stage(
+                    stage="stage4",
+                    fingerprint=stage4_fingerprint,
+                    compute=lambda: stage4_fn(**stage4_kwargs),
+                ),
             )
             final_payload = dict(stage4_result or {})
             merged_metadata = dict(dict(stage3_input or {}).get("metadata") or {})
             merged_metadata.update(dict(final_payload.get("metadata") or {}))
             final_answer = str(final_payload.get("final_answer") or final_payload.get("answer_text") or "")
+            if callable(content_callback) and bool(dict(final_payload.get("metadata") or {}).get("cache_hit")) and final_answer:
+                emit_text_chunks(final_answer, content_callback=content_callback)
             success = bool(final_payload.get("success")) if "success" in final_payload else bool(final_answer)
             steps = _build_stage_steps(
                 timings=timings,
                 stage25_result=dict(stage25_result or {}),
                 success=success,
             )
+            stage_cache_hits = {
+                "stage1": _payload_cache_hit(dict(stage1_result or {})),
+                "stage2": _payload_cache_hit(dict(stage2_result or {})),
+                "stage25": _payload_cache_hit(dict(stage25_result or {})),
+                "stage3": _payload_cache_hit(dict(stage3_result or {})),
+                "stage4": _payload_cache_hit(final_payload),
+            }
+            merged_metadata["cache_hit"] = any(stage_cache_hits.values())
+            merged_metadata["stage_cache_hits"] = stage_cache_hits
             _LOGGER.info(
                 "patent pipeline completed trace=%s success=%s final_answer_chars=%s references=%s source_id_count=%s timings=%s",
                 normalized_trace_id,

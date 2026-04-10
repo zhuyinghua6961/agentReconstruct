@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import threading
 import logging
 import re
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass
 from typing import Any, Callable
 
@@ -64,6 +66,15 @@ class _MatchedReference:
 
 def _normalize_text(value: Any) -> str:
     return " ".join(str(value or "").split()).strip()
+
+
+def _normalize_query_list(values: Any) -> list[str]:
+    queries: list[str] = []
+    for item in list(values or []):
+        normalized = " ".join(str(item or "").split()).strip()
+        if normalized and normalized not in queries:
+            queries.append(normalized)
+    return queries
 
 
 def _document_prefix_key(text: str) -> str:
@@ -198,6 +209,8 @@ class PatentRetrievalService:
         self._abstract_vector_search = abstract_vector_search
         self._chunk_vector_search = chunk_vector_search
         self._vector_runtime_enabled = True
+        self._catalog_lock = threading.Lock()
+        self._vector_runtime_lock = threading.Lock()
         self._table_loader = table_loader
         self._answer_builder = answer_builder
         self._archive_loader = archive_loader
@@ -210,7 +223,13 @@ class PatentRetrievalService:
     def catalog_index_version(self) -> str:
         return self._catalog_index_version
 
-    def retrieve(self, *, question: str, context: dict[str, Any] | None = None) -> PatentRetrievalOutcome:
+    def retrieve(
+        self,
+        *,
+        question: str,
+        context: dict[str, Any] | None = None,
+        include_answer_text: bool = True,
+    ) -> PatentRetrievalOutcome:
         _LOGGER.info("retrieve start question_chars=%s vector_enabled=%s", len(str(question or "")), self._vector_search_enabled())
         started_at = time.perf_counter()
         timings: dict[str, int] = {}
@@ -238,6 +257,7 @@ class PatentRetrievalService:
                         cache_hit=False,
                         timings=timings,
                         started_at=started_at,
+                        include_answer_text=include_answer_text,
                     )
                     _LOGGER.info("retrieve complete backend=%s refs=%s", outcome.retrieval_backend, outcome.references)
                     return outcome
@@ -253,6 +273,7 @@ class PatentRetrievalService:
                             cache_hit=False,
                             timings=timings,
                             started_at=started_at,
+                            include_answer_text=include_answer_text,
                         )
                         _LOGGER.info("retrieve complete backend=%s refs=%s", outcome.retrieval_backend, outcome.references)
                         return outcome
@@ -261,13 +282,14 @@ class PatentRetrievalService:
 
         retrieval_mode = "vector_hybrid" if self._vector_search_enabled() else "hybrid_no_vector"
         query_key = self._normalized_query_key(normalized_question=normalized_question, retrieval_mode=retrieval_mode)
-        cached = self._get_retrieval_cache(query_key)
-        if isinstance(cached, dict):
-            return self._outcome_from_cache(cached, cache_hit=True)
+        if include_answer_text:
+            cached = self._get_retrieval_cache(query_key)
+            if isinstance(cached, dict):
+                return self._outcome_from_cache(cached, cache_hit=True)
 
-        negative_hit = self._get_negative_retrieval(query_key)
-        if negative_hit is not None:
-            return self._build_not_found("metadata_lexical", negative_cache_hit=True, timings=timings, started_at=started_at)
+            negative_hit = self._get_negative_retrieval(query_key)
+            if negative_hit is not None:
+                return self._build_not_found("metadata_lexical", negative_cache_hit=True, timings=timings, started_at=started_at)
 
         vector_started_at = time.perf_counter()
         vector_matches = self._vector_matches(question=question, candidate_patent_ids=None, force_backend="vector_hybrid")
@@ -281,8 +303,10 @@ class PatentRetrievalService:
                 cache_hit=False,
                 timings=timings,
                 started_at=started_at,
+                include_answer_text=include_answer_text,
             )
-            self._set_retrieval_cache(query_key, self._cache_payload(outcome))
+            if include_answer_text:
+                self._set_retrieval_cache(query_key, self._cache_payload(outcome))
             _LOGGER.info("retrieve complete backend=%s refs=%s", outcome.retrieval_backend, outcome.references)
             return outcome
 
@@ -301,8 +325,10 @@ class PatentRetrievalService:
                     cache_hit=False,
                     timings=timings,
                     started_at=started_at,
+                    include_answer_text=include_answer_text,
                 )
-                self._set_retrieval_cache(query_key, self._cache_payload(outcome))
+                if include_answer_text:
+                    self._set_retrieval_cache(query_key, self._cache_payload(outcome))
                 _LOGGER.info("retrieve complete backend=%s refs=%s", outcome.retrieval_backend, outcome.references)
                 return outcome
 
@@ -321,12 +347,15 @@ class PatentRetrievalService:
                     cache_hit=False,
                     timings=timings,
                     started_at=started_at,
+                    include_answer_text=include_answer_text,
                 )
-                self._set_retrieval_cache(query_key, self._cache_payload(outcome))
+                if include_answer_text:
+                    self._set_retrieval_cache(query_key, self._cache_payload(outcome))
                 _LOGGER.info("retrieve complete backend=%s refs=%s", outcome.retrieval_backend, outcome.references)
                 return outcome
 
-        self._set_negative_retrieval(query_key, {"not_found": True})
+        if include_answer_text:
+            self._set_negative_retrieval(query_key, {"not_found": True})
         outcome = self._build_not_found("metadata_lexical", negative_cache_hit=False, timings=timings, started_at=started_at)
         _LOGGER.info("retrieve complete backend=%s refs=%s not_found=%s", outcome.retrieval_backend, outcome.references, outcome.not_found)
         return outcome
@@ -338,6 +367,10 @@ class PatentRetrievalService:
         retrieval_plan: Any = None,
         user_question: str,
         query_generation_fn: Callable[..., list[str]] | None = None,
+        frozen_claim_queries: list[list[str]] | None = None,
+        parallel_workers: int = 1,
+        should_cancel: Callable[[], bool] | None = None,
+        active_stream_count: int | None = None,
         context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         claims = self._coerce_retrieval_claims(retrieval_claims)
@@ -346,6 +379,10 @@ class PatentRetrievalService:
                 retrieval_claims=claims,
                 user_question=user_question,
                 query_generation_fn=query_generation_fn,
+                frozen_claim_queries=frozen_claim_queries,
+                parallel_workers=parallel_workers,
+                should_cancel=should_cancel,
+                active_stream_count=active_stream_count,
                 context=context,
             )
         return self._targeted_retrieve_from_plan(
@@ -383,6 +420,7 @@ class PatentRetrievalService:
                     cache_hit=False,
                     timings=timings,
                     started_at=started_at,
+                    include_answer_text=False,
                 )
                 return self._stage2_payload_from_outcome(outcome)
 
@@ -407,6 +445,7 @@ class PatentRetrievalService:
                     cache_hit=False,
                     timings=timings,
                     started_at=started_at,
+                    include_answer_text=False,
                 )
                 payload = self._stage2_payload_from_outcome(outcome)
                 metadata = dict(payload.get("metadata") or {})
@@ -431,6 +470,7 @@ class PatentRetrievalService:
                         cache_hit=False,
                         timings=timings,
                         started_at=started_at,
+                        include_answer_text=False,
                     )
                     payload = self._stage2_payload_from_outcome(outcome)
                     metadata = dict(payload.get("metadata") or {})
@@ -441,7 +481,13 @@ class PatentRetrievalService:
                     return payload
 
         fallback_question = explicit_patent_ids[0] if explicit_patent_ids else user_question
-        return self._stage2_payload_from_outcome(self.retrieve(question=fallback_question, context=context))
+        return self._stage2_payload_from_outcome(
+            self.retrieve(
+                question=fallback_question,
+                context=context,
+                include_answer_text=False,
+            )
+        )
 
     def _targeted_retrieve_from_claims(
         self,
@@ -449,8 +495,15 @@ class PatentRetrievalService:
         retrieval_claims: list[PatentRetrievalClaim],
         user_question: str,
         query_generation_fn: Callable[..., list[str]] | None = None,
+        frozen_claim_queries: list[list[str]] | None = None,
+        parallel_workers: int = 1,
+        should_cancel: Callable[[], bool] | None = None,
+        active_stream_count: int | None = None,
         context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        del active_stream_count
+        if callable(should_cancel) and should_cancel():
+            return self._cancelled_stage2_payload()
         if not self._vector_search_enabled():
             return self._targeted_retrieve_from_plan(
                 retrieval_plan=self._retrieval_plan_from_claims(retrieval_claims, user_question=user_question),
@@ -462,19 +515,44 @@ class PatentRetrievalService:
         timings: dict[str, int] = {}
         generated_queries: list[str] = []
         candidate_patent_ids: list[str] = []
-        all_matches: list[_MatchedReference] = []
+        resolved_frozen_claim_queries = list(frozen_claim_queries or [])
+        claim_jobs = list(enumerate(retrieval_claims))
 
-        for claim in retrieval_claims:
-            claim_queries = self._generate_claim_queries(
-                user_question=user_question,
-                retrieval_claim=claim,
-                query_generation_fn=query_generation_fn,
+        def _failed_claim_output(index: int, claim: PatentRetrievalClaim, exc: Exception) -> dict[str, Any]:
+            _LOGGER.warning(
+                "claim retrieval failed claim_index=%s claim=%s error=%s",
+                int(index) + 1,
+                str(claim.claim or "")[:120],
+                exc,
             )
+            return {
+                "index": index,
+                "generated_queries": [],
+                "candidate_patent_ids": [],
+                "per_query_matches": [],
+                "ok": False,
+            }
+
+        def _process_claim(index: int, claim: PatentRetrievalClaim) -> dict[str, Any]:
+            if index < len(resolved_frozen_claim_queries):
+                claim_queries = _normalize_query_list(resolved_frozen_claim_queries[index])
+            else:
+                claim_queries = self._generate_claim_queries(
+                    user_question=user_question,
+                    retrieval_claim=claim,
+                    query_generation_fn=query_generation_fn,
+                )
             if not claim_queries:
-                continue
+                return {
+                    "index": index,
+                    "generated_queries": [],
+                    "candidate_patent_ids": [],
+                    "per_query_matches": [],
+                    "ok": True,
+                }
+            claim_candidate_patent_ids: list[str] = []
+            per_query_matches: list[list[_MatchedReference]] = []
             for query in claim_queries:
-                if query not in generated_queries:
-                    generated_queries.append(query)
                 abstract_hits = self._run_abstract_vector_search(query, self._top_k_abstract_vector)
                 query_candidate_ids: list[str] = []
                 query_matches: list[_MatchedReference] = []
@@ -492,8 +570,8 @@ class PatentRetrievalService:
                     if abstract_match is not None:
                         query_matches.append(abstract_match)
                 for patent_id in query_candidate_ids:
-                    if patent_id not in candidate_patent_ids:
-                        candidate_patent_ids.append(patent_id)
+                    if patent_id not in claim_candidate_patent_ids:
+                        claim_candidate_patent_ids.append(patent_id)
                 chunk_hits = self._run_chunk_vector_search(
                     query,
                     query_candidate_ids or None,
@@ -510,7 +588,59 @@ class PatentRetrievalService:
                     )
                     if chunk_match is not None:
                         query_matches.append(chunk_match)
-                all_matches.extend(self._dedupe_matches_by_prefix(query_matches))
+                per_query_matches.append(self._dedupe_matches_by_prefix(query_matches))
+            return {
+                "index": index,
+                "generated_queries": list(claim_queries),
+                "candidate_patent_ids": list(claim_candidate_patent_ids),
+                "per_query_matches": per_query_matches,
+                "ok": True,
+            }
+
+        claim_outputs: list[dict[str, Any]] = []
+        if len(claim_jobs) <= 1 or int(parallel_workers or 1) <= 1:
+            for index, claim in claim_jobs:
+                if callable(should_cancel) and should_cancel():
+                    return self._cancelled_stage2_payload()
+                try:
+                    claim_outputs.append(_process_claim(index, claim))
+                except Exception as exc:
+                    claim_outputs.append(_failed_claim_output(index, claim, exc))
+        else:
+            max_workers = min(max(1, int(parallel_workers)), len(claim_jobs))
+            cancelled = False
+            executor = ThreadPoolExecutor(max_workers=max_workers)
+            try:
+                future_map = {executor.submit(_process_claim, index, claim): (index, claim) for index, claim in claim_jobs}
+                pending = set(future_map)
+                while pending:
+                    if callable(should_cancel) and should_cancel():
+                        cancelled = True
+                        for future in pending:
+                            future.cancel()
+                        return self._cancelled_stage2_payload()
+                    done, pending = wait(pending, timeout=0.2, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        try:
+                            claim_outputs.append(future.result())
+                        except Exception as exc:
+                            index, claim = future_map[future]
+                            claim_outputs.append(_failed_claim_output(index, claim, exc))
+            finally:
+                executor.shutdown(wait=not cancelled, cancel_futures=cancelled)
+
+        all_matches: list[_MatchedReference] = []
+        for output in sorted(claim_outputs, key=lambda item: int(item.get("index", 0))):
+            if not output.get("ok"):
+                continue
+            for query in list(output.get("generated_queries") or []):
+                if query not in generated_queries:
+                    generated_queries.append(query)
+            for patent_id in list(output.get("candidate_patent_ids") or []):
+                if patent_id not in candidate_patent_ids:
+                    candidate_patent_ids.append(patent_id)
+            for query_matches in list(output.get("per_query_matches") or []):
+                all_matches.extend(list(query_matches or []))
 
         merged_matches = self._dedupe_matches_by_prefix(all_matches)
         if not merged_matches:
@@ -529,6 +659,7 @@ class PatentRetrievalService:
             cache_hit=False,
             timings=timings,
             started_at=started_at,
+            include_answer_text=False,
         )
         payload = self._stage2_payload_from_outcome(outcome, matches=merged_matches)
         metadata = dict(payload.get("metadata") or {})
@@ -537,6 +668,25 @@ class PatentRetrievalService:
         payload["metadata"] = metadata
         payload["source_ids"] = self.extract_source_ids(payload)
         return payload
+
+    def _cancelled_stage2_payload(self) -> dict[str, Any]:
+        return asdict(
+            PatentStage2RetrievalResult(
+                documents=[],
+                metadatas=[],
+                distances=[],
+                references=[],
+                reference_objects=[],
+                reference_links=[],
+                original_links=[],
+                source_ids=[],
+                metadata={"cancelled": True},
+                cache_hit=False,
+                negative_cache_hit=False,
+                not_found=False,
+                timings={},
+            )
+        )
 
     def extract_source_ids(self, retrieval_results: dict[str, Any]) -> list[str]:
         source_ids: list[str] = []
@@ -885,12 +1035,16 @@ class PatentRetrievalService:
         loader = getattr(self._archive_loader, "load_catalog_record", None)
         if not callable(loader):
             return None
-        record = loader(normalized)
-        if isinstance(record, PatentCatalogRecord):
-            self._catalog_by_id[normalized] = record
-            self._catalog_identifier_index = self._build_catalog_identifier_index(list(self._catalog_by_id.values()))
-            return record
-        return None
+        with self._catalog_lock:
+            cached = self._catalog_by_id.get(normalized)
+            if cached is not None:
+                return cached
+            record = loader(normalized)
+            if isinstance(record, PatentCatalogRecord):
+                self._catalog_by_id[normalized] = record
+                self._catalog_identifier_index = self._build_catalog_identifier_index(list(self._catalog_by_id.values()))
+                return record
+            return None
 
     def _vector_matches(
         self,
@@ -1132,9 +1286,10 @@ class PatentRetrievalService:
             return []
 
     def _disable_vector_search(self, exc: Exception) -> None:
-        if not self._vector_runtime_enabled:
-            return
-        self._vector_runtime_enabled = False
+        with self._vector_runtime_lock:
+            if not self._vector_runtime_enabled:
+                return
+            self._vector_runtime_enabled = False
         _LOGGER.warning("Patent vector retrieval failed; degrading to no-vector mode: %s", exc, exc_info=True)
 
     def _build_success(
@@ -1147,6 +1302,7 @@ class PatentRetrievalService:
         cache_hit: bool,
         timings: dict[str, int],
         started_at: float,
+        include_answer_text: bool = True,
     ) -> PatentRetrievalOutcome:
         if not matches:
             return self._build_not_found(backend, negative_cache_hit=False, timings=timings, started_at=started_at)
@@ -1169,10 +1325,12 @@ class PatentRetrievalService:
                 reference_links.append(reference_link)
             if original_link is not None:
                 original_links.append(original_link)
-        answer_started_at = time.perf_counter()
-        answer_text = self._build_answer_text(question=question, context=context, matches=matches, evidences=evidences)
         resolved_timings = dict(timings)
-        resolved_timings["answer_build_ms"] = max(1, int((time.perf_counter() - answer_started_at) * 1000))
+        answer_text = ""
+        if include_answer_text:
+            answer_started_at = time.perf_counter()
+            answer_text = self._build_answer_text(question=question, context=context, matches=matches, evidences=evidences)
+            resolved_timings["answer_build_ms"] = max(1, int((time.perf_counter() - answer_started_at) * 1000))
         resolved_timings["retrieval_total_ms"] = max(1, int((time.perf_counter() - started_at) * 1000))
         return PatentRetrievalOutcome(
             retrieval_backend=backend,  # type: ignore[arg-type]

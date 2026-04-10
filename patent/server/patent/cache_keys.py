@@ -6,6 +6,19 @@ from dataclasses import asdict, dataclass, is_dataclass
 from urllib.parse import quote
 
 
+_VOLATILE_CACHE_KEYS = {"cache_hit", "negative_cache_hit", "timings"}
+_VOLATILE_METADATA_KEYS = {
+    "candidate_patent_ids",
+    "retrieval_plan_queries",
+    "localization_fallback",
+    "cache_hit",
+    "cache_namespace",
+    "cache_fingerprint",
+    "cache_stage",
+    "cache_key",
+    "stage_cache_hits",
+}
+
 
 def _normalize(value: object) -> str:
     if value is None:
@@ -25,25 +38,29 @@ def _jsonable(value: object) -> object:
     return str(value)
 
 
-def _normalize_retrieval_results_for_cache(value: object) -> object:
+def _normalize_payload_for_cache(value: object) -> object:
     if isinstance(value, dict):
         normalized: dict[str, object] = {}
         for key, item in sorted(value.items(), key=lambda entry: str(entry[0])):
             normalized_key = str(key)
-            if normalized_key in {"cache_hit", "negative_cache_hit", "timings"}:
+            if normalized_key in _VOLATILE_CACHE_KEYS:
                 continue
             if normalized_key == "metadata" and isinstance(item, dict):
                 normalized[normalized_key] = {
-                    str(meta_key): _normalize_retrieval_results_for_cache(meta_value)
+                    str(meta_key): _normalize_payload_for_cache(meta_value)
                     for meta_key, meta_value in sorted(item.items(), key=lambda entry: str(entry[0]))
-                    if str(meta_key) not in {"candidate_patent_ids", "retrieval_plan_queries", "localization_fallback"}
+                    if str(meta_key) not in _VOLATILE_METADATA_KEYS
                 }
                 continue
-            normalized[normalized_key] = _normalize_retrieval_results_for_cache(item)
+            normalized[normalized_key] = _normalize_payload_for_cache(item)
         return normalized
     if isinstance(value, (list, tuple)):
-        return [_normalize_retrieval_results_for_cache(item) for item in value]
+        return [_normalize_payload_for_cache(item) for item in value]
     return _jsonable(value)
+
+
+def _normalize_retrieval_results_for_cache(value: object) -> object:
+    return _normalize_payload_for_cache(value)
 
 
 def _fingerprint(payload: dict[str, object]) -> str:
@@ -115,9 +132,55 @@ def build_stage3_cache_fingerprint(
 ) -> str:
     return _fingerprint(
         {
-            "retrieval_results": _normalize_retrieval_results_for_cache(retrieval_results or {}),
+            "retrieval_results": _normalize_payload_for_cache(retrieval_results or {}),
             "source_ids": list(source_ids or []),
             "force_pdf": bool(force_pdf),
+            "runtime_signature": runtime_signature or {},
+        }
+    )
+
+
+def build_stage4_cache_fingerprint(
+    *,
+    question: str,
+    deep_answer: str | None = None,
+    retrieval_results: dict[str, object] | None,
+    patent_evidence_bundle: dict[str, object] | None,
+    conversation_context: dict[str, object] | None = None,
+    runtime_signature: dict[str, object] | None = None,
+) -> str:
+    return _fingerprint(
+        {
+            "question": " ".join(str(question or "").split()),
+            "deep_answer": " ".join(str(deep_answer or "").split()),
+            "retrieval_results": _normalize_payload_for_cache(retrieval_results or {}),
+            "patent_evidence_bundle": _normalize_payload_for_cache(patent_evidence_bundle or {}),
+            "conversation_context": _normalize_payload_for_cache(conversation_context or {}),
+            "runtime_signature": runtime_signature or {},
+        }
+    )
+
+
+def build_file_route_cache_fingerprint(
+    *,
+    question: str,
+    route: str,
+    source_scope: str,
+    selected_file_ids: list[int] | None,
+    primary_file_id: int | None,
+    selected_execution_files: list[object] | None,
+    file_selection: dict[str, object] | None,
+    runtime_signature: dict[str, object] | None = None,
+) -> str:
+    return _fingerprint(
+        {
+            "question": " ".join(str(question or "").split()),
+            "route": str(route or "").strip(),
+            "source_scope": str(source_scope or "").strip(),
+            "selected_file_ids": list(selected_file_ids or []),
+            "primary_file_id": primary_file_id,
+            "selected_execution_files": _jsonable(list(selected_execution_files or [])),
+            "file_selection": _jsonable(dict(file_selection or {})),
             "runtime_signature": runtime_signature or {},
         }
     )
@@ -150,6 +213,12 @@ class PatentKeyFactory:
 
     def stage_singleflight(self, stage: object, fingerprint: object) -> str:
         return self._join("qa-core", "lock", stage, fingerprint)
+
+    def file_route_cache(self, fingerprint: object) -> str:
+        return self._join("qa-core", "cache", "file-route", fingerprint)
+
+    def file_route_singleflight(self, fingerprint: object) -> str:
+        return self._join("qa-core", "lock", "file-route", fingerprint)
 
     def retrieval_cache(self, normalized_query_key: object) -> str:
         return self._join("retrieval", "cache", normalized_query_key)

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import re
+import threading
+import time
 from typing import Any, Callable
 
+from server.patent.cache_keys import build_file_route_cache_fingerprint
 from server.patent.file_models import PatentFileContract, PatentFileRoutePlan
 from server.patent.pdf_service import PatentPdfService
 from server.patent.streaming import emit_text_chunks
@@ -17,6 +21,248 @@ _HYBRID_SCOPE_TO_PLAN = {
     "pdf+table": ("hybrid", ("pdf", "table"), False),
     "pdf+table+kb": ("hybrid", ("pdf", "table"), True),
 }
+
+_LOGGER = logging.getLogger("patent.file_routes")
+
+
+def _file_route_runtime_signature(
+    *,
+    plan: PatentFileRoutePlan,
+    pdf_service: PatentPdfService,
+    tabular_service: PatentTabularService,
+) -> dict[str, Any]:
+    return {
+        "handler": plan.handler,
+        "include_kb": bool(plan.include_kb),
+        "pdf_service_type": type(pdf_service).__name__,
+        "tabular_service_type": type(tabular_service).__name__,
+    }
+
+
+def _mark_file_route_cache_metadata(
+    *,
+    result: dict[str, Any],
+    fingerprint: str,
+    cache_hit: bool,
+) -> dict[str, Any]:
+    payload = dict(result or {})
+    metadata = dict(payload.get("metadata") or {})
+    metadata.update(
+        {
+            "cache_hit": bool(cache_hit),
+            "cache_namespace": "file-route",
+            "cache_fingerprint": str(fingerprint or "").strip(),
+        }
+    )
+    payload["metadata"] = metadata
+    payload["cache_hit"] = bool(cache_hit)
+    return payload
+
+
+def _run_cached_file_route(
+    *,
+    execution_cache: Any | None,
+    fingerprint: str,
+    compute,
+    cache_ttl_seconds: int,
+    singleflight_ttl_seconds: int,
+    singleflight_poll_interval_seconds: float,
+    singleflight_renew_interval_seconds: float,
+    singleflight_wait_timeout_seconds: float | None,
+) -> dict[str, Any]:
+    cache = execution_cache
+    if cache is None or not bool(getattr(cache, "available", True)):
+        return _mark_file_route_cache_metadata(
+            result=dict(compute() or {}),
+            fingerprint=fingerprint,
+            cache_hit=False,
+        )
+
+    try:
+        cached = cache.get_file_route_cache(fingerprint=fingerprint)
+    except Exception:
+        return _mark_file_route_cache_metadata(
+            result=dict(compute() or {}),
+            fingerprint=fingerprint,
+            cache_hit=False,
+        )
+    if cached is not None:
+        _LOGGER.info("patent file-route cache hit fingerprint=%s", str(fingerprint or "")[:16])
+        return _mark_file_route_cache_metadata(
+            result=dict(cached or {}),
+            fingerprint=fingerprint,
+            cache_hit=True,
+        )
+
+    try:
+        token = cache.claim_file_route_singleflight(
+            fingerprint=fingerprint,
+            ttl_seconds=singleflight_ttl_seconds,
+        )
+    except Exception:
+        return _mark_file_route_cache_metadata(
+            result=dict(compute() or {}),
+            fingerprint=fingerprint,
+            cache_hit=False,
+        )
+
+    claimed = bool(token)
+    renew_stop: threading.Event | None = None
+    renew_thread: threading.Thread | None = None
+    renew_error: list[str] = []
+    try:
+        if not claimed:
+            wait_timeout = (
+                float(singleflight_ttl_seconds)
+                if singleflight_wait_timeout_seconds is None
+                else float(singleflight_wait_timeout_seconds)
+            )
+            deadline = time.monotonic() + wait_timeout
+            while True:
+                try:
+                    cached = cache.get_file_route_cache(fingerprint=fingerprint)
+                except Exception:
+                    return _mark_file_route_cache_metadata(
+                        result=dict(compute() or {}),
+                        fingerprint=fingerprint,
+                        cache_hit=False,
+                    )
+                if cached is not None:
+                    _LOGGER.info("patent file-route cache hit after singleflight wait fingerprint=%s", str(fingerprint or "")[:16])
+                    return _mark_file_route_cache_metadata(
+                        result=dict(cached or {}),
+                        fingerprint=fingerprint,
+                        cache_hit=True,
+                    )
+                try:
+                    owner = str(
+                        getattr(cache, "get_file_route_singleflight_owner", lambda **_kwargs: "")(
+                            fingerprint=fingerprint,
+                        )
+                        or ""
+                    ).strip()
+                except Exception:
+                    return _mark_file_route_cache_metadata(
+                        result=dict(compute() or {}),
+                        fingerprint=fingerprint,
+                        cache_hit=False,
+                    )
+                if not owner:
+                    try:
+                        token = cache.claim_file_route_singleflight(
+                            fingerprint=fingerprint,
+                            ttl_seconds=singleflight_ttl_seconds,
+                        )
+                    except Exception:
+                        return _mark_file_route_cache_metadata(
+                            result=dict(compute() or {}),
+                            fingerprint=fingerprint,
+                            cache_hit=False,
+                        )
+                    claimed = bool(token)
+                    if claimed:
+                        break
+                    try:
+                        cached = cache.get_file_route_cache(fingerprint=fingerprint)
+                    except Exception:
+                        return _mark_file_route_cache_metadata(
+                            result=dict(compute() or {}),
+                            fingerprint=fingerprint,
+                            cache_hit=False,
+                        )
+                    if cached is not None:
+                        _LOGGER.info("patent file-route cache hit after contention handoff fingerprint=%s", str(fingerprint or "")[:16])
+                        return _mark_file_route_cache_metadata(
+                            result=dict(cached or {}),
+                            fingerprint=fingerprint,
+                            cache_hit=True,
+                        )
+                    try:
+                        owner = str(
+                            getattr(cache, "get_file_route_singleflight_owner", lambda **_kwargs: "")(
+                                fingerprint=fingerprint,
+                            )
+                            or ""
+                        ).strip()
+                    except Exception:
+                        return _mark_file_route_cache_metadata(
+                            result=dict(compute() or {}),
+                            fingerprint=fingerprint,
+                            cache_hit=False,
+                        )
+                    if owner and singleflight_wait_timeout_seconds is None:
+                        deadline = time.monotonic() + float(singleflight_ttl_seconds)
+                elif singleflight_wait_timeout_seconds is None:
+                    deadline = time.monotonic() + float(singleflight_ttl_seconds)
+                if time.monotonic() > deadline:
+                    raise TimeoutError("singleflight wait timed out for file-route")
+                time.sleep(singleflight_poll_interval_seconds)
+
+        renew = getattr(cache, "renew_file_route_singleflight", None)
+        if claimed and callable(renew):
+            renew_stop = threading.Event()
+
+            def _renew_loop() -> None:
+                while renew_stop is not None and not renew_stop.wait(singleflight_renew_interval_seconds):
+                    try:
+                        renewed = renew(
+                            fingerprint=fingerprint,
+                            token=str(token or ""),
+                            ttl_seconds=singleflight_ttl_seconds,
+                        )
+                    except Exception as exc:
+                        renew_error.append(str(exc))
+                        renew_stop.set()
+                        return
+                    if renewed:
+                        continue
+                    renew_error.append(
+                        str(getattr(cache, "last_error", "") or "file-route singleflight renew failed").strip()
+                    )
+                    renew_stop.set()
+                    return
+
+            renew_thread = threading.Thread(
+                target=_renew_loop,
+                name="patent-file-route-singleflight-renew",
+                daemon=True,
+            )
+            renew_thread.start()
+
+        computed = dict(compute() or {})
+        if renew_stop is not None:
+            renew_stop.set()
+        if renew_thread is not None and renew_thread.is_alive():
+            renew_thread.join(timeout=0.05)
+            if renew_thread.is_alive() and not renew_error:
+                renew_error.append("file-route singleflight renew completion pending")
+        if not renew_error:
+            try:
+                cache.set_file_route_cache(
+                    fingerprint=fingerprint,
+                    payload=dict(computed),
+                    ttl_seconds=cache_ttl_seconds,
+                )
+            except Exception:
+                pass
+        return _mark_file_route_cache_metadata(
+            result=computed,
+            fingerprint=fingerprint,
+            cache_hit=False,
+        )
+    finally:
+        if renew_stop is not None:
+            renew_stop.set()
+        if renew_thread is not None and renew_thread.is_alive():
+            renew_thread.join(timeout=0.05)
+        if claimed:
+            try:
+                cache.clear_file_route_singleflight(
+                    fingerprint=fingerprint,
+                    token=str(token or ""),
+                )
+            except Exception:
+                pass
 
 
 def plan_patent_file_route(contract: PatentFileContract) -> PatentFileRoutePlan:
@@ -51,44 +297,115 @@ def dispatch_patent_file_route(
     contract: PatentFileContract,
     pdf_service: PatentPdfService | None = None,
     tabular_service: PatentTabularService | None = None,
+    execution_cache: Any | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     content_callback: Callable[[str], None] | None = None,
+    cache_ttl_seconds: int = 300,
+    singleflight_ttl_seconds: int = 30,
+    singleflight_poll_interval_seconds: float = 0.01,
+    singleflight_renew_interval_seconds: float | None = None,
+    singleflight_wait_timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     plan = plan_patent_file_route(contract)
     pdf_handler = pdf_service or PatentPdfService()
     tabular_handler = tabular_service or PatentTabularService()
     dispatch_step = _route_dispatch_step(plan.handler)
+    renew_interval = (
+        min(float(max(1, int(singleflight_ttl_seconds))) / 3.0, 10.0)
+        if singleflight_renew_interval_seconds is None
+        else float(singleflight_renew_interval_seconds)
+    )
+    cache_fingerprint = build_file_route_cache_fingerprint(
+        question=contract.question,
+        route=contract.route,
+        source_scope=contract.source_scope,
+        selected_file_ids=list(contract.selected_file_ids),
+        primary_file_id=contract.primary_file_id,
+        selected_execution_files=[item.as_payload() for item in contract.selected_execution_files],
+        file_selection=dict(contract.file_selection),
+        runtime_signature=_file_route_runtime_signature(
+            plan=plan,
+            pdf_service=pdf_handler,
+            tabular_service=tabular_handler,
+        ),
+    )
     if callable(progress_callback):
         progress_callback(dict(dispatch_step))
     if plan.handler == "pdf":
         service = pdf_handler
-        result = _call_with_supported_kwargs(
-            service.execute,
-            contract=contract,
-            include_kb=plan.include_kb,
-            progress_callback=progress_callback,
-            content_callback=content_callback,
+        result = _run_cached_file_route(
+            execution_cache=execution_cache,
+            fingerprint=cache_fingerprint,
+            compute=lambda: _with_leading_steps(
+                result=_call_with_supported_kwargs(
+                    service.execute,
+                    contract=contract,
+                    include_kb=plan.include_kb,
+                    progress_callback=progress_callback,
+                    content_callback=content_callback,
+                ),
+                steps=[dispatch_step],
+            ),
+            cache_ttl_seconds=max(1, int(cache_ttl_seconds)),
+            singleflight_ttl_seconds=max(1, int(singleflight_ttl_seconds)),
+            singleflight_poll_interval_seconds=max(0.0, float(singleflight_poll_interval_seconds)),
+            singleflight_renew_interval_seconds=max(0.001, renew_interval),
+            singleflight_wait_timeout_seconds=(
+                None if singleflight_wait_timeout_seconds is None else max(0.0, float(singleflight_wait_timeout_seconds))
+            ),
         )
-        return _with_leading_steps(result=result, steps=[dispatch_step])
+        if callable(content_callback) and bool(dict(result.get("metadata") or {}).get("cache_hit")):
+            emit_text_chunks(str(result.get("answer_text") or ""), content_callback=content_callback)
+        return result
     if plan.handler == "tabular":
         service = tabular_handler
-        result = _call_with_supported_kwargs(
-            service.execute,
+        result = _run_cached_file_route(
+            execution_cache=execution_cache,
+            fingerprint=cache_fingerprint,
+            compute=lambda: _with_leading_steps(
+                result=_call_with_supported_kwargs(
+                    service.execute,
+                    contract=contract,
+                    include_kb=plan.include_kb,
+                    progress_callback=progress_callback,
+                    content_callback=content_callback,
+                ),
+                steps=[dispatch_step],
+            ),
+            cache_ttl_seconds=max(1, int(cache_ttl_seconds)),
+            singleflight_ttl_seconds=max(1, int(singleflight_ttl_seconds)),
+            singleflight_poll_interval_seconds=max(0.0, float(singleflight_poll_interval_seconds)),
+            singleflight_renew_interval_seconds=max(0.001, renew_interval),
+            singleflight_wait_timeout_seconds=(
+                None if singleflight_wait_timeout_seconds is None else max(0.0, float(singleflight_wait_timeout_seconds))
+            ),
+        )
+        if callable(content_callback) and bool(dict(result.get("metadata") or {}).get("cache_hit")):
+            emit_text_chunks(str(result.get("answer_text") or ""), content_callback=content_callback)
+        return result
+    result = _run_cached_file_route(
+        execution_cache=execution_cache,
+        fingerprint=cache_fingerprint,
+        compute=lambda: _build_hybrid_result(
             contract=contract,
             include_kb=plan.include_kb,
+            pdf_service=pdf_handler,
+            tabular_service=tabular_handler,
             progress_callback=progress_callback,
             content_callback=content_callback,
-        )
-        return _with_leading_steps(result=result, steps=[dispatch_step])
-    return _build_hybrid_result(
-        contract=contract,
-        include_kb=plan.include_kb,
-        pdf_service=pdf_handler,
-        tabular_service=tabular_handler,
-        progress_callback=progress_callback,
-        content_callback=content_callback,
-        dispatch_step=dispatch_step,
+            dispatch_step=dispatch_step,
+        ),
+        cache_ttl_seconds=max(1, int(cache_ttl_seconds)),
+        singleflight_ttl_seconds=max(1, int(singleflight_ttl_seconds)),
+        singleflight_poll_interval_seconds=max(0.0, float(singleflight_poll_interval_seconds)),
+        singleflight_renew_interval_seconds=max(0.001, renew_interval),
+        singleflight_wait_timeout_seconds=(
+            None if singleflight_wait_timeout_seconds is None else max(0.0, float(singleflight_wait_timeout_seconds))
+        ),
     )
+    if callable(content_callback) and bool(dict(result.get("metadata") or {}).get("cache_hit")) and not plan.include_kb:
+        emit_text_chunks(str(result.get("answer_text") or ""), content_callback=content_callback)
+    return result
 
 
 def _build_hybrid_result(
@@ -275,31 +592,56 @@ def synthesize_patent_hybrid_answer(*, synthesis_contract: dict[str, Any]) -> st
     if not lead:
         return "当前未拿到可读的 PDF、表格或知识库证据，暂时无法生成联合回答。"
 
-    sections: list[str] = [f"直接结论：{lead}"]
+    evidence_lines: list[str] = []
+    if table_execution_context or (tabular_answer and not _is_degraded_answer(tabular_answer)):
+        evidence_lines.append(f"- 表格执行结果：{table_execution_context or tabular_answer}")
+    if pdf_evidence_context or (pdf_answer and not _is_degraded_answer(pdf_answer)):
+        evidence_lines.append(f"- PDF 原文证据：{pdf_evidence_context or pdf_answer}")
+    if usable_kb_answer or kb_evidence_context:
+        evidence_lines.append(f"- 知识库证据：{kb_evidence_context or usable_kb_answer}")
+
+    conflict_message = _detect_conflict_message(
+        file_context="\n".join(part for part in (table_execution_context, pdf_evidence_context) if part),
+        kb_context=kb_evidence_context or usable_kb_answer,
+    )
+
+    comparison_lines: list[str] = []
     if table_execution_context or pdf_evidence_context or tabular_answer or pdf_answer:
-        file_lines: list[str] = []
-        if table_execution_context or (tabular_answer and not _is_degraded_answer(tabular_answer)):
-            file_lines.append(f"表格执行结果：{table_execution_context or tabular_answer}")
-        if pdf_evidence_context or (pdf_answer and not _is_degraded_answer(pdf_answer)):
-            file_lines.append(f"PDF 原文证据：{pdf_evidence_context or pdf_answer}")
-        if file_lines:
-            sections.append("文件依据：\n" + "\n".join(file_lines))
+        comparison_lines.append("- 文件证据优先作为主结论依据，表格执行结果与 PDF 原文用于相互校验。")
     if usable_kb_answer:
-        kb_lines = [f"知识库补充：{usable_kb_answer}"]
-        if kb_reference_instruction:
-            kb_lines.append(kb_reference_instruction)
-        conflict_message = _detect_conflict_message(
-            file_context="\n".join(part for part in (table_execution_context, pdf_evidence_context) if part),
-            kb_context=kb_evidence_context or usable_kb_answer,
-        )
-        if conflict_message:
-            kb_lines.append(conflict_message)
-        elif table_execution_context or pdf_evidence_context or tabular_answer or pdf_answer:
-            kb_lines.append("冲突处理：当前未检测到明确冲突；若知识库与文件证据后续出现不一致，以文件原文和表格执行结果为准。")
-        else:
-            kb_lines.append("说明：当前文件证据不足，本结论主要来自知识库补充。")
-        sections.append("\n".join(kb_lines))
-    return "\n\n".join(part for part in sections if part).strip()
+        comparison_lines.append("- 知识库补充只用于扩展背景或交叉验证，不能覆盖文件侧的直接证据。")
+    if conflict_message:
+        comparison_lines.append(f"- {conflict_message}")
+    elif usable_kb_answer and (table_execution_context or pdf_evidence_context or tabular_answer or pdf_answer):
+        comparison_lines.append("- 当前未检测到明确冲突；若后续文件证据与知识库不一致，仍以文件原文和表格执行结果为准。")
+    elif usable_kb_answer:
+        comparison_lines.append("- 当前文件证据不足，结论主要依赖知识库补充。")
+    else:
+        comparison_lines.append("- 当前回答未纳入知识库补充，属于文件侧联合总结。")
+
+    limitation_lines = [
+        "- 当前结论受可读 PDF、表格执行结果和知识库命中范围限制，未命中的来源不会被补写为确定事实。",
+        (
+            f"- {kb_reference_instruction}"
+            if kb_reference_instruction
+            else "- 若后续补充更多文件或知识库证据，结论可能继续收敛。"
+        ),
+    ]
+
+    sections = [
+        "## 结论",
+        lead,
+        "",
+        "## 证据",
+        *(evidence_lines or ["- 当前未拿到足够的文件或知识库证据。"]),
+        "",
+        "## 对比",
+        *comparison_lines,
+        "",
+        "## 限制",
+        *limitation_lines,
+    ]
+    return "\n".join(sections).strip()
 
 
 def _detect_conflict_message(*, file_context: str, kb_context: str) -> str:

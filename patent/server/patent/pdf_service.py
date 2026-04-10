@@ -64,6 +64,121 @@ def _truncate(value: str, limit: int) -> str:
     return text[: max(1, limit - 1)].rstrip() + "…"
 
 
+def _find_markdown_support_points(text: str, *, max_items: int = 3, min_chars: int = 18) -> list[str]:
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    raw_items = re.split(r"(?<=[。！？.!?])\s+|\n+", normalized)
+    points: list[str] = []
+    for item in raw_items:
+        line = _collapse_whitespace(re.sub(r"^[#>\-\*\d\.\)\s]+", "", item))
+        if len(line) < min_chars:
+            continue
+        if line in points:
+            continue
+        points.append(_truncate(line, 220))
+        if len(points) >= max_items:
+            break
+    return points
+
+
+def _find_section_position(text: str, patterns: tuple[str, ...], *, last_end: int) -> int:
+    normalized = str(text or "")
+    best_position = -1
+    best_end = -1
+    for pattern in patterns:
+        matched = re.search(pattern, normalized, flags=re.MULTILINE | re.IGNORECASE)
+        if matched is None:
+            continue
+        if matched.start() <= last_end:
+            continue
+        if best_position < 0 or matched.start() < best_position:
+            best_position = matched.start()
+            best_end = matched.end()
+    return best_position if best_end >= 0 else -1
+
+
+def _has_fastqa_summary_sections(text: str) -> bool:
+    normalized = str(text or "")
+    patterns = (
+        (r"(^|\n)\s*(?:#{1,6}\s*)?结论\s*[：:]?",),
+        (r"(^|\n)\s*(?:#{1,6}\s*)?证据\s*[：:]?",),
+        (r"(^|\n)\s*(?:#{1,6}\s*)?对比\s*[：:]?",),
+        (r"(^|\n)\s*(?:#{1,6}\s*)?限制\s*[：:]?",),
+    )
+    last_end = -1
+    for group in patterns:
+        position = _find_section_position(normalized, group, last_end=last_end)
+        if position < 0:
+            return False
+        last_end = position
+    return True
+
+
+def _ensure_fastqa_pdf_summary_structure(
+    *,
+    answer: str,
+    prepared_pdf_text: str,
+    include_kb: bool,
+    route_hint: str = "pdf_qa",
+    source_scope: str = "pdf",
+) -> str:
+    normalized_answer = str(answer or "").strip()
+    if not normalized_answer:
+        return normalized_answer
+    if _has_fastqa_summary_sections(normalized_answer):
+        return normalized_answer
+
+    evidence_points = _find_markdown_support_points(prepared_pdf_text, max_items=3)
+    if not evidence_points:
+        evidence_points = _find_markdown_support_points(normalized_answer, max_items=3, min_chars=10)
+    if not evidence_points:
+        evidence_points = ["当前可读原文证据有限，仅能保留模型回答中的主结论。"]
+
+    hybrid_mode = str(route_hint or "pdf_qa").strip().lower() == "hybrid_qa"
+    normalized_scope = str(source_scope or "pdf").strip() or "pdf"
+    comparison_lines = (
+        [
+            "- 当前为混合问答中的 PDF 证据子结论；可用于后续与表格或知识库交叉验证，不能单独替代全局综合结论。",
+            f"- 当前 source_scope={normalized_scope}；本段只描述这份 PDF 原文能够直接支持的对照点。",
+        ]
+        if hybrid_mode
+        else ["- PDF中未提供跨文献对比对象；当前回答仅基于单篇文件证据。"]
+    )
+    limitation_lines = (
+        [
+            "- 当前结论仅基于本次上传 PDF 的可读原文整理，仍需与其他已选文件或知识库证据综合判断。",
+            (
+                "- 知识库若参与，仅可用于验证已在 PDF 中出现的内容，不能补充新的文件结论。"
+                if include_kb
+                else "- 当前未引入知识库补充；若后续纳入其他来源，综合结论可能继续收敛。"
+            ),
+        ]
+        if hybrid_mode
+        else [
+            "- 当前结论仅基于本次上传 PDF 的可读原文整理，未引入文件外新证据。",
+            (
+                "- 知识库若参与，仅可用于验证已在 PDF 中出现的内容，不能补充新的文件结论。"
+                if include_kb
+                else "- 当前未引入知识库补充，本回答不代表跨来源统一结论。"
+            ),
+        ]
+    )
+
+    sections = [
+        "## 结论",
+        normalized_answer,
+        "",
+        "## 证据",
+        *[f"- {item}" for item in evidence_points],
+        "",
+        "## 对比",
+        *comparison_lines,
+        "",
+        "## 限制",
+        *limitation_lines,
+    ]
+    return "\n".join(sections).strip()
+
+
 class _NoopLogger:
     def info(self, *_args, **_kwargs) -> None:
         return None
@@ -116,6 +231,8 @@ class PatentPdfAnswerClient:
         include_kb: bool,
         stream: bool,
         selected_file_labels: list[str] | None = None,
+        route_hint: str = "pdf_qa",
+        source_scope: str = "pdf",
     ) -> dict[str, Any]:
         labels = [str(item).strip() for item in list(selected_file_labels or []) if str(item).strip()]
         compare_mode = is_compare_question(question, selected_pdf_count=len(labels) or 1)
@@ -127,6 +244,8 @@ class PatentPdfAnswerClient:
             is_summary=is_summary_question(question),
             is_compare=compare_mode,
             selected_file_labels=labels or [str(file_name or "").strip() or "unknown.pdf"],
+            route_hint=route_hint,
+            source_scope=source_scope,
         )
         return {
             "model": self._model,
@@ -168,6 +287,8 @@ class PatentPdfAnswerClient:
         file_name: str,
         include_kb: bool,
         selected_file_labels: list[str] | None = None,
+        route_hint: str = "pdf_qa",
+        source_scope: str = "pdf",
     ) -> Any:
         request_payload = self._build_request_payload(
             question=question,
@@ -176,6 +297,8 @@ class PatentPdfAnswerClient:
             include_kb=include_kb,
             stream=True,
             selected_file_labels=selected_file_labels,
+            route_hint=route_hint,
+            source_scope=source_scope,
         )
         with self._client.stream(
             "POST",
@@ -213,6 +336,8 @@ class PatentPdfAnswerClient:
         file_name: str,
         include_kb: bool,
         selected_file_labels: list[str] | None = None,
+        route_hint: str = "pdf_qa",
+        source_scope: str = "pdf",
     ) -> str:
         response = self._client.post(
             f"{self._base_url.rstrip('/')}/chat/completions",
@@ -227,6 +352,8 @@ class PatentPdfAnswerClient:
                 include_kb=include_kb,
                 stream=False,
                 selected_file_labels=selected_file_labels,
+                route_hint=route_hint,
+                source_scope=source_scope,
             ),
         )
         response.raise_for_status()
@@ -373,6 +500,8 @@ class PatentPdfService:
                     available_file_labels=available_labels,
                     include_kb=include_kb,
                     compare_mode=compare_mode,
+                    route_hint=contract.route,
+                    source_scope=contract.source_scope,
                     content_callback=content_callback,
                 )
                 answer_text = str(rendered["answer_text"])
@@ -661,23 +790,74 @@ class PatentPdfService:
         available_file_labels: list[str],
         include_kb: bool,
         compare_mode: bool,
+        route_hint: str,
+        source_scope: str,
         content_callback: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         answer_parts: list[str] = []
         missing_labels = [label for label in selected_file_labels if label not in set(available_file_labels)]
         live_streamed = False
+        stream_mode = "unknown"
+        streamed_text = ""
+        pending_stream_whitespace = ""
+        prompt = build_patent_pdf_answer_prompt(
+            question=question,
+            pdf_content=prepared_pdf_text,
+            kb_section=build_kb_section({"kb_answer": _KB_BOUNDARY_PLACEHOLDER}) if include_kb else "",
+            is_summary=is_summary_question(question),
+            is_compare=compare_mode,
+            selected_file_labels=selected_file_labels or [str(file_name or "").strip() or "unknown.pdf"],
+            route_hint=route_hint,
+            source_scope=source_scope,
+        )
 
         def _emit_stream_piece(piece: str) -> None:
-            nonlocal live_streamed
+            nonlocal live_streamed, stream_mode, streamed_text, pending_stream_whitespace
             text = str(piece or "")
             if not text:
                 return
             answer_parts.append(text)
-            # Compare answers stay buffered until completion so mid-stream failures
-            # cannot leak a misleading partial comparison body to the client.
-            if callable(content_callback) and not compare_mode:
-                content_callback(text)
+            if compare_mode or not callable(content_callback):
+                return
+
+            def _emit_live_text(raw_text: str) -> None:
+                nonlocal live_streamed, streamed_text, pending_stream_whitespace
+                candidate = f"{pending_stream_whitespace}{raw_text}"
+                pending_stream_whitespace = ""
+                normalized_emit = candidate.rstrip()
+                pending_stream_whitespace = candidate[len(normalized_emit) :]
+                if not normalized_emit:
+                    return
+                content_callback(normalized_emit)
+                streamed_text += normalized_emit
                 live_streamed = True
+
+            if stream_mode == "unknown":
+                buffered_text = "".join(answer_parts)
+                normalized_stream_text = buffered_text.lstrip()
+                normalized_buffer = "".join(answer_parts).lstrip()
+                if not normalized_buffer:
+                    pending_stream_whitespace = ""
+                    return
+                looks_like_heading_prefix = bool(
+                    normalized_buffer.startswith("##")
+                    or re.match(r"^(?:#{1,6}\s*)?(?:结论|证据|对比|限制)\b", normalized_buffer)
+                )
+                if _has_fastqa_summary_sections(normalized_buffer):
+                    stream_mode = "raw_structured"
+                    _emit_live_text(normalized_stream_text)
+                    return
+                elif not looks_like_heading_prefix or len(answer_parts) >= 2 or len(normalized_buffer) >= 120:
+                    stream_mode = "wrapped_summary"
+                    prefix = "## 结论\n"
+                    content_callback(prefix)
+                    streamed_text += prefix
+                    if normalized_stream_text:
+                        _emit_live_text(normalized_stream_text)
+                    return
+                else:
+                    return
+            _emit_live_text(text)
 
         def _buffer_text(text: str) -> str:
             return str(text or "").strip()
@@ -688,12 +868,23 @@ class PatentPdfService:
                 pdf_text=prepared_pdf_text,
                 file_name=file_name,
                 include_kb=include_kb,
+                prompt=prompt,
+                route_hint=route_hint,
+                source_scope=source_scope,
             )
             if isinstance(output, (str, bytes)):
                 answer = _buffer_text(str(output or ""))
                 if answer:
                     if compare_mode:
                         answer = _ensure_compare_answer_structure(answer=answer, prepared_pdf_text=prepared_pdf_text)
+                    else:
+                        answer = _ensure_fastqa_pdf_summary_structure(
+                            answer=answer,
+                            prepared_pdf_text=prepared_pdf_text,
+                            include_kb=include_kb,
+                            route_hint=route_hint,
+                            source_scope=source_scope,
+                        )
                     return {
                         "ok": True,
                         "answer_text": answer,
@@ -719,6 +910,8 @@ class PatentPdfService:
                             file_name=file_name,
                             include_kb=include_kb,
                             selected_file_labels=selected_file_labels,
+                            route_hint=route_hint,
+                            source_scope=source_scope,
                         )
                     ):
                         _emit_stream_piece(piece)
@@ -733,11 +926,21 @@ class PatentPdfService:
                             file_name=file_name,
                             include_kb=include_kb,
                             selected_file_labels=selected_file_labels,
+                            route_hint=route_hint,
+                            source_scope=source_scope,
                         )
                     )
                     if answer:
                         if compare_mode:
                             answer = _ensure_compare_answer_structure(answer=answer, prepared_pdf_text=prepared_pdf_text)
+                        else:
+                            answer = _ensure_fastqa_pdf_summary_structure(
+                                answer=answer,
+                                prepared_pdf_text=prepared_pdf_text,
+                                include_kb=include_kb,
+                                route_hint=route_hint,
+                                source_scope=source_scope,
+                            )
                         return {
                             "ok": True,
                             "answer_text": answer,
@@ -753,6 +956,24 @@ class PatentPdfService:
         if answer:
             if compare_mode:
                 answer = _ensure_compare_answer_structure(answer=answer, prepared_pdf_text=prepared_pdf_text)
+            else:
+                answer = _ensure_fastqa_pdf_summary_structure(
+                    answer=answer,
+                    prepared_pdf_text=prepared_pdf_text,
+                    include_kb=include_kb,
+                    route_hint=route_hint,
+                    source_scope=source_scope,
+                )
+            if callable(content_callback) and not compare_mode and answer_parts:
+                if not live_streamed:
+                    emit_text_chunks(answer, content_callback=content_callback)
+                    live_streamed = True
+                    streamed_text = answer
+                elif answer.startswith(streamed_text):
+                    suffix = answer[len(streamed_text) :]
+                    if suffix:
+                        emit_text_chunks(suffix, content_callback=content_callback)
+                    streamed_text = answer
             return {
                 "ok": True,
                 "answer_text": answer,
@@ -770,7 +991,13 @@ class PatentPdfService:
                 reason="模型未返回可用的比较结果",
             )
             if compare_mode
-            else build_extractive_fallback_summary(question=question, pdf_text=prepared_pdf_text)
+            else _ensure_fastqa_pdf_summary_structure(
+                answer=build_extractive_fallback_summary(question=question, pdf_text=prepared_pdf_text),
+                prepared_pdf_text=prepared_pdf_text,
+                include_kb=include_kb,
+                route_hint=route_hint,
+                source_scope=source_scope,
+            )
         )
         if compare_mode:
             return {
@@ -884,27 +1111,50 @@ def _extract_document_summaries(*, prepared_pdf_text: str) -> list[tuple[str, st
 
 
 def _first_sentence(text: str) -> str:
-    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
-    if not normalized:
-        return ""
-    parts = re.split(r"(?<=[。！？.!?])\s+", normalized, maxsplit=1)
-    return str(parts[0] or "").strip()
+    for raw_line in str(text or "").splitlines():
+        line = _collapse_whitespace(raw_line)
+        if not line:
+            continue
+        if re.match(r"^#{1,6}\s*", line):
+            continue
+        if re.match(r"^\d+[\.\)]\s+", line):
+            continue
+        if re.match(r"^[\-\*]\s+", line):
+            line = re.sub(r"^[\-\*]\s+", "", line).strip()
+        parts = re.split(r"(?<=[。！？.!?])\s+", line, maxsplit=1)
+        first = str(parts[0] or "").strip()
+        if first:
+            return first
+    return ""
 
 
 def _has_ordered_compare_sections(text: str) -> bool:
     normalized = str(text or "")
     patterns = (
-        r"(^|\n)\s*各自概要\s*[：:]",
-        r"(^|\n)\s*相同点\s*[：:]",
-        r"(^|\n)\s*差异点\s*[：:]",
-        r"(^|\n)\s*总结\s*[：:]",
+        (
+            r"(^|\n)\s*各自概要\s*[：:]",
+            r"(^|\n)\s*(?:#{1,6}\s*)?(?:1[\.\)]\s*)?文献概要\s*[：:]?",
+        ),
+        (
+            r"(^|\n)\s*相同点\s*[：:]",
+            r"(^|\n)\s*(?:#{1,6}\s*)?(?:2[\.\)]\s*)?研究主题/目标\s*[：:]?",
+            r"(^|\n)\s*(?:#{1,6}\s*)?(?:3[\.\)]\s*)?相同点\s*[：:]?",
+        ),
+        (
+            r"(^|\n)\s*差异点\s*[：:]",
+            r"(^|\n)\s*(?:#{1,6}\s*)?(?:4[\.\)]\s*)?差异点\s*[：:]?",
+        ),
+        (
+            r"(^|\n)\s*总结\s*[：:]",
+            r"(^|\n)\s*(?:#{1,6}\s*)?(?:5[\.\)]\s*)?总结\s*[：:]?",
+        ),
     )
     last_end = -1
-    for pattern in patterns:
-        matched = re.search(pattern, normalized, flags=re.MULTILINE)
-        if matched is None or matched.start() <= last_end:
+    for group in patterns:
+        position = _find_section_position(normalized, group, last_end=last_end)
+        if position < 0:
             return False
-        last_end = matched.start()
+        last_end = position
     return True
 
 

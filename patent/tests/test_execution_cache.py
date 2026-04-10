@@ -1,9 +1,11 @@
 from server.patent.cache_keys import (
     PatentKeyFactory,
+    build_file_route_cache_fingerprint,
     build_stage1_cache_fingerprint,
     build_stage2_cache_fingerprint,
     build_stage25_cache_fingerprint,
     build_stage3_cache_fingerprint,
+    build_stage4_cache_fingerprint,
 )
 from server.services.execution_cache import ExecutionCache
 
@@ -150,11 +152,35 @@ def test_stage_cache_keys_include_stage_namespace_and_input_fingerprint():
         force_pdf=True,
         runtime_signature={"catalog_index_version": "v1"},
     )
+    stage4_fingerprint = build_stage4_cache_fingerprint(
+        question="what is patent substitution risk",
+        retrieval_results={"references": ["CN115132975B"]},
+        patent_evidence_bundle={
+            "source_ids": ["CN115132975B"],
+            "evidence_by_patent_id": {
+                "CN115132975B": [{"kind": "table", "text": "cached evidence"}],
+            },
+        },
+        runtime_signature={"answer_model": "v1"},
+    )
+    file_route_fingerprint = build_file_route_cache_fingerprint(
+        question="summarize the selected paper",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11],
+        primary_file_id=11,
+        selected_execution_files=[{"file_id": 11, "file_type": "pdf", "file_name": "battery-paper.pdf"}],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11]},
+        runtime_signature={"handler": "pdf"},
+    )
 
     assert keys.stage_cache("stage1", stage1_fingerprint).startswith("patent:test:qa-core:cache:stage1:")
     assert keys.stage_cache("stage2", stage2_fingerprint).startswith("patent:test:qa-core:cache:stage2:")
     assert keys.stage_cache("stage25", stage25_fingerprint).startswith("patent:test:qa-core:cache:stage25:")
+    assert keys.stage_cache("stage4", stage4_fingerprint).startswith("patent:test:qa-core:cache:stage4:")
     assert stage3_plain != stage3_pdf
+    assert keys.file_route_cache(file_route_fingerprint).startswith("patent:test:qa-core:cache:file-route:")
+    assert keys.file_route_singleflight(file_route_fingerprint).startswith("patent:test:qa-core:lock:file-route:")
 
 
 def test_stage_cache_fingerprints_change_when_runtime_signature_changes():
@@ -170,6 +196,104 @@ def test_stage_cache_fingerprints_change_when_runtime_signature_changes():
     )
 
     assert stage2_v1 != stage2_v2
+
+
+def test_stage2_and_stage3_fingerprints_do_not_change_with_parallel_worker_counts():
+    stage2_workers_1 = build_stage2_cache_fingerprint(
+        question="what is patent substitution risk",
+        retrieval_plan={"question_type": "comparison", "candidate_recall_queries": ["battery safety"]},
+        runtime_signature={"retrieval_version": "v1"},
+    )
+    stage2_workers_8 = build_stage2_cache_fingerprint(
+        question="what is patent substitution risk",
+        retrieval_plan={"question_type": "comparison", "candidate_recall_queries": ["battery safety"]},
+        runtime_signature={"retrieval_version": "v1"},
+    )
+    stage3_workers_1 = build_stage3_cache_fingerprint(
+        retrieval_results={"references": ["CN115132975B"]},
+        source_ids=["CN115132975B"],
+        force_pdf=False,
+        runtime_signature={"catalog_index_version": "v1"},
+    )
+    stage3_workers_8 = build_stage3_cache_fingerprint(
+        retrieval_results={"references": ["CN115132975B"]},
+        source_ids=["CN115132975B"],
+        force_pdf=False,
+        runtime_signature={"catalog_index_version": "v1"},
+    )
+
+    assert stage2_workers_1 == stage2_workers_8
+    assert stage3_workers_1 == stage3_workers_8
+
+
+def test_stage4_fingerprint_changes_when_runtime_signature_changes():
+    stage4_v1 = build_stage4_cache_fingerprint(
+        question="what is patent substitution risk",
+        retrieval_results={"references": ["CN115132975B"]},
+        patent_evidence_bundle={
+            "source_ids": ["CN115132975B"],
+            "evidence_by_patent_id": {
+                "CN115132975B": [{"kind": "table", "text": "cached evidence"}],
+            },
+        },
+        runtime_signature={"answer_model": "deepseek-v3.1"},
+    )
+    stage4_v2 = build_stage4_cache_fingerprint(
+        question="what is patent substitution risk",
+        retrieval_results={"references": ["CN115132975B"]},
+        patent_evidence_bundle={
+            "source_ids": ["CN115132975B"],
+            "evidence_by_patent_id": {
+                "CN115132975B": [{"kind": "table", "text": "cached evidence"}],
+            },
+        },
+        runtime_signature={"answer_model": "deepseek-v3.2"},
+    )
+
+    assert stage4_v1 != stage4_v2
+
+
+def test_stage4_fingerprint_ignores_volatile_upstream_cache_flags_and_timings():
+    stable = build_stage4_cache_fingerprint(
+        question="what is patent substitution risk",
+        retrieval_results={
+            "references": ["CN115132975B"],
+            "reference_objects": [{"canonical_patent_id": "CN115132975B"}],
+            "metadata": {"retrieval_backend": "vector_hybrid"},
+            "cache_hit": False,
+            "timings": {"vector_search_ms": 12},
+        },
+        patent_evidence_bundle={
+            "source_ids": ["CN115132975B"],
+            "evidence_by_patent_id": {
+                "CN115132975B": [{"kind": "table", "text": "cached evidence"}],
+            },
+            "cache_hit": False,
+            "timings": {"stage3_ms": 14},
+        },
+        runtime_signature={"answer_model": "deepseek-v3.1"},
+    )
+    volatile = build_stage4_cache_fingerprint(
+        question="what is patent substitution risk",
+        retrieval_results={
+            "references": ["CN115132975B"],
+            "reference_objects": [{"canonical_patent_id": "CN115132975B"}],
+            "metadata": {"retrieval_backend": "vector_hybrid"},
+            "cache_hit": True,
+            "timings": {"vector_search_ms": 99},
+        },
+        patent_evidence_bundle={
+            "source_ids": ["CN115132975B"],
+            "evidence_by_patent_id": {
+                "CN115132975B": [{"kind": "table", "text": "cached evidence"}],
+            },
+            "cache_hit": True,
+            "timings": {"stage3_ms": 98},
+        },
+        runtime_signature={"answer_model": "deepseek-v3.1"},
+    )
+
+    assert stable == volatile
 
 
 def test_stage25_fingerprint_ignores_volatile_stage2_cache_flags_and_timings():
@@ -296,6 +420,8 @@ def test_stage3_fingerprint_ignores_volatile_stage2_metadata_fields():
     )
 
     assert stable == volatile
+
+
 def test_execution_cache_roundtrips_stage_payloads_and_singleflight_markers():
     redis = _FakeRedis()
     cache = ExecutionCache(redis, PatentKeyFactory(env="test"))
@@ -310,6 +436,25 @@ def test_execution_cache_roundtrips_stage_payloads_and_singleflight_markers():
     assert cache.claim_stage_singleflight(stage="stage2", fingerprint="sig-stage2", ttl_seconds=20)
     assert cache.claim_stage_singleflight(stage="stage25", fingerprint="sig-stage25", ttl_seconds=20)
     assert cache.claim_stage_singleflight(stage="stage3", fingerprint="sig-stage3", ttl_seconds=20)
+    assert cache.claim_stage_singleflight(stage="stage4", fingerprint="sig-stage4", ttl_seconds=20)
+
+
+def test_execution_cache_roundtrips_file_route_payloads_and_singleflight_markers():
+    redis = _FakeRedis()
+    cache = ExecutionCache(redis, PatentKeyFactory(env="test"))
+
+    payload = {
+        "handler": "pdf",
+        "answer_text": "cached pdf summary",
+        "metadata": {"answer_mode": "pdf_text_summary"},
+    }
+    assert cache.set_file_route_cache(fingerprint="sig-file-route", payload=payload, ttl_seconds=20) is True
+    assert cache.get_file_route_cache(fingerprint="sig-file-route") == payload
+
+    token = cache.claim_file_route_singleflight(fingerprint="sig-file-route", ttl_seconds=20)
+    assert isinstance(token, str) and token
+    assert cache.claim_file_route_singleflight(fingerprint="sig-file-route", ttl_seconds=20) == ""
+    assert cache.clear_file_route_singleflight(fingerprint="sig-file-route", token=token) is True
 
 
 def test_execution_cache_only_clears_stage_singleflight_when_owner_token_matches():
