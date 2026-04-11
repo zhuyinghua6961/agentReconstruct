@@ -32,6 +32,80 @@ from app.modules.storage.service import storage_service
 from app.integrations.storage.factory import get_storage_backend
 
 _PATENT_ID_INLINE_CITATION_RE = re.compile(r"\(\s*patent_id\s*=\s*([A-Za-z0-9._/\-]+)\s*\)", re.IGNORECASE)
+_PATENT_INLINE_REFERENCE_RE = re.compile(r"[\(（]\s*([A-Za-z]{2}\d{6,14}[A-Za-z]\d?)\s*[\)）]", re.IGNORECASE)
+_RAW_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+
+
+def _normalize_patent_publication_number(value: Any) -> str:
+    return str(value or "").strip().upper()
+
+
+def _is_patent_publication_number(value: Any) -> bool:
+    return bool(re.fullmatch(r"[A-Z]{2}\d{6,14}[A-Z]\d?", _normalize_patent_publication_number(value)))
+
+
+def _strip_non_visible_patent_duplicate_contexts(text: Any) -> str:
+    source = str(text or "")
+    output: list[str] = []
+    i = 0
+
+    while i < len(source):
+        if source[i] == "`":
+            tick_count = 1
+            while i + tick_count < len(source) and source[i + tick_count] == "`":
+                tick_count += 1
+            fence = "`" * tick_count
+            end = source.find(fence, i + tick_count)
+            if end >= 0:
+                span_length = (end + tick_count) - i
+                output.append(" " * span_length)
+                i = end + tick_count
+                continue
+
+        url_match = _RAW_URL_RE.match(source, i)
+        if url_match:
+            output.append(" " * len(url_match.group(0)))
+            i = url_match.end()
+            continue
+
+        output.append(source[i])
+        i += 1
+
+    return "".join(output)
+
+
+def _dedupe_trailing_patent_citations(text: Any) -> str:
+    lines = str(text or "").split("\n")
+    normalized_lines: list[str] = []
+
+    for line in lines:
+        updated = str(line or "")
+        matches = list(_PATENT_INLINE_REFERENCE_RE.finditer(updated))
+        for match in reversed(matches):
+            patent_id = _normalize_patent_publication_number(match.group(1))
+            if not _is_patent_publication_number(patent_id):
+                continue
+            start = int(match.start())
+            end = int(match.end())
+            prefix = updated[:start]
+            suffix = updated[end:]
+            if not re.fullmatch(r"\s*[。！？!?；;，,、.]?\s*", suffix):
+                continue
+            visible_prefix = _strip_non_visible_patent_duplicate_contexts(prefix)
+            if not re.search(
+                rf"(?:patent_id\s*=\s*)?{re.escape(patent_id)}(?![A-Za-z0-9._/\-])",
+                visible_prefix,
+                flags=re.IGNORECASE,
+            ):
+                continue
+            updated = f"{prefix}{suffix}"
+        updated = re.sub(r"[ \t]{2,}", " ", updated)
+        updated = re.sub(r"\s+([，。！？；：,.;!?])", r"\1", updated)
+        updated = re.sub(r"[，,；;]\s*([。！？!?])", r"\1", updated)
+        updated = re.sub(r"\(\s+\)", "", updated)
+        normalized_lines.append(updated)
+
+    return "\n".join(normalized_lines)
 
 
 class ConversationService:
@@ -120,13 +194,24 @@ class ConversationService:
         actual = str(actual_mode or "").strip().lower()
         return source == "patentqa" or requested == "patent" or actual == "patent"
 
+    def _should_normalize_patent_citations(self, *, metadata: dict[str, Any] | None, content: Any) -> bool:
+        payload = metadata if isinstance(metadata, dict) else {}
+        if self._is_patent_task_payload(
+            source_service=payload.get("source_service"),
+            requested_mode=payload.get("requested_mode"),
+            actual_mode=payload.get("actual_mode"),
+        ):
+            return True
+        query_mode = str(payload.get("query_mode") or "").strip().lower()
+        if query_mode == "patent" or query_mode.startswith("patent_") or query_mode.startswith("patent "):
+            return True
+        return "patent_id" in str(content or "").lower()
+
     def _normalize_user_visible_patent_citations(self, value: Any, *, trim: bool) -> str:
         text = str(value or "")
-        if "patent_id" not in text.lower():
-            return text.strip() if trim else text
-
         rendered = _PATENT_ID_INLINE_CITATION_RE.sub(lambda match: f"({str(match.group(1) or '').strip().upper()})", text)
         rendered = re.sub(r"patent_id\s*=\s*", "", rendered, flags=re.IGNORECASE)
+        rendered = _dedupe_trailing_patent_citations(rendered)
         rendered = re.sub(r"\(\s+\)", "", rendered)
         rendered = re.sub(r"\s+([，。！？；：,.;!?])", r"\1", rendered)
         rendered = re.sub(r"\n{3,}", "\n\n", rendered)
@@ -689,7 +774,10 @@ class ConversationService:
             status = self._message_terminal_status(item)
             role_text = str(item.get("role") or "assistant")
             content_text = str(item.get("content") or "")
-            if role_text.strip().lower() == "assistant" and "patent_id" in content_text.lower():
+            if role_text.strip().lower() == "assistant" and self._should_normalize_patent_citations(
+                metadata=metadata,
+                content=content_text,
+            ):
                 content_text = self._normalize_user_visible_patent_citations(content_text, trim=True)
             rows.append(
                 {
@@ -2525,7 +2613,10 @@ class ConversationService:
             return {"success": False, "error": "invalid_role", "code": "VALIDATION_ERROR"}
         metadata_payload = metadata if isinstance(metadata, dict) else {}
         content_text = (content or "").strip()
-        if role_text == "assistant" and "patent_id" in content_text.lower():
+        if role_text == "assistant" and self._should_normalize_patent_citations(
+            metadata=metadata_payload,
+            content=content_text,
+        ):
             content_text = self._normalize_user_visible_patent_citations(content_text, trim=True)
         if not content_text:
             return {"success": False, "error": "empty_content", "code": "VALIDATION_ERROR"}

@@ -60,6 +60,137 @@ test('readable patent citations are linkified in new-path rendering', async () =
   }
 })
 
+test('plain inline patent ids are linkified and duplicate trailing patent citations are removed', async () => {
+  const { formatAnswer, formatStreamingAnswer } = await loadRenderUtils()
+  const input = [
+    '双颗粒级配：CN109192948B 使用球形小颗粒填充大颗粒空隙，压实密度达 2.69–2.72 g/cm³（实施例1–3），同时1C放电比容量为149–150 mAh/g (CN109192948B)。',
+    '- 多粒度混合：CN113562714A 将大颗粒磷酸铁（0.6–3 μm）与小颗粒（0.05–0.3 μm）按质量比5–50%混合，极片压实密度达 2.83–2.87 g/cm³（实施例1），且1C容量＞150 mAh/g (CN113562714A)。',
+    '- 数学模型优化：CN115863630B 通过公式 a = 0.315A - 0.086B - 0.25 计算混合比例，使混合材料压实密度拟合值达 2.84–2.95 g/cm³，与实际值误差＜0.01 g/cm³ (CN115863630B)。',
+  ].join('\n')
+
+  const finalHtml = formatAnswer(input)
+  const streamingHtml = formatStreamingAnswer(input)
+
+  for (const html of [finalHtml, streamingHtml]) {
+    assert.match(html, /data-patent-id="CN109192948B"/)
+    assert.match(html, /data-patent-id="CN113562714A"/)
+    assert.match(html, /data-patent-id="CN115863630B"/)
+    assert.equal((html.match(/data-patent-id="CN109192948B"/g) || []).length, 1)
+    assert.equal((html.match(/data-patent-id="CN113562714A"/g) || []).length, 1)
+    assert.equal((html.match(/data-patent-id="CN115863630B"/g) || []).length, 1)
+    assert.doesNotMatch(html, /\(.*CN109192948B.*\)/)
+    assert.doesNotMatch(html, /\(.*CN113562714A.*\)/)
+    assert.doesNotMatch(html, /\(.*CN115863630B.*\)/)
+  }
+})
+
+test('plain inline patent ids stay clickable when immediately followed by Chinese text', async () => {
+  const { formatAnswer, formatStreamingAnswer } = await loadRenderUtils()
+  const input = '双颗粒级配：CN109192948B使用球形小颗粒填充大颗粒空隙，且 CN113562714A的压实密度更高。'
+
+  const finalHtml = formatAnswer(input)
+  const streamingHtml = formatStreamingAnswer(input)
+
+  for (const html of [finalHtml, streamingHtml]) {
+    assert.match(html, /data-patent-id="CN109192948B"/)
+    assert.match(html, /data-patent-id="CN113562714A"/)
+    assert.match(html, />CN109192948B<\/a>使用球形小颗粒/)
+    assert.match(html, />CN113562714A<\/a>的压实密度/)
+  }
+})
+
+test('raw patent urls are not broken by inline patent linkification', async () => {
+  const { formatAnswer, formatStreamingAnswer } = await loadRenderUtils()
+  const input = '原始链接：https://patents.google.com/patent/CN109192948B/en'
+
+  const finalHtml = formatAnswer(input)
+  const streamingHtml = formatStreamingAnswer(input)
+
+  for (const html of [finalHtml, streamingHtml]) {
+    assert.match(html, /https:\/\/patents\.google\.com\/patent\/CN109192948B\/en/)
+    assert.doesNotMatch(html, /data-patent-id="CN109192948B"/)
+  }
+})
+
+test('trailing patent citation is preserved when the same patent id only appears inside a raw url', async () => {
+  const { formatAnswer, formatStreamingAnswer } = await loadRenderUtils()
+  const input = '原始链接：https://patents.google.com/patent/CN109192948B/en (CN109192948B)。'
+
+  const finalHtml = formatAnswer(input)
+  const streamingHtml = formatStreamingAnswer(input)
+
+  assert.match(finalHtml, /https:\/\/patents\.google\.com\/patent\/CN109192948B\/en/)
+  assert.match(finalHtml, /data-patent-id="CN109192948B"/)
+  assert.match(finalHtml, /https:\/\/patents\.google\.com\/patent\/CN109192948B\/en"/)
+  assert.doesNotMatch(finalHtml, /en%E3%80%82|CN109192948B\/en%E3%80%82/)
+  assert.match(finalHtml, /\(<a href="#" class="doi-link patent-link" data-patent-id="CN109192948B">CN109192948B<\/a>\)。/)
+
+  assert.match(streamingHtml, /https:\/\/patents\.google\.com\/patent\/CN109192948B\/en/)
+  assert.match(streamingHtml, /data-patent-id="CN109192948B"/)
+  assert.match(streamingHtml, /\(<a href="#" class="doi-link patent-link" data-patent-id="CN109192948B">CN109192948B<\/a>\)。/)
+})
+
+test('trailing patent citation is preserved when the patent id does not already appear earlier in the clause', async () => {
+  const { formatAnswer, formatStreamingAnswer } = await loadRenderUtils()
+  const input = '可以进一步参考其电压窗口说明 (CN115692635A)。'
+
+  const finalHtml = formatAnswer(input)
+  const streamingHtml = formatStreamingAnswer(input)
+
+  for (const html of [finalHtml, streamingHtml]) {
+    assert.match(html, /data-patent-id="CN115692635A"/)
+    assert.match(html, /<a href="#" class="doi-link patent-link" data-patent-id="CN115692635A">CN115692635A<\/a>/)
+  }
+})
+
+test('trailing patent citation is preserved when it differs from the inline patent id in the same clause', async () => {
+  const { formatAnswer, formatStreamingAnswer } = await loadRenderUtils()
+  const input = '对比 CN109192948B 的压实密度窗口时，也可参考边界方案 (CN115692635A)。'
+
+  const finalHtml = formatAnswer(input)
+  const streamingHtml = formatStreamingAnswer(input)
+
+  for (const html of [finalHtml, streamingHtml]) {
+    assert.equal((html.match(/data-patent-id="CN109192948B"/g) || []).length, 1)
+    assert.equal((html.match(/data-patent-id="CN115692635A"/g) || []).length, 1)
+  }
+})
+
+test('bare patent ids inside inline code and code fences are not linkified', async () => {
+  const { formatAnswer, formatStreamingAnswer } = await loadRenderUtils()
+  const inlineCodeInput = '`CN109192948B`'
+  const fencedCodeInput = '```\nCN109192948B\n```'
+
+  const outputs = [
+    formatAnswer(inlineCodeInput),
+    formatStreamingAnswer(inlineCodeInput),
+    formatAnswer(fencedCodeInput),
+    formatStreamingAnswer(fencedCodeInput),
+  ]
+
+  for (const html of outputs) {
+    assert.doesNotMatch(html, /data-patent-id="CN109192948B"/)
+  }
+
+  assert.match(formatAnswer(inlineCodeInput), /<code>CN109192948B<\/code>/)
+  assert.match(formatStreamingAnswer(inlineCodeInput), /<code>CN109192948B<\/code>/)
+  assert.match(formatAnswer(fencedCodeInput), /<pre><code>CN109192948B[\s\S]*<\/code><\/pre>/)
+})
+
+test('trailing patent citation is preserved when the earlier patent id only appears inside inline code', async () => {
+  const { formatAnswer, formatStreamingAnswer } = await loadRenderUtils()
+  const input = '示例：`CN109192948B` (CN109192948B)。'
+
+  const finalHtml = formatAnswer(input)
+  const streamingHtml = formatStreamingAnswer(input)
+
+  for (const html of [finalHtml, streamingHtml]) {
+    assert.match(html, /<code>CN109192948B<\/code>/)
+    assert.match(html, /data-patent-id="CN109192948B"/)
+    assert.match(html, /\(<a href="#" class="doi-link patent-link" data-patent-id="CN109192948B">CN109192948B<\/a>\)。/)
+  }
+})
+
 test('inline bullet patterns after a clause are normalized into a real list', async () => {
   const { formatAnswer, formatStreamingAnswer } = await loadRenderUtils()
   const input = '结论如下：- 充电上限约 3.65V - 放电下限约 2.5V'

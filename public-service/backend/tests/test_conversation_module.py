@@ -1086,6 +1086,276 @@ def test_conversation_service_add_message_and_detail_hide_raw_patent_id_citation
         assert "CN115132975B" in assistant_message["content"]
 
 
+def test_add_message_dedupes_repeated_trailing_patent_citation_in_user_visible_content():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="patent citation dedupe")
+        conversation_id = int(created["data"]["conversation_id"])
+
+        added_user = service.add_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            role="user",
+            content="请总结这个专利",
+        )
+        assert added_user["success"] is True
+
+        added_assistant = service.add_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            role="assistant",
+            content="双颗粒级配：CN109192948B 使用球形小颗粒填充大颗粒空隙，同时 1C 放电比容量为 149–150 mAh/g (patent_id=CN109192948B)。",
+            metadata={
+                "trace_id": "trace-patent-citation-dedupe",
+                "query_mode": "patent_kb_qa",
+                "route": "kb_qa",
+            },
+        )
+        assert added_assistant["success"] is True
+
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+        assert detail["success"] is True
+        assistant_message = detail["data"]["messages"][-1]
+        assert "patent_id=" not in assistant_message["content"]
+        assert assistant_message["content"].count("CN109192948B") == 1
+        assert "(CN109192948B)" not in assistant_message["content"]
+
+
+def test_add_message_dedupes_repeated_trailing_patent_citation_when_patent_id_is_followed_by_chinese_text():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="patent citation dedupe chinese adjacency")
+        conversation_id = int(created["data"]["conversation_id"])
+
+        added_user = service.add_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            role="user",
+            content="请总结这个专利",
+        )
+        assert added_user["success"] is True
+
+        added_assistant = service.add_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            role="assistant",
+            content="双颗粒级配：CN109192948B使用球形小颗粒填充大颗粒空隙，同时 1C 放电比容量为 149–150 mAh/g (patent_id=CN109192948B)。",
+            metadata={
+                "trace_id": "trace-patent-citation-dedupe-chinese-adjacency",
+                "query_mode": "patent_kb_qa",
+                "route": "kb_qa",
+            },
+        )
+        assert added_assistant["success"] is True
+
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+        assert detail["success"] is True
+        assistant_message = detail["data"]["messages"][-1]
+        assert assistant_message["content"].count("CN109192948B") == 1
+        assert "(CN109192948B)" not in assistant_message["content"]
+
+
+def test_conversation_detail_dedupes_existing_patent_tail_citation_when_loading_history():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="patent citation history dedupe")
+        conversation_id = int(created["data"]["conversation_id"])
+
+        added_user = service.add_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            role="user",
+            content="请总结这个专利",
+        )
+        assert added_user["success"] is True
+
+        added_assistant = service.add_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            role="assistant",
+            content="双颗粒级配：CN109192948B 使用球形小颗粒填充大颗粒空隙，同时 1C 放电比容量为 149–150 mAh/g。",
+            metadata={
+                "trace_id": "trace-patent-citation-history-dedupe",
+                "query_mode": "patent_kb_qa",
+                "route": "kb_qa",
+            },
+        )
+        assert added_assistant["success"] is True
+
+        row = service._repo.get_conversation(conversation_id=conversation_id, user_id=7)
+        assert row is not None
+        with service._json_store.conversation_lock(user_id=7, conversation_id=conversation_id):
+            document, _ = service._load_or_bootstrap_document(
+                row=row,
+                conversation_id=conversation_id,
+                user_id=7,
+                prefer_cached_detail=False,
+            )
+            document["messages"][-1]["content"] = (
+                "双颗粒级配：CN109192948B 使用球形小颗粒填充大颗粒空隙，同时 1C 放电比容量为 149–150 mAh/g (CN109192948B)。"
+            )
+            service._persist_document_and_index(
+                row=row,
+                conversation_id=conversation_id,
+                user_id=7,
+                document=document,
+            )
+        service._invalidate_detail_cache(user_id=7, conversation_id=conversation_id)
+
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+        assert detail["success"] is True
+        assistant_message = detail["data"]["messages"][-1]
+        assert assistant_message["content"].count("CN109192948B") == 1
+        assert "(CN109192948B)" not in assistant_message["content"]
+
+
+def test_add_message_preserves_trailing_patent_citation_when_earlier_match_only_appears_inside_url():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="patent citation url preservation")
+        conversation_id = int(created["data"]["conversation_id"])
+
+        added_user = service.add_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            role="user",
+            content="请总结这个专利",
+        )
+        assert added_user["success"] is True
+
+        added_assistant = service.add_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            role="assistant",
+            content="原始链接：https://example.com/?id=CN109192948B (patent_id=CN109192948B)。",
+            metadata={
+                "trace_id": "trace-patent-citation-url-preservation",
+                "query_mode": "patent_kb_qa",
+                "route": "kb_qa",
+            },
+        )
+        assert added_assistant["success"] is True
+
+        row = service._repo.get_conversation(conversation_id=conversation_id, user_id=7)
+        assert row is not None
+        with service._json_store.conversation_lock(user_id=7, conversation_id=conversation_id):
+            document, _ = service._load_or_bootstrap_document(
+                row=row,
+                conversation_id=conversation_id,
+                user_id=7,
+                prefer_cached_detail=False,
+            )
+            stored_content = document["messages"][-1]["content"]
+
+        assert "patent_id=" not in stored_content
+        assert "(CN109192948B)" in stored_content
+
+
+def test_prepare_response_messages_preserves_trailing_patent_citation_when_earlier_match_only_appears_inside_url():
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        prepared = service._prepare_response_messages(
+            [
+                {
+                    "message_id": "msg_1",
+                    "role": "assistant",
+                    "content": "原始链接：https://example.com/?id=CN109192948B (CN109192948B)。",
+                    "created_at": service._now_iso(),
+                    "status": "done",
+                    "metadata": {
+                        "trace_id": "trace-patent-citation-history-url-preservation",
+                        "query_mode": "patent_kb_qa",
+                        "route": "kb_qa",
+                    },
+                }
+            ]
+        )
+
+        assert len(prepared) == 1
+        assert "https://example.com/?id=CN109192948B" in prepared[0]["content"]
+        assert "(CN109192948B)" in prepared[0]["content"]
+
+
 def test_conversation_repository_list_uses_stable_ordering():
     class _QueryCapturingConversationRepo(ConversationRepository):
         def __init__(self) -> None:

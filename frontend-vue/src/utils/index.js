@@ -42,6 +42,103 @@ function normalizePatentIdForLink(raw) {
   return /^[A-Z]{2}[A-Z0-9._/\-]+$/.test(value) ? value : ''
 }
 
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function isPatentPublicationNumber(value) {
+  return /^[A-Z]{2}\d{6,14}[A-Z]\d?$/i.test(String(value || '').trim())
+}
+
+function isPatentLeadingBoundary(char) {
+  return !char || /[\s([{<"'“‘《「『（【，。！？；：,.;!?:\\|、】【」』》]/.test(char)
+}
+
+function isPatentTrailingTokenChar(char) {
+  return /[A-Za-z0-9._/\-]/.test(char)
+}
+
+function readPatentToken(text, startIndex) {
+  const source = String(text || '')
+  if (startIndex + 3 >= source.length) return null
+  const prefix = source.slice(startIndex, startIndex + 2)
+  if (!/^[A-Za-z]{2}$/.test(prefix)) return null
+
+  let i = startIndex + 2
+  while (i < source.length && isDigit(source[i])) i += 1
+  if (i === startIndex + 2) return null
+  if (i >= source.length || !/[A-Za-z]/.test(source[i])) return null
+  i += 1
+  if (i < source.length && isDigit(source[i])) i += 1
+
+  const normalized = normalizePatentIdForLink(source.slice(startIndex, i))
+  if (!isPatentPublicationNumber(normalized)) return null
+  return {
+    start: startIndex,
+    end: i,
+    normalized,
+  }
+}
+
+function readWrappedPatentSegment(text, startIndex) {
+  const openChar = text[startIndex]
+  const closeChar = openChar === '[' ? ']' : (openChar === '（' ? '）' : ')')
+  const span = readEnclosedSpan(text, startIndex, openChar, closeChar)
+  if (!span) return null
+  const normalized = normalizePatentIdForLink(span.inner)
+  if (!isPatentPublicationNumber(normalized)) return null
+  return {
+    start: span.start,
+    end: span.end,
+    openChar,
+    closeChar,
+    normalized,
+  }
+}
+
+function readPrefixedPatentSegment(text, startIndex) {
+  const source = String(text || '')
+  const prefix = source.startsWith('专利号', startIndex)
+    ? '专利号'
+    : (source.startsWith('公开号', startIndex) ? '公开号' : '')
+  if (!prefix) return null
+  const before = startIndex > 0 ? source[startIndex - 1] : ''
+  if (before && /[A-Za-z0-9]/.test(before)) return null
+
+  let i = startIndex + prefix.length
+  while (i < source.length && /\s/.test(source[i])) i += 1
+  const token = readPatentToken(source, i)
+  if (!token) return null
+  return {
+    start: startIndex,
+    end: token.end,
+    prefix: source.slice(startIndex, i),
+    normalized: token.normalized,
+  }
+}
+
+function readPlainPatentSegment(text, startIndex) {
+  const source = String(text || '')
+  const before = startIndex > 0 ? source[startIndex - 1] : ''
+  if (before && !isPatentLeadingBoundary(before)) return null
+  const token = readPatentToken(source, startIndex)
+  if (!token) return null
+  const after = source[token.end]
+  if (after && isPatentTrailingTokenChar(after)) return null
+  return token
+}
+
+function readRawUrlSpan(text, startIndex) {
+  const source = String(text || '')
+  const matched = source.slice(startIndex).match(/^https?:\/\/[^\s<>"']+/i)
+  if (!matched) return null
+  return {
+    start: startIndex,
+    end: startIndex + matched[0].length,
+    raw: matched[0],
+  }
+}
+
 function repairMergedDoiIdentifiers(text) {
   return String(text || '').replace(
     /(10\.\d{1,9}\/[-._;()/:A-Z0-9]+?)([)\]])(\d{4,9})\.([A-Za-z][-._;()/:A-Z0-9]*)/gi,
@@ -240,29 +337,52 @@ function linkifyPatentTextSegment(text) {
     return `<a href="#" class="doi-link patent-link" data-patent-id="${patentId}">${patentId}</a>`
   }
 
-  let output = String(text || '').replace(
-    /\(\s*patent_id\s*=\s*([A-Za-z0-9._/\-]+)\s*\)/gi,
-    (match, rawPatentId) => {
-      const anchor = renderPatentAnchor(rawPatentId)
-      return anchor ? `(${anchor})` : match
-    }
-  )
+  const source = String(text || '')
+  let output = ''
+  let i = 0
 
-  output = output.replace(
-    /((?:专利号|公开号)\s*)([A-Za-z]{2}[A-Za-z0-9._/\-]{4,})/gi,
-    (match, prefix, rawPatentId) => {
-      const anchor = renderPatentAnchor(rawPatentId)
-      return anchor ? `${prefix}${anchor}` : match
+  while (i < source.length) {
+    const rawUrl = /[Hh]/.test(source[i]) ? readRawUrlSpan(source, i) : null
+    if (rawUrl) {
+      output += rawUrl.raw
+      i = rawUrl.end
+      continue
     }
-  )
 
-  output = output.replace(
-    /([\[(（])\s*([A-Za-z]{2}[A-Za-z0-9._/\-]{4,})\s*([\])）])/gi,
-    (match, openChar, rawPatentId, closeChar) => {
-      const anchor = renderPatentAnchor(rawPatentId)
-      return anchor ? `${openChar}${anchor}${closeChar}` : match
+    const legacyCitation = source.slice(i).match(/^\(\s*patent_id\s*=\s*([A-Za-z0-9._/\-]+)\s*\)/i)
+    if (legacyCitation) {
+      const anchor = renderPatentAnchor(legacyCitation[1])
+      if (anchor) {
+        output += `(${anchor})`
+        i += legacyCitation[0].length
+        continue
+      }
     }
-  )
+
+    const prefixed = readPrefixedPatentSegment(source, i)
+    if (prefixed) {
+      output += `${prefixed.prefix}${renderPatentAnchor(prefixed.normalized)}`
+      i = prefixed.end
+      continue
+    }
+
+    const wrapped = ['(', '[', '（'].includes(source[i]) ? readWrappedPatentSegment(source, i) : null
+    if (wrapped) {
+      output += `${wrapped.openChar}${renderPatentAnchor(wrapped.normalized)}${wrapped.closeChar}`
+      i = wrapped.end
+      continue
+    }
+
+    const plain = /[A-Za-z]/.test(source[i]) ? readPlainPatentSegment(source, i) : null
+    if (plain) {
+      output += renderPatentAnchor(plain.normalized)
+      i = plain.end
+      continue
+    }
+
+    output += source[i]
+    i += 1
+  }
 
   return output
 }
@@ -270,6 +390,8 @@ function linkifyPatentTextSegment(text) {
 function applyPatentLinksToHtml(html) {
   const segments = String(html || '').split(/(<[^>]+>)/g)
   let inAnchor = false
+  let codeDepth = 0
+  let preDepth = 0
 
   return segments
     .map((segment) => {
@@ -279,10 +401,18 @@ function applyPatentLinksToHtml(html) {
           inAnchor = true
         } else if (/^<\/a\b/i.test(segment)) {
           inAnchor = false
+        } else if (/^<code\b/i.test(segment)) {
+          codeDepth += 1
+        } else if (/^<\/code\b/i.test(segment)) {
+          codeDepth = Math.max(0, codeDepth - 1)
+        } else if (/^<pre\b/i.test(segment)) {
+          preDepth += 1
+        } else if (/^<\/pre\b/i.test(segment)) {
+          preDepth = Math.max(0, preDepth - 1)
         }
         return segment
       }
-      if (inAnchor) return segment
+      if (inAnchor || codeDepth > 0 || preDepth > 0) return segment
       return linkifyPatentTextSegment(segment)
     })
     .join('')
@@ -540,11 +670,96 @@ function formatStreamingFallback(text) {
 function normalizeAnswerMarkdown(text, options = {}) {
   const { renderMath = true } = options
   let normalizedText = normalizeMarkdownForRender(text)
+  normalizedText = dedupeTrailingPatentCitations(normalizedText)
   normalizedText = fixTableFormat(normalizedText)
   if (renderMath) {
     normalizedText = renderMathMarkup(normalizedText)
   }
   return normalizedText
+}
+
+function dedupeTrailingPatentCitations(text) {
+  return String(text || '')
+    .split('\n')
+    .map((line) => dedupeTrailingPatentCitationsInLine(line))
+    .join('\n')
+}
+
+function dedupeTrailingPatentCitationsInLine(line) {
+  const source = String(line || '')
+  if (!source) return source
+
+  const wrappedCitationRe = /[\(（]\s*([A-Za-z]{2}\d{6,14}[A-Za-z]\d?)\s*[\)）]/gi
+  const matches = Array.from(source.matchAll(wrappedCitationRe))
+  if (matches.length === 0) return source
+
+  let updated = source
+  for (let i = matches.length - 1; i >= 0; i -= 1) {
+    const match = matches[i]
+    const rawPatentId = match[1]
+    const patentId = normalizePatentIdForLink(rawPatentId)
+    const start = Number(match.index ?? -1)
+    if (!patentId || !isPatentPublicationNumber(patentId) || start < 0) continue
+
+    const end = start + match[0].length
+    const prefix = updated.slice(0, start)
+    const suffix = updated.slice(end)
+    if (!/^\s*[。！？!?；;，,、.]?\s*$/.test(suffix)) continue
+
+    const prefixWithoutUrls = stripRawUrls(prefix)
+    const priorPatentRe = new RegExp(`(?:patent_id\\s*=\\s*)?${escapeRegExp(patentId)}\\b`, 'i')
+    if (!priorPatentRe.test(prefixWithoutUrls)) continue
+
+    updated = `${prefix}${suffix}`
+  }
+
+  return updated
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\s+([，。！？；：,.;!?])/g, '$1')
+    .replace(/[，,；;]\s*([。！？!?])/g, '$1')
+    .replace(/\(\s+\)/g, '')
+}
+
+function stripRawUrls(text) {
+  const source = String(text || '')
+  let output = ''
+  let i = 0
+
+  while (i < source.length) {
+    const codeSpan = source[i] === '`' ? readInlineCodeSpan(source, i) : null
+    if (codeSpan) {
+      output += ' '.repeat(codeSpan.end - codeSpan.start)
+      i = codeSpan.end
+      continue
+    }
+
+    const rawUrl = /[Hh]/.test(source[i]) ? readRawUrlSpan(source, i) : null
+    if (rawUrl) {
+      output += ' '.repeat(rawUrl.raw.length)
+      i = rawUrl.end
+      continue
+    }
+    output += source[i]
+    i += 1
+  }
+
+  return output
+}
+
+function readInlineCodeSpan(text, startIndex) {
+  const source = String(text || '')
+  if (source[startIndex] !== '`') return null
+
+  let tickCount = 1
+  while (source[startIndex + tickCount] === '`') tickCount += 1
+  const fence = '`'.repeat(tickCount)
+  const endIndex = source.indexOf(fence, startIndex + tickCount)
+  if (endIndex < 0) return null
+
+  return {
+    start: startIndex,
+    end: endIndex + tickCount,
+  }
 }
 
 // 格式化答案 - Markdown 渲染

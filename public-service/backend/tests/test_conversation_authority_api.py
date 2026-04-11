@@ -526,6 +526,70 @@ def test_internal_gateway_task_runtime_normalizes_patent_citations_before_user_v
     assert "CN115132975B" in str(assistant_message.get("content") or "")
 
 
+def test_internal_gateway_task_runtime_dedupes_trailing_patent_citations_before_user_visible_storage(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="gateway owned patent citation dedupe")
+        conversation_id = int(created["data"]["conversation_id"])
+
+        start_response = client.post(
+            f"/internal/conversations/{conversation_id}/tasks/task_patent_dedupe_001/assistant-start",
+            json={
+                "conversation_id": conversation_id,
+                "user_id": 7,
+                "trace_id": "task-patent-dedupe-trace",
+                "source_service": "patentQA",
+                "route": "kb_qa",
+                "requested_mode": "patent",
+                "actual_mode": "patent",
+                "task_id": "task_patent_dedupe_001",
+                "status": "queued",
+                "last_seq": 0,
+            },
+            headers=_internal_headers("gateway"),
+        )
+        progress_response = client.post(
+            f"/internal/conversations/{conversation_id}/tasks/task_patent_dedupe_001/assistant-progress",
+            json={
+                "conversation_id": conversation_id,
+                "user_id": 7,
+                "task_id": "task_patent_dedupe_001",
+                "status": "running",
+                "content_delta": "双颗粒级配：CN109192948B 使用球形小颗粒填充大颗粒空隙，同时 1C 放电比容量为 149–150 mAh/g (patent_id=CN109192948B)。",
+                "steps": [],
+                "last_seq": 1,
+            },
+            headers=_internal_headers("gateway"),
+        )
+        terminal_response = client.post(
+            f"/internal/conversations/{conversation_id}/tasks/task_patent_dedupe_001/assistant-terminal",
+            json={
+                "conversation_id": conversation_id,
+                "user_id": 7,
+                "task_id": "task_patent_dedupe_001",
+                "terminal_status": "completed",
+                "last_seq": 2,
+                "answer_text": "双颗粒级配：CN109192948B 使用球形小颗粒填充大颗粒空隙，同时 1C 放电比容量为 149–150 mAh/g (patent_id=CN109192948B)。",
+                "steps": [],
+                "failure": {},
+            },
+            headers=_internal_headers("gateway"),
+        )
+
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+
+    assert start_response.status_code == 200
+    assert progress_response.status_code == 200
+    assert terminal_response.status_code == 200
+    assert detail["success"] is True
+    assistant_message = detail["data"]["messages"][-1]
+    content = str(assistant_message.get("content") or "")
+    assert "patent_id=" not in content
+    assert content.count("CN109192948B") == 1
+    assert "(CN109192948B)" not in content
+
+
 def test_internal_task_create_turn_allows_gateway_caller_and_materializes_both_messages(monkeypatch):
     monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
 

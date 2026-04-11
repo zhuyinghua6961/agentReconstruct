@@ -65,3 +65,4 @@ resource/config/services/patent/config.shared.env
 , d.route, d.turn_mode, d.strategy, d.selected_file_ids)
 , d.route, d.turn_mode, d.strategy, d.needs_clarification, d.selected_file_ids, d.clarification_message)
 /PY
+generation_driven_rag(1).py
