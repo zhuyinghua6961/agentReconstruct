@@ -78,21 +78,13 @@
           @touchstart.prevent="startResize"
         ></div>
 
-        <!-- 右侧面板 - 位置提示/总结/翻译 -->
+        <!-- 右侧面板 - 总结/翻译 -->
         <div
           v-show="showSidePanel"
           class="right-panel"
-          :class="{ 'citations-only': isCitationsVisible }"
           :style="{ width: sidebarWidth + 'px' }"
         >
           <div class="side-mode-switch">
-            <button
-              class="mode-btn"
-              :class="{ active: panelMode === 'citations' }"
-              @click="setPanelMode('citations')"
-            >
-              引用位置
-            </button>
             <button
               class="mode-btn"
               :class="{ active: panelMode === 'summary' }"
@@ -107,40 +99,6 @@
             >
               翻译
             </button>
-          </div>
-
-          <!-- 引用位置面板 -->
-          <div v-show="isCitationsVisible" class="location-panel">
-            <div class="location-panel-header">
-              <h3>📍 引用位置</h3>
-              <p>共 {{ locationHints.length }} 处引用</p>
-            </div>
-            <div class="location-panel-content">
-              <p v-if="locationHints.length === 0" class="summary-placeholder">当前引用暂无可展示的位置证据。</p>
-              <div v-for="(hint, idx) in locationHints" :key="idx" 
-                   class="location-item"
-                   :class="hint.confidence">
-                <div class="location-header">
-                  <span class="page-badge">
-                    {{ resolveLocationTitle(hint) }}
-                  </span>
-                  <span class="similarity-badge" :class="hint.confidence">
-                    {{ resolveLocationBadge(hint) }}
-                  </span>
-                </div>
-                <div v-if="resolveLocationSentence(hint)" class="location-sentence">
-                  "{{ resolveLocationSentence(hint) }}"
-                </div>
-                <div class="location-source">
-                  <strong>原文片段:</strong>
-                  <p>{{ resolveLocationSource(hint) }}</p>
-                </div>
-                <div v-if="hint.has_number || hint.has_unit" class="location-tags">
-                  <span v-if="hint.has_number" class="tag">📊 含数值</span>
-                  <span v-if="hint.has_unit" class="tag">📏 含单位</span>
-                </div>
-              </div>
-            </div>
           </div>
 
           <div class="assist-panels">
@@ -309,7 +267,6 @@ import {
 } from '../utils/pdfReaderClipboardTranslate.js'
 import { resolvePdfReaderInitialPanelMode, isPdfReaderPanelActive } from '../utils/pdfReaderPanelMode'
 import { buildPdfReaderOpenState, releasePdfBlobUrl } from '../utils/pdfReaderOpenFlow'
-import { resolveLocationBadge, resolveLocationSentence, resolveLocationSource, resolveLocationTitle } from '../utils/referenceLocation'
 import { createStreamingHtmlRenderer } from '../utils/streamingRender'
 
 // Props & Emits
@@ -326,7 +283,7 @@ const showSidePanel = ref(true)
 const manualText = ref('')
 const translations = ref([])
 const isTranslating = ref(false)
-const locationHints = ref([])  // 位置提示
+const locationHints = ref([])  // 用于页码定位
 const targetPage = ref(1)  // 目标页码
 const isPdfLoading = ref(false)
 const sidebarWidth = ref(360)
@@ -359,7 +316,6 @@ const MIN_SIDEBAR_WIDTH = 260
 const MIN_LEFT_WIDTH = 420
 const MIN_TRANSLATION_INPUT_HEIGHT = 140
 const MIN_TRANSLATION_HISTORY_HEIGHT = 120
-const isCitationsVisible = computed(() => isPdfReaderPanelActive(panelMode.value, 'citations'))
 const isSummaryVisible = computed(() => isPdfReaderPanelActive(panelMode.value, 'summary'))
 const isTranslationVisible = computed(() => isPdfReaderPanelActive(panelMode.value, 'translation'))
 const hasManualTranslateText = computed(() => normalizeClipboardText(manualText.value).length > 0)
@@ -1119,184 +1075,6 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 
-/* 位置提示面板 */
-.location-panel {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  border-bottom: 1px solid #e5e7eb;
-  min-height: 130px;
-  max-height: 38%;
-}
-
-.right-panel.citations-only .location-panel {
-  flex: 1 1 auto;
-  min-height: 0;
-  max-height: none;
-  border-bottom: none;
-}
-
-.location-panel-header {
-  padding: 20px;
-  border-bottom: 1px solid #e5e7eb;
-  background: #f9fafb;
-}
-
-.location-panel-header h3 {
-  margin: 0 0 8px 0;
-  font-size: 16px;
-  color: #374151;
-}
-
-.location-panel-header p {
-  margin: 0;
-  font-size: 13px;
-  color: #6b7280;
-}
-
-.location-panel-content {
-  flex: 0 1 auto;
-  overflow-y: auto;
-  padding: 16px;
-}
-
-.right-panel.citations-only .location-panel-content {
-  flex: 1 1 auto;
-}
-
-.location-item {
-  margin-bottom: 16px;
-  padding: 16px;
-  background: #f9fafb;
-  border-radius: 12px;
-  border: 2px solid #e5e7eb;
-  transition: all 0.2s;
-}
-
-.location-item:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-}
-
-.location-item.high {
-  border-color: #10b981;
-  background: linear-gradient(to right, #d1fae5 0%, #f9fafb 100%);
-}
-
-.location-item.medium {
-  border-color: #f59e0b;
-  background: linear-gradient(to right, #fef3c7 0%, #f9fafb 100%);
-}
-
-.location-item.low {
-  border-color: #ef4444;
-  background: linear-gradient(to right, #fee2e2 0%, #f9fafb 100%);
-}
-
-.location-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
-}
-
-.page-badge {
-  display: inline-block;
-  padding: 4px 10px;
-  background: #667eea;
-  color: white;
-  border-radius: 6px;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.similarity-badge {
-  display: inline-block;
-  padding: 4px 10px;
-  border-radius: 6px;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.similarity-badge.high {
-  background: #d1fae5;
-  color: #065f46;
-}
-
-.similarity-badge.medium {
-  background: #fef3c7;
-  color: #92400e;
-}
-
-.similarity-badge.low {
-  background: #fee2e2;
-  color: #991b1b;
-}
-
-.location-sentence {
-  font-size: 14px;
-  color: #1f2937;
-  margin-bottom: 12px;
-  padding: 8px;
-  background: white;
-  border-radius: 6px;
-  font-style: italic;
-}
-
-.location-source {
-  font-size: 13px;
-  color: #6b7280;
-  margin-bottom: 12px;
-  padding: 8px;
-  background: white;
-  border-radius: 6px;
-}
-
-.location-source strong {
-  display: block;
-  margin-bottom: 4px;
-  color: #374151;
-}
-
-.location-source p {
-  margin: 0;
-  line-height: 1.5;
-}
-
-.location-tags {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-
-.location-tags .tag {
-  display: inline-block;
-  padding: 4px 8px;
-  background: #e0e7ff;
-  color: #4338ca;
-  border-radius: 4px;
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.jump-btn {
-  width: 100%;
-  padding: 8px;
-  background: #667eea;
-  color: white;
-  border: none;
-  border-radius: 6px;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.jump-btn:hover {
-  background: #5568d3;
-  transform: translateY(-1px);
-}
-
 .pdf-canvas-wrapper {
   flex: 1;
   position: relative;
@@ -1425,10 +1203,6 @@ onBeforeUnmount(() => {
   flex: 1 1 auto;
   min-height: 260px;
   overflow: hidden;
-}
-
-.right-panel.citations-only .assist-panels {
-  display: none;
 }
 
 .translation-panel-header {

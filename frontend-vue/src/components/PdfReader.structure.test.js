@@ -7,8 +7,8 @@ import { dirname, join } from 'node:path'
 const currentDir = dirname(fileURLToPath(import.meta.url))
 const source = readFileSync(join(currentDir, 'PdfReader.vue'), 'utf8')
 
-test('PdfReader keeps only the three target tabs and no stale split-panel logic', () => {
-  assert.match(source, /panelMode === 'citations'/)
+test('PdfReader keeps only summary and translation tabs and no stale split-panel logic', () => {
+  assert.doesNotMatch(source, /panelMode === 'citations'/)
   assert.match(source, /panelMode === 'summary'/)
   assert.match(source, /panelMode === 'translation'/)
 
@@ -25,11 +25,10 @@ test('PdfReader exposes the handlers used by the current template', () => {
 })
 
 
-test('PdfReader citation panel uses the full right-panel space when citations tab is active', () => {
-  assert.match(source, /:class="\{ 'citations-only': isCitationsVisible \}"/)
-  assert.match(source, /\.right-panel\.citations-only \.location-panel\s*\{/) 
-  assert.match(source, /flex:\s*1 1 auto;/)
-  assert.match(source, /max-height:\s*none;/)
+test('PdfReader no longer renders citations-only panel layout', () => {
+  assert.doesNotMatch(source, /:class="\{ 'citations-only': isCitationsVisible \}"/)
+  assert.doesNotMatch(source, /\.right-panel\.citations-only \.location-panel\s*\{/)
+  assert.doesNotMatch(source, /引用位置/)
 })
 
 test('PdfReader uses the shared quota card and single-request pdf open flow', () => {

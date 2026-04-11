@@ -3,6 +3,30 @@ import assert from 'node:assert/strict'
 
 import { formatAnswer, formatStreamingAnswer } from './index.js'
 
+function installMinimalDocumentStub() {
+  if (globalThis.document?.createElement) return
+  globalThis.document = {
+    createElement() {
+      return {
+        _text: '',
+        set textContent(value) {
+          this._text = String(value ?? '')
+        },
+        get innerHTML() {
+          return this._text
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;')
+        },
+      }
+    },
+  }
+}
+
+installMinimalDocumentStub()
+
 test('summary block stays rendered in both streaming and final markdown paths', () => {
   const markdown = [
     '## 主体答案',
@@ -20,8 +44,8 @@ test('summary block stays rendered in both streaming and final markdown paths', 
 
   assert.match(streamingHtml, /<h2>总结<\/h2>/)
   assert.match(finalHtml, /<h2>总结<\/h2>/)
-  assert.match(finalHtml, /<li>传质路径更长。<\/li>/)
-  assert.match(finalHtml, /<li>盐浓度梯度更陡。<\/li>/)
+  assert.match(finalHtml, /<li>(?:<p>)?传质路径更长。(?:<\/p>)?[\s\S]*?<\/li>/)
+  assert.match(finalHtml, /<li>(?:<p>)?盐浓度梯度更陡。(?:<\/p>)?[\s\S]*?<\/li>/)
 })
 
 test('inline markdown heading marker after sentence is normalized into a real heading', () => {
@@ -37,4 +61,119 @@ test('inline markdown heading marker after sentence is normalized into a real he
   assert.doesNotMatch(finalHtml, /### 核心电压参数/)
   assert.match(streamingHtml, /<h3>核心电压参数<\/h3>/)
   assert.match(finalHtml, /<h3>核心电压参数<\/h3>/)
+})
+
+test('inline list marker after patent citation punctuation is normalized into a real list', () => {
+  const markdown = [
+    '掺杂效应可参考 (CN102386398A)。 - 包覆层作用能够降低副反应。 - 复合正极材料可提升循环稳定性。',
+  ].join('\n')
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.match(html, /data-patent-id="CN102386398A"/)
+    assert.match(html, /<li>(?:<p>)?包覆层作用能够降低副反应。(?:<\/p>)?[\s\S]*?<\/li>/)
+    assert.match(html, /<li>(?:<p>)?复合正极材料可提升循环稳定性。(?:<\/p>)?[\s\S]*?<\/li>/)
+    assert.doesNotMatch(html, /\)\。\s+- 包覆层作用/)
+  }
+})
+
+test('inline markdown heading marker after plain text is normalized into a real heading', () => {
+  const markdown = [
+    '全电池性能 ### 总结',
+    '- 循环寿命更稳定。',
+  ].join('\n')
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.doesNotMatch(html, /### 总结/)
+    assert.match(html, /<h3>总结<\/h3>/)
+    assert.match(html, /<li>(?:<p>)?循环寿命更稳定。(?:<\/p>)?[\s\S]*?<\/li>/)
+  }
+})
+
+test('mixed separator and heading markers are normalized instead of leaking raw markdown tokens', () => {
+  const markdown = '引言 --- #### # 1. 本征电压平台与机制'
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.doesNotMatch(html, /--- #### #/)
+    assert.doesNotMatch(html, /#### # 1\./)
+    assert.match(html, /<hr\b/)
+    assert.match(html, /<(?:h1|h2|h3|h4|h5|h6)>1\. 本征电压平台与机制<\/(?:h1|h2|h3|h4|h5|h6)>/)
+  }
+})
+
+test('literal markdown heading examples remain plain text instead of becoming real headings', () => {
+  const markdown = 'Markdown 中使用 ### 标记三级标题。'
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.match(html, /Markdown 中使用/)
+    assert.match(html, /### 标记三级标题。/)
+    assert.doesNotMatch(html, /<h3>标记三级标题。<\/h3>/)
+  }
+})
+
+test('literal markdown heading examples stay plain text even when followed by a real list', () => {
+  const markdown = [
+    'Markdown 中使用 ### 标记三级标题。',
+    '- 列表项',
+  ].join('\n')
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.match(html, /Markdown 中使用 ### 标记三级标题。/)
+    assert.doesNotMatch(html, /<h3>标记三级标题。<\/h3>/)
+    assert.match(html, /<li>(?:<p>)?列表项(?:<\/p>)?[\s\S]*?<\/li>/)
+  }
+})
+
+test('dash-separated prose inside a single bullet item is not split into multiple bullets', () => {
+  const markdown = '- Na盐体系 - 电导率更高，但成本也更高。'
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.equal((html.match(/<li>/g) || []).length, 1)
+    assert.match(html, /Na盐体系/)
+    assert.match(html, /电导率更高，但成本也更高。/)
+  }
+})
+
+test('inline bullet lists still split when later items start with digits', () => {
+  const markdown = '参考：- 2024年容量提升 - 2025年循环稳定'
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.match(html, /<li>(?:<p>)?2024年容量提升(?:<\/p>)?[\s\S]*?<\/li>/)
+    assert.match(html, /<li>(?:<p>)?2025年循环稳定(?:<\/p>)?[\s\S]*?<\/li>/)
+  }
+})
+
+test('inline ordered list items are split into separate ordered list entries', () => {
+  const markdown = '1.材料本征特性...。2.改性优化...。3.测试条件...。'
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.match(html, /<ol>/)
+    assert.equal((html.match(/<li>/g) || []).length, 3)
+    assert.match(html, /材料本征特性/)
+    assert.match(html, /改性优化/)
+    assert.match(html, /测试条件/)
+  }
 })

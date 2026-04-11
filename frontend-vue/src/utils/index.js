@@ -488,10 +488,12 @@ function containsMathMarkup(text) {
 }
 
 function normalizeMarkdownForRender(text) {
-  const input = String(text || '')
-    .replace(/\r\n/g, '\n')
-    .replace(/\u00a0/g, ' ')
-    .replace(/([。！？：:])\s*(#{1,6}\s+)/g, '$1\n\n$2')
+  const input = normalizeInlineMarkdownBoundaries(
+    String(text || '')
+      .replace(/\r\n/g, '\n')
+      .replace(/\u00a0/g, ' ')
+      .replace(/([。！？：:])\s*(#{1,6}\s+)/g, '$1\n\n$2')
+  )
 
   const lines = input.split('\n')
   const normalized = []
@@ -510,7 +512,9 @@ function normalizeMarkdownForRender(text) {
       continue
     }
 
+    line = normalizeInlineOrderedListLine(line)
     line = normalizeInlineBulletListLine(line)
+    line = normalizeLeadingHeadingMarkers(line)
     line = line.replace(/^(\s{0,3}#{1,6})([^\s#])/, '$1 $2')
     line = line.replace(/^(\s{0,3}[-*+])([^\s])/, '$1 $2')
     line = line.replace(/^(\s{0,3}\d+[.)])([^\s])/, '$1 $2')
@@ -532,6 +536,39 @@ function normalizeMarkdownForRender(text) {
   return normalized.join('\n').replace(/\n{3,}/g, '\n\n').trim()
 }
 
+function normalizeInlineMarkdownBoundaries(text) {
+  const lines = String(text || '').split('\n')
+  const normalized = []
+
+  for (let index = 0; index < lines.length; index += 1) {
+    let line = String(lines[index] || '')
+
+    line = line.replace(/([。！？：:；;）)】\]])\s+((?:[-*+]\s+.+))$/, (_match, prefix, inlineList) => {
+      const items = splitInlineBulletItems(inlineList)
+      if (!items || items.length < 2) return `${prefix} ${inlineList}`
+      return `${prefix}\n\n${items.map(({ marker, text: itemText }) => `${marker} ${itemText}`).join('\n')}`
+    })
+
+    line = line.replace(/^(.*\S)\s+(#{1,6}\s+.+)$/, (_match, prefix, headingBlock) => {
+      const nextNonEmptyLine = findNextNonEmptyLine(lines, index + 1)
+      if (!shouldSplitInlineHeadingBlock(prefix, headingBlock, nextNonEmptyLine)) return `${prefix} ${headingBlock}`
+      return `${prefix}\n\n${headingBlock}`
+    })
+
+    line = line.replace(/^(.*\S)\s+(---\s+(?:(?:#{1,6})\s+)+.+)$/, (_match, prefix, separatorBlock) => {
+      return `${prefix}\n\n${separatorBlock}`
+    })
+
+    line = line.replace(/(^|\s*---)\s+((?:(?:#{1,6})\s+)+.+)$/, (_match, separator, headingBlock) => {
+      return `${separator}\n\n${headingBlock}`
+    })
+
+    normalized.push(line)
+  }
+
+  return normalized.join('\n')
+}
+
 function normalizeInlineBulletListLine(line) {
   const source = String(line || '')
   const triggerMatch = source.match(/^(.*?[：:；;])\s*([-*+])\s+(.+)$/)
@@ -543,6 +580,55 @@ function normalizeInlineBulletListLine(line) {
   if (!items) return source
 
   return [prefix, ...items.map(({ marker, text: itemText }) => `${marker} ${itemText}`)].join('\n')
+}
+
+function normalizeInlineOrderedListLine(line) {
+  const source = String(line || '')
+
+  const prefixedMatch = source.match(/^(.+?[：:；;])\s*(\d+[.)].+)$/)
+  if (prefixedMatch) {
+    const prefix = prefixedMatch[1]
+    const items = splitInlineOrderedItems(prefixedMatch[2])
+    if (items && items.length > 1) {
+      return [prefix, ...items.map(({ marker, text: itemText }) => `${marker} ${itemText}`)].join('\n')
+    }
+  }
+
+  const items = splitInlineOrderedItems(source)
+  if (items && items.length > 1) {
+    return items.map(({ marker, text: itemText }) => `${marker} ${itemText}`).join('\n')
+  }
+
+  return source
+}
+
+function normalizeLeadingHeadingMarkers(line) {
+  return String(line || '').replace(
+    /^(\s*)(?:(#{1,6})\s+)+(.*\S.*)$/,
+    (_match, indent, hashes, text) => `${indent}${hashes} ${String(text || '').trim()}`
+  )
+}
+
+function findNextNonEmptyLine(lines, startIndex) {
+  for (let index = startIndex; index < lines.length; index += 1) {
+    const candidate = String(lines[index] || '').trim()
+    if (candidate) return candidate
+  }
+  return ''
+}
+
+function looksLikeStructuredMarkdownLine(line) {
+  return /^(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|\|.+\||---+\s*$)/.test(String(line || '').trim())
+}
+
+function shouldSplitInlineHeadingBlock(prefix, headingBlock, nextNonEmptyLine) {
+  const prefixText = String(prefix || '').trim()
+  const headingText = String(headingBlock || '').replace(/^#{1,6}\s+/, '').trim()
+  if (!looksLikeStructuredMarkdownLine(nextNonEmptyLine)) return false
+  if (!prefixText || !headingText) return false
+  if (/[。！？!?；;：:.]$/.test(prefixText)) return false
+  if (/[。！？!?；;：:]$/.test(headingText)) return false
+  return true
 }
 
 function splitInlineBulletItems(text) {
@@ -593,6 +679,52 @@ function splitInlineBulletItems(text) {
   return items.length >= 1 ? items : null
 }
 
+function splitInlineOrderedItems(text) {
+  const source = String(text || '').trim()
+  if (!source) return null
+  if (!/^\d+[.)]/.test(source)) return null
+
+  const items = []
+  let index = 0
+
+  while (index < source.length) {
+    while (index < source.length && /\s/.test(source[index])) index += 1
+    if (index >= source.length) break
+
+    const markerMatch = source.slice(index).match(/^(\d+[.)])/)
+    if (!markerMatch) return null
+    const marker = markerMatch[1]
+    index += marker.length
+
+    while (index < source.length && /\s/.test(source[index])) index += 1
+    if (index >= source.length) return null
+
+    const itemStart = index
+    let itemEnd = source.length
+
+    for (let cursor = index; cursor < source.length; cursor += 1) {
+      if (!/\d/.test(source[cursor])) continue
+      const nextMarkerMatch = source.slice(cursor).match(/^(\d+[.)])/)
+      if (!nextMarkerMatch) continue
+      if (shouldSplitInlineOrderedBoundary(source, cursor)) {
+        itemEnd = cursor
+        index = cursor
+        break
+      }
+    }
+
+    if (itemEnd === source.length) {
+      index = source.length
+    }
+
+    const itemText = source.slice(itemStart, itemEnd).trim()
+    if (!itemText) return null
+    items.push({ marker, text: itemText })
+  }
+
+  return items.length >= 1 ? items : null
+}
+
 function shouldSplitInlineBulletBoundary(source, markerIndex) {
   let contentStart = markerIndex + 1
   while (contentStart < source.length && /\s/.test(source[contentStart])) contentStart += 1
@@ -601,8 +733,14 @@ function shouldSplitInlineBulletBoundary(source, markerIndex) {
   return !/^[A-Za-z0-9](?:\s|$)/.test(source.slice(contentStart))
 }
 
+function shouldSplitInlineOrderedBoundary(source, markerIndex) {
+  const before = String(source || '').slice(0, markerIndex).replace(/\s+$/g, '')
+  const prevChar = before[before.length - 1] || ''
+  return /[。！？!?；;]/.test(prevChar)
+}
+
 function containsStructuredMarkdown(text) {
-  return /(^|\n)\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|\|.+\|)/m.test(String(text || ''))
+  return /(^|\n)\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|\|.+\||---+\s*$)/m.test(String(text || ''))
 }
 
 function containsInlineRenderMarkup(text) {
@@ -611,8 +749,8 @@ function containsInlineRenderMarkup(text) {
 
 function looksLikeUnrenderedMarkdown(text, html) {
   if (!containsStructuredMarkdown(text)) return false
-  if (/<(?:h[1-6]|ul|ol|li|table|blockquote)\b/i.test(String(html || ''))) return false
-  return /(?:^|\n)\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)/m.test(String(text || ''))
+  if (/<(?:h[1-6]|ul|ol|li|table|blockquote|hr)\b/i.test(String(html || ''))) return false
+  return /(?:^|\n)\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|---+\s*$)/m.test(String(text || ''))
 }
 
 const BEIJING_TIME_ZONE = 'Asia/Shanghai'
@@ -658,8 +796,8 @@ function formatStreamingFallback(text) {
     .replace(/\n{3,}/g, '\n\n')
 
   return normalized
-    .replace(/^###\s+(.+)$/gm, '<h3>$1</h3>')
-    .replace(/^##\s+(.+)$/gm, '<h2>$1</h2>')
+    .replace(/^\s*---+\s*$/gm, '<hr>')
+    .replace(/^(#{1,6})\s+(.+)$/gm, (_match, hashes, title) => `<h${hashes.length}>${title}</h${hashes.length}>`)
     .replace(/^[-*+]\s+(.+)$/gm, '<div class="stream-bullet">• $1</div>')
     .replace(/^\d+[.)]\s+(.+)$/gm, '<div class="stream-bullet">$&</div>')
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')

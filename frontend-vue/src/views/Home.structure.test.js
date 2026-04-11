@@ -223,3 +223,10 @@ test('Home invalidates streaming and final render caches when a message flips in
   assert.match(source, /cached\.terminalStatus === terminalStatus/)
   assert.match(source, /renderedMessageCache\.set\(msg, \{ content, referenceLinks, isComplete, doneSeen, terminalStatus, html \}\)/)
 })
+
+test('Home header no longer renders knowledge-base summary status text', () => {
+  assert.match(source, /<h1>磷酸铁锂知识图谱 AI<\/h1>/)
+  assert.doesNotMatch(source, /const kbSummaryText = computed\(\(\) => \{/)
+  assert.doesNotMatch(source, /<div class="kb-info">\{\{ kbSummaryText \}\}<\/div>/)
+  assert.doesNotMatch(source, /\.kb-info\s*\{/)
+})

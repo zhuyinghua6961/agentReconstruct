@@ -114,13 +114,6 @@ const activeVisibleWindow = computed(() => {
 })
 const visibleMessageEntries = computed(() => activeVisibleWindow.value.visibleMessages)
 const hiddenHistoryCount = computed(() => activeVisibleWindow.value.hiddenCount)
-const kbSummaryText = computed(() => {
-  if (store.kbInfo.loading) return '向量库: 加载中 | 知识图谱: 加载中'
-  const vectorSize = Number(store.kbInfo.vectorSize ?? store.kbInfo.size ?? 0)
-  const graphConnected = Boolean(store.kbInfo.graphConnected)
-  const graphPart = graphConnected ? `${Number(store.kbInfo.graphSize ?? 0)} 条` : '未连接'
-  return `向量库: ${vectorSize} 条 | 知识图谱: ${graphPart}`
-})
 const currentRecoverableTaskSnapshot = computed(() => {
   const chatId = normalizeChatId(store.currentChatId)
   const chat = getChatById(chatId)
@@ -2343,7 +2336,6 @@ watch(
           <div class="ai-icon">✨</div>
           <div class="header-title">
             <h1>磷酸铁锂知识图谱 AI</h1>
-            <div class="kb-info">{{ kbSummaryText }}</div>
           </div>
         </div>
         <div class="header-right">
@@ -3050,11 +3042,6 @@ watch(
   font-size: 18px;
   color: #1e293b;
   margin: 0;
-}
-
-.kb-info {
-  font-size: 13px;
-  color: #64748b;
 }
 
 .messages-area {
