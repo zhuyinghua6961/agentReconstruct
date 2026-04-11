@@ -96,7 +96,7 @@ def _find_section_position(text: str, patterns: tuple[str, ...], *, last_end: in
     return best_position if best_end >= 0 else -1
 
 
-def _has_fastqa_summary_sections(text: str) -> bool:
+def _has_four_block_sections(text: str) -> bool:
     normalized = str(text or "")
     patterns = (
         (r"(^|\n)\s*(?:#{1,6}\s*)?结论\s*[：:]?",),
@@ -113,7 +113,24 @@ def _has_fastqa_summary_sections(text: str) -> bool:
     return True
 
 
-def _ensure_fastqa_pdf_summary_structure(
+def _has_literature_summary_sections(text: str) -> bool:
+    normalized = str(text or "")
+    patterns = (
+        (r"(^|\n)\s*(?:#{1,6}\s*)?研究目的和背景\s*[：:]?",),
+        (r"(^|\n)\s*(?:#{1,6}\s*)?研究方法/实验设计\s*[：:]?",),
+        (r"(^|\n)\s*(?:#{1,6}\s*)?主要发现和结果\s*[：:]?",),
+        (r"(^|\n)\s*(?:#{1,6}\s*)?结论和意义\s*[：:]?",),
+    )
+    last_end = -1
+    for group in patterns:
+        position = _find_section_position(normalized, group, last_end=last_end)
+        if position < 0:
+            return False
+        last_end = position
+    return True
+
+
+def _ensure_four_block_pdf_answer_structure(
     *,
     answer: str,
     prepared_pdf_text: str,
@@ -124,7 +141,7 @@ def _ensure_fastqa_pdf_summary_structure(
     normalized_answer = str(answer or "").strip()
     if not normalized_answer:
         return normalized_answer
-    if _has_fastqa_summary_sections(normalized_answer):
+    if _has_four_block_sections(normalized_answer):
         return normalized_answer
 
     evidence_points = _find_markdown_support_points(prepared_pdf_text, max_items=3)
@@ -175,6 +192,103 @@ def _ensure_fastqa_pdf_summary_structure(
         "",
         "## 限制",
         *limitation_lines,
+    ]
+    return "\n".join(sections).strip()
+
+
+_LITERATURE_SUMMARY_NOTE = "注*：所有总结内容均严格基于文件原文中明确提到的信息，未添加任何通用知识或推测内容。"
+
+
+def _pick_points(points: list[str], *, start: int, count: int) -> list[str]:
+    return [item for item in points[start : start + count] if str(item or "").strip()]
+
+
+def _build_literature_section(title: str, points: list[str], fallback: str) -> list[str]:
+    lines = [f"## {title}"]
+    if points:
+        lines.extend(f"- {point}" for point in points)
+    else:
+        lines.append(f"- {fallback}")
+    lines.append("")
+    return lines
+
+
+def _point_contains_keyword(point: str, keywords: tuple[str, ...]) -> bool:
+    normalized = str(point or "").strip().lower()
+    return bool(normalized) and any(keyword in normalized for keyword in keywords)
+
+
+def _select_literature_points(
+    points: list[str],
+    *,
+    keywords: tuple[str, ...],
+    max_items: int,
+    allow_numeric: bool = False,
+) -> list[str]:
+    selected: list[str] = []
+    for point in points:
+        normalized = str(point or "").strip()
+        if not normalized:
+            continue
+        if not _point_contains_keyword(normalized, keywords):
+            if not (allow_numeric and re.search(r"\d", normalized)):
+                continue
+        if normalized in selected:
+            continue
+        selected.append(normalized)
+        if len(selected) >= max_items:
+            break
+    return selected
+
+
+def _ensure_literature_summary_structure(
+    *,
+    answer: str,
+    prepared_pdf_text: str,
+) -> str:
+    normalized_answer = str(answer or "").strip()
+    if not normalized_answer:
+        return normalized_answer
+    if _has_literature_summary_sections(normalized_answer):
+        if _LITERATURE_SUMMARY_NOTE in normalized_answer:
+            return normalized_answer
+        return f"{normalized_answer}\n\n{_LITERATURE_SUMMARY_NOTE}".strip()
+
+    prepared_points = _find_markdown_support_points(prepared_pdf_text, max_items=8, min_chars=12)
+    answer_points = _find_markdown_support_points(normalized_answer, max_items=4, min_chars=10)
+    all_points: list[str] = []
+    for item in [*answer_points, *prepared_points]:
+        if item and item not in all_points:
+            all_points.append(item)
+
+    background_points = _select_literature_points(
+        all_points,
+        keywords=("研究背景", "背景", "目的", "aim", "objective", "motivation", "introduc", "study", "studies", "investigate"),
+        max_items=2,
+    )
+    method_points = _select_literature_points(
+        all_points,
+        keywords=("方法", "实验", "采用", "通过", "制备", "表征", "测试", "xrd", "tof-sims", "s-cells", "method", "methods", "experimental", "measure"),
+        max_items=2,
+    )
+    result_points = _select_literature_points(
+        all_points,
+        keywords=("结果", "发现", "提升", "改善", "show", "shows", "result", "results", "retention", "efficiency", "ocv", "峰"),
+        max_items=3,
+        allow_numeric=True,
+    )
+    conclusion_points = _select_literature_points(
+        answer_points or all_points,
+        keywords=("结论", "意义", "表明", "说明", "证明", "suggest", "indicate", "conclusion", "conclusions"),
+        max_items=2,
+    )
+
+    sections = [
+        *_build_literature_section("研究目的和背景", background_points, "PDF中未提及足够的研究背景或研究目的信息。"),
+        *_build_literature_section("研究方法/实验设计", method_points, "PDF中未提及足够的研究方法或实验设计细节。"),
+        *_build_literature_section("主要发现和结果", result_points, "PDF中未提及足够的主要发现或结果数据。"),
+        *_build_literature_section("结论和意义", conclusion_points, "PDF中未提及足够的结论或研究意义描述。"),
+        _LITERATURE_SUMMARY_NOTE,
     ]
     return "\n".join(sections).strip()
 
@@ -236,12 +350,13 @@ class PatentPdfAnswerClient:
     ) -> dict[str, Any]:
         labels = [str(item).strip() for item in list(selected_file_labels or []) if str(item).strip()]
         compare_mode = is_compare_question(question, selected_pdf_count=len(labels) or 1)
+        summary_mode = is_summary_question(question) and not compare_mode
         kb_section = build_kb_section({"kb_answer": _KB_BOUNDARY_PLACEHOLDER}) if include_kb else ""
         prompt = build_patent_pdf_answer_prompt(
             question=question,
             pdf_content=pdf_text,
             kb_section=kb_section,
-            is_summary=is_summary_question(question),
+            is_summary=summary_mode,
             is_compare=compare_mode,
             selected_file_labels=labels or [str(file_name or "").strip() or "unknown.pdf"],
             route_hint=route_hint,
@@ -712,7 +827,7 @@ class PatentPdfService:
         available_file_labels: list[str],
         compare_mode: bool,
     ) -> dict[str, Any]:
-        summary_mode = is_summary_question(question)
+        summary_mode = is_summary_question(question) and not compare_mode
         missing_labels = [label for label in selected_file_labels if label not in set(available_file_labels)]
 
         if compare_mode and (len(available_file_labels) < 2 or missing_labels):
@@ -800,11 +915,12 @@ class PatentPdfService:
         stream_mode = "unknown"
         streamed_text = ""
         pending_stream_whitespace = ""
+        summary_mode = is_summary_question(question) and not compare_mode
         prompt = build_patent_pdf_answer_prompt(
             question=question,
             pdf_content=prepared_pdf_text,
             kb_section=build_kb_section({"kb_answer": _KB_BOUNDARY_PLACEHOLDER}) if include_kb else "",
-            is_summary=is_summary_question(question),
+            is_summary=summary_mode,
             is_compare=compare_mode,
             selected_file_labels=selected_file_labels or [str(file_name or "").strip() or "unknown.pdf"],
             route_hint=route_hint,
@@ -839,11 +955,16 @@ class PatentPdfService:
                 if not normalized_buffer:
                     pending_stream_whitespace = ""
                     return
+                if summary_mode:
+                    if _has_literature_summary_sections(normalized_buffer):
+                        stream_mode = "raw_structured"
+                        _emit_live_text(normalized_stream_text)
+                    return
                 looks_like_heading_prefix = bool(
                     normalized_buffer.startswith("##")
                     or re.match(r"^(?:#{1,6}\s*)?(?:结论|证据|对比|限制)\b", normalized_buffer)
                 )
-                if _has_fastqa_summary_sections(normalized_buffer):
+                if _has_four_block_sections(normalized_buffer):
                     stream_mode = "raw_structured"
                     _emit_live_text(normalized_stream_text)
                     return
@@ -877,8 +998,13 @@ class PatentPdfService:
                 if answer:
                     if compare_mode:
                         answer = _ensure_compare_answer_structure(answer=answer, prepared_pdf_text=prepared_pdf_text)
+                    elif summary_mode:
+                        answer = _ensure_literature_summary_structure(
+                            answer=answer,
+                            prepared_pdf_text=prepared_pdf_text,
+                        )
                     else:
-                        answer = _ensure_fastqa_pdf_summary_structure(
+                        answer = _ensure_four_block_pdf_answer_structure(
                             answer=answer,
                             prepared_pdf_text=prepared_pdf_text,
                             include_kb=include_kb,
@@ -933,8 +1059,13 @@ class PatentPdfService:
                     if answer:
                         if compare_mode:
                             answer = _ensure_compare_answer_structure(answer=answer, prepared_pdf_text=prepared_pdf_text)
+                        elif summary_mode:
+                            answer = _ensure_literature_summary_structure(
+                                answer=answer,
+                                prepared_pdf_text=prepared_pdf_text,
+                            )
                         else:
-                            answer = _ensure_fastqa_pdf_summary_structure(
+                            answer = _ensure_four_block_pdf_answer_structure(
                                 answer=answer,
                                 prepared_pdf_text=prepared_pdf_text,
                                 include_kb=include_kb,
@@ -956,8 +1087,13 @@ class PatentPdfService:
         if answer:
             if compare_mode:
                 answer = _ensure_compare_answer_structure(answer=answer, prepared_pdf_text=prepared_pdf_text)
+            elif summary_mode:
+                answer = _ensure_literature_summary_structure(
+                    answer=answer,
+                    prepared_pdf_text=prepared_pdf_text,
+                )
             else:
-                answer = _ensure_fastqa_pdf_summary_structure(
+                answer = _ensure_four_block_pdf_answer_structure(
                     answer=answer,
                     prepared_pdf_text=prepared_pdf_text,
                     include_kb=include_kb,
@@ -991,12 +1127,19 @@ class PatentPdfService:
                 reason="模型未返回可用的比较结果",
             )
             if compare_mode
-            else _ensure_fastqa_pdf_summary_structure(
-                answer=build_extractive_fallback_summary(question=question, pdf_text=prepared_pdf_text),
-                prepared_pdf_text=prepared_pdf_text,
-                include_kb=include_kb,
-                route_hint=route_hint,
-                source_scope=source_scope,
+            else (
+                _ensure_literature_summary_structure(
+                    answer=build_extractive_fallback_summary(question=question, pdf_text=prepared_pdf_text),
+                    prepared_pdf_text=prepared_pdf_text,
+                )
+                if summary_mode
+                else _ensure_four_block_pdf_answer_structure(
+                    answer=build_extractive_fallback_summary(question=question, pdf_text=prepared_pdf_text),
+                    prepared_pdf_text=prepared_pdf_text,
+                    include_kb=include_kb,
+                    route_hint=route_hint,
+                    source_scope=source_scope,
+                )
             )
         )
         if compare_mode:
@@ -1067,8 +1210,8 @@ def _ensure_compare_answer_structure(*, answer: str, prepared_pdf_text: str) -> 
         return normalized_answer
 
     doc_count = len(document_summaries)
-    outlines = "\n".join(
-        f"{index}. {label}：{summary}"
+    outlines = "\n\n".join(
+        _build_compare_document_outline(index=index, label=label, summary=summary)
         for index, (label, summary) in enumerate(document_summaries, start=1)
     )
     shared_points = (
@@ -1087,6 +1230,50 @@ def _ensure_compare_answer_structure(*, answer: str, prepared_pdf_text: str) -> 
         "总结：\n"
         f"{summary_line}"
     ).strip()
+
+
+def _build_compare_document_outline(*, index: int, label: str, summary: str) -> str:
+    points = _extract_compare_summary_points(summary)
+    background_points = points[:1]
+    method_points = points[1:2] or points[:1]
+    result_points = points[1:3] or points[:1]
+    conclusion_points = points[-1:] or points[:1]
+    return "\n".join(
+        [
+            f"### 文献 {index}: {label}",
+            "## 研究目的和背景",
+            *[f"- {item}" for item in (background_points or ["原文中仅保留了有限的研究背景摘要。"])],
+            "",
+            "## 研究方法/实验设计",
+            *[f"- {item}" for item in (method_points or ["原文摘要中未保留足够的方法或实验设计细节。"])],
+            "",
+            "## 主要发现和结果",
+            *[f"- {item}" for item in (result_points or ["原文摘要中未保留足够的主要发现或结果数据。"])],
+            "",
+            "## 结论和意义",
+            *[f"- {item}" for item in (conclusion_points or ["原文摘要中未保留足够的结论或意义信息。"])],
+        ]
+    ).strip()
+
+
+def _extract_compare_summary_points(summary: str) -> list[str]:
+    normalized = str(summary or "").replace("\r\n", "\n").replace("\r", "\n").strip("…")
+    if not normalized:
+        return []
+    raw_parts = re.split(r"(?<=[。！？.!?])\s+|\n+", normalized)
+    points: list[str] = []
+    for raw_part in raw_parts:
+        item = _collapse_whitespace(re.sub(r"^[#>\-\*\d\.\)\s]+", "", raw_part))
+        if len(item) < 8:
+            continue
+        if item in points:
+            continue
+        points.append(item)
+        if len(points) >= 4:
+            break
+    if points:
+        return points
+    return [_collapse_whitespace(normalized)] if _collapse_whitespace(normalized) else []
 
 
 def _extract_document_summaries(*, prepared_pdf_text: str) -> list[tuple[str, str]]:

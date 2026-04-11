@@ -150,3 +150,70 @@ test('formatAnswer renders prefixed doi links inside markdown table cells', () =
   assert.match(html, /class="doi-link"/i)
   assert.match(html, /data-doi="10\.1039\/c2jm15273h"/i)
 })
+
+test('formatAnswer does not linkify ordinary numeric prose that only resembles an implicit DOI', () => {
+  installMinimalDom()
+  const input = '平台电压约为 10.2V，样品编号 10.20abc 也不应被识别为 DOI。'
+
+  const streamingHtml = formatStreamingAnswer(input)
+  const finalHtml = formatAnswer(input)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.doesNotMatch(html, /class="doi-link"/i)
+    assert.match(html, /10\.2V/)
+    assert.match(html, /10\.20abc/)
+  }
+})
+
+test('compare markdown keeps document subheadings and chapter blocks in order', () => {
+  installMinimalDom()
+  const input = [
+    '### 文献 1：厚电极液相传质',
+    '',
+    '## 研究目的和背景',
+    '- 评估高面容量下的浓差极化。',
+    '',
+    '## 研究方法/实验设计',
+    '- 结合 XRD 与 TOF-SIMS 进行验证。',
+    '',
+    '### 文献 2：界面演化与倍率响应',
+    '',
+    '## 研究目的和背景',
+    '- 比较不同界面状态下的动力学差异。',
+    '',
+    '## 研究方法/实验设计',
+    '- 通过 OCV 与对称电池结果交叉验证。',
+    '',
+    '## 相同点',
+    '- 两篇文献都强调离子输运约束。',
+  ].join('\n')
+
+  const streamingHtml = formatStreamingAnswer(input)
+  const finalHtml = formatAnswer(input)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.doesNotMatch(html, /### 文献 1：厚电极液相传质/)
+    assert.doesNotMatch(html, /## 研究目的和背景/)
+    assert.match(html, /<h3>文献 1：厚电极液相传质<\/h3>/)
+    assert.match(html, /<h3>文献 2：界面演化与倍率响应<\/h3>/)
+    assert.match(html, /<h2>研究目的和背景<\/h2>/)
+    assert.match(html, /<h2>研究方法\/实验设计<\/h2>/)
+    assert.match(html, /<h2>相同点<\/h2>/)
+
+    const doc1Index = html.indexOf('<h3>文献 1：厚电极液相传质</h3>')
+    const doc1BackgroundIndex = html.indexOf('<h2>研究目的和背景</h2>', doc1Index)
+    const doc2Index = html.indexOf('<h3>文献 2：界面演化与倍率响应</h3>', doc1BackgroundIndex)
+    const doc2BackgroundIndex = html.indexOf('<h2>研究目的和背景</h2>', doc2Index)
+    const compareIndex = html.indexOf('<h2>相同点</h2>', doc2BackgroundIndex)
+
+    assert.notEqual(doc1Index, -1)
+    assert.notEqual(doc1BackgroundIndex, -1)
+    assert.notEqual(doc2Index, -1)
+    assert.notEqual(doc2BackgroundIndex, -1)
+    assert.notEqual(compareIndex, -1)
+    assert.ok(doc1Index < doc1BackgroundIndex)
+    assert.ok(doc1BackgroundIndex < doc2Index)
+    assert.ok(doc2Index < doc2BackgroundIndex)
+    assert.ok(doc2BackgroundIndex < compareIndex)
+  }
+})

@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from server.patent.cache_keys import build_file_route_cache_fingerprint
 from server.patent.file_models import PatentFileContract, PatentFileRoutePlan
+from server.patent.pdf_contract import is_summary_question
 from server.patent.pdf_service import PatentPdfService
 from server.patent.streaming import emit_text_chunks
 from server.patent.tabular_service import PatentTabularService
@@ -23,6 +24,7 @@ _HYBRID_SCOPE_TO_PLAN = {
 }
 
 _LOGGER = logging.getLogger("patent.file_routes")
+_LITERATURE_SUMMARY_NOTE = "注*：所有总结内容均严格基于文件原文中明确提到的信息，未添加任何通用知识或推测内容。"
 
 
 def _file_route_runtime_signature(
@@ -571,8 +573,106 @@ def build_patent_hybrid_synthesis_contract(
     }
 
 
+def _collect_hybrid_points(*values: str, max_items: int = 4) -> list[str]:
+    points: list[str] = []
+    skipped_titles = {"研究目的和背景", "研究方法/实验设计", "主要发现和结果", "结论和意义", "结论", "证据", "对比", "限制"}
+    for value in values:
+        normalized = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+        if not normalized.strip():
+            continue
+        for raw_line in normalized.splitlines():
+            line = re.sub(r"^[#>\-\*\d\.\)\s]+", "", raw_line).strip()
+            if len(line) < 8:
+                continue
+            if line in skipped_titles or line.startswith("注*"):
+                continue
+            if line in points:
+                continue
+            points.append(_clip_lead_text(line, limit=220))
+            if len(points) >= max_items:
+                return points
+    return points
+
+
+def _build_hybrid_literature_section(title: str, points: list[str], fallback: str) -> list[str]:
+    lines = [f"## {title}"]
+    if points:
+        lines.extend(f"- {point}" for point in points)
+    else:
+        lines.append(f"- {fallback}")
+    lines.append("")
+    return lines
+
+
+def _synthesize_hybrid_literature_answer(*, synthesis_contract: dict[str, Any]) -> str:
+    contract = dict(synthesis_contract or {})
+    pdf_answer = str(contract.get("pdf_answer") or "").strip()
+    tabular_answer = str(contract.get("tabular_answer") or "").strip()
+    kb_answer = str(contract.get("kb_answer") or "").strip()
+    pdf_evidence_context = str(contract.get("pdf_evidence_context") or "").strip()
+    table_execution_context = str(contract.get("table_execution_context") or "").strip()
+    kb_evidence_context = str(contract.get("kb_evidence_context") or "").strip()
+    kb_reference_instruction = str(contract.get("kb_reference_instruction") or "").strip()
+    usable_kb_answer = "" if _is_degraded_answer(kb_answer) else kb_answer
+
+    lead = _select_hybrid_direct_conclusion(
+        table_execution_context=table_execution_context,
+        pdf_evidence_context=pdf_evidence_context,
+        tabular_answer="",
+        pdf_answer="",
+        kb_answer=usable_kb_answer,
+    )
+    if not lead:
+        return "当前未拿到可读的 PDF、表格或知识库证据，暂时无法生成联合回答。"
+
+    background_points = _collect_hybrid_points(pdf_evidence_context, max_items=2)
+    if usable_kb_answer or kb_evidence_context:
+        background_points = [*background_points, _clip_lead_text(f"知识库交叉验证：{kb_evidence_context or usable_kb_answer}", limit=220)]
+
+    method_points = []
+    if pdf_evidence_context:
+        method_points.append(_clip_lead_text(f"PDF 原文证据：{pdf_evidence_context}", limit=220))
+    if table_execution_context:
+        method_points.append(_clip_lead_text(f"表格执行结果：{table_execution_context}", limit=220))
+    if usable_kb_answer or kb_evidence_context:
+        method_points.append("知识库结果仅用于交叉验证，不能覆盖文件原文和表格执行结果。")
+
+    result_points = _collect_hybrid_points(
+        table_execution_context,
+        pdf_evidence_context,
+        max_items=3,
+    )
+    if usable_kb_answer or kb_evidence_context:
+        result_points.append(_clip_lead_text(f"知识库补充：{kb_evidence_context or usable_kb_answer}", limit=220))
+
+    conflict_message = _detect_conflict_message(
+        file_context="\n".join(part for part in (table_execution_context, pdf_evidence_context) if part),
+        kb_context=kb_evidence_context or usable_kb_answer,
+    )
+    conclusion_points = [lead]
+    conclusion_points.append("文件证据优先作为主结论依据，PDF 原文与表格执行结果用于相互校验。")
+    if conflict_message:
+        conclusion_points.append(conflict_message)
+    elif usable_kb_answer:
+        conclusion_points.append("当前未检测到明确冲突；知识库只作为补充验证，不替代文件侧结论。")
+    if kb_reference_instruction:
+        conclusion_points.append(kb_reference_instruction)
+
+    sections = [
+        *_build_hybrid_literature_section("研究目的和背景", background_points, "当前文件与知识库证据中未提供足够的研究背景或研究目的信息。"),
+        *_build_hybrid_literature_section("研究方法/实验设计", method_points, "当前文件与知识库证据中未提供足够的研究方法、实验设计或验证路径信息。"),
+        *_build_hybrid_literature_section("主要发现和结果", result_points, "当前文件与知识库证据中未提供足够的主要发现、关键指标或结果数据。"),
+        *_build_hybrid_literature_section("结论和意义", conclusion_points, "当前文件与知识库证据中未提供足够的结论或应用意义描述。"),
+        _LITERATURE_SUMMARY_NOTE,
+    ]
+    return "\n".join(sections).strip()
+
+
 def synthesize_patent_hybrid_answer(*, synthesis_contract: dict[str, Any]) -> str:
     contract = dict(synthesis_contract or {})
+    if is_summary_question(str(contract.get("question") or "")):
+        return _synthesize_hybrid_literature_answer(synthesis_contract=contract)
+
     pdf_answer = str(contract.get("pdf_answer") or "").strip()
     tabular_answer = str(contract.get("tabular_answer") or "").strip()
     kb_answer = str(contract.get("kb_answer") or "").strip()

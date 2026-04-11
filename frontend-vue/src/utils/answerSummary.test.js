@@ -177,3 +177,40 @@ test('inline ordered list items are split into separate ordered list entries', (
     assert.match(html, /测试条件/)
   }
 })
+
+test('literature summary chapters keep nested bullets and render note as a secondary paragraph', () => {
+  const markdown = [
+    '## 研究目的和背景',
+    '- 该研究关注厚电极在高面容量条件下的传质限制。',
+    '',
+    '## 研究方法/实验设计',
+    '- 研究对象为自支撑 LiMn2O4 厚电极。',
+    '- 表征与验证：',
+    '  - XRD 跟踪 (111) 峰移动。',
+    '  - TOF-SIMS 观察 Li+ 分布。',
+    '',
+    '## 主要发现和结果',
+    '- OCV 平台与浓差极化存在明显差异。',
+    '',
+    '## 结论和意义',
+    '- 结果支持厚电极设计需要同步优化离子输运。',
+    '',
+    '注*：所有总结内容均严格基于 PDF 原文中明确提到的信息。',
+  ].join('\n')
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.doesNotMatch(html, /## 研究目的和背景/)
+    assert.match(html, /<h2>研究目的和背景<\/h2>/)
+    assert.match(html, /<h2>研究方法\/实验设计<\/h2>/)
+    assert.match(html, /<h2>主要发现和结果<\/h2>/)
+    assert.match(html, /<h2>结论和意义<\/h2>/)
+    assert.match(html, /<li>(?:<p>)?表征与验证：(?:<\/p>)?\s*<ul>/)
+    assert.match(html, /XRD 跟踪 \(111\) 峰移动。/)
+    assert.match(html, /TOF-SIMS 观察 Li\+ 分布。/)
+    assert.match(html, /<p class="message-note">注\*：所有总结内容均严格基于 PDF 原文中明确提到的信息。<\/p>/)
+    assert.doesNotMatch(html, /<h[1-6]>注\*：/)
+  }
+})

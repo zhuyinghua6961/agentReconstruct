@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sys
 import pytest
 from pathlib import Path
@@ -321,7 +322,7 @@ def test_dispatch_pdf_route_uses_real_pdf_text_summary_when_local_path_is_availa
     assert "Patent PDF route answered" not in result["answer_text"]
 
 
-def test_dispatch_pdf_route_summary_aligns_to_fastqa_markdown_sections(tmp_path):
+def test_dispatch_pdf_route_summary_aligns_to_literature_summary_sections(tmp_path):
     pdf_path = tmp_path / "battery-paper.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
     contract = build_patent_file_contract(
@@ -352,13 +353,12 @@ def test_dispatch_pdf_route_summary_aligns_to_fastqa_markdown_sections(tmp_path)
     )
 
     answer = result["answer_text"]
-    assert "## 结论" in answer
-    assert "## 证据" in answer
-    assert "## 对比" in answer
-    assert "## 限制" in answer
-    assert answer.count("\n- ") >= 3
+    assert "## 研究目的和背景" in answer
+    assert "## 研究方法/实验设计" in answer
+    assert "## 主要发现和结果" in answer
+    assert "## 结论和意义" in answer
+    assert "注*" in answer
     assert "LMFP/LFP" in answer
-    assert "PDF中未提供跨文献对比对象" in answer
 
 
 def test_dispatch_pdf_route_negative_compare_question_targets_only_first_document(tmp_path):
@@ -526,6 +526,10 @@ def test_dispatch_pdf_route_compare_answer_is_restructured_with_distinct_facts_f
 
     assert result["metadata"]["answer_mode"] == "pdf_text_compare"
     assert "各自概要" in result["answer_text"]
+    assert result["answer_text"].count("研究目的和背景") >= 2
+    assert result["answer_text"].count("研究方法/实验设计") >= 2
+    assert result["answer_text"].count("主要发现和结果") >= 2
+    assert result["answer_text"].count("结论和意义") >= 2
     assert "相同点" in result["answer_text"]
     assert "差异点" in result["answer_text"]
     assert "总结" in result["answer_text"]
@@ -533,6 +537,14 @@ def test_dispatch_pdf_route_compare_answer_is_restructured_with_distinct_facts_f
     assert "paper-b.pdf" in result["answer_text"]
     assert "15% efficiency improvement" in result["answer_text"]
     assert "200-cycle retention" in result["answer_text"]
+    assert re.search(
+        r"paper-a\.pdf[\s\S]*?研究目的和背景[\s\S]*?研究方法/实验设计[\s\S]*?主要发现和结果[\s\S]*?结论和意义",
+        result["answer_text"],
+    )
+    assert re.search(
+        r"paper-b\.pdf[\s\S]*?研究目的和背景[\s\S]*?研究方法/实验设计[\s\S]*?主要发现和结果[\s\S]*?结论和意义",
+        result["answer_text"],
+    )
     assert "paper-a.pdf" in result["metadata"]["prepared_pdf_text"]
     assert "paper-b.pdf" in result["metadata"]["prepared_pdf_text"]
 
@@ -1490,9 +1502,10 @@ def test_dispatch_tabular_route_passes_patent_adapted_prompt_to_answer_fn(tmp_pa
     assert captured["route_hint"] == "tabular_qa"
     assert captured["source_scope"] == "table"
     assert "表格执行结果来自当前专利/文献文件的真实提取或计算结果" in captured["prompt"]
-    assert "## 结论" in captured["prompt"]
-    assert "## 证据" in captured["prompt"]
-    assert "## 限制" in captured["prompt"]
+    assert "## 研究目的和背景" in captured["prompt"]
+    assert "## 研究方法/实验设计" in captured["prompt"]
+    assert "## 主要发现和结果" in captured["prompt"]
+    assert "## 结论和意义" in captured["prompt"]
 
 
 def test_dispatch_tabular_route_uses_file_name_suffix_when_local_path_has_no_extension(tmp_path):
@@ -1633,10 +1646,10 @@ def test_dispatch_hybrid_route_passes_patent_adapted_prompts_to_pdf_and_tabular_
     assert captured["table_source_scope"] == "pdf+table+kb"
     assert "当前任务属于 patent 混合文件问答中的表格证据分析环节" in captured["table_prompt"]
     assert "知识库或其他文件只能用于后续交叉验证" in captured["table_prompt"]
-    assert "## 结论" in captured["table_prompt"]
+    assert "## 研究目的和背景" in captured["table_prompt"]
 
 
-def test_dispatch_hybrid_route_preserves_hybrid_boundary_in_wrapped_pdf_and_table_subanswers(tmp_path):
+def test_dispatch_hybrid_route_preserves_real_pdf_and_table_subanswers_for_later_synthesis(tmp_path):
     pdf_path = tmp_path / "battery-paper.pdf"
     csv_path = tmp_path / "cells.csv"
     pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
@@ -1669,12 +1682,10 @@ def test_dispatch_hybrid_route_preserves_hybrid_boundary_in_wrapped_pdf_and_tabl
 
     pdf_answer = result["metadata"]["synthesis_contract"]["pdf_answer"]
     table_answer = result["metadata"]["synthesis_contract"]["tabular_answer"]
-    assert "当前为混合问答中的 PDF 证据子结论" in pdf_answer
-    assert "不能单独替代全局综合结论" in pdf_answer
-    assert "PDF中未提供跨文献对比对象；当前回答仅基于单篇文件证据。" not in pdf_answer
-    assert "当前为混合问答中的表格证据子结论" in table_answer
-    assert "不能单独覆盖其他文件或知识库结论" in table_answer
-    assert "当前问题主要基于单个表格文件，未提供可直接对照的第二份文件证据。" not in table_answer
+    assert "LMFP/LFP" in pdf_answer
+    assert "120mAh" in table_answer
+    assert "Patent PDF route answered" not in pdf_answer
+    assert "Patent tabular route answered" not in table_answer
 
 
 def test_dispatch_hybrid_route_with_kb_defers_hybrid_step_until_executor_merge(tmp_path):

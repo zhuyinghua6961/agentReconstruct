@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 from xml.etree import ElementTree as ET
 
+from server.patent.pdf_contract import is_summary_question
 from server.patent.file_models import PatentFileContract
 from server.patent.streaming import emit_text_chunks, iter_text_output
 from server.services.mode_profiles import get_patent_mode_profile
@@ -51,6 +52,17 @@ def _has_fastqa_markdown_sections(text: str) -> bool:
     last_end = -1
     for label in ("结论", "证据", "对比", "限制"):
         matched = re.search(rf"(^|\n)\s*(?:#{{1,6}}\s*)?{label}\s*[：:]?", normalized, flags=re.MULTILINE)
+        if matched is None or matched.start() <= last_end:
+            return False
+        last_end = matched.start()
+    return True
+
+
+def _has_literature_summary_sections(text: str) -> bool:
+    normalized = str(text or "")
+    last_end = -1
+    for label in ("研究目的和背景", "研究方法/实验设计", "主要发现和结果", "结论和意义"):
+        matched = re.search(rf"(^|\n)\s*(?:#{{1,6}}\s*)?{re.escape(label)}\s*[：:]?", normalized, flags=re.MULTILINE)
         if matched is None or matched.start() <= last_end:
             return False
         last_end = matched.start()
@@ -121,9 +133,112 @@ def _ensure_fastqa_table_summary_structure(
 
 
 def _is_summary_question(question: str) -> bool:
-    lower = str(question or "").strip().lower()
-    hints = ("总结", "概括", "摘要", "summarize", "summary", "overview", "main points")
-    return any(hint in lower for hint in hints)
+    return is_summary_question(question)
+
+
+_LITERATURE_SUMMARY_NOTE = "注*：所有总结内容均严格基于文件原文中明确提到的信息，未添加任何通用知识或推测内容。"
+
+
+def _pick_points(points: list[str], *, start: int, count: int) -> list[str]:
+    return [item for item in points[start : start + count] if str(item or "").strip()]
+
+
+def _build_literature_section(title: str, points: list[str], fallback: str) -> list[str]:
+    lines = [f"## {title}"]
+    if points:
+        lines.extend(f"- {point}" for point in points)
+    else:
+        lines.append(f"- {fallback}")
+    lines.append("")
+    return lines
+
+
+def _point_contains_keyword(point: str, keywords: tuple[str, ...]) -> bool:
+    normalized = str(point or "").strip().lower()
+    return bool(normalized) and any(keyword in normalized for keyword in keywords)
+
+
+def _is_table_structure_point(point: str) -> bool:
+    normalized = str(point or "").strip().lower()
+    if not normalized:
+        return False
+    markers = ("工作表:", "sheet", "列:", "字段", "数据行数", "column", "columns", "row count")
+    return any(marker in normalized for marker in markers)
+
+
+def _select_literature_points(
+    points: list[str],
+    *,
+    keywords: tuple[str, ...],
+    max_items: int,
+    allow_numeric: bool = False,
+    exclude_structure: bool = False,
+) -> list[str]:
+    selected: list[str] = []
+    for point in points:
+        normalized = str(point or "").strip()
+        if not normalized:
+            continue
+        if exclude_structure and _is_table_structure_point(normalized):
+            continue
+        if not _point_contains_keyword(normalized, keywords):
+            if not (allow_numeric and re.search(r"\d", normalized)):
+                continue
+        if normalized in selected:
+            continue
+        selected.append(normalized)
+        if len(selected) >= max_items:
+            break
+    return selected
+
+
+def _ensure_literature_table_summary_structure(*, answer: str, table_text: str) -> str:
+    normalized_answer = str(answer or "").strip()
+    if not normalized_answer:
+        return normalized_answer
+    if _has_literature_summary_sections(normalized_answer):
+        if _LITERATURE_SUMMARY_NOTE in normalized_answer:
+            return normalized_answer
+        return f"{normalized_answer}\n\n{_LITERATURE_SUMMARY_NOTE}".strip()
+
+    table_points = _find_table_support_points(table_text, max_items=8)
+    answer_points = _find_table_support_points(normalized_answer, max_items=4)
+    all_points: list[str] = []
+    for item in [*answer_points, *table_points]:
+        if item and item not in all_points:
+            all_points.append(item)
+
+    background_points = _select_literature_points(
+        answer_points,
+        keywords=("研究背景", "背景", "目的", "研究", "focus", "aim", "objective"),
+        max_items=1,
+    )
+    method_points = _select_literature_points(
+        table_points,
+        keywords=("工作表", "sheet", "列:", "字段", "数据行数", "row", "rows", "column"),
+        max_items=2,
+    )
+    result_points = _select_literature_points(
+        all_points,
+        keywords=("mah", "capacity", "效率", "retention", "capacity_mah", "material=", "note=", "结果"),
+        max_items=3,
+        allow_numeric=True,
+        exclude_structure=True,
+    )
+    conclusion_points = _select_literature_points(
+        answer_points,
+        keywords=("结论", "意义", "总结", "说明", "表明", "conclusion", "summary"),
+        max_items=2,
+    )
+
+    sections = [
+        *_build_literature_section("研究目的和背景", background_points, "表格中未提供足够的研究背景或研究目的信息。"),
+        *_build_literature_section("研究方法/实验设计", method_points, "表格中未提供足够的研究方法、实验设计或字段定义信息。"),
+        *_build_literature_section("主要发现和结果", result_points, "表格中未提供足够的主要发现、关键指标或结果数据。"),
+        *_build_literature_section("结论和意义", conclusion_points, "表格中未提供足够的结论或研究意义描述。"),
+        _LITERATURE_SUMMARY_NOTE,
+    ]
+    return "\n".join(sections).strip()
 
 
 def _tokenize(value: object) -> set[str]:
@@ -193,6 +308,34 @@ def _build_patent_tabular_prompt(
     normalized_scope = str(source_scope or "table").strip() or "table"
     summary_mode = _is_summary_question(question)
     if normalized_route == "hybrid_qa":
+        if summary_mode:
+            return "\n".join(
+                [
+                    "你是一位专利/文献表格证据分析助手。",
+                    "当前任务属于 patent 混合文件问答中的表格证据分析环节。",
+                    "表格执行结果来自当前专利/文献文件的真实提取或计算结果，必须作为当前子任务的主依据。",
+                    f"当前 source_scope={normalized_scope}",
+                    "知识库或其他文件只能用于后续交叉验证，不能覆盖这里的表格结论。",
+                    "请先整理这份表格单独能够支持的文献概要，再为后续跨来源综合保留证据边界。",
+                    "",
+                    "用户问题:",
+                    str(question or ""),
+                    "",
+                    "表格证据:",
+                    str(table_text or ""),
+                    "",
+                    "请按以下 Markdown 结构回答：",
+                    "## 研究目的和背景",
+                    "## 研究方法/实验设计",
+                    "## 主要发现和结果",
+                    "## 结论和意义",
+                    f"{_LITERATURE_SUMMARY_NOTE}",
+                    "- 只允许使用当前表格中直接出现的字段、数值、样例行或统计结果",
+                    "- 如果某个章节缺少表格证据，明确写出表格中未提供足够信息，不要补写通用知识",
+                    "- 保留原始术语、字段名和数值单位",
+                    "- 这仍然是混合问答里的表格子结论，不能把 PDF 或知识库内容写成当前表格事实",
+                ]
+            ).strip()
         return "\n".join(
             [
                 "你是一位专利/文献表格证据分析助手。",
@@ -228,9 +371,31 @@ def _build_patent_tabular_prompt(
 
     intro = "你是一位专利/文献表格分析助手。表格执行结果来自当前专利/文献文件的真实提取或计算结果，不允许编造。"
     if summary_mode:
-        intro += " 对于概览类问题，优先总结整体分布、差异和异常，再补充少量代表性数据点。"
-    else:
-        intro += " 对于定向问题，只回答表格证据能够直接支持的内容；证据不足时要明确指出。"
+        intro += " 对于概览类问题，请输出章节化的文献总结；若背景或方法在表格里没有证据，明确说明信息不足。"
+        return "\n".join(
+            [
+                intro,
+                f"当前 route={normalized_route}，source_scope={normalized_scope}",
+                "",
+                "用户问题:",
+                str(question or ""),
+                "",
+                "表格证据:",
+                str(table_text or ""),
+                "",
+                "请按以下 Markdown 结构回答：",
+                "## 研究目的和背景",
+                "## 研究方法/实验设计",
+                "## 主要发现和结果",
+                "## 结论和意义",
+                f"{_LITERATURE_SUMMARY_NOTE}",
+                "- 只允许使用当前表格中能够直接支持的字段、数值、统计结果和代表性行",
+                "- 如果表格无法支持某个章节，明确写出表格中未提供足够信息",
+                "- 保留原始字段名、单位和关键术语",
+                "- 不要把字段查询类问题改写成超出表格证据边界的泛化结论",
+            ]
+        ).strip()
+    intro += " 对于定向问题，只回答表格证据能够直接支持的内容；证据不足时要明确指出。"
     return "\n".join(
         [
             intro,
@@ -439,6 +604,7 @@ class PatentTabularService:
         source_scope: str,
         content_callback: Callable[[str], None] | None = None,
     ) -> str:
+        summary_mode = _is_summary_question(question)
         prompt = _build_patent_tabular_prompt(
             question=question,
             table_text=table_text,
@@ -458,12 +624,16 @@ class PatentTabularService:
             if isinstance(output, (str, bytes)):
                 answer = str(output or "").strip()
                 if answer:
-                    answer = _ensure_fastqa_table_summary_structure(
-                        answer=answer,
-                        table_text=table_text,
-                        include_kb=include_kb,
-                        route_hint=route_hint,
-                        source_scope=source_scope,
+                    answer = (
+                        _ensure_literature_table_summary_structure(answer=answer, table_text=table_text)
+                        if summary_mode
+                        else _ensure_fastqa_table_summary_structure(
+                            answer=answer,
+                            table_text=table_text,
+                            include_kb=include_kb,
+                            route_hint=route_hint,
+                            source_scope=source_scope,
+                        )
                     )
                     emit_text_chunks(answer, content_callback=content_callback)
                     return answer
@@ -476,22 +646,30 @@ class PatentTabularService:
                     answer_parts.append(text)
                 answer = "".join(answer_parts).strip()
                 if answer:
-                    answer = _ensure_fastqa_table_summary_structure(
-                        answer=answer,
-                        table_text=table_text,
-                        include_kb=include_kb,
-                        route_hint=route_hint,
-                        source_scope=source_scope,
+                    answer = (
+                        _ensure_literature_table_summary_structure(answer=answer, table_text=table_text)
+                        if summary_mode
+                        else _ensure_fastqa_table_summary_structure(
+                            answer=answer,
+                            table_text=table_text,
+                            include_kb=include_kb,
+                            route_hint=route_hint,
+                            source_scope=source_scope,
+                        )
                     )
                     emit_text_chunks(answer, content_callback=content_callback)
                     return answer
         fallback = _table_fallback_answer(question=question, table_text=table_text)
-        answer = _ensure_fastqa_table_summary_structure(
-            answer=fallback,
-            table_text=table_text,
-            include_kb=include_kb,
-            route_hint=route_hint,
-            source_scope=source_scope,
+        answer = (
+            _ensure_literature_table_summary_structure(answer=fallback, table_text=table_text)
+            if summary_mode
+            else _ensure_fastqa_table_summary_structure(
+                answer=fallback,
+                table_text=table_text,
+                include_kb=include_kb,
+                route_hint=route_hint,
+                source_scope=source_scope,
+            )
         )
         emit_text_chunks(answer, content_callback=content_callback)
         return answer

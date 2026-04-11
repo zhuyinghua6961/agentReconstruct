@@ -34,6 +34,9 @@ function normalizeDoiForLink(raw) {
   if (value.includes('_') && !value.includes('/')) {
     value = value.replace('_', '/')
   }
+  if (!value.includes('/') && /^10\.\d{1,9}[A-Za-z0-9]/i.test(value)) {
+    value = value.replace(/^(10\.\d{1,9})(?=[A-Za-z0-9])/, '$1/')
+  }
   return /^10\.\d{1,9}\//i.test(value) ? value : ''
 }
 
@@ -140,10 +143,21 @@ function readRawUrlSpan(text, startIndex) {
 }
 
 function repairMergedDoiIdentifiers(text) {
-  return String(text || '').replace(
+  let repaired = String(text || '').replace(
     /(10\.\d{1,9}\/[-._;()/:A-Z0-9]+?)([)\]])(\d{4,9})\.([A-Za-z][-._;()/:A-Z0-9]*)/gi,
     (_match, first, separator, registrant, suffix) => `${first}${separator} 10.${registrant}/${suffix}`
   )
+
+  let previous = ''
+  while (repaired !== previous) {
+    previous = repaired
+    repaired = repaired.replace(
+      /(10\.\d{1,9}(?:\/|[A-Za-z0-9])[A-Za-z0-9._;()/:+\-_()-]*?)(10\.\d{1,9}(?:\/|[A-Za-z0-9]))/gi,
+      '$1 $2'
+    )
+  }
+
+  return repaired
 }
 
 function readEnclosedSpan(text, startIndex, openChar, closeChar) {
@@ -170,18 +184,31 @@ function readEnclosedSpan(text, startIndex, openChar, closeChar) {
   return null
 }
 
-function readDoiToken(text, startIndex) {
+function readDoiToken(text, startIndex, options = {}) {
+  const allowImplicitSeparator = options.allowImplicitSeparator === true
   if (!String(text || '').startsWith('10.', startIndex)) return null
   let i = startIndex + 3
   while (i < text.length && isDigit(text[i])) i += 1
   if (i === startIndex + 3) return null
-  if (i >= text.length || !['/', '_'].includes(text[i])) return null
-  i += 1
+  if (i >= text.length) return null
+  let usedImplicitSeparator = false
+  if (['/', '_'].includes(text[i])) {
+    i += 1
+  } else if (!allowImplicitSeparator || !/[A-Za-z0-9]/.test(text[i])) {
+    return null
+  } else {
+    usedImplicitSeparator = true
+  }
 
   let bodyStart = i
   let depth = 0
   while (i < text.length) {
     const char = text[i]
+    if (
+      i > bodyStart
+      && char === '1'
+      && /^10\.\d{1,9}(?:\/|_|[A-Za-z0-9])/.test(text.slice(i))
+    ) break
     if (!isDoiBodyChar(char)) break
     if (char === '(') depth += 1
     if (char === ')') {
@@ -199,6 +226,13 @@ function readDoiToken(text, startIndex) {
   }
   if (end <= startIndex) return null
 
+  if (usedImplicitSeparator) {
+    const implicitBody = text.slice(bodyStart, end)
+    if (implicitBody.length < 5 || !/^[A-Za-z]/.test(implicitBody)) {
+      return null
+    }
+  }
+
   const normalized = normalizeDoiForLink(text.slice(startIndex, end))
   if (!normalized) return null
 
@@ -215,7 +249,6 @@ function readDoiPrefixedSpan(text, startIndex) {
   if (!lower.startsWith('doi')) return null
   const before = startIndex > 0 ? text[startIndex - 1] : ''
   if (before && /[A-Za-z0-9]/.test(before)) return null
-  if (before === '(' || before === '[') return null
 
   let i = startIndex + 3
   while (i < text.length && /\s/.test(text[i])) i += 1
@@ -223,7 +256,7 @@ function readDoiPrefixedSpan(text, startIndex) {
   i += 1
   while (i < text.length && /\s/.test(text[i])) i += 1
 
-  const doiToken = readDoiToken(text, i)
+  const doiToken = readDoiToken(text, i, { allowImplicitSeparator: true })
   if (!doiToken) return null
 
   return {
@@ -269,7 +302,7 @@ function readPlainDoiSegment(text, startIndex) {
   const before = startIndex > 0 ? text[startIndex - 1] : ''
   if (before && !isDoiBoundary(before) && before !== '\n') return null
   if (['=', ':'].includes(before)) return null
-  return readDoiToken(text, startIndex)
+  return readDoiToken(text, startIndex, { allowImplicitSeparator: true })
 }
 
 function linkifyDoiTextSegment(text) {
@@ -420,6 +453,17 @@ function applyPatentLinksToHtml(html) {
 
 function applyCitationLinksToHtml(html) {
   return applyPatentLinksToHtml(applyDoiLinksToHtml(html))
+}
+
+function annotateMessageNotes(html) {
+  return String(html || '').replace(
+    /<p>(\s*注\*：[\s\S]*?)<\/p>/g,
+    (_match, content) => `<p class="message-note">${content}</p>`
+  )
+}
+
+function decorateRenderedAnswerHtml(html) {
+  return annotateMessageNotes(applyCitationLinksToHtml(html))
 }
 
 function protectDoiSegments(text) {
@@ -918,7 +962,7 @@ export function formatAnswer(text, referenceSnippets = []) {
     html = formatStreamingFallback(normalizedText)
   }
 
-  return applyCitationLinksToHtml(html)
+  return decorateRenderedAnswerHtml(html)
 }
 
 export function formatStreamingAnswer(text) {
@@ -928,7 +972,7 @@ export function formatStreamingAnswer(text) {
   const shouldRenderMath = containsMathMarkup(baseText) || containsInlineRenderMarkup(baseText)
 
   if (!containsStructuredMarkdown(baseText) && !shouldRenderMath) {
-    return applyCitationLinksToHtml(formatStreamingFallback(baseText))
+    return decorateRenderedAnswerHtml(formatStreamingFallback(baseText))
   }
 
   const normalizedText = shouldRenderMath ? renderMathMarkup(baseText) : baseText
@@ -944,7 +988,7 @@ export function formatStreamingAnswer(text) {
     html = formatStreamingFallback(normalizedText)
   }
 
-  return applyCitationLinksToHtml(html)
+  return decorateRenderedAnswerHtml(html)
 }
 
 // 修复表格格式

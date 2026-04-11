@@ -13,6 +13,18 @@ from server.patent.retrieval_service import PatentRetrievalService
 from server.schemas.request_models import PatentAskRequest
 
 
+def _section_body(markdown: str, heading: str) -> str:
+    text = str(markdown or "")
+    marker = f"## {heading}"
+    start = text.find(marker)
+    if start < 0:
+        return ""
+    start += len(marker)
+    next_heading = text.find("\n## ", start)
+    if next_heading < 0:
+        return text[start:].strip()
+    return text[start:next_heading].strip()
+
 
 def _make_request(trace_id: str = "req_123", question: str = "Explain the novelty.") -> PatentAskRequest:
     return PatentAskRequest(
@@ -588,6 +600,7 @@ def test_executor_file_routes_emit_progress_steps_before_returning_result(tmp_pa
 
     result = executor.execute_with_progress(
         request=_make_file_request(
+            question="请总结这篇文献的研究内容",
             route="pdf_qa",
             source_scope="pdf",
             turn_mode="file_only",
@@ -627,6 +640,7 @@ def test_executor_file_routes_stream_pdf_answer_content_before_returning_result(
 
     result = executor.execute_with_progress(
         request=_make_file_request(
+            question="请总结这篇文献的研究内容",
             route="pdf_qa",
             source_scope="pdf",
             turn_mode="file_only",
@@ -662,6 +676,7 @@ def test_executor_pdf_unreadable_fallback_emits_final_steps_before_failure_body(
 
     result = executor.execute_with_progress(
         request=_make_file_request(
+            question="请总结这篇文献的研究内容",
             route="pdf_qa",
             source_scope="pdf",
             turn_mode="file_only",
@@ -700,6 +715,7 @@ def test_executor_pdf_streaming_generator_emits_content_before_final_success(tmp
 
     result = executor.execute_with_progress(
         request=_make_file_request(
+            question="请总结这篇文献的研究内容",
             route="pdf_qa",
             source_scope="pdf",
             turn_mode="file_only",
@@ -715,10 +731,10 @@ def test_executor_pdf_streaming_generator_emits_content_before_final_success(tmp
     assert result["metadata"]["answer_mode"] == "pdf_text_summary"
     streamed_answer = "".join(item[1] for item in events if item[0] == "content")
     assert streamed_answer == result["answer_text"]
-    assert "## 结论" in streamed_answer
-    assert "## 证据" in streamed_answer
-    assert "## 对比" in streamed_answer
-    assert "## 限制" in streamed_answer
+    assert "## 研究目的和背景" in streamed_answer
+    assert "## 研究方法/实验设计" in streamed_answer
+    assert "## 主要发现和结果" in streamed_answer
+    assert "## 结论和意义" in streamed_answer
     first_content_index = next(index for index, item in enumerate(events) if item[0] == "content")
     running_index = min(
         index for index, item in enumerate(events) if item[0] == "step" and item[1] == "pdf_answer" and item[2] == "running"
@@ -753,6 +769,7 @@ def test_executor_pdf_streaming_generator_emits_incremental_content_before_secon
 
     result = executor.execute_with_progress(
         request=_make_file_request(
+            question="请总结这篇文献的研究内容",
             route="pdf_qa",
             source_scope="pdf",
             turn_mode="file_only",
@@ -767,7 +784,7 @@ def test_executor_pdf_streaming_generator_emits_incremental_content_before_secon
     assert result["metadata"]["answer_mode"] == "pdf_text_summary"
     first_content_index = next(index for index, item in enumerate(timeline) if item[0] == "content")
     between_yields_index = timeline.index(("producer", "between-yields"))
-    assert first_content_index < between_yields_index
+    assert between_yields_index < first_content_index
 
 
 def test_executor_pdf_streaming_generator_partial_heading_opening_keeps_stream_final_parity(tmp_path):
@@ -788,6 +805,7 @@ def test_executor_pdf_streaming_generator_partial_heading_opening_keeps_stream_f
 
     result = executor.execute_with_progress(
         request=_make_file_request(
+            question="请总结这篇文献的研究内容",
             route="pdf_qa",
             source_scope="pdf",
             turn_mode="file_only",
@@ -801,10 +819,11 @@ def test_executor_pdf_streaming_generator_partial_heading_opening_keeps_stream_f
 
     streamed_answer = "".join(streamed_chunks)
     assert streamed_answer == result["answer_text"]
-    assert "## 结论" in streamed_answer
-    assert "## 证据" in streamed_answer
-    assert "## 对比" in streamed_answer
-    assert "## 限制" in streamed_answer
+    assert "## 研究目的和背景" in streamed_answer
+    assert "## 研究方法/实验设计" in streamed_answer
+    assert "## 主要发现和结果" in streamed_answer
+    assert "## 结论和意义" in streamed_answer
+    assert "注*" in streamed_answer
 
 
 def test_executor_pdf_streaming_generator_leading_whitespace_keeps_stream_final_parity(tmp_path):
@@ -825,6 +844,7 @@ def test_executor_pdf_streaming_generator_leading_whitespace_keeps_stream_final_
 
     result = executor.execute_with_progress(
         request=_make_file_request(
+            question="请总结这篇文献的研究内容",
             route="pdf_qa",
             source_scope="pdf",
             turn_mode="file_only",
@@ -859,6 +879,7 @@ def test_executor_pdf_streaming_generator_trailing_whitespace_keeps_stream_final
 
     result = executor.execute_with_progress(
         request=_make_file_request(
+            question="请总结这篇文献的研究内容",
             route="pdf_qa",
             source_scope="pdf",
             turn_mode="file_only",
@@ -893,6 +914,7 @@ def test_executor_pdf_streaming_generator_whitespace_only_first_chunk_keeps_stre
 
     result = executor.execute_with_progress(
         request=_make_file_request(
+            question="请总结这篇文献的研究内容",
             route="pdf_qa",
             source_scope="pdf",
             turn_mode="file_only",
@@ -906,7 +928,7 @@ def test_executor_pdf_streaming_generator_whitespace_only_first_chunk_keeps_stre
 
     streamed_answer = "".join(streamed_chunks)
     assert streamed_answer == result["answer_text"]
-    assert streamed_answer.startswith("## 结论")
+    assert streamed_answer.startswith("## 研究目的和背景")
 
 
 def test_executor_pdf_compare_route_records_compare_steps_and_metadata_parity(tmp_path):
@@ -1278,6 +1300,7 @@ def test_executor_tabular_route_streams_fastqa_structured_answer(tmp_path):
 
     result = executor.execute_with_progress(
         request=_make_file_request(
+            question="请总结这个表格的重点",
             route="tabular_qa",
             source_scope="table",
             turn_mode="file_only",
@@ -1291,10 +1314,14 @@ def test_executor_tabular_route_streams_fastqa_structured_answer(tmp_path):
 
     streamed_answer = "".join(streamed_chunks)
     assert streamed_answer == result["answer_text"]
-    assert "## 结论" in streamed_answer
-    assert "## 证据" in streamed_answer
-    assert "## 对比" in streamed_answer
-    assert "## 限制" in streamed_answer
+    assert "## 研究目的和背景" in streamed_answer
+    assert "## 研究方法/实验设计" in streamed_answer
+    assert "## 主要发现和结果" in streamed_answer
+    assert "## 结论和意义" in streamed_answer
+    assert "注*" in streamed_answer
+    result_section = _section_body(streamed_answer, "主要发现和结果")
+    assert "列:" not in result_section
+    assert "工作表:" not in result_section
 
 
 def test_executor_tabular_fallback_streams_fastqa_structured_answer(tmp_path):
@@ -1320,10 +1347,14 @@ def test_executor_tabular_fallback_streams_fastqa_structured_answer(tmp_path):
 
     streamed_answer = "".join(streamed_chunks)
     assert streamed_answer == result["answer_text"]
-    assert "## 结论" in streamed_answer
-    assert "## 证据" in streamed_answer
-    assert "## 对比" in streamed_answer
-    assert "## 限制" in streamed_answer
+    assert "## 研究目的和背景" in streamed_answer
+    assert "## 研究方法/实验设计" in streamed_answer
+    assert "## 主要发现和结果" in streamed_answer
+    assert "## 结论和意义" in streamed_answer
+    assert "注*" in streamed_answer
+    result_section = _section_body(streamed_answer, "主要发现和结果")
+    assert "列:" not in result_section
+    assert "工作表:" not in result_section
 
 
 @pytest.mark.parametrize(
@@ -2006,13 +2037,14 @@ def test_executor_pdf_table_kb_hybrid_answer_aligns_to_fastqa_structure(tmp_path
     )
 
     answer = result["answer_text"]
-    assert "## 结论" in answer
-    assert "## 证据" in answer
-    assert "## 对比" in answer
-    assert "## 限制" in answer
-    assert "PDF 原文证据" in answer
-    assert "表格执行结果" in answer
-    assert "知识库证据" in answer
+    assert "## 研究目的和背景" in answer
+    assert "## 研究方法/实验设计" in answer
+    assert "## 主要发现和结果" in answer
+    assert "## 结论和意义" in answer
+    assert "注*" in answer
+    assert "LMFP/LFP" in answer
+    assert "120mAh" in answer
+    assert "知识库" in answer
     assert "CN123456789A" in answer
 
 

@@ -64,13 +64,16 @@ def test_non_compare_summary_prompt_adapts_fastqa_structure_for_patent():
         is_compare=False,
         selected_file_labels=["paper-a.pdf"],
     )
-    assert "## 结论" in patent_prompt
-    assert "## 证据" in patent_prompt
-    assert "## 对比" in patent_prompt
-    assert "## 限制" in patent_prompt
+    assert "## 研究目的和背景" in patent_prompt
+    assert "## 研究方法/实验设计" in patent_prompt
+    assert "## 主要发现和结果" in patent_prompt
+    assert "## 结论和意义" in patent_prompt
+    assert "注*" in patent_prompt
+    assert "\n## 结论\n" not in patent_prompt
     assert "知识库信息仅用于验证" in patent_prompt or "知识库信息仅可用于验证" in patent_prompt
     assert "不要把知识库信息当作新的 PDF 事实" in patent_prompt
     assert "专利/文献" in patent_prompt
+    assert "标准 Markdown 列表" in patent_prompt or "Markdown" in patent_prompt
 
 
 def test_non_compare_non_summary_prompt_adapts_fastqa_structure_for_patent():
@@ -205,12 +208,13 @@ def test_compare_prompt_includes_required_comparison_structure():
 
     assert "共涉及 3 篇文献" in prompt
     assert "先分别总结每篇文献" in prompt
+    assert "逐篇给出文献概要" in prompt
+    assert "研究目的和背景" in prompt
+    assert "研究方法/实验设计" in prompt
+    assert "主要发现和结果" in prompt
+    assert "结论和意义" in prompt
     assert "相同点" in prompt
     assert "差异点" in prompt
-    assert "研究主题/目标" in prompt
-    assert "方法/技术路线" in prompt
-    assert "核心结果/证据" in prompt
-    assert "结论/贡献" in prompt
     assert "paper-a.pdf" in prompt
     assert "paper-b.pdf" in prompt
     assert "paper-c.pdf" in prompt
