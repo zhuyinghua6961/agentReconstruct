@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from types import SimpleNamespace
 
-from app.modules.generation_pipeline.doi_inserter import programmatic_insert_dois
+from app.modules.generation_pipeline.doi_inserter import _iter_sentence_units, programmatic_insert_dois
 
 
 class _Logger:
@@ -137,3 +137,71 @@ def test_programmatic_insert_dois_preserves_markdown_block_boundaries():
     assert "(doi=10.1/a)\n\n## 机理分析" in result
     assert "## 机理分析\n- 液相极化增强。 (doi=10.1/b)" in result
 
+
+def test_iter_sentence_units_keeps_decimal_measurements_intact():
+    units = _iter_sentence_units("颗粒尺寸约为 0.22μm，压实密度可达 3.6 g/cm³。")
+
+    assert units == [("颗粒尺寸约为 0.22μm，压实密度可达 3.6 g/cm³。", "")]
+
+
+def test_iter_sentence_units_does_not_split_existing_doi_tokens():
+    units = _iter_sentence_units("参考文献 (doi=10.1007/s11595-019-2086-y) 与 10.1016/j.ssi.2024.116535 支撑该结论。")
+
+    assert units == [("参考文献 (doi=10.1007/s11595-019-2086-y) 与 10.1016/j.ssi.2024.116535 支撑该结论。", "")]
+
+
+def test_iter_sentence_units_splits_mixed_language_sentences_without_space_after_period():
+    units = _iter_sentence_units("English claim.第二句说明另一件事。")
+
+    assert units == [("English claim.", ""), ("第二句说明另一件事。", "")]
+
+
+def test_iter_sentence_units_splits_english_sentences_without_space_after_period():
+    units = _iter_sentence_units("Sentence one.Next sentence.")
+
+    assert units == [("Sentence one.", ""), ("Next sentence.", "")]
+
+
+def test_iter_sentence_units_stops_raw_doi_before_following_sentence_without_space():
+    units = _iter_sentence_units("10.1016/j.ssi.2024.116535.Next sentence.")
+
+    assert units == [("10.1016/j.ssi.2024.116535.", ""), ("Next sentence.", "")]
+
+
+def test_iter_sentence_units_splits_lowercase_scientific_sentence_start_after_period():
+    units = _iter_sentence_units("The electrolyte was adjusted. pH remained at 3.5.")
+
+    assert units == [("The electrolyte was adjusted.", " "), ("pH remained at 3.5.", "")]
+
+
+def test_iter_sentence_units_keeps_common_abbreviation_mid_sentence_intact():
+    units = _iter_sentence_units("Smith et al. reported higher conductivity.")
+
+    assert units == [("Smith et al. reported higher conductivity.", "")]
+
+
+def test_programmatic_insert_dois_keeps_decimal_values_when_appending_citations():
+    agent = _Agent(use_sentence_embeddings=False, require_pdf_evidence_for_doi=False)
+    retrieval_results = {
+        "all_metadatas": [{"doi": "10.1/a"}],
+        "all_documents": ["颗粒尺寸约为 0.22μm，压实密度可达 3.6 g/cm³。"],
+        "all_distances": [0.1],
+    }
+
+    answer = "颗粒尺寸约为 0.22μm，压实密度可达 3.6 g/cm³。"
+    result = programmatic_insert_dois(
+        agent=agent,
+        answer=answer,
+        retrieval_results=retrieval_results,
+        similarity_threshold=None,
+        question="q",
+        validate_and_fix_doi_fn=lambda doi: doi,
+        aligner_cls=None,
+        logger=_Logger(),
+    )
+
+    assert "0.22μm" in result
+    assert "3.6 g/cm³" in result
+    assert "0. (doi=" not in result
+    assert "3. (doi=" not in result
+    assert result.endswith(" (doi=10.1/a)")

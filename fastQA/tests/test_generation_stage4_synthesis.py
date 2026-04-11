@@ -130,7 +130,7 @@ def test_extract_cited_dois_and_build_references():
         pdf_chunks={"10.1/a": [{"text": "sample evidence text", "page": 1}]},
     )
 
-    assert set(cited) == {"10.1/a", "10.1_a"}
+    assert set(cited) == {"10.1/a"}
     assert {item["doi"] for item in references} == {"10.1/a"}
 
 

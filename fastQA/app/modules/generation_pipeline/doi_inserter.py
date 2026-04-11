@@ -17,21 +17,186 @@ def _cosine_similarity(a, b) -> float:
     return sum(x * y for x, y in zip(a, b)) / (na * nb)
 
 
-_SENTENCE_WITH_SUFFIX_RE = re.compile(r".*?(?<=[。！？?!.；;])\s*|.+$", re.DOTALL)
+_DIRECT_SENTENCE_TERMINATORS = {"。", "！", "？", "?", "!", "；", ";"}
+_DOI_BODY_CHAR_RE = re.compile(r"[A-Za-z0-9._;()/:-]")
+_COMMON_PERIOD_ABBREVIATIONS = {
+    "al",
+    "approx",
+    "ca",
+    "cf",
+    "dr",
+    "eq",
+    "eqs",
+    "etc",
+    "fig",
+    "figs",
+    "i.e",
+    "e.g",
+    "inc",
+    "jr",
+    "mr",
+    "mrs",
+    "ms",
+    "no",
+    "nos",
+    "prof",
+    "ref",
+    "refs",
+    "sr",
+    "vs",
+}
+
+
+def _is_cjk(char: str) -> bool:
+    return bool(char) and "\u4e00" <= char <= "\u9fff"
+
+
+def _is_doi_body_char(char: str) -> bool:
+    return bool(char) and bool(_DOI_BODY_CHAR_RE.fullmatch(char))
+
+
+def _looks_like_tight_sentence_start(char: str) -> bool:
+    return bool(char) and (
+        char.isupper()
+        or _is_cjk(char)
+        or char in {'"', "'", "(", "[", "{", "“", "‘"}
+    )
+
+
+def _read_previous_ascii_token(answer: str, index: int) -> str:
+    source = str(answer or "")
+    end = index
+    start = end
+    while start > 0 and (source[start - 1].isalpha() or source[start - 1] in {".", "-"}):
+        start -= 1
+    return source[start:end]
+
+
+def _looks_like_scientific_lowercase_sentence_start(answer: str, start_index: int, period_index: int) -> bool:
+    source = str(answer or "")
+    if start_index >= len(source):
+        return False
+    char = source[start_index]
+    if not (char.isalpha() and char.islower()):
+        return False
+
+    previous_token = _read_previous_ascii_token(source, period_index).lower().strip(".-")
+    if not previous_token:
+        return False
+    if len(previous_token) == 1:
+        return False
+    if previous_token in _COMMON_PERIOD_ABBREVIATIONS:
+        return False
+    return True
+
+
+def _read_doi_token_end(answer: str, start: int) -> Optional[int]:
+    source = str(answer or "")
+    if not source.startswith("10.", start):
+        return None
+
+    i = start + 3
+    while i < len(source) and source[i].isdigit():
+        i += 1
+    if i == start + 3:
+        return None
+    if i >= len(source) or source[i] not in {"/", "_"}:
+        return None
+    i += 1
+
+    body_start = i
+    depth = 0
+    while i < len(source):
+        char = source[i]
+        if not _is_doi_body_char(char):
+            break
+        if char == "." and depth == 0 and _is_period_sentence_boundary(source, i):
+            break
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            if depth == 0:
+                break
+            depth -= 1
+        i += 1
+
+    if i == body_start or depth != 0:
+        return None
+
+    end = i
+    while end > start and source[end - 1] in ".,;:":
+        end -= 1
+    return end if end > start else None
+
+
+def _is_decimal_point(answer: str, index: int) -> bool:
+    if index <= 0 or index + 1 >= len(answer):
+        return False
+    return answer[index - 1].isdigit() and answer[index + 1].isdigit()
+
+
+def _looks_like_sentence_start(char: str) -> bool:
+    return bool(char) and (
+        char.isdigit()
+        or char.isupper()
+        or _is_cjk(char)
+        or char in {'"', "'", "(", "[", "{", "#", "-", "*", "+", ">", "“", "‘"}
+    )
+
+
+def _is_period_sentence_boundary(answer: str, index: int) -> bool:
+    source = str(answer or "")
+    if _is_decimal_point(source, index):
+        return False
+    next_index = index + 1
+    if next_index >= len(source):
+        return True
+    if not source[next_index].isspace():
+        return _looks_like_tight_sentence_start(source[next_index])
+    while next_index < len(source) and source[next_index].isspace():
+        next_index += 1
+    if next_index >= len(source):
+        return True
+    return _looks_like_sentence_start(source[next_index]) or _looks_like_scientific_lowercase_sentence_start(source, next_index, index)
+
+
+def _split_trailing_whitespace(chunk: str) -> tuple[str, str]:
+    match = re.match(r"(?s)(.*?)(\s*)$", chunk)
+    if match:
+        return match.group(1), match.group(2)
+    return chunk, ""
 
 
 def _iter_sentence_units(answer: str) -> list[tuple[str, str]]:
     units: list[tuple[str, str]] = []
-    for chunk in _SENTENCE_WITH_SUFFIX_RE.findall(answer or ""):
-        if chunk == "":
+    source = str(answer or "")
+    if not source:
+        return units
+
+    start = 0
+    i = 0
+    while i < len(source):
+        doi_end = _read_doi_token_end(source, i)
+        if doi_end is not None:
+            i = doi_end
             continue
-        match = re.match(r"(?s)(.*?)(\s*)$", chunk)
-        if match:
-            units.append((match.group(1), match.group(2)))
-        else:
-            units.append((chunk, ""))
-    if not units and answer:
-        units.append((answer, ""))
+
+        char = source[i]
+        is_boundary = char in _DIRECT_SENTENCE_TERMINATORS or (char == "." and _is_period_sentence_boundary(source, i))
+        if not is_boundary:
+            i += 1
+            continue
+
+        body_end = i + 1
+        suffix_end = body_end
+        while suffix_end < len(source) and source[suffix_end].isspace():
+            suffix_end += 1
+        units.append((source[start:body_end], source[body_end:suffix_end]))
+        start = suffix_end
+        i = suffix_end
+
+    if start < len(source):
+        units.append(_split_trailing_whitespace(source[start:]))
     return units
 
 
