@@ -977,6 +977,64 @@ def test_executor_pdf_streaming_generator_whitespace_only_first_chunk_keeps_stre
     assert streamed_answer.startswith("## 研究目的和背景")
 
 
+def test_executor_pdf_streaming_structured_answer_missing_limitations_keeps_stream_final_parity(tmp_path):
+    pdf_path = tmp_path / "structured-missing-limitations.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    streamed_chunks: list[str] = []
+
+    def _streaming_answer(**kwargs):
+        yield "\n".join(
+            [
+                "## 研究目的和背景",
+                "- 原文说明高倍率充电场景的安全性挑战。",
+                "",
+                "## 研究方法/实验设计",
+                "- 对 LMFP/LFP 复配体系进行对比测试。",
+                "",
+                "## 主要发现和结果",
+                "- 复配体系改善了高倍率充电表现。",
+                "",
+                "## 结论和意义",
+                "- 该路线有助于兼顾性能与安全性。",
+                "",
+                "注*：所有总结内容均严格基于文件原文中明确提到的信息，未添加任何通用知识或推测内容。",
+            ]
+        )
+
+    executor = PatentExecutor(
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "This paper studies LMFP/LFP blending for safer charging. "
+                "Method setup compares blended and baseline electrodes. "
+                "Results show safer high-rate charging. "
+                "The conclusion notes that long-cycle validation is still limited."
+            ),
+            answer_question_fn=_streaming_answer,
+        )
+    )
+
+    result = executor.execute_with_progress(
+        request=_make_file_request(
+            question="请总结这篇文献的研究内容",
+            route="pdf_qa",
+            source_scope="pdf",
+            turn_mode="file_only",
+            execution_files=[{"file_id": 11, "file_type": "pdf", "file_name": "structured-missing-limitations.pdf", "local_path": str(pdf_path)}],
+            selected_file_ids=[11],
+            trace_id="req_stream_pdf_structured_missing_limitations",
+        ),
+        context={"recent_turns_for_llm": []},
+        content_callback=streamed_chunks.append,
+    )
+
+    streamed_answer = "".join(streamed_chunks)
+    assert streamed_answer == result["answer_text"]
+    assert streamed_answer.count("## 局限性") == 1
+    limitation_section = _section_body(streamed_answer, "局限性")
+    assert limitation_section.startswith("- ")
+    assert "long-cycle validation is still limited" in limitation_section
+
+
 def test_executor_pdf_compare_route_records_compare_steps_and_metadata_parity(tmp_path):
     pdf_path_a = tmp_path / "paper-a.pdf"
     pdf_path_b = tmp_path / "paper-b.pdf"

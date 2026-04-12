@@ -251,6 +251,7 @@ def build_patent_pdf_answer_prompt(
         normalized_route = str(route_hint or "pdf_qa").strip().lower() or "pdf_qa"
         normalized_scope = str(source_scope or "pdf").strip() or "pdf"
         hybrid_mode = normalized_route == "hybrid_qa"
+        aligned_pdf_summary_mode = normalized_route == "pdf_qa" and normalized_scope.lower() == "pdf"
         route_intro = (
             "你是一位专利/文献证据分析助手。当前任务属于 patent 混合文件问答中的 PDF 证据分析环节。"
             if hybrid_mode
@@ -267,7 +268,24 @@ def build_patent_pdf_answer_prompt(
 - `## 对比` 中如果没有可对照来源，明确写出当前缺少对照对象；如果这是混合问答子任务，只写这份 PDF 可提供的对照点
 - `## 限制` 中明确说明未提及、证据不足或仍待其他来源交叉验证的部分
 """
-        summary_output_contract = """
+        summary_output_contract = (
+            """
+**输出结构要求**：
+- 请使用标准 Markdown 标题和列表标记（如 `##`、`-`），不要输出原始 `•`
+- 请按以下结构回答：
+  - `## 研究目的和背景`
+  - `## 研究方法/实验设计`
+  - `## 主要发现和结果`
+  - `## 结论和意义`
+  - `## 局限性`
+  - `注*：所有总结内容均严格基于文件原文中明确提到的信息，未添加任何通用知识或推测内容。`
+- 每个章节优先提供 1-3 个由 PDF 原文直接支持的要点
+- 如果某个章节证据不足，明确写出 `PDF中未提及` 或 `原文证据不足`
+- 如果 `局限性` 没有直接证据，也要明确写出 `PDF中未提及` 或 `原文证据不足`
+- 保留原文中的专业术语，不要替换成泛化说法
+"""
+            if aligned_pdf_summary_mode
+            else """
 **输出结构要求**：
 - 请使用标准 Markdown 标题和列表标记（如 `##`、`-`），不要输出原始 `•`
 - 请按以下结构回答：
@@ -280,6 +298,7 @@ def build_patent_pdf_answer_prompt(
 - 如果某个章节证据不足，明确写出 `PDF中未提及` 或 `原文证据不足`
 - 保留原文中的专业术语，不要替换成泛化说法
 """
+        )
         hybrid_scope_block = (
             f"""
 **混合问答子任务要求**：

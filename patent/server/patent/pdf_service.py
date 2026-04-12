@@ -24,6 +24,12 @@ from server.patent.pdf_contract import (
     validate_compare_context,
 )
 from server.patent.file_models import PatentFileContract
+from server.patent.summary_formatting import (
+    LITERATURE_SUMMARY_NOTE,
+    PRIMARY_SUMMARY_HEADINGS,
+    classify_summary_answer,
+    extract_support_points,
+)
 from server.patent.streaming import emit_text_chunks, iter_text_output
 from server.services.mode_profiles import get_patent_mode_profile
 
@@ -196,11 +202,116 @@ def _ensure_four_block_pdf_answer_structure(
     return "\n".join(sections).strip()
 
 
-_LITERATURE_SUMMARY_NOTE = "注*：所有总结内容均严格基于文件原文中明确提到的信息，未添加任何通用知识或推测内容。"
+_LITERATURE_SUMMARY_NOTE = LITERATURE_SUMMARY_NOTE
+_SUMMARY_LIMITATIONS_HEADING = "局限性"
+_SUMMARY_SECTION_ORDER = (*PRIMARY_SUMMARY_HEADINGS, _SUMMARY_LIMITATIONS_HEADING)
+_SUMMARY_SELECTION_ORDER = (
+    "研究目的和背景",
+    "研究方法/实验设计",
+    "主要发现和结果",
+    "局限性",
+    "结论和意义",
+)
+_SUMMARY_SECTION_ALIASES = {
+    "研究目的和背景": "研究目的和背景",
+    "研究方法/实验设计": "研究方法/实验设计",
+    "主要发现和结果": "主要发现和结果",
+    "结论和意义": "结论和意义",
+    "局限性": "局限性",
+    "结论": "结论和意义",
+    "证据": "主要发现和结果",
+    "限制": "局限性",
+}
+_SUMMARY_SECTION_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "研究目的和背景": (
+        "背景",
+        "目的",
+        "动机",
+        "研究",
+        "problem",
+        "background",
+        "motivation",
+        "objective",
+        "aim",
+        "study",
+    ),
+    "研究方法/实验设计": (
+        "方法",
+        "实验",
+        "流程",
+        "设计",
+        "采用",
+        "对比",
+        "测量",
+        "表征",
+        "method",
+        "methods",
+        "experimental",
+        "experiment",
+        "setup",
+        "compare",
+        "measure",
+        "evaluate",
+    ),
+    "主要发现和结果": (
+        "结果",
+        "发现",
+        "提升",
+        "降低",
+        "改善",
+        "提高",
+        "show",
+        "result",
+        "results",
+        "improve",
+        "improved",
+        "gain",
+        "lower",
+        "higher",
+        "better",
+    ),
+    "结论和意义": (
+        "结论",
+        "意义",
+        "说明",
+        "表明",
+        "证明",
+        "conclusion",
+        "significance",
+        "indicate",
+        "suggest",
+        "demonstrate",
+        "help",
+    ),
+    "局限性": (
+        "局限",
+        "不足",
+        "仍有限",
+        "有限",
+        "未来",
+        "后续",
+        "需要进一步",
+        "有待",
+        "future",
+        "limit",
+        "limited",
+        "limitation",
+        "further",
+    ),
+}
+_SUMMARY_SECTION_FALLBACKS = {
+    "研究目的和背景": "PDF中未提及足够的研究背景或研究目的信息。",
+    "研究方法/实验设计": "PDF中未提及足够的研究方法或实验设计细节。",
+    "主要发现和结果": "PDF中未提及足够的主要发现或结果数据。",
+    "结论和意义": "PDF中未提及足够的结论或研究意义描述。",
+    "局限性": "PDF中未提及明确的局限性或后续工作说明。",
+}
 
 
-def _pick_points(points: list[str], *, start: int, count: int) -> list[str]:
-    return [item for item in points[start : start + count] if str(item or "").strip()]
+def _is_aligned_pdf_summary_request(*, route_hint: str, source_scope: str) -> bool:
+    normalized_route = str(route_hint or "").strip().lower()
+    normalized_scope = str(source_scope or "").strip().lower()
+    return normalized_route == "pdf_qa" and normalized_scope == "pdf"
 
 
 def _build_literature_section(title: str, points: list[str], fallback: str) -> list[str]:
@@ -241,7 +352,231 @@ def _select_literature_points(
     return selected
 
 
-def _ensure_literature_summary_structure(
+def _strip_multi_doc_headers(text: str) -> str:
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    cleaned_lines = [line for line in normalized.split("\n") if not MULTI_DOC_HEADER_PATTERN.fullmatch(line.strip())]
+    return "\n".join(cleaned_lines).strip()
+
+
+def _match_summary_heading(line: str) -> str | None:
+    normalized = str(line or "").strip()
+    if not normalized:
+        return None
+    normalized = re.sub(r"^#{1,6}\s*", "", normalized).strip()
+    normalized = re.sub(r"\s*[：:]\s*$", "", normalized).strip()
+    return _SUMMARY_SECTION_ALIASES.get(normalized)
+
+
+def _normalize_summary_body(body: str) -> str:
+    lines = str(body or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(line.rstrip() for line in lines).strip()
+
+
+def _extract_summary_sections(text: str) -> dict[str, str]:
+    sections: dict[str, str] = {}
+    current_heading: str | None = None
+    current_lines: list[str] = []
+
+    def _flush() -> None:
+        nonlocal current_heading, current_lines
+        if current_heading is None:
+            current_lines = []
+            return
+        body = _normalize_summary_body("\n".join(current_lines))
+        if body:
+            existing = sections.get(current_heading, "")
+            sections[current_heading] = body if not existing else f"{existing}\n{body}".strip()
+        current_lines = []
+
+    for raw_line in _strip_multi_doc_headers(text).splitlines():
+        if raw_line.lstrip().startswith("注*："):
+            continue
+        heading = _match_summary_heading(raw_line)
+        if heading is not None:
+            _flush()
+            current_heading = heading
+            continue
+        if current_heading is not None:
+            current_lines.append(raw_line)
+    _flush()
+    return sections
+
+
+def _body_has_support(body: str) -> bool:
+    normalized = _normalize_summary_body(body)
+    if not normalized:
+        return False
+    if "PDF中未提及" in normalized or "原文证据不足" in normalized:
+        return True
+    return bool(extract_support_points(normalized, max_items=8, min_chars=10))
+
+
+def _clean_summary_source_text(text: str) -> str:
+    normalized = _strip_multi_doc_headers(text)
+    cleaned_lines = []
+    for raw_line in normalized.splitlines():
+        if raw_line.lstrip().startswith("注*："):
+            continue
+        if _match_summary_heading(raw_line) is not None:
+            continue
+        cleaned_lines.append(raw_line)
+    return "\n".join(cleaned_lines).strip()
+
+
+def _collect_summary_points(text: str, *, max_items: int, min_chars: int) -> list[str]:
+    return extract_support_points(_clean_summary_source_text(text), max_items=max_items, min_chars=min_chars)
+
+
+def _point_matches_heading(point: str, heading: str) -> bool:
+    normalized = str(point or "").strip().lower()
+    return bool(normalized) and any(keyword in normalized for keyword in _SUMMARY_SECTION_KEYWORDS.get(heading, ()))
+
+
+def _pick_summary_points(
+    *,
+    heading: str,
+    answer_points: list[str],
+    prepared_points: list[str],
+    used_points: set[str],
+    max_items: int,
+    allow_general_fallback: bool,
+) -> list[str]:
+    selected: list[str] = []
+
+    def _try_add(point: str) -> bool:
+        normalized = str(point or "").strip()
+        if not normalized or normalized in used_points or normalized in selected:
+            return False
+        selected.append(normalized)
+        used_points.add(normalized)
+        return len(selected) >= max_items
+
+    for pool in (answer_points, prepared_points):
+        for point in pool:
+            if not _point_matches_heading(point, heading):
+                continue
+            if _try_add(point):
+                return selected
+
+    if not allow_general_fallback:
+        return selected
+
+    if heading == "研究目的和背景":
+        for point in [*answer_points, *prepared_points]:
+            if _try_add(point):
+                return selected
+    elif heading == "结论和意义":
+        for point in [*reversed(answer_points), *reversed(prepared_points)]:
+            if _try_add(point):
+                return selected
+
+    return selected
+
+
+def _build_summary_section_body(
+    *,
+    heading: str,
+    sections: dict[str, str],
+    answer_points: list[str],
+    prepared_points: list[str],
+    used_points: set[str],
+    allow_general_fallback: bool,
+) -> str:
+    body = _normalize_summary_body(sections.get(heading, ""))
+    if _body_has_support(body):
+        return body
+    points = _pick_summary_points(
+        heading=heading,
+        answer_points=answer_points,
+        prepared_points=prepared_points,
+        used_points=used_points,
+        max_items=2 if heading != "主要发现和结果" else 3,
+        allow_general_fallback=allow_general_fallback,
+    )
+    if points:
+        return "\n".join(f"- {point}" for point in points)
+    return f"- {_SUMMARY_SECTION_FALLBACKS[heading]}"
+
+
+def _build_repaired_literature_summary(
+    *,
+    answer: str,
+    prepared_pdf_text: str,
+    use_model_content: bool,
+    allow_general_fallback: bool,
+) -> str:
+    sections = _extract_summary_sections(answer) if use_model_content else {}
+    answer_points = _collect_summary_points(answer, max_items=10, min_chars=10) if use_model_content else []
+    prepared_points = _collect_summary_points(prepared_pdf_text, max_items=10, min_chars=12)
+    used_points: set[str] = set()
+    section_bodies: dict[str, str] = {}
+    for heading in _SUMMARY_SELECTION_ORDER:
+        section_bodies[heading] = _build_summary_section_body(
+            heading=heading,
+            sections=sections,
+            answer_points=answer_points,
+            prepared_points=prepared_points,
+            used_points=used_points,
+            allow_general_fallback=allow_general_fallback,
+        )
+    lines: list[str] = []
+    for heading in _SUMMARY_SECTION_ORDER:
+        lines.append(f"## {heading}")
+        lines.append(section_bodies[heading])
+        lines.append("")
+    lines.append(_LITERATURE_SUMMARY_NOTE)
+    return "\n".join(lines).strip()
+
+
+def _append_summary_tail_sections(
+    *,
+    answer: str,
+    prepared_pdf_text: str,
+) -> str:
+    normalized_answer = str(answer or "").strip()
+    if not normalized_answer:
+        return _build_repaired_literature_summary(
+            answer=answer,
+            prepared_pdf_text=prepared_pdf_text,
+            use_model_content=False,
+            allow_general_fallback=False,
+        )
+    sections = _extract_summary_sections(normalized_answer)
+    answer_points = _collect_summary_points(normalized_answer, max_items=10, min_chars=10)
+    prepared_points = _collect_summary_points(prepared_pdf_text, max_items=10, min_chars=12)
+    used_points: set[str] = set()
+    extra_blocks: list[str] = []
+    for heading in _SUMMARY_SECTION_ORDER:
+        if heading in sections and _body_has_support(sections[heading]):
+            continue
+        extra_blocks.extend(
+            [
+                f"## {heading}",
+                _build_summary_section_body(
+                    heading=heading,
+                sections=sections,
+                answer_points=answer_points,
+                prepared_points=prepared_points,
+                used_points=used_points,
+                allow_general_fallback=True,
+            ),
+                "",
+            ]
+        )
+    cleaned = normalized_answer
+    if _LITERATURE_SUMMARY_NOTE in cleaned:
+        cleaned = cleaned.replace(_LITERATURE_SUMMARY_NOTE, "").rstrip()
+    if extra_blocks:
+        extra_text = "\n".join(extra_blocks).strip()
+        cleaned = f"{cleaned}\n\n{extra_text}".strip()
+    return f"{cleaned}\n\n{_LITERATURE_SUMMARY_NOTE}".strip()
+
+
+def _ensure_legacy_literature_summary_structure(
     *,
     answer: str,
     prepared_pdf_text: str,
@@ -291,6 +626,42 @@ def _ensure_literature_summary_structure(
         _LITERATURE_SUMMARY_NOTE,
     ]
     return "\n".join(sections).strip()
+
+
+def _ensure_literature_summary_structure(
+    *,
+    answer: str,
+    prepared_pdf_text: str,
+    route_hint: str = "pdf_qa",
+    source_scope: str = "pdf",
+) -> str:
+    normalized_answer = str(answer or "").strip()
+    if not _is_aligned_pdf_summary_request(route_hint=route_hint, source_scope=source_scope):
+        return _ensure_legacy_literature_summary_structure(answer=normalized_answer, prepared_pdf_text=prepared_pdf_text)
+    prepared_source_text = _strip_multi_doc_headers(prepared_pdf_text)
+    mode = classify_summary_answer(normalized_answer, prepared_text=prepared_source_text)
+    if mode == "preserve":
+        return _append_summary_tail_sections(answer=normalized_answer, prepared_pdf_text=prepared_source_text)
+    if mode == "light_repair":
+        return _build_repaired_literature_summary(
+            answer=normalized_answer,
+            prepared_pdf_text=prepared_source_text,
+            use_model_content=True,
+            allow_general_fallback=True,
+        )
+    if mode == "conservative_repair":
+        return _build_repaired_literature_summary(
+            answer=normalized_answer,
+            prepared_pdf_text=prepared_source_text,
+            use_model_content=True,
+            allow_general_fallback=False,
+        )
+    return _build_repaired_literature_summary(
+        answer="",
+        prepared_pdf_text=prepared_source_text,
+        use_model_content=False,
+        allow_general_fallback=False,
+    )
 
 
 class _NoopLogger:
@@ -931,6 +1302,7 @@ class PatentPdfService:
         streamed_text = ""
         pending_stream_whitespace = ""
         summary_mode = is_summary_question(question) and not compare_mode
+        aligned_summary_mode = summary_mode and _is_aligned_pdf_summary_request(route_hint=route_hint, source_scope=source_scope)
         prompt = build_patent_pdf_answer_prompt(
             question=question,
             pdf_content=prepared_pdf_text,
@@ -971,7 +1343,7 @@ class PatentPdfService:
                     pending_stream_whitespace = ""
                     return
                 if summary_mode:
-                    if _has_literature_summary_sections(normalized_buffer):
+                    if not aligned_summary_mode and _has_literature_summary_sections(normalized_buffer):
                         stream_mode = "raw_structured"
                         _emit_live_text(normalized_stream_text)
                     return
@@ -1033,6 +1405,8 @@ class PatentPdfService:
                             answer = _ensure_literature_summary_structure(
                                 answer=answer,
                                 prepared_pdf_text=prepared_pdf_text,
+                                route_hint=route_hint,
+                                source_scope=source_scope,
                             )
                         else:
                             answer = _ensure_four_block_pdf_answer_structure(
@@ -1099,6 +1473,8 @@ class PatentPdfService:
                                 answer = _ensure_literature_summary_structure(
                                     answer=answer,
                                     prepared_pdf_text=prepared_pdf_text,
+                                    route_hint=route_hint,
+                                    source_scope=source_scope,
                                 )
                             else:
                                 answer = _ensure_four_block_pdf_answer_structure(
@@ -1132,6 +1508,8 @@ class PatentPdfService:
                     answer = _ensure_literature_summary_structure(
                         answer=answer,
                         prepared_pdf_text=prepared_pdf_text,
+                        route_hint=route_hint,
+                        source_scope=source_scope,
                     )
                 else:
                     answer = _ensure_four_block_pdf_answer_structure(
@@ -1176,6 +1554,8 @@ class PatentPdfService:
                 _ensure_literature_summary_structure(
                     answer=build_extractive_fallback_summary(question=question, pdf_text=prepared_pdf_text),
                     prepared_pdf_text=prepared_pdf_text,
+                    route_hint=route_hint,
+                    source_scope=source_scope,
                 )
                 if summary_mode
                 else _ensure_four_block_pdf_answer_structure(

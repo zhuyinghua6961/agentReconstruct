@@ -31,6 +31,19 @@ TABLE_FILE = {
 }
 
 
+def _section_body(markdown: str, heading: str) -> str:
+    text = str(markdown or "")
+    marker = f"## {heading}"
+    start = text.find(marker)
+    if start < 0:
+        return ""
+    start += len(marker)
+    next_heading = text.find("\n## ", start)
+    if next_heading < 0:
+        return text[start:].strip()
+    return text[start:next_heading].strip()
+
+
 def _write_csv(path: Path) -> None:
     path.write_text(
         "material,capacity_mAh,note\n"
@@ -418,7 +431,10 @@ def test_dispatch_pdf_route_summary_aligns_to_literature_summary_sections(tmp_pa
     assert "## 结论和意义" in answer
     assert "## 局限性" in answer
     assert "注*" in answer
+    assert "long-cycle validation is still limited" in _section_body(answer, "局限性") or "limited" in _section_body(answer, "局限性")
+    assert "long-cycle validation is still limited" in _section_body(answer, "局限性") or "limited" in _section_body(answer, "局限性")
     assert "LMFP/LFP" in answer
+    assert "长循环验证仍有限" in _section_body(answer, "局限性") or "limited" in _section_body(answer, "局限性")
 
 
 def test_dispatch_pdf_route_summary_preserves_well_structured_model_answer(tmp_path):
@@ -556,6 +572,7 @@ def test_dispatch_pdf_route_summary_conservative_repair_keeps_sparse_usable_answ
     assert "## 结论和意义" in answer
     assert "## 局限性" in answer
     assert "注*" in answer
+    assert "长循环验证仍有限" in _section_body(answer, "局限性") or "limited" in _section_body(answer, "局限性")
     assert "LMFP/LFP" in answer
 
 
@@ -595,6 +612,91 @@ def test_dispatch_pdf_route_summary_fallback_from_degraded_answer_still_emits_li
     assert "## 结论和意义" in answer
     assert "## 局限性" in answer
     assert "注*" in answer
+    assert "long-cycle validation is still limited" in _section_body(answer, "局限性") or "limited" in _section_body(answer, "局限性")
+
+
+def test_dispatch_pdf_route_summary_fallback_discards_degraded_model_text(tmp_path):
+    pdf_path = tmp_path / "battery-paper-fallback-degraded-text.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="请总结这篇文献的研究内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11],
+        primary_file_id=11,
+        execution_files=[{**PDF_FILE, "local_path": str(pdf_path)}],
+        file_selection={"strategy": "explicit_selection"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "This paper studies LMFP/LFP blending for safer charging. "
+                "Method setup compares blended and baseline electrodes. "
+                "Results show safer high-rate charging. "
+                "The conclusion notes that long-cycle validation is still limited."
+            ),
+            answer_question_fn=lambda **kwargs: "暂时无法生成，请稍后重试。",
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    answer = result["answer_text"]
+    assert "暂时无法生成" not in answer
+    assert "请稍后重试" not in answer
+    assert "## 局限性" in answer
+
+
+def test_dispatch_pdf_route_summary_preserves_existing_gap_limitations_without_duplicate_section(tmp_path):
+    pdf_path = tmp_path / "battery-paper-gap-limitations.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    structured_answer = "\n".join(
+        [
+            "## 研究目的和背景",
+            "- 原文说明高倍率充电场景下的安全性问题。",
+            "",
+            "## 研究方法/实验设计",
+            "- 对 LMFP/LFP 复配体系进行对比测试。",
+            "",
+            "## 主要发现和结果",
+            "- 复配体系改善了高倍率充电表现。",
+            "",
+            "## 结论和意义",
+            "- 该路线有助于兼顾安全性与性能。",
+            "",
+            "## 局限性",
+            "- PDF中未提及更长期的循环验证数据。",
+            "",
+            "注*：所有总结内容均严格基于文件原文中明确提到的信息，未添加任何通用知识或推测内容。",
+        ]
+    )
+    contract = build_patent_file_contract(
+        question="请总结这篇文献的研究内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11],
+        primary_file_id=11,
+        execution_files=[{**PDF_FILE, "local_path": str(pdf_path)}],
+        file_selection={"strategy": "explicit_selection"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "Structured source text with explicit gap wording.",
+            answer_question_fn=lambda **kwargs: structured_answer,
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    answer = result["answer_text"]
+    assert answer.count("## 局限性") == 1
+    assert answer.count("注*：") == 1
 
 
 def test_dispatch_pdf_route_negative_compare_question_targets_only_first_document(tmp_path):
