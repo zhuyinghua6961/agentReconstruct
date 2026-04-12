@@ -218,6 +218,7 @@ function normalizeMessage(item) {
     thinking: '思考模式',
     patent: '专利模式',
     neo4j: '知识图谱',
+    graph_kb: '知识图谱',
     community: '社区分析',
     literature: '文献检索',
     tabular_qa: '表格问答',

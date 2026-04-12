@@ -26,7 +26,7 @@ const PINNED_CHATS_COLLAPSED_KEY = 'lfp.sidebar.pinned-collapsed.v1'
 const RECENT_CHATS_COLLAPSED_KEY = 'lfp.sidebar.recent-collapsed.v1'
 const FILE_LIST_COLLAPSED_KEY = 'lfp.file-list.collapsed.v1'
 const ASK_MODE_STORAGE_KEY = 'gateway.ask.mode.v1'
-const ASK_MODE_LABELS = { fast: '快速模式', thinking: '思考模式', patent: '专利模式' }
+const ASK_MODE_LABELS = { fast: '快速模式', thinking: '思考模式', patent: '专利模式', graph_kb: '知识图谱', neo4j: '知识图谱' }
 
 const store = useChatStore()
 const pdfReader = ref(null)

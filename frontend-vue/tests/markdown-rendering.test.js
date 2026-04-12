@@ -217,3 +217,70 @@ test('compare markdown keeps document subheadings and chapter blocks in order', 
     assert.ok(doc2BackgroundIndex < compareIndex)
   }
 })
+
+test('compare markdown renders the new five-section patent compare structure', () => {
+  installMinimalDom()
+  const input = [
+    '## 具体内容对比',
+    '',
+    '### 文献 #1 核心内容（根据PDF原文）',
+    '- 文件：paper-a.pdf',
+    '- Results A show 15% efficiency improvement.',
+    '',
+    '### 文献 #2 核心内容（根据PDF原文）',
+    '- 文件：paper-b.pdf',
+    '- Results B keep 200-cycle retention.',
+    '',
+    '## 研究方法差异',
+    '',
+    '### 文献 #1 采用的研究方法',
+    '- XRD 与电化学测试联合验证。',
+    '',
+    '### 文献 #2 采用的研究方法',
+    '- 循环保持结果与 OCV 平台交叉验证。',
+    '',
+    '## 应用领域差异',
+    '',
+    '### 文献 #1 关注的应用领域',
+    '- 高倍率正极优化。',
+    '',
+    '### 文献 #2 关注的应用领域',
+    '- 长循环稳定性提升。',
+    '',
+    '## 相同点',
+    '- 两篇文献都提供了明确的实验结果。',
+    '',
+    '## 总结',
+    '- 两篇文献分别代表效率导向与稳定性导向。',
+  ].join('\n')
+
+  const streamingHtml = formatStreamingAnswer(input)
+  const finalHtml = formatAnswer(input)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.match(html, /<h2>具体内容对比<\/h2>/)
+    assert.match(html, /<h2>研究方法差异<\/h2>/)
+    assert.match(html, /<h2>应用领域差异<\/h2>/)
+    assert.match(html, /<h2>相同点<\/h2>/)
+    assert.match(html, /<h2>总结<\/h2>/)
+    assert.match(html, /<h3>文献 #1 核心内容（根据PDF原文）<\/h3>/)
+    assert.match(html, /<h3>文献 #2 核心内容（根据PDF原文）<\/h3>/)
+    assert.match(html, /<h3>文献 #1 采用的研究方法<\/h3>/)
+    assert.match(html, /<h3>文献 #2 采用的研究方法<\/h3>/)
+    assert.match(html, /<h3>文献 #1 关注的应用领域<\/h3>/)
+    assert.match(html, /<h3>文献 #2 关注的应用领域<\/h3>/)
+    assert.match(html, /paper-a\.pdf/)
+    assert.match(html, /paper-b\.pdf/)
+
+    const contentIndex = html.indexOf('<h2>具体内容对比</h2>')
+    const methodIndex = html.indexOf('<h2>研究方法差异</h2>')
+    const applicationIndex = html.indexOf('<h2>应用领域差异</h2>')
+    const sameIndex = html.indexOf('<h2>相同点</h2>')
+    const summaryIndex = html.indexOf('<h2>总结</h2>')
+
+    assert.ok(contentIndex < methodIndex)
+    assert.ok(methodIndex < applicationIndex)
+    assert.ok(applicationIndex < sameIndex)
+    assert.ok(sameIndex < summaryIndex)
+  }
+})

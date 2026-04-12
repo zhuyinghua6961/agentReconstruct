@@ -7,6 +7,10 @@ import { fileURLToPath } from 'node:url'
 const currentDir = dirname(fileURLToPath(import.meta.url))
 const source = readFileSync(join(currentDir, 'Home.vue'), 'utf8')
 
+test('Home formats graph_kb query mode as a knowledge-graph badge during streaming', () => {
+  assert.match(source, /const ASK_MODE_LABELS = \{ fast: '快速模式', thinking: '思考模式', patent: '专利模式', graph_kb: '知识图谱', neo4j: '知识图谱' \}/)
+})
+
 test('Home uses absolute message identity in the render list wiring', () => {
   assert.match(source, /import\s*\{\s*buildVisibleMessageWindow,\s*resolveHiddenHistoryReveal\s*\}\s*from '\.\.\/utils\/messageWindowing'/)
   assert.match(source, /const activeVisibleWindow = computed\(\(\) => \{/)
