@@ -206,6 +206,47 @@ def test_render_expand_doi_context_normalizes_dirty_process_fields():
     assert references == ("10.1039/c4ra15767b",)
 
 
+def test_render_expand_doi_context_keeps_clean_method_prose_intact():
+    answer, references = render_graph_kb_answer(
+        GraphKbQueryPlan(
+            template_id="expand_doi_context_by_doi",
+            params={
+                "doi": "10.1039/c4ra15767b",
+                "include_testing": False,
+                "include_process": True,
+            },
+        ),
+        [
+            {
+                "doi": "10.1039/c4ra15767b",
+                "title": "Clean Process Paper",
+                "preparation_methods": ["sol-gel method assisted coating"],
+            }
+        ],
+    )
+
+    assert "### Sol-gel method assisted coating" in answer
+    assert "- sol-gel" not in answer
+    assert references == ("10.1039/c4ra15767b",)
+
+
+def test_render_raw_material_list_answer_preserves_title_punctuation():
+    answer, references = render_graph_kb_answer(
+        GraphKbQueryPlan(template_id="list_by_raw_material", params={"material_name": "LiFePO4"}),
+        [
+            {
+                "doi": "10.1/a",
+                "title": "Effects of A, B, and C",
+                "matched_raw_materials": ["LiFePO4 powder"],
+            }
+        ],
+    )
+
+    assert "Effects of A, B, and C" in answer
+    assert "Effects of A；B；and C" not in answer
+    assert references == ("10.1/a",)
+
+
 def test_render_raw_material_list_answer_filters_truncated_doi_rows():
     answer, references = render_graph_kb_answer(
         GraphKbQueryPlan(template_id="list_by_raw_material", params={"material_name": "LiFePO4"}),

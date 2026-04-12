@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import re
 from typing import Any
 
 from app.modules.graph_kb.classifier import classify_graph_kb_question
@@ -8,11 +9,71 @@ from app.modules.graph_kb.client import execute_graph_kb_plan, plan_graph_kb_que
 from app.modules.graph_kb.models import GraphKbExecutionResult, GraphKbQueryPlan
 
 
+_GRAPH_ROW_DOI_START_RE = re.compile(r"^10\.\d{1,9}[/_]", re.IGNORECASE)
+_GRAPH_ROW_TRAILING_PUNCT_RE = re.compile(r"[.,;:]+$")
+_GRAPH_NULL_TOKEN_RE = re.compile(r"(?i)(?:^|_)null(?=_|$)")
+_GRAPH_WHITESPACE_RE = re.compile(r"\s+")
+_GRAPH_FIELD_KEY_RE = re.compile(
+    r"(?:^|_)(ball_powder_ratio|temperature|atmosphere|thickness|speed|time|method)(?=_)",
+    re.IGNORECASE,
+)
+
+_GRAPH_PARAM_LABELS = {
+    "time": "时间",
+    "temperature": "温度",
+    "speed": "转速",
+    "ball_powder_ratio": "球粉比",
+    "atmosphere": "气氛",
+    "thickness": "厚度",
+}
+_GRAPH_PARAM_ORDER = ("time", "temperature", "speed", "ball_powder_ratio", "atmosphere", "thickness")
+
+
+def _trim_unbalanced_trailing_parens(value: str) -> str:
+    text = str(value or "")
+    while text.endswith(")") and text.count("(") < text.count(")"):
+        text = text[:-1]
+    return text
+
+
+def _normalize_graph_row_doi(value: Any) -> str:
+    doi = str(value or "").strip()
+    if not doi:
+        return ""
+    doi = _GRAPH_ROW_TRAILING_PUNCT_RE.sub("", doi)
+    doi = _trim_unbalanced_trailing_parens(doi)
+    if doi.startswith("10.") and "_" in doi and "/" not in doi:
+        doi = doi.replace("_", "/", 1)
+    lowered = doi.lower()
+    if not _GRAPH_ROW_DOI_START_RE.match(doi):
+        return ""
+    if any(marker in lowered for marker in ("http://", "https://", "www.")):
+        return ""
+    if doi.endswith(("-", "/", "_", ".")):
+        return ""
+    return doi
+
+
+def _sanitize_graph_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    sanitized: list[dict[str, Any]] = []
+    for row in rows:
+        payload = dict(row or {})
+        if "doi" not in payload:
+            sanitized.append(payload)
+            continue
+        doi = _normalize_graph_row_doi(payload.get("doi"))
+        if not doi:
+            continue
+        payload["doi"] = doi
+        sanitized.append(payload)
+    return sanitized
+
+
 def _unique_references(rows: list[dict[str, Any]]) -> tuple[str, ...]:
     seen: set[str] = set()
     refs: list[str] = []
     for row in rows:
-        doi = str(row.get("doi") or "").strip()
+        doi = _normalize_graph_row_doi(row.get("doi"))
         if not doi or doi in seen:
             continue
         seen.add(doi)
@@ -23,7 +84,7 @@ def _unique_references(rows: list[dict[str, Any]]) -> tuple[str, ...]:
 def _clean_items(values: Any, *, limit: int) -> list[str]:
     items: list[str] = []
     for item in list(values or []):
-        text = str(item or "").strip()
+        text = _clean_graph_display_text(item)
         if not text or text in items:
             continue
         items.append(text)
@@ -32,56 +93,212 @@ def _clean_items(values: Any, *, limit: int) -> list[str]:
     return items
 
 
+def _normalize_graph_field_source(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = _GRAPH_NULL_TOKEN_RE.sub("_", text)
+    text = re.sub(r"_+", "_", text)
+    return text.strip(" _;，；,.")
+
+
+def _clean_graph_display_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = _GRAPH_NULL_TOKEN_RE.sub("_", text)
+    text = re.sub(r"_+", " ", text)
+    text = _GRAPH_WHITESPACE_RE.sub(" ", text)
+    return text.strip(" _")
+
+
+def _clean_graph_field_value(value: Any) -> str:
+    text = _normalize_graph_field_source(value)
+    if not text:
+        return ""
+    text = text.replace("_", " ")
+    text = _GRAPH_WHITESPACE_RE.sub(" ", text)
+    return text.strip(" ")
+
+
+def _format_graph_title(value: Any) -> str:
+    text = _clean_graph_display_text(value)
+    if text and text == text.lower():
+        return text[:1].upper() + text[1:]
+    return text
+
+
+def _parse_graph_field_map(value: Any) -> tuple[dict[str, str], list[str]]:
+    source = _normalize_graph_field_source(value)
+    if not source:
+        return {}, []
+
+    matches = list(_GRAPH_FIELD_KEY_RE.finditer(source))
+    if not matches:
+        cleaned = _clean_graph_display_text(source)
+        return {}, [cleaned] if cleaned else []
+
+    parsed: dict[str, str] = {}
+    leftovers: list[str] = []
+
+    prefix = _clean_graph_field_value(source[: matches[0].start()])
+    if prefix:
+        leftovers.append(prefix)
+
+    for index, match in enumerate(matches):
+        key = str(match.group(1) or "").strip().lower()
+        value_start = match.end()
+        value_end = matches[index + 1].start() if index + 1 < len(matches) else len(source)
+        value_text = _clean_graph_field_value(source[value_start:value_end])
+        if value_text and key not in parsed:
+            parsed[key] = value_text
+
+    return parsed, leftovers
+
+
+def _build_method_sections(values: Any, *, limit: int) -> list[dict[str, Any]]:
+    sections: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for raw in list(values or []):
+        field_map, leftovers = _parse_graph_field_map(raw)
+        title = _format_graph_title(field_map.pop("method", ""))
+        if not title:
+            plain = _format_graph_title(raw)
+            if not plain or plain in seen:
+                continue
+            sections.append({"title": plain, "params": []})
+            seen.add(plain)
+        else:
+            params: list[str] = []
+            for key in _GRAPH_PARAM_ORDER:
+                value_text = field_map.get(key)
+                if not value_text:
+                    continue
+                params.append(f"- {_GRAPH_PARAM_LABELS[key]}：{value_text}")
+            for extra in leftovers:
+                if extra:
+                    params.append(f"- {extra}")
+            key_text = f"{title}|{'|'.join(params)}"
+            if key_text in seen:
+                continue
+            sections.append({"title": title, "params": params})
+            seen.add(key_text)
+        if len(sections) >= limit:
+            break
+
+    return sections
+
+
+def _build_parameter_lines(values: Any, *, limit: int) -> list[str]:
+    lines: list[str] = []
+    seen: set[str] = set()
+
+    for raw in list(values or []):
+        field_map, leftovers = _parse_graph_field_map(raw)
+        current: list[str] = []
+        for key in _GRAPH_PARAM_ORDER:
+            value_text = field_map.get(key)
+            if not value_text:
+                continue
+            current.append(f"- {_GRAPH_PARAM_LABELS[key]}：{value_text}")
+        for extra in leftovers:
+            if extra:
+                current.append(f"- {extra}")
+        if not current:
+            plain = _clean_graph_display_text(raw)
+            if plain:
+                current = [f"- {plain}"]
+        for line in current:
+            if line in seen:
+                continue
+            seen.add(line)
+            lines.append(line)
+            if len(lines) >= limit:
+                return lines
+
+    return lines
+
+
+def _build_markdown(sections: list[list[str]]) -> str:
+    blocks = ["\n".join(section).strip() for section in sections if section and "\n".join(section).strip()]
+    return "\n\n".join(blocks).strip()
+
+
 def render_graph_kb_answer(plan: GraphKbQueryPlan, rows: list[dict[str, Any]]) -> tuple[str, tuple[str, ...]]:
+    rows = _sanitize_graph_rows(rows)
     if not rows:
         return "", ()
 
     references = _unique_references(rows)
     if plan.template_id == "lookup_by_doi":
         row = rows[0]
-        raw_materials = [str(item).strip() for item in list(row.get("raw_materials") or []) if str(item).strip()]
-        answer = f"文献 DOI {row.get('doi') or plan.params.get('doi')} 的标题为《{row.get('title') or '未知标题'}》。"
+        raw_materials = _clean_items(row.get("raw_materials"), limit=3)
+        answer = f"文献 DOI {row.get('doi') or plan.params.get('doi')} 的标题为《{_clean_graph_display_text(row.get('title')) or '未知标题'}》。"
         if raw_materials:
             answer += f" 图谱里关联到的原料包括：{'；'.join(raw_materials[:3])}。"
         return answer, references
     if plan.template_id == "expand_doi_context_by_doi":
         row = rows[0]
-        answer = f"文献 DOI {row.get('doi') or plan.params.get('doi')} 的标题为《{row.get('title') or '未知标题'}》。"
+        title = _clean_graph_display_text(row.get("title")) or "未知标题"
+        doi = str(row.get("doi") or plan.params.get("doi") or "").strip()
+        sections: list[list[str]] = [
+            [
+                "## 📄 文献信息",
+                f"- 标题：{title}",
+                f"- DOI：{doi}",
+            ]
+        ]
         if bool(plan.params.get("include_testing")):
             testing_items = _clean_items(row.get("testing_items"), limit=3)
             if testing_items:
-                answer += f" 图谱里关联到的测试/表征包括：{'；'.join(testing_items)}。"
+                sections.append(["## 🔬 测试/表征", *[f"- {item}" for item in testing_items]])
         if bool(plan.params.get("include_process")):
-            preparation_methods = _clean_items(row.get("preparation_methods"), limit=2)
-            process_parameters = _clean_items(row.get("process_parameters"), limit=3)
-            if preparation_methods:
-                answer += f" 制备/工艺方法包括：{'；'.join(preparation_methods)}。"
-            if process_parameters:
-                answer += f" 关键工艺参数包括：{'；'.join(process_parameters)}。"
+            process_section: list[str] = ["## ⚙️ 制备/工艺"]
+            for method in _build_method_sections(row.get("preparation_methods"), limit=3):
+                process_section.append(f"### {method['title']}")
+                process_section.extend(list(method.get("params") or []))
+            if len(process_section) > 1:
+                sections.append(process_section)
+
+            parameter_lines = _build_parameter_lines(row.get("process_parameters"), limit=6)
+            if parameter_lines:
+                sections.append(["## 📌 关键参数", *parameter_lines])
         if bool(plan.params.get("include_raw_materials")):
             raw_materials = _clean_items(row.get("raw_materials"), limit=3)
             if raw_materials:
-                answer += f" 图谱里关联到的原料包括：{'；'.join(raw_materials)}。"
-        return answer, references
+                sections.append(["## 🧪 原料", *[f"- {item}" for item in raw_materials]])
+        return _build_markdown(sections), references
     if plan.template_id == "list_by_material":
         material = str(plan.params.get("material_name") or "")
-        items = [f"《{row.get('title') or row.get('doi') or '未知条目'}》" for row in rows]
+        items = [f"《{_clean_graph_display_text(row.get('title')) or row.get('doi') or '未知条目'}》" for row in rows]
         return f"关于 {material} 的图谱命中文献包括：{'；'.join(items)}。", references
     if plan.template_id == "list_by_raw_material":
         material = str(plan.params.get("material_name") or "")
-        items: list[str] = []
-        for row in rows:
-            title = str(row.get("title") or row.get("doi") or "未知条目")
+        sections: list[list[str]] = [
+            [
+                "## 📚 文献概览",
+                f"- 当前展示 {len(rows)} 篇相关文献",
+                f"- 原料：{material}",
+                "- 查询类型：按原料查文献",
+            ],
+            ["## 📖 相关文献"],
+        ]
+        list_section = sections[-1]
+        for index, row in enumerate(rows, start=1):
+            title = _clean_graph_display_text(row.get("title")) or str(row.get("doi") or "未知条目")
             matched_raw_materials = _clean_items(row.get("matched_raw_materials"), limit=2)
+            list_section.append(f"### [{index}] {title}")
+            list_section.append(f"- DOI：{row.get('doi') or '未知 DOI'}")
             if matched_raw_materials:
-                items.append(f"《{title}》 (原料命中：{'；'.join(matched_raw_materials)})")
-            else:
-                items.append(f"《{title}》")
-        return f"使用 {material} 作为原料的图谱命中文献包括：{'；'.join(items)}。", references
+                list_section.append(f"- 命中条件：原料 = {'；'.join(matched_raw_materials)}")
+        return _build_markdown(sections), references
     if plan.template_id == "count_by_filter":
         material = str(plan.params.get("material_name") or "")
         return f"{material} 在当前图谱中的命中文献数量为 {rows[0].get('count', 0)} 篇。", references
     return "", references
+
+
 def try_graph_kb_answer(
     *,
     question: str,
@@ -127,12 +344,13 @@ def try_graph_kb_answer(
             fallback_reason="empty_result",
         )
 
-    answer, references = render_graph_kb_answer(plan, rows)
+    sanitized_rows = _sanitize_graph_rows(rows)
+    answer, references = render_graph_kb_answer(plan, sanitized_rows)
     if not answer.strip():
         return GraphKbExecutionResult(
             handled=False,
             template_id=plan.template_id,
-            result_count=len(rows),
+            result_count=len(sanitized_rows),
             latency_ms=latency_ms,
             fallback_reason="render_empty",
         )
@@ -143,7 +361,7 @@ def try_graph_kb_answer(
         references=references,
         query_mode="graph_kb",
         template_id=plan.template_id,
-        result_count=len(rows),
+        result_count=len(sanitized_rows),
         latency_ms=latency_ms,
         fallback_reason="",
     )
