@@ -5,6 +5,7 @@ from dataclasses import replace
 from fastapi.testclient import TestClient
 
 from app.main import app
+import app.modules.graph_kb.service as graph_kb_service
 import app.routers.qa as qa_router_module
 
 
@@ -59,6 +60,9 @@ def test_sync_ask_returns_graph_answer_when_handled(monkeypatch):
     assert payload["final_answer"] == "graph answer"
     assert payload["references"] == ["10.1000/test"]
     assert payload["query_mode"] == "graph_kb"
+    assert payload["reference_links"] == [{"doi": "10.1000/test", "pdf_url": "/api/v1/view_pdf/10.1000/test"}]
+    assert payload["pdf_links"] == payload["reference_links"]
+    assert payload["doi_locations"] == {}
 
 
 def test_sync_ask_falls_back_to_generation_when_graph_not_handled(monkeypatch):
@@ -86,6 +90,48 @@ def test_sync_ask_falls_back_to_generation_when_graph_not_handled(monkeypatch):
     assert payload["success"] is True
     assert payload["final_answer"] == "generation answer"
     assert payload["query_mode"] == "生成驱动检索"
+
+
+def test_sync_ask_falls_back_to_generation_when_real_graph_path_filters_all_invalid_dois(monkeypatch):
+    _enable_graph_kb(monkeypatch)
+    monkeypatch.setattr(qa_router_module, "generation_runtime_is_ready", lambda runtime: True)
+    app.state.generation_runtime = object()
+    app.state.neo4j_client = object()
+
+    monkeypatch.setattr(
+        graph_kb_service,
+        "execute_graph_kb_plan",
+        lambda *args, **kwargs: [
+            {
+                "doi": "10.1007/s12598-",
+                "title": "Broken Paper",
+                "matched_raw_materials": ["LiFePO4 powder"],
+            }
+        ],
+    )
+
+    def _fake_generation(**kwargs):
+        yield {"type": "metadata", "query_mode": "生成驱动检索", "route": "kb_qa"}
+        yield {"type": "content", "content": "generation answer after invalid graph doi"}
+        yield {"type": "done", "route": "kb_qa", "references": []}
+
+    monkeypatch.setattr(qa_router_module.qa_kb_service, "iter_answer_events", _fake_generation)
+
+    response = client.post(
+        "/api/ask",
+        json={
+            "question": "有哪些使用LiFePO4作为原料的文献？",
+            "requested_mode": "fast",
+            "route": "kb_qa",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["final_answer"] == "generation answer after invalid graph doi"
+    assert payload["query_mode"] == "生成驱动检索"
+    assert payload["references"] == []
 
 
 def test_sync_ask_falls_back_to_generation_for_material_wording_not_supported_by_graph(monkeypatch):
@@ -183,6 +229,9 @@ def test_stream_ask_emits_graph_metadata_step_content_and_done(monkeypatch):
     assert '阶段三：整理图谱结果' in response.text
     assert '"type": "content"' in response.text
     assert '"type": "done"' in response.text
+    assert '"reference_links"' in response.text
+    assert '"pdf_links"' in response.text
+    assert '"doi_locations"' in response.text
 
 
 def test_iter_graph_kb_events_emits_three_success_steps():
@@ -213,3 +262,9 @@ def test_iter_graph_kb_events_emits_three_success_steps():
     assert all(step["status"] == "success" for step in steps)
     assert steps[1]["detail"] == "按 DOI 展开测试/工艺"
     assert steps[2]["data"]["count"] == 2
+
+    done_event = next(event for event in events if event.get("type") == "done")
+    assert done_event["references"] == ["10.1000/test"]
+    assert "reference_links" not in done_event
+    assert "pdf_links" not in done_event
+    assert "doi_locations" not in done_event
