@@ -14,7 +14,9 @@ def healthz(request: Request) -> JSONResponse:
     settings = request.app.state.settings
     redis_status = dict(request.app.state.component_status.get("redis") or {})
     generation_runtime_status = dict(request.app.state.component_status.get("generation_runtime") or {})
+    graph_kb_status = dict(request.app.state.component_status.get("graph_kb") or {})
     generation_ready = bool(getattr(request.app.state, "generation_runtime_ready", False))
+    graph_kb_ready = bool(getattr(request.app.state, "graph_kb_ready", False))
     is_readiness_probe = str(getattr(request.url, "path", "") or "").endswith("/api/health")
     status_code = 200
     success = True
@@ -33,6 +35,8 @@ def healthz(request: Request) -> JSONResponse:
             "api_prefix": settings.api_prefix,
             "generation_runtime_enabled": settings.generation_runtime_enabled,
             "generation_runtime_ready": generation_ready,
+            "graph_kb_enabled": settings.graph_kb_enabled,
+            "graph_kb_ready": graph_kb_ready,
             "runtime_mode": "generation" if generation_ready else "placeholder",
             "supported_routes": ["kb_qa", "pdf_qa", "tabular_qa", "hybrid_qa"],
             "placeholder_fallback_enabled": settings.allow_placeholder_fallback,
@@ -42,6 +46,7 @@ def healthz(request: Request) -> JSONResponse:
             "components": {
                 "redis": redis_status,
                 "generation_runtime": generation_runtime_status,
+                "graph_kb": graph_kb_status,
             },
         },
     )

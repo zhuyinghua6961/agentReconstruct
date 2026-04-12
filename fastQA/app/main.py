@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
-from app.core.runtime import bootstrap_generation_runtime, bootstrap_redis, close_generation_runtime, close_redis
+from app.core.runtime import bootstrap_generation_runtime, bootstrap_graph_kb, bootstrap_redis, close_generation_runtime, close_graph_kb, close_redis
 from app.modules.documents.api import router as documents_router
 from app.routers.health import router as health_router
 from app.routers.qa import router as qa_router
@@ -30,6 +30,7 @@ async def _lifespan(app: FastAPI):
         close = getattr(getattr(app.state, "shared_llm_adapter", None), "close", None)
         if callable(close):
             close()
+        close_graph_kb(app.state)
         close_generation_runtime(app.state)
         close_redis(app.state)
 
@@ -55,6 +56,8 @@ def create_app() -> FastAPI:
     app.state.redis_service = None
     app.state.generation_runtime = None
     app.state.generation_runtime_ready = False
+    app.state.neo4j_client = None
+    app.state.graph_kb_ready = False
     app.state.shared_llm_adapter = None
     app.state.shared_llm_adapter_ready = False
     app.state.pdf_web_bindings = None
@@ -64,6 +67,7 @@ def create_app() -> FastAPI:
     app.state.persist_assistant_terminal_hook = partial(persist_assistant_terminal, async_enabled=settings.chat_persist_async) if settings.chat_persist_enabled else None
     bootstrap_redis(app.state)
     bootstrap_generation_runtime(app.state)
+    bootstrap_graph_kb(app.state)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,

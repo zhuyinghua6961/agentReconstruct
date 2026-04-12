@@ -20,6 +20,9 @@ def test_healthz_exposes_service_roots():
     assert payload["runtime_mode"] in {"placeholder", "generation"}
     assert payload["supported_routes"] == ["kb_qa", "pdf_qa", "tabular_qa", "hybrid_qa"]
     assert payload["ask_stream_max_concurrent"] >= 1
+    assert "graph_kb" in payload["components"]
+    assert "graph_kb_enabled" in payload
+    assert "graph_kb_ready" in payload
 
 
 def test_api_health_reflects_runtime_readiness():
@@ -32,3 +35,4 @@ def test_api_health_reflects_runtime_readiness():
     assert response.status_code == (200 if expected_ready else 503)
     assert payload["success"] is expected_ready
     assert payload["runtime_mode"] == ("generation" if expected_ready else "placeholder")
+    assert payload["graph_kb_ready"] is bool(getattr(app.state, "graph_kb_ready", False))

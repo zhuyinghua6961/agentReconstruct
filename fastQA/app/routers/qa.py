@@ -14,6 +14,8 @@ from pydantic import BaseModel, Field
 
 from app.core.runtime import generation_runtime_is_ready
 from app.core.sse import sse_response
+from app.modules.graph_kb.models import GraphKbExecutionResult
+from app.modules.graph_kb.service import try_graph_kb_answer
 from app.modules.qa_kb.models import QaKbRequest
 from app.modules.qa_kb.service import qa_kb_service
 from app.modules.qa_kb.streaming import build_doi_locations, normalize_reference_objects, normalize_references
@@ -654,6 +656,40 @@ def _iter_route_events(
         len(list(adapted_request.used_files or adapted_request.execution_files or [])),
     )
     if route == "kb_qa":
+        conversation_context = build_conversation_context(
+            current_question=adapted_request.question,
+            request_chat_history=adapted_request.request_chat_history,
+            authority_chat_history=adapted_request.authority_chat_history,
+            authority_summary=adapted_request.authority_summary,
+            authority_conversation_state=adapted_request.authority_conversation_state,
+            source_scope=adapted_request.source_scope,
+            selected_file_ids=adapted_request.selected_file_ids,
+            used_files=adapted_request.used_files,
+            execution_files=adapted_request.execution_files,
+            primary_file_id=adapted_request.primary_file_id,
+        )
+        graph_enabled = bool(getattr(getattr(request.app.state, "settings", None), "graph_kb_enabled", False))
+        graph_client = getattr(request.app.state, "neo4j_client", None)
+        if graph_enabled:
+            try:
+                graph_result = try_graph_kb_answer(
+                    question=adapted_request.question,
+                    conversation_context=conversation_context,
+                    neo4j_client=graph_client,
+                    max_rows=int(getattr(getattr(request.app.state, "settings", None), "graph_kb_max_rows", 20) or 20),
+                    timeout_ms=int(getattr(getattr(request.app.state, "settings", None), "graph_kb_timeout_ms", 3000) or 3000),
+                    generation_runtime=getattr(request.app.state, "generation_runtime", None),
+                )
+                if graph_result.handled:
+                    yield from _iter_graph_kb_events(
+                        result=graph_result,
+                        trace_id=adapted_request.trace_id,
+                        route=route,
+                    )
+                    return
+            except Exception as exc:
+                logger.warning("fastqa graph kb attempt failed, falling back to generation: %s", exc)
+
         runtime = getattr(request.app.state, "generation_runtime", None) if generation_runtime_is_ready(request.app.state) else None
         redis_service = getattr(request.app.state, "redis_service", None)
         if runtime is None:
@@ -671,18 +707,6 @@ def _iter_route_events(
         server_active_stream_count = None
         if limiter is not None:
             server_active_stream_count = int(limiter.snapshot().active)
-        conversation_context = build_conversation_context(
-            current_question=adapted_request.question,
-            request_chat_history=adapted_request.request_chat_history,
-            authority_chat_history=adapted_request.authority_chat_history,
-            authority_summary=adapted_request.authority_summary,
-            authority_conversation_state=adapted_request.authority_conversation_state,
-            source_scope=adapted_request.source_scope,
-            selected_file_ids=adapted_request.selected_file_ids,
-            used_files=adapted_request.used_files,
-            execution_files=adapted_request.execution_files,
-            primary_file_id=adapted_request.primary_file_id,
-        )
         qa_request = QaKbRequest(
             question=adapted_request.question,
             request_use_generation_driven=adapted_request.request_use_generation_driven,
@@ -765,6 +789,64 @@ def _iter_route_events(
     )
 
 
+def _iter_graph_kb_events(*, result: GraphKbExecutionResult, trace_id: str, route: str) -> Iterator[dict[str, Any]]:
+    template_label_map = {
+        "lookup_by_doi": "按 DOI 查询文献",
+        "expand_doi_context_by_doi": "按 DOI 展开测试/工艺",
+        "list_by_material": "按主题/材料找文献",
+        "list_by_raw_material": "按原料找文献",
+        "count_by_filter": "统计图谱命中文献",
+    }
+    template_label = template_label_map.get(str(result.template_id or "").strip(), "执行图谱检索模板")
+    result_count = int(result.result_count or 0)
+
+    yield {
+        "type": "metadata",
+        "query_mode": str(result.query_mode or "graph_kb"),
+        "route": route,
+        "trace_id": trace_id,
+    }
+    yield {
+        "type": "step",
+        "step": "graph_intent",
+        "title": "阶段一",
+        "detail": "识别知识图谱意图",
+        "message": "阶段一：识别知识图谱意图",
+        "status": "success",
+        "trace_id": trace_id,
+    }
+    yield {
+        "type": "step",
+        "step": "graph_query",
+        "title": "阶段二",
+        "detail": template_label,
+        "message": "阶段二：执行图谱检索",
+        "status": "success",
+        "trace_id": trace_id,
+    }
+    yield {
+        "type": "step",
+        "step": "graph_answer",
+        "title": "阶段三",
+        "detail": f"命中 {result_count} 条图谱结果并生成回答" if result_count > 0 else "整理图谱结果并生成回答",
+        "message": "阶段三：整理图谱结果",
+        "status": "success",
+        "data": {"count": result_count},
+        "trace_id": trace_id,
+    }
+    yield {
+        "type": "content",
+        "content": str(result.answer or ""),
+        "trace_id": trace_id,
+    }
+    yield {
+        "type": "done",
+        "route": route,
+        "references": list(result.references or []),
+        "trace_id": trace_id,
+    }
+
+
 def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: GatewayAskRequest, limiter: Any, trace_id: str, cancel_event: Event) -> Iterator[dict[str, Any]]:
     route, file_context, used_files, file_selection = _resolve_route_context(adapted_request, request)
     requested_mode = adapted_request.requested_mode
@@ -781,6 +863,7 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
         return enriched
     done_emitted = False
     metadata_emitted = False
+    current_query_mode = route
     logger = _request_logger(request, trace_id, route)
 
     logger.info(
@@ -844,7 +927,16 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
             if event_type == "done":
                 done_event = dict(event)
                 done_event["route"] = route
-                query_mode = _event_query_mode(done_event, route)
+                query_mode = str(
+                    done_event.get("query_mode")
+                    or (
+                        done_event.get("metadata").get("query_mode")
+                        if isinstance(done_event.get("metadata"), dict)
+                        else ""
+                    )
+                    or current_query_mode
+                    or route
+                )
                 if not metadata_emitted:
                     metadata_emitted = True
                     yield _metadata_event(
@@ -892,6 +984,7 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
                     len(str(done_event.get("final_answer") or "")),
                 )
                 done_emitted = True
+                current_query_mode = query_mode
                 yield _enrich_outbound_event(done_event)
                 continue
             if event_type == "metadata":
@@ -902,6 +995,7 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
                 metadata_event.setdefault("trace_id", trace_id)
                 metadata_event.setdefault("source_scope", source_scope)
                 metadata_event.setdefault("source_usage", dict(source_usage))
+                current_query_mode = str(metadata_event.get("query_mode") or current_query_mode or route)
                 metadata_emitted = True
                 yield _enrich_outbound_event(metadata_event)
                 continue
@@ -921,7 +1015,7 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
                         trace_id=trace_id,
                         source_scope=source_scope,
                         source_usage=source_usage,
-                        query_mode=_event_query_mode(error_event, route),
+                        query_mode=_event_query_mode(error_event, current_query_mode or route),
                     )
                 logger.warning(
                     "fastqa error event route=%s code=%s error=%s",
@@ -941,10 +1035,18 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
                     trace_id=trace_id,
                     source_scope=source_scope,
                     source_usage=source_usage,
-                    query_mode=route,
+                    query_mode=current_query_mode or route,
                 )
             logger.info("fastqa stream finished without explicit done event; emitting synthetic done route=%s", route)
-            yield _done_event(route=route, used_files=used_files, trace_id=trace_id, file_selection=file_selection, source_scope=source_scope, source_usage=source_usage, query_mode=route)
+            yield _done_event(
+                route=route,
+                used_files=used_files,
+                trace_id=trace_id,
+                file_selection=file_selection,
+                source_scope=source_scope,
+                source_usage=source_usage,
+                query_mode=current_query_mode or route,
+            )
     except Exception as exc:
         logger.error("fastqa stream execution failed route=%s error=%s", route, exc, exc_info=True)
         if not metadata_emitted:
@@ -955,7 +1057,7 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
                 trace_id=trace_id,
                 source_scope=source_scope,
                 source_usage=source_usage,
-                query_mode=route,
+                query_mode=current_query_mode or route,
             )
         yield _runtime_error_event(
             code="FASTQA_RUNTIME_ERROR",
