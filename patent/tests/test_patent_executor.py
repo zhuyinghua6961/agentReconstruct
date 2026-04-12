@@ -26,6 +26,52 @@ def _section_body(markdown: str, heading: str) -> str:
     return text[start:next_heading].strip()
 
 
+def _build_valid_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：围绕方案 {index} 展开研究，并给出明确的中文结论。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：采用表征测试与性能验证结合的方法，重点分析方案 {index}。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：面向应用方向 {index} 的性能优化场景。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 所有文献都提供了可比较的实验结论。",
+            "",
+            "## 总结",
+            "- 这些文献展示了不同技术路线下的差异化优化方向。",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _make_request(trace_id: str = "req_123", question: str = "Explain the novelty.") -> PatentAskRequest:
     return PatentAskRequest(
         question=question,
@@ -943,7 +989,7 @@ def test_executor_pdf_compare_route_records_compare_steps_and_metadata_parity(tm
                 if path == str(pdf_path_a)
                 else "Abstract B.\n\nResults B observed.\n\nConclusion B final."
             ),
-            answer_question_fn=lambda **kwargs: "对比结果：文献 1 与文献 2 存在明显差异。",
+            answer_question_fn=lambda **kwargs: _build_valid_compare_answer(["paper-a.pdf", "paper-b.pdf"]),
         )
     )
     progress_steps: list[dict[str, object]] = []
@@ -998,7 +1044,7 @@ def test_executor_pdf_compare_success_emits_final_step_before_first_content(tmp_
                 if path == str(pdf_path_a)
                 else "Abstract B.\n\nResults B observed.\n\nConclusion B final."
             ),
-            answer_question_fn=lambda **kwargs: "对比结果：文献 1 与文献 2 存在明显差异。",
+            answer_question_fn=lambda **kwargs: _build_valid_compare_answer(["paper-a.pdf", "paper-b.pdf"]),
         )
     )
     events: list[tuple[str, str, str]] = []
@@ -1022,6 +1068,18 @@ def test_executor_pdf_compare_success_emits_final_step_before_first_content(tmp_
     )
 
     assert result["metadata"]["answer_mode"] == "pdf_text_compare"
+    assert "## 具体内容对比" in result["answer_text"]
+    assert "## 研究方法差异" in result["answer_text"]
+    assert "## 应用领域差异" in result["answer_text"]
+    assert "## 相同点" in result["answer_text"]
+    assert "## 总结" in result["answer_text"]
+    assert result["answer_text"].index("## 具体内容对比") < result["answer_text"].index("## 研究方法差异") < result["answer_text"].index("## 应用领域差异") < result["answer_text"].index("## 相同点") < result["answer_text"].index("## 总结")
+    assert "### 文献 #1 核心内容（根据PDF原文）" in result["answer_text"]
+    assert "### 文献 #2 核心内容（根据PDF原文）" in result["answer_text"]
+    assert "### 文献 #1 采用的研究方法" in result["answer_text"]
+    assert "### 文献 #2 采用的研究方法" in result["answer_text"]
+    assert "### 文献 #1 关注的应用领域" in result["answer_text"]
+    assert "### 文献 #2 关注的应用领域" in result["answer_text"]
     first_content_index = next(index for index, item in enumerate(events) if item[0] == "content")
     final_success_index = max(
         index
@@ -1038,8 +1096,10 @@ def test_executor_pdf_compare_streaming_generator_emits_content_before_final_suc
     pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
 
     def _streaming_compare(**kwargs):
-        yield "对比结果：文献 1 更强调效率提升，"
-        yield "文献 2 更强调循环保持。"
+        answer = _build_valid_compare_answer(["paper-a.pdf", "paper-b.pdf"])
+        midpoint = len(answer) // 2
+        yield answer[:midpoint]
+        yield answer[midpoint:]
 
     executor = PatentExecutor(
         pdf_service=PatentPdfService(
@@ -1072,6 +1132,18 @@ def test_executor_pdf_compare_streaming_generator_emits_content_before_final_suc
     )
 
     assert result["metadata"]["answer_mode"] == "pdf_text_compare"
+    assert "## 具体内容对比" in result["answer_text"]
+    assert "## 研究方法差异" in result["answer_text"]
+    assert "## 应用领域差异" in result["answer_text"]
+    assert "## 相同点" in result["answer_text"]
+    assert "## 总结" in result["answer_text"]
+    assert result["answer_text"].index("## 具体内容对比") < result["answer_text"].index("## 研究方法差异") < result["answer_text"].index("## 应用领域差异") < result["answer_text"].index("## 相同点") < result["answer_text"].index("## 总结")
+    assert "### 文献 #1 核心内容（根据PDF原文）" in result["answer_text"]
+    assert "### 文献 #2 核心内容（根据PDF原文）" in result["answer_text"]
+    assert "### 文献 #1 采用的研究方法" in result["answer_text"]
+    assert "### 文献 #2 采用的研究方法" in result["answer_text"]
+    assert "### 文献 #1 关注的应用领域" in result["answer_text"]
+    assert "### 文献 #2 关注的应用领域" in result["answer_text"]
     final_success_index = max(
         index
         for index, item in enumerate(events)
@@ -1209,6 +1281,47 @@ def test_executor_pdf_compare_empty_model_answer_returns_failure_not_exception(t
     assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
     assert ("step", "pdf_answer", "error") in events
     assert "无法完成完整比较" in result["answer_text"]
+
+
+def test_executor_pdf_compare_too_many_selected_documents_returns_failure_not_success(tmp_path):
+    execution_files = []
+    selected_ids = []
+    for index in range(5):
+        pdf_path = tmp_path / f"paper-{index + 1}.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+        execution_files.append(
+            {"file_id": 600 + index, "file_type": "pdf", "file_name": f"paper-{index + 1}.pdf", "local_path": str(pdf_path)}
+        )
+        selected_ids.append(600 + index)
+    calls: list[dict[str, object]] = []
+    executor = PatentExecutor(
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "Abstract.\n\nResults observed.\n\nConclusion final.",
+            answer_question_fn=lambda **kwargs: calls.append(dict(kwargs)) or (_ for _ in ()).throw(AssertionError("compare generation should not run")),
+        )
+    )
+    events: list[tuple[str, str, str]] = []
+
+    result = executor.execute_with_progress(
+        request=_make_file_request(
+            route="pdf_qa",
+            source_scope="pdf",
+            turn_mode="file_only",
+            question="对比一下这五篇文献",
+            execution_files=execution_files,
+            selected_file_ids=selected_ids,
+            trace_id="req_compare_pdf_too_many_docs",
+        ),
+        context={"recent_turns_for_llm": []},
+        progress_callback=lambda step: events.append(("step", str(step.get("step") or ""), str(step.get("status") or ""))),
+        content_callback=lambda chunk: events.append(("content", str(chunk or ""), "")),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert ("step", "multi_pdf_compare", "error") in events
+    assert "超过 4 篇文献" in result["answer_text"]
+    assert "缩小比较范围" in result["answer_text"]
+    assert calls == []
 
 
 def test_executor_dispatches_tabular_route_to_patent_tabular_service():

@@ -41,6 +41,65 @@ def _write_csv(path: Path) -> None:
     )
 
 
+def _build_valid_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：围绕方案 {index} 展开研究，并给出明确的中文结论。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：采用表征测试与性能验证结合的方法，重点分析方案 {index}。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：面向应用方向 {index} 的性能优化场景。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 所有文献都提供了可比较的实验结论。",
+            "",
+            "## 总结",
+            "- 这些文献展示了不同技术路线下的差异化优化方向。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_valid_compare_answer_out_of_order(labels: list[str]) -> str:
+    ordered = _build_valid_compare_answer(labels)
+    content_blocks = []
+    for heading in ["相同点", "总结", "应用领域差异", "研究方法差异", "具体内容对比"]:
+        marker = f"## {heading}"
+        start = ordered.index(marker)
+        next_positions = [ordered.find(f"\n## {candidate}", start + 1) for candidate in ["具体内容对比", "研究方法差异", "应用领域差异", "相同点", "总结"]]
+        next_positions = [position for position in next_positions if position > start]
+        end = min(next_positions) if next_positions else len(ordered)
+        content_blocks.append(ordered[start:end].strip())
+    return "\n\n".join(content_blocks)
+
+
 def test_build_patent_file_contract_consumes_gateway_canonical_fields_without_recanonicalizing():
     contract = build_patent_file_contract(
         route="hybrid_qa",
@@ -475,7 +534,7 @@ def test_dispatch_pdf_route_formats_two_selected_pdfs_for_compare_questions(tmp_
                 "file_name": str(kwargs["file_name"]),
             }
         )
-        or "对比结果：文献 1 与文献 2 存在明显差异。",
+        or _build_valid_compare_answer(["paper-a.pdf", "paper-b.pdf"]),
     )
 
     result = dispatch_patent_file_route(
@@ -491,7 +550,7 @@ def test_dispatch_pdf_route_formats_two_selected_pdfs_for_compare_questions(tmp_
     assert "paper-b.pdf" in captured["file_name"]
 
 
-def test_dispatch_pdf_route_compare_answer_is_restructured_with_distinct_facts_from_both_documents(tmp_path):
+def test_dispatch_pdf_route_compare_answer_is_restructured_with_five_target_sections(tmp_path):
     pdf_path_a = tmp_path / "paper-a.pdf"
     pdf_path_b = tmp_path / "paper-b.pdf"
     pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
@@ -519,32 +578,32 @@ def test_dispatch_pdf_route_compare_answer_is_restructured_with_distinct_facts_f
                 if path == str(pdf_path_a)
                 else "Abstract B studies phosphate stabilization.\n\nResults B keep 200-cycle retention.\n\nConclusion B favors route B."
             ),
-            answer_question_fn=lambda **kwargs: "文献 1 更强调效率提升，文献 2 更强调循环保持。",
+            answer_question_fn=lambda **kwargs: _build_valid_compare_answer_out_of_order(["paper-a.pdf", "paper-b.pdf"]),
         ),
         tabular_service=PatentTabularService(),
     )
 
     assert result["metadata"]["answer_mode"] == "pdf_text_compare"
-    assert "各自概要" in result["answer_text"]
-    assert result["answer_text"].count("研究目的和背景") >= 2
-    assert result["answer_text"].count("研究方法/实验设计") >= 2
-    assert result["answer_text"].count("主要发现和结果") >= 2
-    assert result["answer_text"].count("结论和意义") >= 2
-    assert "相同点" in result["answer_text"]
-    assert "差异点" in result["answer_text"]
-    assert "总结" in result["answer_text"]
+    answer = result["answer_text"]
+    assert "## 具体内容对比" in answer
+    assert "## 研究方法差异" in answer
+    assert "## 应用领域差异" in answer
+    assert "## 相同点" in answer
+    assert "## 总结" in answer
+    assert answer.index("## 具体内容对比") < answer.index("## 研究方法差异") < answer.index("## 应用领域差异") < answer.index("## 相同点") < answer.index("## 总结")
+    assert "### 文献 #1 核心内容（根据PDF原文）" in answer
+    assert "### 文献 #2 核心内容（根据PDF原文）" in answer
+    assert "### 文献 #1 采用的研究方法" in answer
+    assert "### 文献 #2 采用的研究方法" in answer
+    assert "### 文献 #1 关注的应用领域" in answer
+    assert "### 文献 #2 关注的应用领域" in answer
     assert "paper-a.pdf" in result["answer_text"]
     assert "paper-b.pdf" in result["answer_text"]
-    assert "15% efficiency improvement" in result["answer_text"]
-    assert "200-cycle retention" in result["answer_text"]
-    assert re.search(
-        r"paper-a\.pdf[\s\S]*?研究目的和背景[\s\S]*?研究方法/实验设计[\s\S]*?主要发现和结果[\s\S]*?结论和意义",
-        result["answer_text"],
-    )
-    assert re.search(
-        r"paper-b\.pdf[\s\S]*?研究目的和背景[\s\S]*?研究方法/实验设计[\s\S]*?主要发现和结果[\s\S]*?结论和意义",
-        result["answer_text"],
-    )
+    assert "paper-a.pdf" in result["answer_text"]
+    assert "paper-b.pdf" in result["answer_text"]
+    assert "明确的中文结论" in result["answer_text"]
+    assert "各自概要" not in answer
+    assert "差异点" not in answer
     assert "paper-a.pdf" in result["metadata"]["prepared_pdf_text"]
     assert "paper-b.pdf" in result["metadata"]["prepared_pdf_text"]
 
@@ -577,16 +636,16 @@ def test_dispatch_pdf_route_compare_answer_restructures_when_markers_are_out_of_
                 if path == str(pdf_path_a)
                 else "Abstract B studies phosphate stabilization.\n\nResults B keep 200-cycle retention.\n\nConclusion B favors route B."
             ),
-            answer_question_fn=lambda **kwargs: "相同点：都有实验。\n差异点：A 强调效率，B 强调循环。\n总结：存在差异。\n各自概要：略。",
+            answer_question_fn=lambda **kwargs: _build_valid_compare_answer_out_of_order(["paper-a.pdf", "paper-b.pdf"]),
         ),
         tabular_service=PatentTabularService(),
     )
 
     answer = result["answer_text"]
-    assert answer.index("各自概要") < answer.index("相同点") < answer.index("差异点") < answer.index("总结")
+    assert answer.index("## 具体内容对比") < answer.index("## 研究方法差异") < answer.index("## 应用领域差异") < answer.index("## 相同点") < answer.index("## 总结")
 
 
-def test_dispatch_pdf_route_compare_answer_preserves_valid_numbered_markdown_structure(tmp_path):
+def test_dispatch_pdf_route_compare_answer_preserves_valid_five_section_markdown_structure(tmp_path):
     pdf_path_a = tmp_path / "paper-a.pdf"
     pdf_path_b = tmp_path / "paper-b.pdf"
     pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
@@ -620,16 +679,24 @@ def test_dispatch_pdf_route_compare_answer_preserves_valid_numbered_markdown_str
             ),
             answer_question_fn=lambda **kwargs: (
                 "两篇文献对比分析\n\n"
-                "## 1. 文献概要\n"
-                "- paper-a.pdf：强调 15% efficiency improvement，并倾向 route A。\n"
-                "- paper-b.pdf：强调 200-cycle retention，并倾向 route B。\n\n"
-                "## 2. 研究主题/目标\n"
-                "- 两篇都围绕正极体系优化展开，但关注点不同。\n\n"
-                "## 3. 相同点\n"
+                "## 具体内容对比\n"
+                "### 文献 #1 核心内容（根据PDF原文）\n"
+                "- paper-a.pdf：围绕富锰正极体系展开，并报告了效率提升趋势。\n"
+                "### 文献 #2 核心内容（根据PDF原文）\n"
+                "- paper-b.pdf：聚焦磷酸盐稳定化路线，并强调长循环保持能力。\n\n"
+                "## 研究方法差异\n"
+                "### 文献 #1 采用的研究方法\n"
+                "- 通过电化学测试与倍率性能评估验证材料表现。\n"
+                "### 文献 #2 采用的研究方法\n"
+                "- 通过循环寿命测试与稳定性对照验证改性效果。\n\n"
+                "## 应用领域差异\n"
+                "### 文献 #1 关注的应用领域\n"
+                "- 高倍率正极优化。\n"
+                "### 文献 #2 关注的应用领域\n"
+                "- 长循环稳定性提升。\n\n"
+                "## 相同点\n"
                 "- 都提供了实验结果和明确结论。\n\n"
-                "## 4. 差异点\n"
-                "- 第一篇更强调效率提升，第二篇更强调循环保持。\n\n"
-                "## 5. 总结\n"
+                "## 总结\n"
                 "- 两篇文献分别代表效率导向与稳定性导向。"
             ),
         ),
@@ -637,11 +704,15 @@ def test_dispatch_pdf_route_compare_answer_preserves_valid_numbered_markdown_str
     )
 
     answer = result["answer_text"]
-    assert "## 1. 文献概要" in answer
-    assert "## 5. 总结" in answer
+    assert "## 具体内容对比" in answer
+    assert "## 研究方法差异" in answer
+    assert "## 应用领域差异" in answer
+    assert "## 相同点" in answer
+    assert "## 总结" in answer
+    assert answer.index("## 具体内容对比") < answer.index("## 研究方法差异") < answer.index("## 应用领域差异") < answer.index("## 相同点") < answer.index("## 总结")
     assert "各自概要：" not in answer
-    assert "两篇文献对比分析 ## 1." not in answer
-    assert answer.count("## 5. 总结") == 1
+    assert "差异点：" not in answer
+    assert answer.count("## 总结") == 1
 
 
 def test_dispatch_pdf_route_compare_answer_restructures_when_headings_exist_but_document_facts_are_missing(tmp_path):
@@ -672,15 +743,16 @@ def test_dispatch_pdf_route_compare_answer_restructures_when_headings_exist_but_
                 if path == str(pdf_path_a)
                 else "Abstract B studies phosphate stabilization.\n\nResults B keep 200-cycle retention.\n\nConclusion B favors route B."
             ),
-            answer_question_fn=lambda **kwargs: "各自概要：\n1. 文献一：略。\n2. 文献二：略。\n\n相同点：都有实验。\n\n差异点：存在差异。\n\n总结：略。",
+            answer_question_fn=lambda **kwargs: "## 具体内容对比\n- 略。\n\n## 研究方法差异\n- 略。\n\n## 应用领域差异\n- 略。\n\n## 相同点\n- 都有实验。\n\n## 总结\n- 略。",
         ),
         tabular_service=PatentTabularService(),
     )
 
-    assert "paper-a.pdf" in result["answer_text"]
-    assert "paper-b.pdf" in result["answer_text"]
-    assert "15% efficiency improvement" in result["answer_text"]
-    assert "200-cycle retention" in result["answer_text"]
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+    assert "逐篇中文核心内容" in result["answer_text"]
+    assert "15% efficiency improvement" not in result["answer_text"]
+    assert "200-cycle retention" not in result["answer_text"]
 
 
 def test_dispatch_pdf_route_compare_answer_restructures_when_only_labels_exist_without_distinct_facts(tmp_path):
@@ -711,15 +783,16 @@ def test_dispatch_pdf_route_compare_answer_restructures_when_only_labels_exist_w
                 if path == str(pdf_path_a)
                 else "Abstract B studies phosphate stabilization.\n\nResults B keep 200-cycle retention.\n\nConclusion B favors route B."
             ),
-            answer_question_fn=lambda **kwargs: (
-                "各自概要：\n1. paper-a.pdf：略。\n2. paper-b.pdf：略。\n\n相同点：都有实验。\n\n差异点：存在差异。\n\n总结：略。"
-            ),
+            answer_question_fn=lambda **kwargs: "## 具体内容对比\n### 文献 #1 核心内容（根据PDF原文）\n- paper-a.pdf：略。\n### 文献 #2 核心内容（根据PDF原文）\n- paper-b.pdf：略。\n\n## 研究方法差异\n- 略。\n\n## 应用领域差异\n- 略。\n\n## 相同点\n- 都有实验。\n\n## 总结\n- 略。",
         ),
         tabular_service=PatentTabularService(),
     )
 
-    assert "15% efficiency improvement" in result["answer_text"]
-    assert "200-cycle retention" in result["answer_text"]
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+    assert "逐篇中文核心内容" in result["answer_text"]
+    assert "15% efficiency improvement" not in result["answer_text"]
+    assert "200-cycle retention" not in result["answer_text"]
 
 
 def test_dispatch_pdf_route_compare_answer_restructures_when_only_shared_tokens_are_repeated(tmp_path):
@@ -751,19 +824,244 @@ def test_dispatch_pdf_route_compare_answer_restructures_when_only_shared_tokens_
                 else "Abstract B keeps a shared compare anchor.\n\nResults B keep 200-cycle retention.\n\nConclusion B favors route B."
             ),
             answer_question_fn=lambda **kwargs: (
-                "各自概要：\n"
-                "1. paper-a.pdf：shared compare anchor。\n"
-                "2. paper-b.pdf：shared compare anchor。\n\n"
-                "相同点：都有实验。\n\n"
-                "差异点：存在差异。\n\n"
-                "总结：略。"
+                "## 具体内容对比\n"
+                "### 文献 #1 核心内容（根据PDF原文）\n"
+                "- paper-a.pdf：shared compare anchor。\n"
+                "### 文献 #2 核心内容（根据PDF原文）\n"
+                "- paper-b.pdf：shared compare anchor。\n\n"
+                "## 研究方法差异\n- 略。\n\n"
+                "## 应用领域差异\n- 略。\n\n"
+                "## 相同点\n- 都有实验。\n\n"
+                "## 总结\n- 略。"
             ),
         ),
         tabular_service=PatentTabularService(),
     )
 
-    assert "15% efficiency improvement" in result["answer_text"]
-    assert "200-cycle retention" in result["answer_text"]
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+    assert "shared compare anchor" not in result["answer_text"]
+    assert "逐篇中文核心内容" in result["answer_text"]
+
+
+def test_dispatch_pdf_route_compare_answer_requires_per_document_structure_for_three_documents(tmp_path):
+    pdf_paths = []
+    execution_files = []
+    selected_ids = []
+    for index in range(3):
+        pdf_path = tmp_path / f"paper-{index + 1}.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+        pdf_paths.append(pdf_path)
+        execution_files.append(
+            {
+                "file_id": 410 + index,
+                "file_type": "pdf",
+                "file_name": f"paper-{index + 1}.pdf",
+                "local_path": str(pdf_path),
+            }
+        )
+        selected_ids.append(410 + index)
+
+    contract = build_patent_file_contract(
+        question="对比一下这三篇文献的方法和应用方向",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=selected_ids,
+        primary_file_id=selected_ids[0],
+        execution_files=execution_files,
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": selected_ids, "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "中文摘要。\n\n实验结果明确。\n\n结论完整。",
+            answer_question_fn=lambda **kwargs: (
+                "## 具体内容对比\n"
+                "- 三篇文献都讨论电池材料，但关注重点不同。\n\n"
+                "## 研究方法差异\n"
+                "- 有的使用表征测试，有的使用循环验证。\n\n"
+                "## 应用领域差异\n"
+                "- 覆盖倍率性能、循环稳定性和界面改性。\n\n"
+                "## 相同点\n"
+                "- 都给出了实验结论。\n\n"
+                "## 总结\n"
+                "- 这些文献展示了不同优化方向。"
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+    assert "逐篇" in result["answer_text"]
+
+
+def test_dispatch_pdf_route_returns_explicit_compare_failure_when_selected_compare_docs_exceed_bound(tmp_path):
+    pdf_paths = []
+    execution_files = []
+    selected_ids = []
+    for index in range(5):
+        pdf_path = tmp_path / f"paper-{index + 1}.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+        pdf_paths.append(pdf_path)
+        execution_files.append(
+            {
+                "file_id": 300 + index,
+                "file_type": "pdf",
+                "file_name": f"paper-{index + 1}.pdf",
+                "local_path": str(pdf_path),
+            }
+        )
+        selected_ids.append(300 + index)
+    contract = build_patent_file_contract(
+        question="对比一下这五篇文献",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=selected_ids,
+        primary_file_id=selected_ids[0],
+        execution_files=execution_files,
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": selected_ids},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    calls: list[dict[str, object]] = []
+    service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: "Abstract.\n\nResults observed.\n\nConclusion final.",
+        answer_question_fn=lambda **kwargs: calls.append(dict(kwargs)) or (_ for _ in ()).throw(AssertionError("compare generation should not run")),
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=service,
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "超过 4 篇文献" in result["answer_text"]
+    assert "缩小比较范围" in result["answer_text"]
+    assert calls == []
+
+
+def test_dispatch_pdf_route_rejects_bad_english_fragment_compare_output(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12]},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "Abstract A discusses manganese-rich cathodes.\n\nResults A show 15% efficiency improvement.\n\nConclusion A favors route A."
+                if path == str(pdf_path_a)
+                else "Abstract B studies phosphate stabilization.\n\nResults B keep 200-cycle retention.\n\nConclusion B favors route B."
+            ),
+            answer_question_fn=lambda **kwargs: (
+                "## 具体内容对比\n"
+                "### 文献 #1 核心内容（根据PDF原文）\n"
+                "- Abstract A in- str fragment.\n"
+                "### 文献 #2 核心内容（根据PDF原文）\n"
+                "- Abstract B duplicate fragment.\n\n"
+                "## 研究方法差异\n"
+                "### 文献 #1 采用的研究方法\n"
+                "- Results A 15% improvement.\n"
+                "### 文献 #2 采用的研究方法\n"
+                "- Results B 200-cycle retention.\n\n"
+                "## 应用领域差异\n"
+                "### 文献 #1 关注的应用领域\n"
+                "- route A deployment.\n"
+                "### 文献 #2 关注的应用领域\n"
+                "- route B deployment.\n\n"
+                "## 相同点\n"
+                "- Both provide experiments.\n\n"
+                "## 总结\n"
+                "- 两篇文献存在差异。"
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+    assert "in- str" not in result["answer_text"]
+    assert "Abstract A in- str fragment." not in result["answer_text"]
+    assert "Abstract B duplicate fragment." not in result["answer_text"]
+    assert "Results A 15% improvement." not in result["answer_text"]
+    assert "Results B 200-cycle retention." not in result["answer_text"]
+
+
+def test_dispatch_pdf_route_rejects_compare_output_with_hollow_shared_section_and_empty_summary(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12]},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "中文摘要 A。\n\n实验结果 A 明确。\n\n结论 A 完整。"
+                if path == str(pdf_path_a)
+                else "中文摘要 B。\n\n实验结果 B 明确。\n\n结论 B 完整。"
+            ),
+            answer_question_fn=lambda **kwargs: (
+                "## 具体内容对比\n"
+                "### 文献 #1 核心内容（根据PDF原文）\n"
+                "- paper-a.pdf：围绕方案一展开研究，并给出明确的中文结论。\n"
+                "### 文献 #2 核心内容（根据PDF原文）\n"
+                "- paper-b.pdf：围绕方案二展开研究，并给出明确的中文结论。\n\n"
+                "## 研究方法差异\n"
+                "### 文献 #1 采用的研究方法\n"
+                "- 采用表征测试与性能验证结合的方法。\n"
+                "### 文献 #2 采用的研究方法\n"
+                "- 采用循环测试与稳定性评估结合的方法。\n\n"
+                "## 应用领域差异\n"
+                "### 文献 #1 关注的应用领域\n"
+                "- 面向高倍率性能优化。\n"
+                "### 文献 #2 关注的应用领域\n"
+                "- 面向长循环稳定性提升。\n\n"
+                "## 相同点\n"
+                "- Both provide experiments.\n\n"
+                "## 总结\n"
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+    assert "所选文献都提供了可用于逐篇比较的 PDF 原文证据。" not in result["answer_text"]
 
 
 def test_dispatch_pdf_route_returns_explicit_compare_failure_when_only_one_pdf_is_readable(tmp_path):
@@ -929,7 +1227,8 @@ def test_dispatch_pdf_route_preserves_per_document_abstract_for_four_doc_compare
     }
     service = PatentPdfService(
         extract_pdf_text_fn=lambda path, max_pages=10: texts[path],
-        answer_question_fn=lambda **kwargs: captured.update({"pdf_text": str(kwargs["pdf_text"])}) or "对比结果",
+        answer_question_fn=lambda **kwargs: captured.update({"pdf_text": str(kwargs["pdf_text"])})
+        or _build_valid_compare_answer([f"paper-{index}.pdf" for index in range(1, 5)]),
         max_pdf_chars=1000,
     )
 
@@ -979,7 +1278,8 @@ def test_dispatch_pdf_route_drops_reference_tail_from_compare_context(tmp_path):
     }
     service = PatentPdfService(
         extract_pdf_text_fn=lambda path, max_pages=10: texts[path],
-        answer_question_fn=lambda **kwargs: captured.update({"pdf_text": str(kwargs["pdf_text"])}) or "对比结果",
+        answer_question_fn=lambda **kwargs: captured.update({"pdf_text": str(kwargs["pdf_text"])})
+        or _build_valid_compare_answer(["paper-a.pdf", "paper-b.pdf"]),
         max_pdf_chars=560,
     )
 
@@ -1071,7 +1371,8 @@ def test_dispatch_pdf_route_allows_appendix_word_inside_body_content(tmp_path):
             else "Abstract B mentions appendix-based evaluation setup.\n\n"
             "Results B observed.\n\nConclusion B final."
         ),
-        answer_question_fn=lambda **kwargs: captured.update({"pdf_text": str(kwargs["pdf_text"])}) or "对比结果",
+        answer_question_fn=lambda **kwargs: captured.update({"pdf_text": str(kwargs["pdf_text"])})
+        or _build_valid_compare_answer(["paper-a.pdf", "paper-b.pdf"]),
     )
 
     result = dispatch_patent_file_route(
@@ -1166,7 +1467,7 @@ def test_dispatch_pdf_route_accepts_long_compare_paragraphs_when_required_slices
         extract_pdf_text_fn=lambda path, max_pages=10: (
             f"{long_abstract}\n\nMethod {Path(path).stem}.\n\nResults {Path(path).stem} observed.\n\n{long_conclusion}"
         ),
-        answer_question_fn=lambda **kwargs: "对比结果",
+        answer_question_fn=lambda **kwargs: _build_valid_compare_answer([f"paper-{index}.pdf" for index in range(1, 5)]),
         max_pdf_chars=1000,
     )
 
@@ -1206,7 +1507,8 @@ def test_dispatch_pdf_route_preserves_compare_slices_for_flattened_single_newlin
             if path == str(pdf_path_a)
             else f"{flat_front_matter}\nAbstract B short.\nMethod B.\nResults B observed.\nConclusion B final."
         ),
-        answer_question_fn=lambda **kwargs: captured.update({"pdf_text": str(kwargs["pdf_text"])}) or "对比结果",
+        answer_question_fn=lambda **kwargs: captured.update({"pdf_text": str(kwargs["pdf_text"])})
+        or _build_valid_compare_answer(["paper-a.pdf", "paper-b.pdf"]),
         max_pdf_chars=560,
     )
 
@@ -1248,7 +1550,7 @@ def test_dispatch_pdf_route_allows_late_appendix_based_body_paragraph(tmp_path):
             if path == str(pdf_path_a)
             else "Abstract B short.\n\nMethod B.\n\nAppendix-based evaluation setup improved precision.\n\nConclusion B final."
         ),
-        answer_question_fn=lambda **kwargs: "对比结果",
+        answer_question_fn=lambda **kwargs: _build_valid_compare_answer(["paper-a.pdf", "paper-b.pdf"]),
     )
 
     result = dispatch_patent_file_route(
@@ -1285,7 +1587,7 @@ def test_dispatch_pdf_route_matches_compare_sections_by_exact_file_label(tmp_pat
             if path == str(pdf_path_short)
             else "Abstract myfoo exact.\n\nResults myfoo exact.\n\nConclusion myfoo exact."
         ),
-        answer_question_fn=lambda **kwargs: "对比结果",
+        answer_question_fn=lambda **kwargs: _build_valid_compare_answer(["my-foo.pdf", "foo.pdf"]),
     )
 
     monkeypatch.setattr(
@@ -1343,7 +1645,8 @@ def test_dispatch_pdf_route_preserves_section_body_when_headings_are_standalone_
                 "Conclusion\n\nConclusion body B keeps the real tail evidence."
             )
         ),
-        answer_question_fn=lambda **kwargs: captured.update({"pdf_text": str(kwargs["pdf_text"])}) or "对比结果",
+        answer_question_fn=lambda **kwargs: captured.update({"pdf_text": str(kwargs["pdf_text"])})
+        or _build_valid_compare_answer(["paper-a.pdf", "paper-b.pdf"]),
         max_pdf_chars=560,
     )
 
@@ -1364,7 +1667,7 @@ def test_dispatch_pdf_route_fails_explicitly_when_compare_budget_is_too_small(tm
     pdf_paths = []
     execution_files = []
     selected_ids = []
-    for index in range(5):
+    for index in range(4):
         pdf_path = tmp_path / f"paper-{index + 1}.pdf"
         pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
         pdf_paths.append(pdf_path)
@@ -1378,7 +1681,7 @@ def test_dispatch_pdf_route_fails_explicitly_when_compare_budget_is_too_small(tm
         )
         selected_ids.append(100 + index)
     contract = build_patent_file_contract(
-        question="对比一下这五篇文献的内容",
+        question="对比一下这四篇文献的内容",
         route="pdf_qa",
         source_scope="pdf",
         selected_file_ids=selected_ids,
@@ -1397,6 +1700,7 @@ def test_dispatch_pdf_route_fails_explicitly_when_compare_budget_is_too_small(tm
         answer_question_fn=lambda **kwargs: "",
         max_pdf_chars=120,
     )
+    service._max_pdf_chars = 120
 
     result = dispatch_patent_file_route(
         contract=contract,

@@ -196,28 +196,88 @@ def test_multi_pdf_format_uses_fastqa_compatible_headers():
     assert FASTQA_TRUNCATION.MULTI_DOC_HEADER_PATTERN.search(formatted) is not None
 
 
-def test_compare_prompt_includes_required_comparison_structure():
+def test_compare_prompt_requires_five_section_contract_for_two_documents():
     prompt = build_patent_pdf_answer_prompt(
         question="对比一下这两篇文献的内容",
         pdf_content="==== 文献 1: paper-a.pdf ====\nA\n\n==== 文献 2: paper-b.pdf ====\nB",
         kb_section="",
         is_summary=False,
         is_compare=True,
-        selected_file_labels=["paper-a.pdf", "paper-b.pdf", "paper-c.pdf"],
+        selected_file_labels=["paper-a.pdf", "paper-b.pdf"],
     )
 
-    assert "共涉及 3 篇文献" in prompt
-    assert "先分别总结每篇文献" in prompt
-    assert "逐篇给出文献概要" in prompt
-    assert "研究目的和背景" in prompt
-    assert "研究方法/实验设计" in prompt
-    assert "主要发现和结果" in prompt
-    assert "结论和意义" in prompt
-    assert "相同点" in prompt
-    assert "差异点" in prompt
+    assert "共涉及 2 篇文献" in prompt
+    assert "## 具体内容对比" in prompt
+    assert "## 研究方法差异" in prompt
+    assert "## 应用领域差异" in prompt
+    assert "## 相同点" in prompt
+    assert "## 总结" in prompt
+    assert "### 文献 #1 核心内容（根据PDF原文）" in prompt
+    assert "### 文献 #2 核心内容（根据PDF原文）" in prompt
+    assert "### 文献 #1 采用的研究方法" in prompt
+    assert "### 文献 #2 采用的研究方法" in prompt
+    assert "### 文献 #1 关注的应用领域" in prompt
+    assert "### 文献 #2 关注的应用领域" in prompt
+    assert "高质量的中文总结" in prompt
+    assert "不得直接摘录英文摘要" in prompt
+    assert "证据不足" in prompt
     assert "paper-a.pdf" in prompt
     assert "paper-b.pdf" in prompt
-    assert "paper-c.pdf" in prompt
+    assert "各自概要" not in prompt
+    assert "差异点" not in prompt
+
+
+def test_compare_prompt_allows_compact_compare_for_three_to_four_documents():
+    prompt = build_patent_pdf_answer_prompt(
+        question="对比一下这四篇文献的方法和应用方向",
+        pdf_content=(
+            "==== 文献 1: paper-1.pdf ====\nA\n\n"
+            "==== 文献 2: paper-2.pdf ====\nB\n\n"
+            "==== 文献 3: paper-3.pdf ====\nC\n\n"
+            "==== 文献 4: paper-4.pdf ====\nD"
+        ),
+        kb_section="",
+        is_summary=False,
+        is_compare=True,
+        selected_file_labels=["paper-1.pdf", "paper-2.pdf", "paper-3.pdf", "paper-4.pdf"],
+    )
+
+    assert "共涉及 4 篇文献" in prompt
+    assert "## 具体内容对比" in prompt
+    assert "## 研究方法差异" in prompt
+    assert "## 应用领域差异" in prompt
+    assert "3 到 4 篇文献" in prompt or "3-4 篇文献" in prompt
+    assert "可适当压缩" in prompt
+    assert "每篇文献至少保留一个可区分的事实" in prompt
+    assert "### 文献 #1 核心内容（根据PDF原文）" not in prompt
+    assert "### 文献 #1 采用的研究方法" not in prompt
+    assert "### 文献 #1 关注的应用领域" not in prompt
+
+
+def test_compare_prompt_refuses_to_promise_rich_contract_for_more_than_four_documents():
+    prompt = build_patent_pdf_answer_prompt(
+        question="对比一下这五篇文献",
+        pdf_content=(
+            "==== 文献 1: paper-1.pdf ====\nA\n\n"
+            "==== 文献 2: paper-2.pdf ====\nB\n\n"
+            "==== 文献 3: paper-3.pdf ====\nC\n\n"
+            "==== 文献 4: paper-4.pdf ====\nD\n\n"
+            "==== 文献 5: paper-5.pdf ====\nE"
+        ),
+        kb_section="",
+        is_summary=False,
+        is_compare=True,
+        selected_file_labels=["paper-1.pdf", "paper-2.pdf", "paper-3.pdf", "paper-4.pdf", "paper-5.pdf"],
+    )
+
+    assert "共涉及 5 篇文献" in prompt
+    assert "超过 4 篇文献" in prompt
+    assert "请缩小比较范围" in prompt
+    assert "请按以下五个一级章节组织回答" not in prompt
+    assert "## 具体内容对比" not in prompt
+    assert "## 研究方法差异" not in prompt
+    assert "## 应用领域差异" not in prompt
+    assert "### 文献 #1 核心内容（根据PDF原文）" not in prompt
 
 
 def test_compare_fallback_refuses_to_pretend_summary_success():
