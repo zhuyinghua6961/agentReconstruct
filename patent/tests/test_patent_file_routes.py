@@ -416,8 +416,185 @@ def test_dispatch_pdf_route_summary_aligns_to_literature_summary_sections(tmp_pa
     assert "## 研究方法/实验设计" in answer
     assert "## 主要发现和结果" in answer
     assert "## 结论和意义" in answer
+    assert "## 局限性" in answer
     assert "注*" in answer
     assert "LMFP/LFP" in answer
+
+
+def test_dispatch_pdf_route_summary_preserves_well_structured_model_answer(tmp_path):
+    pdf_path = tmp_path / "battery-paper-structured.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    structured_answer = "\n".join(
+        [
+            "## 研究目的和背景",
+            "- 原文首先说明高倍率充电中的安全性问题。",
+            "",
+            "## 研究方法/实验设计",
+            "- 研究对象为 LMFP/LFP 复配体系。",
+            "- 方法流程：",
+            "  - 先比较不同配比。",
+            "  - 再验证高倍率充电表现。",
+            "",
+            "## 主要发现和结果",
+            "- LMFP/LFP 复配改善了高倍率充电安全性。",
+            "",
+            "## 结论和意义",
+            "- 该路线对兼顾能量密度与安全性有帮助。",
+            "",
+            "## 局限性",
+            "- 原文指出长循环验证仍有限。",
+        ]
+    )
+    contract = build_patent_file_contract(
+        question="请总结这篇文献的研究内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11],
+        primary_file_id=11,
+        execution_files=[{**PDF_FILE, "local_path": str(pdf_path)}],
+        file_selection={"strategy": "explicit_selection"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "Structured source text with multi-step method and limitations.",
+            answer_question_fn=lambda **kwargs: structured_answer,
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    answer = result["answer_text"]
+    assert "## 局限性" in answer
+    assert "- 方法流程：" in answer
+    assert "  - 先比较不同配比。" in answer
+    assert "高倍率充电安全性" in answer
+
+
+def test_dispatch_pdf_route_summary_repair_rebuilds_legacy_four_block_answer_with_limitations(tmp_path):
+    pdf_path = tmp_path / "battery-paper-legacy.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="请总结这篇文献的研究内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11],
+        primary_file_id=11,
+        execution_files=[{**PDF_FILE, "local_path": str(pdf_path)}],
+        file_selection={"strategy": "explicit_selection"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "The paper explains the motivation, method setup, quantitative findings, "
+                "and notes that long-cycle validation is still limited."
+            ),
+            answer_question_fn=lambda **kwargs: "\n".join(
+                [
+                    "## 结论",
+                    "本文认为 LMFP/LFP 复配改善了高倍率充电表现。",
+                    "",
+                    "## 证据",
+                    "- 原文报告了更稳定的充电过程。",
+                    "",
+                    "## 对比",
+                    "- 当前没有其他对照对象。",
+                    "",
+                    "## 限制",
+                    "- 长循环验证仍有限。",
+                ]
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    answer = result["answer_text"]
+    assert answer.count("## ") >= 5
+    assert "## 局限性" in answer
+    assert "注*" in answer
+
+
+def test_dispatch_pdf_route_summary_conservative_repair_keeps_sparse_usable_answer_and_adds_limitations(tmp_path):
+    pdf_path = tmp_path / "battery-paper-conservative.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="请总结这篇文献的研究内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11],
+        primary_file_id=11,
+        execution_files=[{**PDF_FILE, "local_path": str(pdf_path)}],
+        file_selection={"strategy": "explicit_selection"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "The paper studies LMFP/LFP blending for safer charging. "
+                "Method setup compares blended and baseline electrodes. "
+                "Results show safer high-rate charging. "
+                "The conclusion notes that long-cycle validation is still limited."
+            ),
+            answer_question_fn=lambda **kwargs: "LMFP/LFP 复配改善了高倍率充电安全性。长循环验证仍有限。",
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    answer = result["answer_text"]
+    assert "## 研究目的和背景" in answer
+    assert "## 研究方法/实验设计" in answer
+    assert "## 主要发现和结果" in answer
+    assert "## 结论和意义" in answer
+    assert "## 局限性" in answer
+    assert "注*" in answer
+    assert "LMFP/LFP" in answer
+
+
+def test_dispatch_pdf_route_summary_fallback_from_degraded_answer_still_emits_limitations(tmp_path):
+    pdf_path = tmp_path / "battery-paper-fallback.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="请总结这篇文献的研究内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11],
+        primary_file_id=11,
+        execution_files=[{**PDF_FILE, "local_path": str(pdf_path)}],
+        file_selection={"strategy": "explicit_selection"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "This paper studies LMFP/LFP blending for safer charging. "
+                "Method setup compares blended and baseline electrodes. "
+                "Results show safer high-rate charging. "
+                "The conclusion notes that long-cycle validation is still limited."
+            ),
+            answer_question_fn=lambda **kwargs: "",
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    answer = result["answer_text"]
+    assert "## 研究目的和背景" in answer
+    assert "## 研究方法/实验设计" in answer
+    assert "## 主要发现和结果" in answer
+    assert "## 结论和意义" in answer
+    assert "## 局限性" in answer
+    assert "注*" in answer
 
 
 def test_dispatch_pdf_route_negative_compare_question_targets_only_first_document(tmp_path):
@@ -1892,6 +2069,9 @@ def test_dispatch_hybrid_route_uses_real_pdf_and_table_content_when_local_paths_
     }.issubset(set(result["metadata"]["synthesis_contract"].keys()))
     assert "旧 pdf summary 壳子" not in result["answer_text"]
     assert "旧 table summary 壳子" not in result["answer_text"]
+    assert result["answer_text"].startswith("## 研究目的和背景")
+    assert "PDF 原文证据：" not in result["answer_text"]
+    assert "表格执行结果：" not in result["answer_text"]
 
 
 def test_dispatch_hybrid_route_passes_patent_adapted_prompts_to_pdf_and_tabular_subanswers(tmp_path):

@@ -68,12 +68,15 @@ def test_non_compare_summary_prompt_adapts_fastqa_structure_for_patent():
     assert "## 研究方法/实验设计" in patent_prompt
     assert "## 主要发现和结果" in patent_prompt
     assert "## 结论和意义" in patent_prompt
+    assert "## 局限性" in patent_prompt
     assert "注*" in patent_prompt
+    assert "PDF中未提及" in patent_prompt
     assert "\n## 结论\n" not in patent_prompt
     assert "知识库信息仅用于验证" in patent_prompt or "知识库信息仅可用于验证" in patent_prompt
     assert "不要把知识库信息当作新的 PDF 事实" in patent_prompt
     assert "专利/文献" in patent_prompt
     assert "标准 Markdown 列表" in patent_prompt or "Markdown" in patent_prompt
+    assert len(patent_prompt) < 6000
 
 
 def test_non_compare_non_summary_prompt_adapts_fastqa_structure_for_patent():

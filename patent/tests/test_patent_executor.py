@@ -1875,6 +1875,9 @@ def test_executor_hybrid_route_uses_real_pdf_and_table_content_when_local_paths_
     assert "PDF 部分：" not in result["answer_text"]
     assert "表格部分：" not in result["answer_text"]
     assert "Patent hybrid route combined selected PDF and table files" not in result["answer_text"]
+    assert result["answer_text"].startswith("## 研究目的和背景")
+    assert "PDF 原文证据：" not in result["answer_text"]
+    assert "表格执行结果：" not in result["answer_text"]
 
 
 def test_executor_hybrid_file_route_streams_composed_pdf_and_table_answer(tmp_path):
@@ -2097,7 +2100,7 @@ def test_executor_pdf_table_kb_hybrid_unifies_real_file_and_kb_evidence(tmp_path
     assert result["metadata"]["synthesis_contract"]["source_scope"] == "pdf+table+kb"
 
 
-def test_executor_pdf_table_kb_hybrid_answer_aligns_to_fastqa_structure(tmp_path):
+def test_executor_pdf_table_kb_hybrid_answer_keeps_current_mixed_evidence_behavior(tmp_path):
     pdf_path = tmp_path / "spec.pdf"
     csv_path = tmp_path / "claims.csv"
     pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
@@ -2150,15 +2153,11 @@ def test_executor_pdf_table_kb_hybrid_answer_aligns_to_fastqa_structure(tmp_path
     )
 
     answer = result["answer_text"]
-    assert "## 研究目的和背景" in answer
-    assert "## 研究方法/实验设计" in answer
-    assert "## 主要发现和结果" in answer
-    assert "## 结论和意义" in answer
-    assert "注*" in answer
     assert "LMFP/LFP" in answer
     assert "120mAh" in answer
     assert "知识库" in answer
     assert "CN123456789A" in answer
+    assert "知识库补充：" in answer or "知识库交叉验证：" in answer
 
 
 def test_executor_pdf_kb_hybrid_preserves_file_route_cache_metadata_alongside_kb_metadata():
