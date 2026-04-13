@@ -215,6 +215,61 @@ test('literature summary chapters keep nested bullets and render note as a secon
   }
 })
 
+test('literature summary keeps limitations chapter and consistent structure in streaming and final render paths', () => {
+  const markdown = [
+    '## 研究目的和背景',
+    '- 该研究围绕复杂场景中的空中视觉语言导航任务展开。',
+    '',
+    '## 研究方法/实验设计',
+    '- 方法链路包括：',
+    '  - 视觉感知与目标定位。',
+    '  - 局部地图构建与表示编码。',
+    '  - 语言模型推理与动作决策。',
+    '',
+    '## 主要发现和结果',
+    '- 该方法在多个评估指标上优于对比基线。',
+    '',
+    '## 结论和意义',
+    '- 结果说明多模态空间表示能够提升导航决策质量。',
+    '',
+    '## 局限性',
+    '- 原文指出复杂天气与长距离场景下仍存在性能下降。',
+    '',
+    '注*：所有总结内容均严格基于文件原文中明确提到的信息，未添加任何通用知识或推测内容。',
+  ].join('\n')
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  const expectedHeadings = [
+    '研究目的和背景',
+    '研究方法/实验设计',
+    '主要发现和结果',
+    '结论和意义',
+    '局限性',
+  ]
+
+  for (const html of [streamingHtml, finalHtml]) {
+    for (const heading of expectedHeadings) {
+      assert.match(html, new RegExp(`<h2>${heading}<\\/h2>`))
+    }
+    assert.match(html, /<li>(?:<p>)?方法链路包括：(?:<\/p>)?\s*<ul>/)
+    assert.match(html, /视觉感知与目标定位。/)
+    assert.match(html, /局部地图构建与表示编码。/)
+    assert.match(html, /语言模型推理与动作决策。/)
+    assert.match(html, /<p class="message-note">注\*：所有总结内容均严格基于文件原文中明确提到的信息，未添加任何通用知识或推测内容。<\/p>/)
+  }
+
+  assert.deepEqual(
+    streamingHtml.match(/<h2>[^<]+<\/h2>/g),
+    finalHtml.match(/<h2>[^<]+<\/h2>/g)
+  )
+  assert.equal(
+    (streamingHtml.match(/<li>/g) || []).length,
+    (finalHtml.match(/<li>/g) || []).length
+  )
+})
+
 test('graph kb markdown renders section headings, literature entries, and doi links cleanly', () => {
   const markdown = [
     '## 📚 文献概览',

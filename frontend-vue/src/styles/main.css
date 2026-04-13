@@ -408,9 +408,10 @@ textarea::placeholder {
 .message-content h2 {
   font-size: 18px;
   color: #667eea;
-  margin: 18px 0 12px;
+  margin: 22px 0 12px;
   padding-bottom: 6px;
   border-bottom: 1px solid rgba(102, 126, 234, 0.3);
+  line-height: 1.5;
 }
 
 .message-content h3 {
@@ -444,6 +445,10 @@ textarea::placeholder {
   list-style: disc;
 }
 
+.message-content ul ul {
+  list-style: circle;
+}
+
 .message-content ol {
   list-style: decimal;
 }
@@ -455,8 +460,8 @@ textarea::placeholder {
 
 .message-content li > ul,
 .message-content li > ol {
-  margin: 6px 0 8px;
-  padding-left: 1.25rem;
+  margin: 8px 0 10px;
+  padding-left: 1.35rem;
 }
 
 .message-content h2 + p,
@@ -469,7 +474,9 @@ textarea::placeholder {
 }
 
 .message-content p.message-note {
-  margin-top: 12px;
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(107, 114, 128, 0.2);
   color: #6b7280;
   font-size: 13px;
   line-height: 1.65;
