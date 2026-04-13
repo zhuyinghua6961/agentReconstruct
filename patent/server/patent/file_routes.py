@@ -11,6 +11,7 @@ from server.patent.cache_keys import build_file_route_cache_fingerprint
 from server.patent.file_models import PatentFileContract, PatentFileRoutePlan
 from server.patent.pdf_contract import is_summary_question
 from server.patent.pdf_service import PatentPdfService
+from server.patent.summary_formatting import LITERATURE_SUMMARY_NOTE
 from server.patent.streaming import emit_text_chunks
 from server.patent.tabular_service import PatentTabularService
 from server.services.mode_profiles import get_patent_mode_profile
@@ -24,7 +25,7 @@ _HYBRID_SCOPE_TO_PLAN = {
 }
 
 _LOGGER = logging.getLogger("patent.file_routes")
-_LITERATURE_SUMMARY_NOTE = "注*：所有总结内容均严格基于文件原文中明确提到的信息，未添加任何通用知识或推测内容。"
+_LITERATURE_SUMMARY_NOTE = LITERATURE_SUMMARY_NOTE
 
 
 def _file_route_runtime_signature(
@@ -594,6 +595,261 @@ def _collect_hybrid_points(*values: str, max_items: int = 4) -> list[str]:
     return points
 
 
+def _strip_pdf_context_headers(text: str) -> str:
+    lines = []
+    for raw_line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("==== 文献 "):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def _extract_hybrid_summary_candidates(*values: str, max_items: int = 6, min_chars: int = 10) -> list[str]:
+    candidates: list[str] = []
+    skipped_titles = {
+        "研究目的和背景",
+        "研究方法/实验设计",
+        "主要发现和结果",
+        "结论和意义",
+        "局限性",
+        "结论",
+        "证据",
+        "对比",
+        "限制",
+    }
+    for value in values:
+        normalized = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+        if not normalized.strip():
+            continue
+        for raw_part in re.split(r"(?<=[。！？.!?])\s*|\n+", normalized):
+            line = re.sub(r"^[#>\-\*\d\.\)\s]+", "", raw_part).strip()
+            line = re.sub(r"^(?:PDF 原文证据：|表格执行结果：|知识库证据：|知识库补充：|真实表格总结：|真实 PDF 总结：)", "", line).strip()
+            if not line or line.startswith("==== 文献 "):
+                continue
+            if (
+                re.match(r"^(?:文件:|工作表:|列:|数据行数:|代表性行:)", line)
+                or any(marker in line for marker in (" 工作表:", " 列:", " 数据行数:", " 代表性行:", "material=", "capacity_mAh=", "note="))
+            ):
+                continue
+            if "壳子" in line or "不应主导最终格式" in line:
+                continue
+            if _is_gap_wording(line):
+                continue
+            if len(line) < int(min_chars):
+                continue
+            if line in skipped_titles or line.startswith("注*"):
+                continue
+            if line in candidates:
+                continue
+            candidates.append(_clip_lead_text(line, limit=220))
+            if len(candidates) >= int(max_items):
+                return candidates
+    return candidates
+
+
+def _select_candidates_by_keywords(
+    candidates: list[str],
+    *,
+    keywords: tuple[str, ...],
+    max_items: int,
+) -> list[str]:
+    selected: list[str] = []
+    for candidate in candidates:
+        lowered = str(candidate or "").lower()
+        if not any(keyword in lowered for keyword in keywords):
+            continue
+        if candidate in selected:
+            continue
+        selected.append(candidate)
+        if len(selected) >= int(max_items):
+            break
+    return selected
+
+
+def _build_file_only_hybrid_summary_section(title: str, points: list[str], fallback: str) -> list[str]:
+    lines = [f"## {title}"]
+    if points:
+        lines.extend(f"- {point}" for point in points)
+    else:
+        lines.append(f"- {fallback}")
+    lines.append("")
+    return lines
+
+
+def _extract_markdown_section_first_bullet(text: str, heading: str) -> str:
+    normalized = str(text or "")
+    marker = f"## {heading}"
+    start = normalized.find(marker)
+    if start < 0:
+        return ""
+    start += len(marker)
+    next_heading = normalized.find("\n## ", start)
+    body = normalized[start:] if next_heading < 0 else normalized[start:next_heading]
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        if line.startswith("- "):
+            candidate = re.sub(r"^(?:真实 PDF 总结：|真实表格总结：)", "", line[2:].strip()).strip()
+            if (
+                not candidate
+                or candidate.startswith("==== 文献 ")
+                or _is_gap_wording(candidate)
+                or "壳子" in candidate
+                or "不应主导最终格式" in candidate
+            ):
+                continue
+            return candidate
+    return ""
+
+
+def _is_gap_wording(text: str) -> bool:
+    normalized = str(text or "").strip()
+    return bool(normalized) and any(
+        marker in normalized
+        for marker in (
+            "PDF中未提及",
+            "原文证据不足",
+            "表格中未提供足够",
+            "表格未提供足够",
+            "当前文件证据中未提供足够",
+        )
+    )
+
+
+def _file_only_table_summary_point(*, table_execution_context: str, tabular_answer: str) -> str:
+    answer_candidates = _extract_hybrid_summary_candidates(tabular_answer, max_items=2, min_chars=10)
+    if answer_candidates and not _is_gap_wording(answer_candidates[0]):
+        return answer_candidates[0]
+    table_lead = _lead_from_table_context(table_execution_context)
+    if not table_lead:
+        return ""
+    if _is_gap_wording(table_lead):
+        return ""
+    if any(marker in table_lead for marker in ("工作表:", "列:", "数据行数:", "代表性行:", "material=", "capacity_mAh=", "note=")):
+        return "表格结果补充了文件侧涉及的关键数据对照信息。"
+    return table_lead
+
+
+def _select_file_only_hybrid_conclusion(
+    *,
+    pdf_evidence_context: str,
+    pdf_answer: str,
+    table_execution_context: str,
+    tabular_answer: str,
+) -> str:
+    pdf_conclusion_point = _extract_markdown_section_first_bullet(pdf_answer, "结论和意义")
+    if _is_gap_wording(pdf_conclusion_point):
+        pdf_conclusion_point = ""
+    pdf_result_point = _extract_markdown_section_first_bullet(pdf_answer, "主要发现和结果")
+    if _is_gap_wording(pdf_result_point):
+        pdf_result_point = ""
+    pdf_answer_candidates = _extract_hybrid_summary_candidates(pdf_answer, max_items=2, min_chars=10)
+    table_point = _file_only_table_summary_point(
+        table_execution_context=table_execution_context,
+        tabular_answer=tabular_answer,
+    )
+    for candidate in (
+        pdf_conclusion_point,
+        pdf_result_point,
+        (pdf_answer_candidates[0] if pdf_answer_candidates and not _is_gap_wording(pdf_answer_candidates[0]) else ""),
+        _lead_from_pdf_context(pdf_evidence_context),
+        table_point,
+    ):
+        if candidate:
+            return candidate
+    return ""
+
+
+def _synthesize_file_only_hybrid_summary(*, synthesis_contract: dict[str, Any]) -> str:
+    contract = dict(synthesis_contract or {})
+    pdf_answer = str(contract.get("pdf_answer") or "").strip()
+    tabular_answer = str(contract.get("tabular_answer") or "").strip()
+    pdf_evidence_context = _strip_pdf_context_headers(str(contract.get("pdf_evidence_context") or ""))
+    table_execution_context = str(contract.get("table_execution_context") or "").strip()
+
+    if not _has_usable_hybrid_evidence(
+        synthesis_contract={
+            "pdf_evidence_context": pdf_evidence_context,
+            "table_execution_context": table_execution_context,
+            "pdf_answer": pdf_answer,
+            "tabular_answer": tabular_answer,
+        }
+    ):
+        return "当前未拿到可读的 PDF 或表格证据，暂时无法生成联合回答。"
+
+    pdf_candidates = _extract_hybrid_summary_candidates(pdf_evidence_context, pdf_answer, max_items=8, min_chars=10)
+    table_candidates = _extract_hybrid_summary_candidates(table_execution_context, tabular_answer, max_items=8, min_chars=10)
+    merged_candidates = _extract_hybrid_summary_candidates(
+        pdf_evidence_context,
+        pdf_answer,
+        table_execution_context,
+        tabular_answer,
+        max_items=12,
+        min_chars=10,
+    )
+
+    background_points = _select_candidates_by_keywords(
+        pdf_candidates or merged_candidates,
+        keywords=("study", "studies", "研究", "背景", "目的", "挑战", "问题", "motivation", "background", "aim"),
+        max_items=2,
+    )
+    if not background_points and pdf_candidates:
+        background_points = pdf_candidates[:2]
+
+    method_points = _select_candidates_by_keywords(
+        pdf_candidates,
+        keywords=("method", "methods", "实验", "方法", "对比", "测量", "表征", "setup", "compare", "test"),
+        max_items=2,
+    )
+    table_point = _file_only_table_summary_point(
+        table_execution_context=table_execution_context,
+        tabular_answer=tabular_answer,
+    )
+    if table_point:
+        method_points.append(f"表格结果补充了文件侧涉及的关键数据对照：{table_point}")
+    method_points = [item for index, item in enumerate(method_points) if item and item not in method_points[:index]][:3]
+
+    result_points = _select_candidates_by_keywords(
+        merged_candidates,
+        keywords=("result", "results", "改善", "提升", "更安全", "capacity", "mah", "charging", "性能", "结果", "发现"),
+        max_items=3,
+    )
+    if table_point and table_point not in result_points:
+        result_points.append(table_point)
+    result_points = result_points[:3]
+
+    lead = _select_file_only_hybrid_conclusion(
+        pdf_evidence_context=pdf_evidence_context,
+        pdf_answer=pdf_answer,
+        table_execution_context=table_execution_context,
+        tabular_answer=tabular_answer,
+    )
+    conclusion_points = [lead] if lead else []
+    conclusion_points.append("PDF 原文与表格执行结果在当前回答中相互补充，文件证据优先作为结论依据。")
+    conclusion_points = [item for index, item in enumerate(conclusion_points) if item and item not in conclusion_points[:index]][:3]
+
+    limitation_points = _select_candidates_by_keywords(
+        merged_candidates,
+        keywords=("limited", "limitation", "局限", "不足", "有待", "future", "仍有限", "需要进一步"),
+        max_items=2,
+    )
+    if not limitation_points:
+        limitation_points = [
+            "当前总结仅基于已上传 PDF 原文与表格执行结果整理，未引入知识库或文件外补充证据。",
+            "若 PDF 原文或表格中未提供更完整的长期验证、机理解释或边界条件，当前回答不做补写。",
+        ]
+
+    sections = [
+        *_build_file_only_hybrid_summary_section("研究目的和背景", background_points, "当前文件证据中未提供足够的研究背景或研究目的信息。"),
+        *_build_file_only_hybrid_summary_section("研究方法/实验设计", method_points, "当前文件证据中未提供足够的研究方法、实验设计或验证路径信息。"),
+        *_build_file_only_hybrid_summary_section("主要发现和结果", result_points, "当前文件证据中未提供足够的主要发现、关键指标或结果数据。"),
+        *_build_file_only_hybrid_summary_section("结论和意义", conclusion_points, "当前文件证据中未提供足够的结论或应用意义描述。"),
+        *_build_file_only_hybrid_summary_section("局限性", limitation_points, "当前文件证据中未明确给出局限性或后续工作说明。"),
+        _LITERATURE_SUMMARY_NOTE,
+    ]
+    return "\n".join(sections).strip()
+
+
 def _build_hybrid_literature_section(title: str, points: list[str], fallback: str) -> list[str]:
     lines = [f"## {title}"]
     if points:
@@ -670,6 +926,9 @@ def _synthesize_hybrid_literature_answer(*, synthesis_contract: dict[str, Any]) 
 
 def synthesize_patent_hybrid_answer(*, synthesis_contract: dict[str, Any]) -> str:
     contract = dict(synthesis_contract or {})
+    source_scope = str(contract.get("source_scope") or "").strip().lower()
+    if is_summary_question(str(contract.get("question") or "")) and source_scope == "pdf+table" and not bool(contract.get("include_kb")):
+        return _synthesize_file_only_hybrid_summary(synthesis_contract=contract)
     if is_summary_question(str(contract.get("question") or "")):
         return _synthesize_hybrid_literature_answer(synthesis_contract=contract)
 

@@ -44,12 +44,31 @@ def _section_body(markdown: str, heading: str) -> str:
     return text[start:next_heading].strip()
 
 
+def _first_bullet(markdown: str, heading: str) -> str:
+    body = _section_body(markdown, heading)
+    for raw_line in body.splitlines():
+        line = raw_line.strip()
+        if line.startswith("- "):
+            return line[2:].strip()
+    return body.strip()
+
+
 def _write_csv(path: Path) -> None:
     path.write_text(
         "material,capacity_mAh,note\n"
         "LMFP,120,stable\n"
         "LFP,115,safe\n"
         "NCM,140,higher energy\n",
+        encoding="utf-8",
+    )
+
+
+def _write_alt_csv(path: Path) -> None:
+    path.write_text(
+        "rate_c,temp_c,score\n"
+        "1,25,0.81\n"
+        "2,35,0.78\n"
+        "3,45,0.73\n",
         encoding="utf-8",
     )
 
@@ -2174,6 +2193,15 @@ def test_dispatch_hybrid_route_uses_real_pdf_and_table_content_when_local_paths_
     assert result["answer_text"].startswith("## 研究目的和背景")
     assert "PDF 原文证据：" not in result["answer_text"]
     assert "表格执行结果：" not in result["answer_text"]
+    assert "## 局限性" in result["answer_text"]
+    assert "注*" in result["answer_text"]
+    assert "==== 文献 " not in result["answer_text"]
+    assert not _first_bullet(result["answer_text"], "结论和意义").startswith("表格结果显示：")
+    assert "真实 PDF 总结：" not in result["answer_text"]
+    assert "LMFP/LFP 复配改善了充电安全性" in _section_body(result["answer_text"], "结论和意义")
+    assert "列:" not in _section_body(result["answer_text"], "主要发现和结果")
+    assert "真实表格总结：" not in result["answer_text"]
+    assert "表格中未提供足够" not in result["answer_text"]
 
 
 def test_dispatch_hybrid_route_passes_patent_adapted_prompts_to_pdf_and_tabular_subanswers(tmp_path):
@@ -2363,16 +2391,72 @@ def test_dispatch_hybrid_route_does_not_use_shell_subanswers_as_direct_conclusio
         contract=contract,
         pdf_service=PatentPdfService(
             extract_pdf_text_fn=lambda path, max_pages=10: "LMFP/LFP route reports safer charging behavior and stable cycling.",
-            answer_question_fn=lambda **kwargs: "旧 pdf summary 壳子，不应主导最终格式。",
+            answer_question_fn=lambda **kwargs: "\n".join(
+                [
+                    "## 研究目的和背景",
+                    "- 旧 pdf summary 壳子，不应主导最终格式。",
+                    "",
+                    "## 结论和意义",
+                    "- 旧 pdf summary 壳子，不应主导最终格式。",
+                ]
+            ),
         ),
         tabular_service=PatentTabularService(
-            answer_question_fn=lambda **kwargs: "旧 table summary 壳子，不应主导最终格式。",
+            answer_question_fn=lambda **kwargs: "\n".join(
+                [
+                    "## 研究目的和背景",
+                    "- 旧 table summary 壳子，不应主导最终格式。",
+                    "",
+                    "## 主要发现和结果",
+                    "- 旧 table summary 壳子，不应主导最终格式。",
+                ]
+            ),
         ),
     )
 
     assert "旧 pdf summary 壳子" not in result["answer_text"]
     assert "旧 table summary 壳子" not in result["answer_text"]
+    assert "PDF中未提及足够" not in result["answer_text"]
+    assert "表格中未提供足够" not in result["answer_text"]
     assert "120" in result["answer_text"] or "LMFP/LFP" in result["answer_text"]
+
+
+def test_dispatch_hybrid_route_summary_filters_raw_table_structure_for_non_material_tables(tmp_path):
+    pdf_path = tmp_path / "battery-paper-alt.pdf"
+    csv_path = tmp_path / "alt-cells.csv"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    _write_alt_csv(csv_path)
+    contract = build_patent_file_contract(
+        question="请结合 PDF 和表格总结结论",
+        route="hybrid_qa",
+        source_scope="pdf+table",
+        selected_file_ids=[11, 33],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "local_path": str(pdf_path)},
+            {"file_id": 33, "file_type": "csv", "file_name": "alt-cells.csv", "local_path": str(csv_path)},
+        ],
+        file_selection={"strategy": "explicit_selection", "source_scope": "pdf+table"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "This paper studies LMFP/LFP blending and reports safer charging behavior.",
+            answer_question_fn=lambda **kwargs: "真实 PDF 总结：LMFP/LFP 复配改善了充电安全性。",
+        ),
+        tabular_service=PatentTabularService(
+            answer_question_fn=lambda **kwargs: "真实表格总结：该表记录了不同倍率与温度条件下的评分变化。",
+        ),
+    )
+
+    answer = result["answer_text"]
+    assert "工作表:" not in answer
+    assert "列:" not in answer
+    assert "代表性行:" not in answer
+    assert "真实表格总结：" not in answer
 
 
 @pytest.mark.parametrize(

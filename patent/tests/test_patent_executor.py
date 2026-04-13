@@ -1876,6 +1876,7 @@ def test_executor_dispatches_file_only_hybrid_route_to_patent_file_scaffold():
 
     result = executor.execute(
         request=_make_file_request(
+            question="请结合 PDF 和表格总结结论",
             route="hybrid_qa",
             source_scope="pdf+table",
             turn_mode="file_only",
@@ -1914,6 +1915,7 @@ def test_executor_hybrid_route_uses_real_pdf_and_table_content_when_local_paths_
 
     result = executor.execute(
         request=_make_file_request(
+            question="请结合 PDF 和表格总结结论",
             route="hybrid_qa",
             source_scope="pdf+table",
             turn_mode="file_only",
@@ -1936,6 +1938,15 @@ def test_executor_hybrid_route_uses_real_pdf_and_table_content_when_local_paths_
     assert result["answer_text"].startswith("## 研究目的和背景")
     assert "PDF 原文证据：" not in result["answer_text"]
     assert "表格执行结果：" not in result["answer_text"]
+    assert "## 局限性" in result["answer_text"]
+    assert "注*" in result["answer_text"]
+    assert "==== 文献 " not in result["answer_text"]
+    assert not _section_body(result["answer_text"], "结论和意义").startswith("表格结果显示：")
+    assert "真实 PDF 总结：" not in result["answer_text"]
+    assert "LMFP/LFP 复配改善了充电安全性" in _section_body(result["answer_text"], "结论和意义")
+    assert "列:" not in _section_body(result["answer_text"], "主要发现和结果")
+    assert "真实表格总结：" not in result["answer_text"]
+    assert "表格中未提供足够" not in result["answer_text"]
 
 
 def test_executor_hybrid_file_route_streams_composed_pdf_and_table_answer(tmp_path):
@@ -1958,6 +1969,7 @@ def test_executor_hybrid_file_route_streams_composed_pdf_and_table_answer(tmp_pa
 
     result = executor.execute_with_progress(
         request=_make_file_request(
+            question="请结合 PDF 和表格总结结论",
             route="hybrid_qa",
             source_scope="pdf+table",
             turn_mode="file_only",
@@ -1977,6 +1989,15 @@ def test_executor_hybrid_file_route_streams_composed_pdf_and_table_answer(tmp_pa
     assert "".join(streamed_chunks) == result["answer_text"]
     assert "PDF 部分：" not in "".join(streamed_chunks)
     assert "表格部分：" not in "".join(streamed_chunks)
+    assert "## 局限性" in result["answer_text"]
+    assert "注*" in result["answer_text"]
+    assert "==== 文献 " not in result["answer_text"]
+    assert not _section_body(result["answer_text"], "结论和意义").startswith("表格结果显示：")
+    assert "真实 PDF 总结：" not in result["answer_text"]
+    assert "LMFP/LFP 复配改善了充电安全性" in _section_body(result["answer_text"], "结论和意义")
+    assert "列:" not in _section_body(result["answer_text"], "主要发现和结果")
+    assert "真实表格总结：" not in result["answer_text"]
+    assert "表格中未提供足够" not in result["answer_text"]
 
 
 def test_executor_pdf_kb_hybrid_explicitly_reports_conflict_between_file_and_kb_evidence():
