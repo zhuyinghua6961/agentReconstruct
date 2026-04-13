@@ -43,7 +43,11 @@ def test_build_paper_filename_replaces_all_slashes():
 
 
 def test_storage_service_normalize_doi_matches_current_fastqa_behavior():
-    assert storage_service.normalize_doi("doi:10.1000_demo).") == "10.1000/demo)."
+    assert storage_service.normalize_doi("doi:10.1000_demo).") == "10.1000/demo"
+
+
+def test_storage_service_normalize_doi_strips_equals_prefix():
+    assert storage_service.normalize_doi("doi=10.1016/j.psep.2024.10.111") == "10.1016/j.psep.2024.10.111"
 
 
 

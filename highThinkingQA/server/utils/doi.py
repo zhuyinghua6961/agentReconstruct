@@ -47,7 +47,7 @@ def normalize_doi(value: str) -> str:
         text = unquote(text).strip()
     text = text.replace("\\", "/")
     text = _repair_missing_separator(text)
-    text = re.sub(r"^doi:\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^doi\s*[:=]\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"^[(/\\s]+|[)\],;:.\\s]+$", "", text)
     if "papers/" in text:
         text = text.split("papers/", 1)[-1]

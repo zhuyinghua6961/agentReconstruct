@@ -75,6 +75,16 @@ test('streaming answer repairs square-bracket merged doi identifiers into separa
   assert.match(html, /data-doi="10\.1002\/aem\.202501444"/)
 })
 
+test('streaming answer keeps dotted DOI suffixes intact instead of truncating them', async () => {
+  const { formatStreamingAnswer } = await loadRenderUtils()
+
+  const html = formatStreamingAnswer('结论成立 (doi=10.1016/j.psep.2024.10.111)')
+
+  assert.match(html, /data-doi="10\.1016\/j\.psep\.2024\.10\.111"/)
+  assert.doesNotMatch(html, /data-doi="10\.1016\/j\.psep\.2024"/)
+  assert.doesNotMatch(html, />10\.111</)
+})
+
 test('streaming answer does not fabricate doi links from ordinary bracket-adjacent text', async () => {
   const { formatStreamingAnswer } = await loadRenderUtils()
 

@@ -5,6 +5,10 @@ def test_normalize_doi_handles_polluted_reference_tokens():
     assert normalize_doi("doi:10.1007_s11581-021-04073-2).") == "10.1007/s11581-021-04073-2"
 
 
+def test_normalize_doi_handles_equals_prefixed_reference_tokens():
+    assert normalize_doi("doi=10.1016/j.psep.2024.10.111") == "10.1016/j.psep.2024.10.111"
+
+
 def test_normalize_doi_handles_papers_prefixed_pdf_path_like_current_highthinking_behavior():
     assert normalize_doi("papers/10.1007_s11581-021-04073-2.pdf") == "10.1007_s11581-021-04073-2"
 

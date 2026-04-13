@@ -31,7 +31,7 @@ class StorageService:
             previous = text
             text = unquote(text).strip()
         text = text.replace("\\", "/")
-        text = re.sub(r"^doi:\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"^doi\s*[:=]\s*", "", text, flags=re.IGNORECASE)
         text = re.sub(r"^[(/\\s]+|[)\],;:.\\s]+$", "", text)
         if "papers/" in text:
             text = text.split("papers/", 1)[-1]

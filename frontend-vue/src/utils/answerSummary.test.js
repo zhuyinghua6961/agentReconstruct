@@ -178,6 +178,133 @@ test('inline ordered list items are split into separate ordered list entries', (
   }
 })
 
+test('inline ordered list items split correctly after patent citations', () => {
+  const markdown = [
+    '1. 机械加压与烧结工艺：通过辊压与烧结提升压实密度 (CN108011104A) 2. 掺杂与包覆改性：通过掺杂提升结构稳定性 (CN11442117B) 3. 多元材料体系：优化多元材料设计 (CN106410140A)',
+  ].join('\n')
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.match(html, /<ol>/)
+    assert.equal((html.match(/<li>/g) || []).length, 3)
+    assert.match(html, /data-patent-id="CN108011104A"/)
+    assert.match(html, /data-patent-id="CN11442117B"/)
+    assert.match(html, /data-patent-id="CN106410140A"/)
+    assert.doesNotMatch(html, /<\/a>\)\s+2\./)
+    assert.doesNotMatch(html, /<\/a>\)\s+3\./)
+  }
+})
+
+test('chapter-scoped numbered subsection items become peer subheadings when glued to patent citations without spaces', () => {
+  const markdown = [
+    '### 二、工艺参数对压实密度的提升作用',
+    '',
+    '1. 机械加压与烧结工艺：说明内容 (CN115028154A, CN114873574A)2. 干燥与造粒技术：说明内容 (CN102263247B)3. 烧结制度优化：说明内容',
+  ].join('\n')
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.match(html, /<h3>二、工艺参数对压实密度的提升作用<\/h3>/)
+    assert.match(html, /<h3>1\. 机械加压与烧结工艺：<\/h3>/)
+    assert.match(html, /<h3>2\. 干燥与造粒技术：<\/h3>/)
+    assert.match(html, /<h3>3\. 烧结制度优化：<\/h3>/)
+    assert.match(html, />说明内容 \(/)
+    assert.match(html, /data-patent-id="CN115028154A"/)
+    assert.match(html, /data-patent-id="CN114873574A"/)
+    assert.match(html, /data-patent-id="CN102263247B"/)
+    assert.doesNotMatch(html, /CN114873574A<\/a>\)2\./)
+    assert.doesNotMatch(html, /CN102263247B<\/a>\)3\./)
+    assert.doesNotMatch(html, /<ol>/)
+  }
+})
+
+test('prefixed inline ordered list splits correctly after multi-patent citations without spaces', () => {
+  const markdown = '工艺优化包括：1. 机械加压与烧结工艺：说明内容 (CN115028154A, CN114873574A)2. 干燥与造粒技术：说明内容'
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.match(html, /工艺优化包括：/)
+    assert.match(html, /<ol>/)
+    assert.equal((html.match(/<li>/g) || []).length, 2)
+    assert.match(html, /机械加压与烧结工艺：说明内容/)
+    assert.match(html, /干燥与造粒技术：说明内容/)
+    assert.match(html, /data-patent-id="CN115028154A"/)
+    assert.match(html, /data-patent-id="CN114873574A"/)
+    assert.doesNotMatch(html, /CN114873574A<\/a>\)2\./)
+  }
+})
+
+test('prefixed inline ordered list splits correctly after multi-patent citations joined by ideographic comma', () => {
+  const markdown = '工艺优化包括：1. 机械加压与烧结工艺：说明内容 (CN115028154A、CN114873574A)2. 干燥与造粒技术：说明内容 (CN102263247B)3. 烧结制度优化：说明内容'
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.match(html, /工艺优化包括：/)
+    assert.match(html, /<ol>/)
+    assert.equal((html.match(/<li>/g) || []).length, 3)
+    assert.match(html, /机械加压与烧结工艺：说明内容/)
+    assert.match(html, /干燥与造粒技术：说明内容/)
+    assert.match(html, /烧结制度优化：说明内容/)
+    assert.match(html, /data-patent-id="CN115028154A"/)
+    assert.match(html, /data-patent-id="CN114873574A"/)
+    assert.match(html, /data-patent-id="CN102263247B"/)
+    assert.doesNotMatch(html, /CN114873574A<\/a>\)2\./)
+    assert.doesNotMatch(html, /CN102263247B<\/a>\)3\./)
+  }
+})
+
+test('inline markdown heading with trailing punctuation after patent citation is normalized into a real heading', () => {
+  const markdown = [
+    '1. 机械加压与烧结工艺：通过辊压与烧结提升压实密度 (CN108011104A) ### 二、工艺参数对压实密度的提升作用。',
+    '1. 参数控制：说明',
+  ].join('\n')
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.doesNotMatch(html, /### 二、工艺参数对压实密度的提升作用。/)
+    assert.match(html, /<h3>二、工艺参数对压实密度的提升作用。<\/h3>/)
+  }
+})
+
+test('plain chinese chapter headings and numbered subsection titles are normalized into hierarchical headings', () => {
+  const markdown = [
+    '一、材料结构与组分设计对压实密度的影响',
+    '1. 颗粒级配优化：采用大颗粒与小颗粒混合填充可显著提升压实密度。例如：',
+    'CN109192948B 通过将球形小颗粒填充至大颗粒空隙中，使压实密度达 2.69–2.72 g/cm3。',
+    'CN107256968A 使用大、小颗粒混杂的磷酸铁原料，使极片压实密度达 2.35–2.45 g/cm3。',
+    'CN108011104A 通过大小颗粒浆料混合，压实密度达 2.46–2.57 g/cm3。(CN108011104A) 2. 掺杂与包覆改性：',
+    'CN102082266B 采用碳+铁复合包覆，提升导电性和颗粒紧密度。',
+    'CN101442117B 通过碳包覆与喷雾干燥工艺，改善颗粒分布。(CN101442117B) 3. 多元材料体系：',
+    'CN116986574A 针对磷酸锰铁锂（LMFP），通过多粒径混合使压实密度达 2.8–3.0 g/cm3。',
+  ].join('\n')
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.match(html, /<h2>一、材料结构与组分设计对压实密度的影响<\/h2>/)
+    assert.match(html, /<h3>1\. 颗粒级配优化：<\/h3>/)
+    assert.match(html, /<h3>2\. 掺杂与包覆改性：<\/h3>/)
+    assert.match(html, /<h3>3\. 多元材料体系：<\/h3>/)
+    assert.match(html, /采用大颗粒与小颗粒混合填充可显著提升压实密度。例如：/)
+    assert.match(html, /data-patent-id="CN108011104A"/)
+    assert.match(html, /data-patent-id="CN101442117B"/)
+    assert.doesNotMatch(html, /CN108011104A<\/a>\)\s*2\./)
+    assert.doesNotMatch(html, /CN101442117B<\/a>\)\s*3\./)
+    assert.doesNotMatch(html, /<ol start="2">/)
+  }
+})
+
 test('literature summary chapters keep nested bullets and render note as a secondary paragraph', () => {
   const markdown = [
     '## 研究目的和背景',

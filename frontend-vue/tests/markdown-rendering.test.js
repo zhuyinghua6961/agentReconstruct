@@ -68,6 +68,17 @@ test('formatAnswer renders DOI links with parenthesized suffix intact', () => {
   assert.match(html, />10\.1016\/S0378-7753\(03\)00297-0<\/a>/i)
 })
 
+test('formatAnswer keeps dotted DOI suffixes intact instead of truncating them', () => {
+  installMinimalDom()
+  const input = '参考文献 (doi=10.1016/j.psep.2024.10.111)'
+
+  const html = formatAnswer(input)
+
+  assert.match(html, /data-doi="10\.1016\/j\.psep\.2024\.10\.111"/i)
+  assert.doesNotMatch(html, /data-doi="10\.1016\/j\.psep\.2024"/i)
+  assert.doesNotMatch(html, />10\.111</i)
+})
+
 test('formatAnswer renders inline formulas with superscript and subscript', () => {
   installMinimalDom()
   const input = '容量衰减可写作 $Q_{loss} = k x^2$，材料可表示为 Li_{1-x}CoO_2。'
@@ -109,6 +120,17 @@ test('formatAnswer does not treat raw DOI fragments as math markup and keeps the
   assert.match(html, /class="doi-link"/i)
   assert.match(html, /data-doi="10\.1039\/c2jm15273h"/i)
   assert.match(html, /data-doi="10\.1016\/S0378-7753\(03\)00297-0"/i)
+  assert.doesNotMatch(html, /<sub>|<sup>/i)
+})
+
+test('formatAnswer preserves underscore DOI bodies without subscript rendering', () => {
+  installMinimalDom()
+  const input = '参考文献 (10.1155/2014_364327)'
+
+  const html = formatAnswer(input)
+
+  assert.match(html, /data-doi="10\.1155\/2014_364327"/i)
+  assert.match(html, />10\.1155\/2014_364327<\/a>/i)
   assert.doesNotMatch(html, /<sub>|<sup>/i)
 })
 

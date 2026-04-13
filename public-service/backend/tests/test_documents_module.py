@@ -69,6 +69,25 @@ def test_documents_service_view_pdf_path_normalizes_polluted_doi(monkeypatch, tm
     assert payload["doi"] == "10.1007/s11581-021-04073-2"
 
 
+def test_documents_service_view_pdf_path_normalizes_equals_prefixed_doi(monkeypatch, tmp_path):
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    captured: dict[str, str] = {}
+
+    def _fake_ensure_local_pdf(*, doi: str, logger):
+        captured["doi"] = doi
+        return pdf_path
+
+    monkeypatch.setattr(documents_service, "_ensure_local_pdf", _fake_ensure_local_pdf)
+
+    payload, status_code, resolved = documents_service.view_pdf_path("doi=10.1016/j.psep.2024.10.111", logger=None)
+
+    assert status_code == 200
+    assert resolved == pdf_path
+    assert captured["doi"] == "10.1016/j.psep.2024.10.111"
+    assert payload["doi"] == "10.1016/j.psep.2024.10.111"
+
+
 def test_view_pdf_route_accepts_query_token_auth(monkeypatch, tmp_path):
     pdf_path = tmp_path / "paper.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n")

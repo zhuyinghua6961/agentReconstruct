@@ -152,7 +152,7 @@ function repairMergedDoiIdentifiers(text) {
   while (repaired !== previous) {
     previous = repaired
     repaired = repaired.replace(
-      /(10\.\d{1,9}(?:\/|[A-Za-z0-9])[A-Za-z0-9._;()/:+\-_()-]*?)(10\.\d{1,9}(?:\/|[A-Za-z0-9]))/gi,
+      /(10\.\d{1,9}(?:\/|[A-Za-z])[A-Za-z0-9._;()/:+\-_()-]*?)(10\.\d{1,9}(?:\/|[A-Za-z]))/gi,
       '$1 $2'
     )
   }
@@ -204,11 +204,6 @@ function readDoiToken(text, startIndex, options = {}) {
   let depth = 0
   while (i < text.length) {
     const char = text[i]
-    if (
-      i > bodyStart
-      && char === '1'
-      && /^10\.\d{1,9}(?:\/|_|[A-Za-z0-9])/.test(text.slice(i))
-    ) break
     if (!isDoiBodyChar(char)) break
     if (char === '(') depth += 1
     if (char === ')') {
@@ -249,6 +244,7 @@ function readDoiPrefixedSpan(text, startIndex) {
   if (!lower.startsWith('doi')) return null
   const before = startIndex > 0 ? text[startIndex - 1] : ''
   if (before && /[A-Za-z0-9]/.test(before)) return null
+  if (['(', '[', '（'].includes(before)) return null
 
   let i = startIndex + 3
   while (i < text.length && /\s/.test(text[i])) i += 1
@@ -477,7 +473,8 @@ function protectDoiSegments(text) {
       ? readWrappedDoiSegment(source, i)
       : null
     const prefixed = wrapped ? null : (isAsciiLetter(source[i]) ? readDoiPrefixedSpan(source, i) : null)
-    const match = wrapped || prefixed
+    const plain = (wrapped || prefixed) ? null : (source[i] === '1' ? readPlainDoiSegment(source, i) : null)
+    const match = wrapped || prefixed || plain
 
     if (match) {
       const raw = source.slice(match.start, match.end)
@@ -531,12 +528,88 @@ function containsMathMarkup(text) {
     || /[A-Za-z)\]](?:_\{[^{}\n]{1,32}\}|_[A-Za-z0-9+\-]{1,16}|\^\{[^{}\n]{1,32}\}|\^[A-Za-z0-9+\-]{1,16})/.test(protectedText)
 }
 
+function looksLikeStructuredSectionHeading(line) {
+  return /^(?:#{1,6}\s+)?[一二三四五六七八九十]+、.+$/.test(String(line || '').trim())
+}
+
+function splitStructuredSubheadingText(text) {
+  const source = String(text || '').trim()
+  const match = source.match(/^([^：:\n]{1,40}?[：:])(?:\s*(.*))?$/)
+  if (!match) return null
+
+  return {
+    title: String(match[1] || '').trim(),
+    body: String(match[2] || '').trim(),
+  }
+}
+
+function normalizeStructuredSectionSubheadings(text) {
+  const lines = String(text || '')
+    .replace(/([。！？；;）)】\]])\s*(\d+[.)]\s+[^：:\n]{1,40}?[：:])/g, '$1\n$2')
+    .split('\n')
+  const normalized = []
+  let inStructuredSection = false
+
+  for (const rawLine of lines) {
+    const line = String(rawLine || '')
+    const trimmed = line.trim()
+
+    if (!trimmed) {
+      normalized.push('')
+      continue
+    }
+
+    if (/^\s{0,3}#{1,6}\s+/.test(trimmed) && !looksLikeStructuredSectionHeading(trimmed)) {
+      inStructuredSection = false
+      normalized.push(line)
+      continue
+    }
+
+    if (looksLikeStructuredSectionHeading(trimmed)) {
+      inStructuredSection = true
+      if (/^\s{0,3}#{1,6}\s+/.test(trimmed)) {
+        normalized.push(trimmed)
+      } else {
+        normalized.push(`## ${trimmed}`)
+      }
+      continue
+    }
+
+    if (!inStructuredSection) {
+      normalized.push(line)
+      continue
+    }
+
+    const orderedItems = splitInlineOrderedItems(trimmed)
+    const structuredItems = Array.isArray(orderedItems) && orderedItems.length > 0
+      ? orderedItems.map((item) => ({
+          marker: item.marker,
+          parsed: splitStructuredSubheadingText(item.text),
+        }))
+      : null
+
+    if (structuredItems && structuredItems.every((item) => item.parsed)) {
+      for (const item of structuredItems) {
+        normalized.push(`### ${item.marker} ${item.parsed.title}`)
+        if (item.parsed.body) normalized.push(item.parsed.body)
+      }
+      continue
+    }
+
+    normalized.push(line)
+  }
+
+  return normalized.join('\n').replace(/\n{3,}/g, '\n\n')
+}
+
 function normalizeMarkdownForRender(text) {
   const input = normalizeInlineMarkdownBoundaries(
-    String(text || '')
+    normalizeStructuredSectionSubheadings(
+      String(text || '')
       .replace(/\r\n/g, '\n')
       .replace(/\u00a0/g, ' ')
-      .replace(/([。！？：:])\s*(#{1,6}\s+)/g, '$1\n\n$2')
+      .replace(/([。！？：:；;）)】\]])\s*(#{1,6}\s+)/g, '$1\n\n$2')
+    )
   )
 
   const lines = input.split('\n')
@@ -546,7 +619,8 @@ function normalizeMarkdownForRender(text) {
   const isList = (line) => /^\s{0,3}(?:[-*+]\s+|\d+[.)]\s+)/.test(line)
   const isTable = (line) => line.includes('|') && !line.trim().startsWith('```')
 
-  for (const rawLine of lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const rawLine = lines[index]
     let line = String(rawLine || '').replace(/\t/g, '  ').replace(/[ \t]+$/g, '')
     const trimmed = line.trim()
 
@@ -559,6 +633,7 @@ function normalizeMarkdownForRender(text) {
     line = normalizeInlineOrderedListLine(line)
     line = normalizeInlineBulletListLine(line)
     line = normalizeLeadingHeadingMarkers(line)
+    line = normalizeStandaloneOrderedSubheadingLine(line, findNextNonEmptyLine(lines, index + 1))
     line = line.replace(/^(\s{0,3}#{1,6})([^\s#])/, '$1 $2')
     line = line.replace(/^(\s{0,3}[-*+])([^\s])/, '$1 $2')
     line = line.replace(/^(\s{0,3}\d+[.)])([^\s])/, '$1 $2')
@@ -590,6 +665,12 @@ function normalizeInlineMarkdownBoundaries(text) {
     line = line.replace(/([。！？：:；;）)】\]])\s+((?:[-*+]\s+.+))$/, (_match, prefix, inlineList) => {
       const items = splitInlineBulletItems(inlineList)
       if (!items || items.length < 2) return `${prefix} ${inlineList}`
+      return `${prefix}\n\n${items.map(({ marker, text: itemText }) => `${marker} ${itemText}`).join('\n')}`
+    })
+
+    line = line.replace(/([。！？：:；;）)】\]])\s*((?:\d+[.)]\s+.+))$/, (_match, prefix, inlineList) => {
+      const items = splitInlineOrderedItems(inlineList)
+      if (!items) return `${prefix} ${inlineList}`
       return `${prefix}\n\n${items.map(({ marker, text: itemText }) => `${marker} ${itemText}`).join('\n')}`
     })
 
@@ -651,6 +732,14 @@ function normalizeLeadingHeadingMarkers(line) {
     /^(\s*)(?:(#{1,6})\s+)+(.*\S.*)$/,
     (_match, indent, hashes, text) => `${indent}${hashes} ${String(text || '').trim()}`
   )
+}
+
+function normalizeStandaloneOrderedSubheadingLine(line, nextNonEmptyLine) {
+  const source = String(line || '')
+  const match = source.match(/^(\s{0,3})(\d+[.)]\s+.{1,80}[：:])\s*$/)
+  if (!match) return source
+  if (!String(nextNonEmptyLine || '').trim()) return source
+  return `${match[1]}### ${match[2]}`
 }
 
 function findNextNonEmptyLine(lines, startIndex) {
@@ -780,7 +869,8 @@ function shouldSplitInlineBulletBoundary(source, markerIndex) {
 function shouldSplitInlineOrderedBoundary(source, markerIndex) {
   const before = String(source || '').slice(0, markerIndex).replace(/\s+$/g, '')
   const prevChar = before[before.length - 1] || ''
-  return /[。！？!?；;]/.test(prevChar)
+  if (/[。！？!?；;]/.test(prevChar)) return true
+  return /(?:[\(（\[]\s*(?:(?:[A-Za-z]{2}\d{6,14}[A-Za-z]\d?|10\.\d{1,9}[-._;()/:A-Z0-9]+)\s*(?:[,，、;；]\s*(?:[A-Za-z]{2}\d{6,14}[A-Za-z]\d?|10\.\d{1,9}[-._;()/:A-Z0-9]+)\s*)*)[\)）\]])$/i.test(before)
 }
 
 function containsStructuredMarkdown(text) {
