@@ -308,10 +308,10 @@ _SUMMARY_SECTION_FALLBACKS = {
 }
 
 
-def _is_aligned_pdf_summary_request(*, route_hint: str, source_scope: str) -> bool:
+def _is_aligned_pdf_summary_request(*, route_hint: str, source_scope: str, selected_pdf_count: int = 1) -> bool:
     normalized_route = str(route_hint or "").strip().lower()
     normalized_scope = str(source_scope or "").strip().lower()
-    return normalized_route == "pdf_qa" and normalized_scope == "pdf"
+    return normalized_route == "pdf_qa" and normalized_scope == "pdf" and int(selected_pdf_count or 0) == 1
 
 
 def _build_literature_section(title: str, points: list[str], fallback: str) -> list[str]:
@@ -634,9 +634,14 @@ def _ensure_literature_summary_structure(
     prepared_pdf_text: str,
     route_hint: str = "pdf_qa",
     source_scope: str = "pdf",
+    selected_pdf_count: int = 1,
 ) -> str:
     normalized_answer = str(answer or "").strip()
-    if not _is_aligned_pdf_summary_request(route_hint=route_hint, source_scope=source_scope):
+    if not _is_aligned_pdf_summary_request(
+        route_hint=route_hint,
+        source_scope=source_scope,
+        selected_pdf_count=selected_pdf_count,
+    ):
         return _ensure_legacy_literature_summary_structure(answer=normalized_answer, prepared_pdf_text=prepared_pdf_text)
     prepared_source_text = _strip_multi_doc_headers(prepared_pdf_text)
     mode = classify_summary_answer(normalized_answer, prepared_text=prepared_source_text)
@@ -1302,7 +1307,12 @@ class PatentPdfService:
         streamed_text = ""
         pending_stream_whitespace = ""
         summary_mode = is_summary_question(question) and not compare_mode
-        aligned_summary_mode = summary_mode and _is_aligned_pdf_summary_request(route_hint=route_hint, source_scope=source_scope)
+        selected_pdf_count = max(1, len([label for label in selected_file_labels if str(label or "").strip()]))
+        aligned_summary_mode = summary_mode and _is_aligned_pdf_summary_request(
+            route_hint=route_hint,
+            source_scope=source_scope,
+            selected_pdf_count=selected_pdf_count,
+        )
         prompt = build_patent_pdf_answer_prompt(
             question=question,
             pdf_content=prepared_pdf_text,
@@ -1407,6 +1417,7 @@ class PatentPdfService:
                                 prepared_pdf_text=prepared_pdf_text,
                                 route_hint=route_hint,
                                 source_scope=source_scope,
+                                selected_pdf_count=selected_pdf_count,
                             )
                         else:
                             answer = _ensure_four_block_pdf_answer_structure(
@@ -1475,6 +1486,7 @@ class PatentPdfService:
                                     prepared_pdf_text=prepared_pdf_text,
                                     route_hint=route_hint,
                                     source_scope=source_scope,
+                                    selected_pdf_count=selected_pdf_count,
                                 )
                             else:
                                 answer = _ensure_four_block_pdf_answer_structure(
@@ -1510,6 +1522,7 @@ class PatentPdfService:
                         prepared_pdf_text=prepared_pdf_text,
                         route_hint=route_hint,
                         source_scope=source_scope,
+                        selected_pdf_count=selected_pdf_count,
                     )
                 else:
                     answer = _ensure_four_block_pdf_answer_structure(
@@ -1556,6 +1569,7 @@ class PatentPdfService:
                     prepared_pdf_text=prepared_pdf_text,
                     route_hint=route_hint,
                     source_scope=source_scope,
+                    selected_pdf_count=selected_pdf_count,
                 )
                 if summary_mode
                 else _ensure_four_block_pdf_answer_structure(

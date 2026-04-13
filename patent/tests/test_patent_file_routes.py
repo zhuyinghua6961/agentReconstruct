@@ -760,6 +760,52 @@ def test_dispatch_pdf_route_negative_compare_question_targets_only_first_documen
     assert "200-cycle retention" not in seen_inputs[0]
 
 
+def test_dispatch_pdf_route_multi_pdf_summary_keeps_legacy_summary_shape(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    captured_prompts: list[str] = []
+    contract = build_patent_file_contract(
+        question="请总结这两篇文献的研究内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "Abstract A unique fact.\n\nResults A report 15% efficiency improvement."
+                if path == str(pdf_path_a)
+                else "Abstract B unique fact.\n\nResults B report 200-cycle retention."
+            ),
+            answer_question_fn=lambda **kwargs: captured_prompts.append(str(kwargs.get("prompt") or "")) or "两篇文献分别报告了效率提升和循环保持率差异。",
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    answer = result["answer_text"]
+    assert captured_prompts
+    assert "负责基于上传的单篇 PDF 原文给出结构化回答" not in captured_prompts[0]
+    assert "## 局限性" not in captured_prompts[0]
+    assert "## 研究目的和背景" in answer
+    assert "## 研究方法/实验设计" in answer
+    assert "## 主要发现和结果" in answer
+    assert "## 结论和意义" in answer
+    assert "## 局限性" not in answer
+    assert "注*" in answer
+
+
 def test_dispatch_pdf_route_targeted_first_document_does_not_fall_through_to_second_when_first_is_unreadable(tmp_path):
     pdf_path_a = tmp_path / "paper-a.pdf"
     pdf_path_b = tmp_path / "paper-b.pdf"

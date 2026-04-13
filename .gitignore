@@ -56,6 +56,7 @@ deploy/minio-seed/*/*
 
 # Local developer artifacts
 .codex
+.superpowers/
 *.egg-info/
 
 # Local service config overlays

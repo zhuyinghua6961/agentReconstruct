@@ -250,13 +250,23 @@ def build_patent_pdf_answer_prompt(
     if not is_compare:
         normalized_route = str(route_hint or "pdf_qa").strip().lower() or "pdf_qa"
         normalized_scope = str(source_scope or "pdf").strip() or "pdf"
+        selected_pdf_count = max(1, len([str(item).strip() for item in list(selected_file_labels or []) if str(item).strip()]))
         hybrid_mode = normalized_route == "hybrid_qa"
-        aligned_pdf_summary_mode = normalized_route == "pdf_qa" and normalized_scope.lower() == "pdf"
+        aligned_pdf_summary_mode = (
+            normalized_route == "pdf_qa"
+            and normalized_scope.lower() == "pdf"
+            and selected_pdf_count == 1
+        )
         route_intro = (
             "你是一位专利/文献证据分析助手。当前任务属于 patent 混合文件问答中的 PDF 证据分析环节。"
             if hybrid_mode
-            else "你是一位专利/文献文件分析助手，负责基于上传的单篇 PDF 原文给出结构化回答。"
+            else (
+                "你是一位专利/文献文件分析助手，负责基于上传的单篇 PDF 原文给出结构化回答。"
+                if selected_pdf_count == 1
+                else "你是一位专利/文献文件分析助手，负责基于当前选中的 PDF 原文集合给出结构化回答。"
+            )
         )
+        summary_subject = "这篇**具体专利/文献**" if selected_pdf_count == 1 else "这些**已选文献**"
         output_contract = """
 **输出结构要求**：
 - 请按以下 Markdown 结构回答：
@@ -314,7 +324,7 @@ def build_patent_pdf_answer_prompt(
             return f"""
 {route_intro}
 
-用户要求总结这篇**具体专利/文献**的研究内容，并且答案需要适配 patent 文件问答的结构化输出。
+用户要求总结{summary_subject}的研究内容，并且答案需要适配 patent 文件问答的结构化输出。
 
 **🚨 核心约束（必须严格遵守）**：
 1. **绝对禁止使用通用知识**：

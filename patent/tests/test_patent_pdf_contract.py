@@ -79,6 +79,27 @@ def test_non_compare_summary_prompt_adapts_fastqa_structure_for_patent():
     assert len(patent_prompt) < 6000
 
 
+def test_non_compare_multi_pdf_summary_prompt_does_not_use_single_pdf_aligned_contract():
+    patent_prompt = build_patent_pdf_answer_prompt(
+        question="请总结这两篇文献的研究内容",
+        pdf_content="==== 文献 1: paper-a.pdf ====\nA\n\n==== 文献 2: paper-b.pdf ====\nB",
+        kb_section="",
+        is_summary=True,
+        is_compare=False,
+        selected_file_labels=["paper-a.pdf", "paper-b.pdf"],
+        route_hint="pdf_qa",
+        source_scope="pdf",
+    )
+
+    assert "负责基于上传的单篇 PDF 原文给出结构化回答" not in patent_prompt
+    assert "## 局限性" not in patent_prompt
+    assert "注*" in patent_prompt
+    assert "## 研究目的和背景" in patent_prompt
+    assert "## 研究方法/实验设计" in patent_prompt
+    assert "## 主要发现和结果" in patent_prompt
+    assert "## 结论和意义" in patent_prompt
+
+
 def test_non_compare_non_summary_prompt_adapts_fastqa_structure_for_patent():
     patent_prompt = build_patent_pdf_answer_prompt(
         question="这篇文献里报告了什么结果？",
