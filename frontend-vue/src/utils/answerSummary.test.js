@@ -214,3 +214,25 @@ test('literature summary chapters keep nested bullets and render note as a secon
     assert.doesNotMatch(html, /<h[1-6]>注\*：/)
   }
 })
+
+test('graph kb markdown renders section headings, literature entries, and doi links cleanly', () => {
+  const markdown = [
+    '## 📚 文献概览',
+    '- 当前展示 2 篇相关文献',
+    '- 原料：LiFePO4',
+    '',
+    '## 📖 相关文献',
+    '### [1] Paper A',
+    '- DOI：10.1/a',
+    '- 命中条件：原料 = LiFePO4 powder',
+  ].join('\n')
+
+  const finalHtml = formatAnswer(markdown)
+
+  assert.match(finalHtml, /<h2>📚 文献概览<\/h2>/)
+  assert.match(finalHtml, /<h2>📖 相关文献<\/h2>/)
+  assert.match(finalHtml, /<h3>\[1\] Paper A<\/h3>/)
+  assert.match(finalHtml, /<li>(?:<p>)?当前展示 2 篇相关文献(?:<\/p>)?[\s\S]*?<\/li>/)
+  assert.match(finalHtml, /class="doi-link"/)
+  assert.match(finalHtml, /data-doi="10\.1\/a"/)
+})

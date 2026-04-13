@@ -6,9 +6,55 @@ import { fileURLToPath } from 'node:url'
 
 const currentDir = dirname(fileURLToPath(import.meta.url))
 const source = readFileSync(join(currentDir, 'Home.vue'), 'utf8')
+const scriptSource = source.slice(0, source.indexOf('</script>'))
+const assistantMessageSection = source.slice(
+  source.indexOf(`<template v-else-if="entry.message.role === 'bot' || entry.message.role === 'assistant'">`),
+  source.indexOf(`<div v-else-if="getTaskPhaseLabel(store.currentChatId)" class="loading-animation">`)
+)
+
+function assertGraphScopedSelector(selector) {
+  assert.match(
+    source,
+    new RegExp(
+      String.raw`(?:\.message-graph-kb\s*:deep\(${selector}\)|\.message-content\.message-graph-kb\s*:deep\(${selector}\)|:deep\(\.message-graph-kb ${selector.replace('\\.', '.')}\))(?=\s*,|\s*\{)`
+    )
+  )
+}
+
+function assertNoGlobalMessageContentSelector(selector) {
+  assert.doesNotMatch(
+    source,
+    new RegExp(
+      String.raw`(?:^|,)\s*(?![^,{]*message-graph-kb)[^,{]*\.message-content[^,{]*:deep\(${selector}\)(?=\s*,|\s*\{)`,
+      'm'
+    )
+  )
+}
 
 test('Home formats graph_kb query mode as a knowledge-graph badge during streaming', () => {
   assert.match(source, /const ASK_MODE_LABELS = \{ fast: '快速模式', thinking: '思考模式', patent: '专利模式', graph_kb: '知识图谱', neo4j: '知识图谱' \}/)
+})
+
+test('Home marks graph kb assistant messages with a graph-only class for labeled and raw graph modes', () => {
+  const wrapperMatch = assistantMessageSection.match(
+    /<div(?=[^>]*\bmessage-content\b)(?=[^>]*:class="[^"]*message-graph-kb[^"]*")(?=[^>]*:class="[^"]*entry\.message[^"]*")[^>]*:class="([^"]*message-graph-kb[^"]*)"[^>]*>/
+  )
+  assert.ok(wrapperMatch, 'assistant message-content wrapper should bind message-graph-kb through :class')
+  const classExpr = wrapperMatch[1]
+
+  const helperMatch = classExpr.match(/message-graph-kb'\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\(entry\.message\)/)
+  if (helperMatch) {
+    const helperName = helperMatch[1]
+    const helperDefinition = new RegExp(
+      String.raw`(?:function\s+${helperName}\s*\(|const\s+${helperName}\s*=\s*(?:\([^)]*\)|[A-Za-z_][A-Za-z0-9_]*)\s*=>)[\s\S]*?(?:知识图谱|graph_kb|neo4j)[\s\S]*?(?:queryMode|query_mode)|(?:function\s+${helperName}\s*\(|const\s+${helperName}\s*=\s*(?:\([^)]*\)|[A-Za-z_][A-Za-z0-9_]*)\s*=>)[\s\S]*?(?:queryMode|query_mode)[\s\S]*?(?:知识图谱|graph_kb|neo4j)`,
+      's'
+    )
+    assert.match(scriptSource, helperDefinition)
+    return
+  }
+
+  assert.match(classExpr, /知识图谱|queryMode/)
+  assert.match(classExpr, /query_mode|graph_kb|neo4j/)
 })
 
 test('Home uses absolute message identity in the render list wiring', () => {
@@ -86,6 +132,15 @@ test('Home renders quota limit cards inline for quota failures while keeping mar
   assert.match(source, /<QuotaLimitCard v-if="getQuotaCard\(entry\.message\)" :card="getQuotaCard\(entry\.message\)" \/>\s*<div v-else-if="entry\.message\.content && isStreamingTextMessage\(entry\.message\)"/s)
   assert.match(source, /<template v-else-if="entry\.message\.content">/)
   assert.match(source, /<div v-html="getRenderedMessageHtml\(entry\.message\)"><\/div>/)
+})
+
+test('Home preserves DOI click routing from rendered markdown into the PDF reader', () => {
+  assert.match(source, /if \(target\.classList && target\.classList\.contains\('doi-link'\)\)/)
+  assert.match(source, /const doi = target\.getAttribute\('data-doi'\)/)
+  assert.match(source, /const messageElement = target\.closest\('\.message\[data-message-index\]'\)/)
+  assert.match(source, /const currentMsg = getMessageByAbsoluteIndex\(messageIndex\)/)
+  assert.match(source, /const locations = buildCitationLocationsForDoi\(\{/)
+  assert.match(source, /pdfReader\.value\.openReader\(doi, locations\)/)
 })
 
 test('Home renders failed terminal assistant messages as terminal cards instead of loading placeholders', () => {
@@ -233,4 +288,17 @@ test('Home header no longer renders knowledge-base summary status text', () => {
   assert.doesNotMatch(source, /const kbSummaryText = computed\(\(\) => \{/)
   assert.doesNotMatch(source, /<div class="kb-info">\{\{ kbSummaryText \}\}<\/div>/)
   assert.doesNotMatch(source, /\.kb-info\s*\{/)
+})
+
+test('Home scopes graph kb markdown styles through deep selectors instead of global markdown rules', () => {
+  assertGraphScopedSelector('h2')
+  assertGraphScopedSelector('h3')
+  assertGraphScopedSelector('ul')
+  assertGraphScopedSelector('li')
+  assertGraphScopedSelector('\\.doi-link')
+  assertNoGlobalMessageContentSelector('h2')
+  assertNoGlobalMessageContentSelector('h3')
+  assertNoGlobalMessageContentSelector('ul')
+  assertNoGlobalMessageContentSelector('li')
+  assertNoGlobalMessageContentSelector('\\.doi-link')
 })
