@@ -87,7 +87,46 @@ def test_summary_formatting_module_exposes_deterministic_predicates():
         classify_summary_answer(
             "LMFP/LFP 复配改善了高倍率充电安全性。\n长循环验证仍然有限且需要继续补充。",
             prepared_text="这里提供足够长的研究背景描述。\n这里提供足够长的方法描述。\n这里提供足够长的结果描述。\n这里提供足够长的局限性描述。",
-        )
+    )
         == "conservative_repair"
     )
     assert classify_summary_answer("暂时无法生成，请稍后重试。", prepared_text="这里提供足够长的研究背景描述。") == "fallback"
+
+
+def test_pdf_summary_debug_helpers_report_section_point_counts():
+    from server.patent.pdf_service import (  # type: ignore[attr-defined]
+        _format_summary_point_counts,
+        _summary_section_point_counts,
+    )
+
+    summary = "\n".join(
+        [
+            "## 研究目的和背景",
+            "- 背景点一提供了足够长的描述信息。",
+            "- 背景点二提供了足够长的描述信息。",
+            "",
+            "## 研究方法/实验设计",
+            "- 方法点一提供了足够长的描述信息。",
+            "- 方法点二提供了足够长的描述信息。",
+            "- 方法点三提供了足够长的描述信息。",
+            "",
+            "## 主要发现和结果",
+            "- 结果点一提供了足够长的描述信息。",
+            "- 结果点二提供了足够长的描述信息。",
+            "",
+            "## 结论和意义",
+            "- 结论点一提供了足够长的描述信息。",
+            "",
+            "## 局限性",
+            "- 局限点一提供了足够长的描述信息。",
+        ]
+    )
+
+    counts = _summary_section_point_counts(summary)
+
+    assert counts["研究目的和背景"] == 2
+    assert counts["研究方法/实验设计"] == 3
+    assert counts["主要发现和结果"] == 2
+    assert counts["结论和意义"] == 1
+    assert counts["局限性"] == 1
+    assert _format_summary_point_counts(counts) == "研究目的和背景:2,研究方法/实验设计:3,主要发现和结果:2,结论和意义:1,局限性:1"

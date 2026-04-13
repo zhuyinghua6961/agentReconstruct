@@ -11,6 +11,11 @@ from xml.etree import ElementTree as ET
 from server.patent.pdf_contract import is_summary_question
 from server.patent.file_models import PatentFileContract
 from server.patent.streaming import emit_text_chunks, iter_text_output
+from server.patent.tabular.executor import execute_tabular_plan
+from server.patent.tabular.planner import plan_tabular_query
+from server.patent.tabular.renderer import build_tabular_result_context, has_usable_tabular_result
+from server.patent.tabular.schema_profiler import profile_workbook
+from server.patent.tabular.workbook_loader import load_workbook_cached
 from server.services.mode_profiles import get_patent_mode_profile
 
 _XML_NS = {
@@ -435,6 +440,7 @@ class PatentTabularService:
         self._max_rows_per_sheet = max(1, int(max_rows_per_sheet))
         self._max_sheets = max(1, int(max_sheets))
         self._max_table_chars = max(1000, int(max_table_chars))
+        self._has_custom_extract_table_text_fn = extract_table_text_fn is not None
 
     def execute(
         self,
@@ -460,28 +466,33 @@ class PatentTabularService:
             },
         )
 
-        table_text = self._load_table_text(contract=contract)
-        if table_text:
+        table_text = self._load_table_text(contract=contract) if self._has_custom_extract_table_text_fn else ""
+        execution_context = (
+            table_text
+            if self._has_custom_extract_table_text_fn
+            else self._load_table_execution_context(contract=contract)
+        )
+        if execution_context:
             self._record_step(
                 steps,
                 progress_callback=progress_callback,
                 payload={
                     "step": "tabular_load",
                     "title": "读取表格内容",
-                    "message": f"📊 已完成表格原始内容读取，文件数 {len(used_files)}，chars={len(table_text)}",
+                    "message": f"📊 已完成表格执行上下文构建，文件数 {len(used_files)}，chars={len(execution_context)}",
                     "status": "success",
-                    "data": {"count": len(used_files), "chars": len(table_text)},
+                    "data": {"count": len(used_files), "chars": len(execution_context)},
                 },
             )
             answer_text = self._build_answer(
                 question=contract.question,
-                table_text=table_text,
+                table_text=execution_context,
                 include_kb=include_kb,
                 route_hint=contract.route,
                 source_scope=contract.source_scope,
                 content_callback=content_callback,
             )
-            answer_mode = "table_text_summary"
+            answer_mode = "table_execution_summary"
         else:
             answer_text = "当前未拿到可读的表格原始内容，无法生成基于表格的回答。请稍后重试或检查文件处理状态。"
             self._record_step(
@@ -495,7 +506,7 @@ class PatentTabularService:
                     "data": {"count": len(used_files), "chars": 0},
                 },
             )
-            answer_mode = "table_text_unavailable"
+            answer_mode = "table_execution_unavailable"
 
         self._record_step(
             steps,
@@ -513,7 +524,7 @@ class PatentTabularService:
             payload={
                 "step": "tabular_answer",
                 "title": "生成文件答案",
-                "message": "✍️ 已基于表格原始内容生成答案" if table_text else "✍️ 已返回表格不可读的说明",
+                "message": "✍️ 已基于表格原始内容生成答案" if execution_context else "✍️ 已返回表格不可读的说明",
                 "status": "success",
             },
         )
@@ -531,8 +542,8 @@ class PatentTabularService:
                 "selected_file_count": len(used_files),
                 "kb_enabled": bool(include_kb),
                 "answer_mode": answer_mode,
-                "table_text_chars": len(table_text),
-                "table_evidence_context": _truncate(table_text, min(self._max_table_chars, 1200)),
+                "table_text_chars": len(execution_context),
+                "table_evidence_context": _truncate(execution_context, min(self._max_table_chars, 1200)),
             },
             "timings": {
                 "patent_tabular_route_ms": 1,
@@ -542,6 +553,54 @@ class PatentTabularService:
             "file_selection": dict(contract.file_selection),
             "kb_enabled": bool(include_kb),
         }
+
+    def _load_table_execution_context(self, *, contract: PatentFileContract) -> str:
+        sections: list[str] = []
+        for item in contract.selected_execution_files:
+            if item.family != "table":
+                continue
+            local_path = str(item.payload.get("local_path") or "").strip()
+            if not local_path:
+                continue
+            resolved = Path(local_path)
+            if not resolved.exists() or not resolved.is_file():
+                continue
+            file_name = str(item.file_name or resolved.name or f"file:{item.file_id}")
+            try:
+                workbook = load_workbook_cached(
+                    path=str(resolved),
+                    file_name=file_name,
+                    file_type=str(item.file_type or resolved.suffix.lstrip(".")).lower(),
+                    max_sheets=self._max_sheets,
+                )
+                profile = profile_workbook(workbook)
+                plan = plan_tabular_query(question=contract.question, profile=profile)
+                if bool(plan.get("needs_clarification")):
+                    result = {
+                        "sheet_name": str(plan.get("sheet_name") or ""),
+                        "operation": str(plan.get("operation") or "clarification"),
+                        "rows": [],
+                        "row_count": 0,
+                        "empty_reason": str(plan.get("clarification_reason") or "clarification_required"),
+                        "summary_stats": {
+                            "aggregate": str(plan.get("aggregate") or ""),
+                            "source_row_count": 0,
+                        },
+                    }
+                else:
+                    result = execute_tabular_plan(workbook=workbook, plan=plan)
+            except Exception:
+                continue
+            if not has_usable_tabular_result(result):
+                continue
+            context = build_tabular_result_context(
+                file_name=file_name,
+                plan=plan,
+                result=result,
+            )
+            if context:
+                sections.append(context)
+        return "\n\n".join(section for section in sections if section).strip()
 
     @staticmethod
     def _record_step(

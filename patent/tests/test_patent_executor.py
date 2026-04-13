@@ -1455,7 +1455,8 @@ def test_executor_tabular_route_uses_real_table_content_when_local_path_is_avail
         context={"recent_turns_for_llm": []},
     )
 
-    assert result["metadata"]["answer_mode"] == "table_text_summary"
+    assert result["metadata"]["answer_mode"] == "table_execution_summary"
+    assert "匹配工作表" in result["metadata"]["table_evidence_context"]
     assert "真实表格总结" in result["answer_text"]
     assert "Patent tabular route answered" not in result["answer_text"]
 
@@ -2175,6 +2176,9 @@ def test_executor_pdf_table_kb_hybrid_unifies_real_file_and_kb_evidence(tmp_path
     assert "120mAh" in result["answer_text"]
     assert "知识库补充" in result["answer_text"]
     assert "CN123456789A" in result["answer_text"]
+    assert "匹配工作表:" not in result["answer_text"]
+    assert "执行操作:" not in result["answer_text"]
+    assert "文件:" not in result["answer_text"]
     assert "Patent KB participation:" not in result["answer_text"]
     assert result["metadata"]["synthesis_contract"]["source_scope"] == "pdf+table+kb"
 
@@ -2236,6 +2240,9 @@ def test_executor_pdf_table_kb_hybrid_answer_keeps_current_mixed_evidence_behavi
     assert "120mAh" in answer
     assert "知识库" in answer
     assert "CN123456789A" in answer
+    assert "匹配工作表:" not in answer
+    assert "执行操作:" not in answer
+    assert "文件:" not in answer
     assert "知识库补充：" in answer or "知识库交叉验证：" in answer
 
 

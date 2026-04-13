@@ -6,8 +6,10 @@ import pytest
 from pathlib import Path
 
 import server.patent.pdf_service as pdf_service_module
+import server.patent.tabular_service as tabular_service_module
 from server.patent.file_contract import build_patent_file_contract
 from server.patent.file_routes import dispatch_patent_file_route, plan_patent_file_route
+from server.patent.pdf_contract import format_multi_pdf_sections
 from server.patent.pdf_service import PatentPdfService
 from server.patent.tabular_service import PatentTabularService
 
@@ -413,6 +415,154 @@ def test_dispatch_pdf_route_uses_real_pdf_text_summary_when_local_path_is_availa
     assert "Patent PDF route answered" not in result["answer_text"]
 
 
+def test_pdf_service_default_extractor_uses_file_qna_entrypoint_and_budget(monkeypatch, tmp_path):
+    pdf_path = tmp_path / "battery-paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="请总结这篇文献",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11],
+        primary_file_id=11,
+        execution_files=[{**PDF_FILE, "local_path": str(pdf_path)}],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    called: dict[str, object] = {}
+
+    def _fake_extract(pdf_path: str, *, max_pages: int = 50, exclude_references: bool = True) -> str:
+        called["pdf_path"] = pdf_path
+        called["max_pages"] = max_pages
+        called["exclude_references"] = exclude_references
+        return "标题: Sample\n\n--- 第 1 页 ---\nResults section.\n\n--- 第 2 页 ---\nConclusion section."
+
+    monkeypatch.setattr(pdf_service_module, "extract_file_qa_pdf_text", _fake_extract, raising=False)
+
+    service = PatentPdfService(answer_question_fn=lambda **kwargs: "不进入生成")
+    documents = service._load_pdf_documents(execution_files=contract.selected_execution_files)
+
+    assert len(documents) == 1
+    assert documents[0]["label"] == "battery-paper.pdf"
+    assert "Results section." in documents[0]["text"]
+    assert called == {
+        "pdf_path": str(pdf_path),
+        "max_pages": 50,
+        "exclude_references": True,
+    }
+
+
+def test_pdf_service_keeps_injected_extract_pdf_text_fn_contract(tmp_path):
+    pdf_path = tmp_path / "battery-paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="请总结这篇文献",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11],
+        primary_file_id=11,
+        execution_files=[{**PDF_FILE, "local_path": str(pdf_path)}],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: "Injected extractor result.",
+        answer_question_fn=lambda **kwargs: "不进入生成",
+    )
+    documents = service._load_pdf_documents(execution_files=contract.selected_execution_files)
+
+    assert len(documents) == 1
+    assert documents[0]["text"] == "Injected extractor result."
+
+
+def test_pdf_service_keeps_injected_extract_pdf_text_fn_contract_for_var_kwargs(tmp_path):
+    pdf_path = tmp_path / "battery-paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="请总结这篇文献",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11],
+        primary_file_id=11,
+        execution_files=[{**PDF_FILE, "local_path": str(pdf_path)}],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    captured: dict[str, object] = {}
+
+    def _injector(path: str, **kwargs):
+        captured["path"] = path
+        captured.update(kwargs)
+        return "Injected extractor result from kwargs."
+
+    service = PatentPdfService(
+        extract_pdf_text_fn=_injector,
+        answer_question_fn=lambda **kwargs: "不进入生成",
+    )
+    documents = service._load_pdf_documents(execution_files=contract.selected_execution_files)
+
+    assert len(documents) == 1
+    assert documents[0]["text"] == "Injected extractor result from kwargs."
+    assert captured["path"] == str(pdf_path)
+    assert captured["max_pages"] == 50
+    assert captured["exclude_references"] is True
+
+
+def test_pdf_service_default_extractor_keeps_compare_tail_sections_reachable(monkeypatch, tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    front_matter = "作者信息与版权页。 " * 220
+    texts = {
+        str(pdf_path_a): (
+            f"{front_matter}\n\nAbstract A short.\n\nMethod A.\n\nResults A observed.\n\nConclusion A final."
+        ),
+        str(pdf_path_b): (
+            f"{front_matter}\n\nAbstract B short.\n\nMethod B.\n\nResults B observed.\n\nConclusion B final."
+        ),
+    }
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的方法和结论",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    monkeypatch.setattr(
+        pdf_service_module,
+        "extract_file_qa_pdf_text",
+        lambda pdf_path, max_pages=50, exclude_references=True: texts[pdf_path],
+        raising=False,
+    )
+
+    service = PatentPdfService(answer_question_fn=lambda **kwargs: "不进入生成")
+    pdf_documents = service._load_pdf_documents(execution_files=contract.selected_execution_files)
+    prepared = service._prepare_answer_input(
+        question=contract.question,
+        pdf_text=format_multi_pdf_sections(pdf_documents),
+        pdf_documents=pdf_documents,
+        selected_file_labels=["paper-a.pdf", "paper-b.pdf"],
+        available_file_labels=["paper-a.pdf", "paper-b.pdf"],
+        compare_mode=True,
+    )
+
+    assert prepared["ok"] is True
+    assert "Results A observed." in str(prepared["prepared_pdf_text"])
+    assert "Conclusion B final." in str(prepared["prepared_pdf_text"])
+
+
 def test_dispatch_pdf_route_summary_aligns_to_literature_summary_sections(tmp_path):
     pdf_path = tmp_path / "battery-paper.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
@@ -593,6 +743,60 @@ def test_dispatch_pdf_route_summary_conservative_repair_keeps_sparse_usable_answ
     assert "注*" in answer
     assert "长循环验证仍有限" in _section_body(answer, "局限性") or "limited" in _section_body(answer, "局限性")
     assert "LMFP/LFP" in answer
+
+
+def test_dispatch_pdf_route_summary_repair_expands_dense_pdf_evidence_into_longer_sections(tmp_path):
+    pdf_path = tmp_path / "battery-paper-dense-summary.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="请总结这篇文献的研究内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11],
+        primary_file_id=11,
+        execution_files=[{**PDF_FILE, "local_path": str(pdf_path)}],
+        file_selection={"strategy": "explicit_selection"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    prepared_pdf_text = " ".join(
+        [
+            "研究背景指出户外摄像头虽然部署广泛，但自动化分析仍受到校准不足限制。",
+            "研究目的在于构建一种可扩展的全球交通摄像头校准框架。",
+            "方法部分说明研究对象覆盖真实交通摄像头与街景图像配准场景。",
+            "方法部分说明先在相机周围采样多个全景图并提取透视图像。",
+            "方法部分说明随后使用语义分割屏蔽车辆和行人等动态对象。",
+            "方法部分说明再使用SuperPoint和SuperGlue完成特征提取与匹配。",
+            "方法部分说明最后在Bundle Adjustment中引入全景约束并结合GPS完成尺度校准。",
+            "结果显示该方法在焦距误差上优于现有方法。",
+            "结果显示该方法在地面距离测量误差上显著降低。",
+            "结果显示系统已经成功完成一百多个全球交通摄像头的三维重建与定位。",
+            "结果显示该框架还能生成车辆活动热图并支持速度测量。",
+            "结论指出该框架证明了街景图像可用于大规模精确校准交通摄像头。",
+            "结论指出该研究为交通分析和安全管理提供了可落地的数据基础。",
+            "局限性指出如果场景缺少足够背景纹理，特征匹配性能会下降。",
+        ]
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: prepared_pdf_text,
+            answer_question_fn=lambda **kwargs: "本文提出了一个交通摄像头校准框架，并证明其有效。",
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    answer = result["answer_text"]
+    method_lines = [line for line in _section_body(answer, "研究方法/实验设计").splitlines() if line.strip().startswith("- ")]
+    result_lines = [line for line in _section_body(answer, "主要发现和结果").splitlines() if line.strip().startswith("- ")]
+
+    assert len(method_lines) >= 4
+    assert len(result_lines) >= 4
+    assert "SuperPoint" in _section_body(answer, "研究方法/实验设计")
+    assert "SuperGlue" in _section_body(answer, "研究方法/实验设计")
+    assert "热图" in _section_body(answer, "主要发现和结果")
 
 
 def test_dispatch_pdf_route_summary_fallback_from_degraded_answer_still_emits_limitations(tmp_path):
@@ -2110,7 +2314,8 @@ def test_dispatch_tabular_route_uses_real_table_content_when_local_path_is_avail
     )
 
     assert result["handler"] == "tabular"
-    assert result["metadata"]["answer_mode"] == "table_text_summary"
+    assert result["metadata"]["answer_mode"] == "table_execution_summary"
+    assert "匹配工作表" in result["metadata"]["table_evidence_context"]
     assert "真实表格总结" in result["answer_text"]
     assert "Patent tabular route answered" not in result["answer_text"]
 
@@ -2177,8 +2382,128 @@ def test_dispatch_tabular_route_uses_file_name_suffix_when_local_path_has_no_ext
         tabular_service=PatentTabularService(),
     )
 
-    assert result["metadata"]["answer_mode"] == "table_text_summary"
+    assert result["metadata"]["answer_mode"] == "table_execution_summary"
     assert "table_text_unavailable" not in str(result["metadata"])
+
+
+def test_dispatch_tabular_route_marks_empty_structured_execution_as_unavailable(monkeypatch, tmp_path):
+    csv_path = tmp_path / "cells.csv"
+    _write_csv(csv_path)
+    contract = build_patent_file_contract(
+        question="查一下不存在的材料",
+        route="tabular_qa",
+        source_scope="table",
+        selected_file_ids=[33],
+        primary_file_id=33,
+        execution_files=[{"file_id": 33, "file_type": "csv", "file_name": "cells.csv", "local_path": str(csv_path)}],
+        file_selection={"strategy": "explicit_selection"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    monkeypatch.setattr(
+        tabular_service_module,
+        "execute_tabular_plan",
+        lambda **kwargs: {
+            "sheet_name": "Sheet1",
+            "operation": "lookup",
+            "rows": [],
+            "row_count": 0,
+            "empty_reason": "no_lookup_match",
+            "summary_stats": {"aggregate": "mean", "source_row_count": 0},
+        },
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "table_execution_unavailable"
+    assert result["metadata"]["table_evidence_context"] == ""
+    assert "无法生成基于表格的回答" in result["answer_text"]
+
+
+def test_dispatch_tabular_route_marks_structured_loader_failure_as_unavailable(monkeypatch, tmp_path):
+    csv_path = tmp_path / "cells.csv"
+    _write_csv(csv_path)
+    contract = build_patent_file_contract(
+        question="请总结这个表格的重点",
+        route="tabular_qa",
+        source_scope="table",
+        selected_file_ids=[33],
+        primary_file_id=33,
+        execution_files=[{"file_id": 33, "file_type": "csv", "file_name": "cells.csv", "local_path": str(csv_path)}],
+        file_selection={"strategy": "explicit_selection"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    monkeypatch.setattr(
+        tabular_service_module,
+        "load_workbook_cached",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "table_execution_unavailable"
+    assert result["metadata"]["table_evidence_context"] == ""
+    assert "无法生成基于表格的回答" in result["answer_text"]
+
+
+def test_dispatch_tabular_route_preserves_injected_extract_table_text_fn_contract(tmp_path):
+    csv_path = tmp_path / "cells.csv"
+    _write_csv(csv_path)
+    contract = build_patent_file_contract(
+        question="Explain the table.",
+        route="tabular_qa",
+        source_scope="table",
+        selected_file_ids=[33],
+        primary_file_id=33,
+        execution_files=[{"file_id": 33, "file_type": "csv", "file_name": "cells.csv", "local_path": str(csv_path)}],
+        file_selection={"strategy": "explicit_selection"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    captured: dict[str, object] = {}
+
+    def _custom_extract(path: str, *, question: str, file_name: str, file_type: str, max_rows_per_sheet: int = 8, max_sheets: int = 3) -> str:
+        captured.update(
+            {
+                "path": path,
+                "question": question,
+                "file_name": file_name,
+                "file_type": file_type,
+                "max_rows_per_sheet": max_rows_per_sheet,
+                "max_sheets": max_sheets,
+            }
+        )
+        return "custom table evidence"
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(),
+        tabular_service=PatentTabularService(
+            extract_table_text_fn=_custom_extract,
+            answer_question_fn=lambda **kwargs: "真实表格总结：自定义提取器已生效。",
+        ),
+    )
+
+    assert captured == {
+        "path": str(csv_path),
+        "question": "Explain the table.",
+        "file_name": "cells.csv",
+        "file_type": "csv",
+        "max_rows_per_sheet": 8,
+        "max_sheets": 3,
+    }
+    assert result["metadata"]["answer_mode"] == "table_execution_summary"
+    assert "custom table evidence" in result["metadata"]["table_evidence_context"]
+    assert "自定义提取器已生效" in result["answer_text"]
 
 
 def test_dispatch_hybrid_route_uses_real_pdf_and_table_content_when_local_paths_are_available(tmp_path):
@@ -2465,6 +2790,74 @@ def test_dispatch_hybrid_route_does_not_use_shell_subanswers_as_direct_conclusio
     assert "PDF中未提及足够" not in result["answer_text"]
     assert "表格中未提供足够" not in result["answer_text"]
     assert "120" in result["answer_text"] or "LMFP/LFP" in result["answer_text"]
+
+
+def test_dispatch_hybrid_route_with_only_shell_subanswers_and_no_evidence_stays_unavailable():
+    contract = build_patent_file_contract(
+        question="请结合 PDF 和表格总结结论",
+        route="hybrid_qa",
+        source_scope="pdf+table",
+        selected_file_ids=[11, 33],
+        primary_file_id=11,
+        execution_files=[PDF_FILE, TABLE_FILE],
+        file_selection={"strategy": "explicit_selection", "source_scope": "pdf+table"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    class _ShellPdfService:
+        def execute(self, *, contract, include_kb: bool, progress_callback=None, content_callback=None):
+            return {
+                "answer_text": "\n".join(
+                    [
+                        "## 研究目的和背景",
+                        "- 旧 pdf summary 壳子，不应主导最终格式。",
+                    ]
+                ),
+                "route": contract.route,
+                "query_mode": "patent_hybrid_qa",
+                "source_scope": contract.source_scope,
+                "steps": [{"step": "pdf_answer", "title": "生成文件答案", "message": "ok", "status": "success"}],
+                "metadata": {
+                    "answer_mode": "pdf_text_summary",
+                    "pdf_evidence_context": "",
+                },
+                "timings": {"pdf_ms": 1},
+                "used_files": [item.as_payload() for item in contract.selected_execution_files if item.family == "pdf"],
+                "file_selection": dict(contract.file_selection),
+            }
+
+    class _ShellTabularService:
+        def execute(self, *, contract, include_kb: bool, progress_callback=None, content_callback=None):
+            return {
+                "answer_text": "\n".join(
+                    [
+                        "## 研究目的和背景",
+                        "- 旧 table summary 壳子，不应主导最终格式。",
+                    ]
+                ),
+                "route": contract.route,
+                "query_mode": "patent_hybrid_qa",
+                "source_scope": contract.source_scope,
+                "steps": [{"step": "tabular_answer", "title": "生成文件答案", "message": "ok", "status": "success"}],
+                "metadata": {
+                    "answer_mode": "table_execution_summary",
+                    "table_evidence_context": "",
+                },
+                "timings": {"patent_tabular_route_ms": 1},
+                "used_files": [item.as_payload() for item in contract.selected_execution_files if item.family == "table"],
+                "file_selection": dict(contract.file_selection),
+            }
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=_ShellPdfService(),
+        tabular_service=_ShellTabularService(),
+    )
+
+    assert "暂时无法生成联合回答" in result["answer_text"]
+    assert result["steps"][-1]["status"] == "error"
+    assert result["metadata"]["steps"][-1]["status"] == "error"
 
 
 def test_dispatch_hybrid_route_summary_filters_raw_table_structure_for_non_material_tables(tmp_path):

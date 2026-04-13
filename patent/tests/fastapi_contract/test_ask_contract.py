@@ -101,6 +101,52 @@ def _pdf_compare_payload() -> dict:
     return payload
 
 
+def _build_valid_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：围绕方案 {index} 展开研究，并给出明确的中文结论。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：采用表征测试与性能验证结合的方法，重点分析方案 {index}。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：面向应用方向 {index} 的性能优化场景。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 所有文献都提供了可比较的实验结论。",
+            "",
+            "## 总结",
+            "- 这些文献展示了不同技术路线下的差异化优化方向。",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _tabular_payload() -> dict:
     payload = _base_payload()
     payload.update(
@@ -2531,7 +2577,7 @@ def test_http_stream_pdf_compare_route_emits_context_and_compare_steps_before_do
             if path == str(pdf_path_a)
             else "Abstract B.\n\nResults B observed.\n\nConclusion B final."
         ),
-        answer_question_fn=lambda **kwargs: "对比结果：文献 1 与文献 2 存在明显差异。",
+        answer_question_fn=lambda **kwargs: _build_valid_compare_answer(["paper-a.pdf", "paper-b.pdf"]),
     )
     payload = _pdf_compare_payload()
     payload["execution_files"][0]["local_path"] = str(pdf_path_a)
@@ -2649,7 +2695,7 @@ def test_http_stream_pdf_compare_success_emits_final_step_before_first_content(m
             if path == str(pdf_path_a)
             else "Abstract B.\n\nResults B observed.\n\nConclusion B final."
         ),
-        answer_question_fn=lambda **kwargs: "对比结果：文献 1 与文献 2 存在明显差异。",
+        answer_question_fn=lambda **kwargs: _build_valid_compare_answer(["paper-a.pdf", "paper-b.pdf"]),
     )
     payload = _pdf_compare_payload()
     payload["execution_files"][0]["local_path"] = str(pdf_path_a)
@@ -2680,8 +2726,10 @@ def test_http_stream_pdf_compare_generator_emits_content_before_final_success(mo
     pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
 
     def _streaming_compare(**kwargs):
-        yield "对比结果：文献 1 更强调效率提升，"
-        yield "文献 2 更强调循环保持。"
+        answer = _build_valid_compare_answer(["paper-a.pdf", "paper-b.pdf"])
+        midpoint = len(answer) // 2
+        yield answer[:midpoint]
+        yield answer[midpoint:]
 
     app.state.ask_service._patent_executor._pdf_service = PatentPdfService(
         extract_pdf_text_fn=lambda path, max_pages=10: (
@@ -2872,7 +2920,8 @@ def test_http_sync_tabular_route_summarizes_readable_local_table_instead_of_stub
     body = response.json()
     assert "真实表格总结" in body["final_answer"]
     assert "Patent tabular route answered from selected table content" not in body["final_answer"]
-    assert body["metadata"]["answer_mode"] == "table_text_summary"
+    assert body["metadata"]["answer_mode"] == "table_execution_summary"
+    assert "匹配工作表" in body["metadata"]["table_evidence_context"]
     assert "local_path" not in body["used_files"][0]
 
 
@@ -3003,6 +3052,9 @@ def test_http_sync_hybrid_pdf_table_kb_route_keeps_context_dispatch_and_unified_
     assert "120mAh" in body["final_answer"]
     assert "知识库补充" in body["final_answer"]
     assert "CN123456789A" in body["final_answer"]
+    assert "匹配工作表:" not in body["final_answer"]
+    assert "执行操作:" not in body["final_answer"]
+    assert "文件:" not in body["final_answer"]
     assert [step["step"] for step in body["metadata"]["steps"][:2]] == ["context_ready", "dispatch"]
     assert body["metadata"]["steps"][-1]["step"] == "hybrid_answer"
     assert body["metadata"]["steps"][-1]["status"] == "success"

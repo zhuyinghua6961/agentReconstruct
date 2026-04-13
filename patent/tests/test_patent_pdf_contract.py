@@ -71,6 +71,8 @@ def test_non_compare_summary_prompt_adapts_fastqa_structure_for_patent():
     assert "## 局限性" in patent_prompt
     assert "注*" in patent_prompt
     assert "PDF中未提及" in patent_prompt
+    assert "1-3" not in patent_prompt
+    assert "3-5" in patent_prompt
     assert "\n## 结论\n" not in patent_prompt
     assert "知识库信息仅用于验证" in patent_prompt or "知识库信息仅可用于验证" in patent_prompt
     assert "不要把知识库信息当作新的 PDF 事实" in patent_prompt
@@ -164,6 +166,24 @@ def test_request_payload_includes_kb_boundary_section_when_include_kb_is_enabled
     assert prompt_without_kb != prompt_with_kb
     assert expected_kb_section.strip() in prompt_with_kb
     assert expected_kb_section.strip() not in prompt_without_kb
+
+
+def test_request_payload_sets_explicit_output_budget_for_pdf_summary():
+    client = PatentPdfAnswerClient(api_key="key", base_url="https://example.com", model="model")
+    try:
+        payload = client._build_request_payload(
+            question="请总结这篇文献",
+            pdf_text="标题: A study\nAbstract text\nResults text",
+            file_name="paper-a.pdf",
+            include_kb=False,
+            stream=False,
+            selected_file_labels=["paper-a.pdf"],
+        )
+    finally:
+        client.close()
+
+    assert int(payload.get("max_tokens") or 0) >= 1800
+    assert float(payload.get("top_p") or 0) >= 0.9
 
 
 def test_compare_detection_accepts_implicit_compare_requests():

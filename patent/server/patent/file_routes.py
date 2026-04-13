@@ -627,10 +627,7 @@ def _extract_hybrid_summary_candidates(*values: str, max_items: int = 6, min_cha
             line = re.sub(r"^(?:PDF 原文证据：|表格执行结果：|知识库证据：|知识库补充：|真实表格总结：|真实 PDF 总结：)", "", line).strip()
             if not line or line.startswith("==== 文献 "):
                 continue
-            if (
-                re.match(r"^(?:文件:|工作表:|列:|数据行数:|代表性行:)", line)
-                or any(marker in line for marker in (" 工作表:", " 列:", " 数据行数:", " 代表性行:", "material=", "capacity_mAh=", "note="))
-            ):
+            if _is_tabular_structure_line(line):
                 continue
             if "壳子" in line or "不应主导最终格式" in line:
                 continue
@@ -646,6 +643,104 @@ def _extract_hybrid_summary_candidates(*values: str, max_items: int = 6, min_cha
             if len(candidates) >= int(max_items):
                 return candidates
     return candidates
+
+
+def _is_tabular_structure_line(text: str) -> bool:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return False
+    inline_markers = (
+        "匹配工作表:",
+        "执行操作:",
+        "聚合方式:",
+        "分组列:",
+        "指标列:",
+        "返回列:",
+        "过滤条件:",
+        "命中行数:",
+        "空结果原因:",
+        "结果样例:",
+        "代表性行:",
+        "数据行数:",
+    )
+    if any(marker in normalized for marker in inline_markers):
+        return True
+    if re.match(
+        r"^(?:文件|工作表|匹配工作表|执行操作|聚合方式|分组列|指标列|返回列|过滤条件|命中行数|空结果原因|结果样例|列|数据行数|代表性行)\s*:",
+        normalized,
+    ):
+        return True
+    return bool(re.match(r"^(?:样例)\s*\d+\s*:", normalized))
+
+
+def _parse_tabular_sample_point(text: str) -> str:
+    raw_text = str(text or "").strip()
+    matched = re.search(r"(样例\s*\d+\s*:\s*.+)$", raw_text)
+    normalized = matched.group(1) if matched else raw_text
+    normalized = re.sub(r"^[#>\-\*\s]*样例\s*\d+\s*:\s*", "", normalized)
+    if not normalized:
+        return ""
+    pairs: list[tuple[str, str]] = []
+    for raw_part in normalized.split(";"):
+        if "=" not in raw_part:
+            continue
+        key, value = raw_part.split("=", 1)
+        clean_key = str(key or "").strip()
+        clean_value = str(value or "").strip()
+        if not clean_key or not clean_value:
+            continue
+        pairs.append((clean_key, clean_value))
+    if not pairs:
+        return ""
+
+    values = {key.lower(): value for key, value in pairs}
+    material = values.get("material", "")
+    capacity = values.get("capacity_mah", "")
+    note = values.get("note", "")
+    if material and capacity:
+        summary = f"{material} {capacity}mAh"
+        if note:
+            summary += f"（{note}）"
+        return summary
+
+    score = values.get("score", "")
+    rate = values.get("rate_c", "")
+    temp = values.get("temp_c", "")
+    if score and (rate or temp):
+        conditions = [item for item in (f"rate_c={rate}" if rate else "", f"temp_c={temp}" if temp else "") if item]
+        if conditions:
+            return f"{', '.join(conditions)} 时 score={score}"
+
+    formatted_parts = [f"{key}={value}" for key, value in pairs[:3]]
+    return "；".join(formatted_parts)
+
+
+def _extract_tabular_context_points(text: str, *, max_items: int = 3) -> list[str]:
+    points: list[str] = []
+    normalized_text = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    sample_matches = re.findall(r"样例\s*\d+\s*:\s*.*?(?=(?:样例\s*\d+\s*:|$))", normalized_text)
+    for raw_line in [*sample_matches, *normalized_text.splitlines()]:
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+        parsed = _parse_tabular_sample_point(line)
+        if not parsed or parsed in points:
+            continue
+        points.append(_clip_lead_text(parsed, limit=220))
+        if len(points) >= int(max_items):
+            break
+    return points
+
+
+def _extract_hybrid_answer_point(text: str, headings: tuple[str, ...]) -> str:
+    for heading in headings:
+        candidate = _extract_markdown_section_first_bullet(text, heading)
+        if candidate and not _is_gap_wording(candidate) and not _is_degraded_answer(candidate):
+            return candidate
+    candidates = _extract_hybrid_summary_candidates(text, max_items=2, min_chars=10)
+    if candidates and not _is_gap_wording(candidates[0]) and not _is_degraded_answer(candidates[0]):
+        return candidates[0]
+    return ""
 
 
 def _select_candidates_by_keywords(
@@ -693,12 +788,30 @@ def _extract_markdown_section_first_bullet(text: str, heading: str) -> str:
             if (
                 not candidate
                 or candidate.startswith("==== 文献 ")
+                or candidate.startswith("注*")
                 or _is_gap_wording(candidate)
+                or _is_degraded_answer(candidate)
                 or "壳子" in candidate
                 or "不应主导最终格式" in candidate
+                or _is_tabular_structure_line(candidate)
             ):
                 continue
             return candidate
+    for raw_line in body.splitlines():
+        line = re.sub(r"^(?:真实 PDF 总结：|真实表格总结：)", "", raw_line.strip()).strip()
+        if (
+            not line
+            or line.startswith("## ")
+            or line.startswith("==== 文献 ")
+            or line.startswith("注*")
+            or _is_gap_wording(line)
+            or _is_degraded_answer(line)
+            or "壳子" in line
+            or "不应主导最终格式" in line
+            or _is_tabular_structure_line(line)
+        ):
+            continue
+        return line
     return ""
 
 
@@ -717,9 +830,15 @@ def _is_gap_wording(text: str) -> bool:
 
 
 def _file_only_table_summary_point(*, table_execution_context: str, tabular_answer: str) -> str:
-    answer_candidates = _extract_hybrid_summary_candidates(tabular_answer, max_items=2, min_chars=10)
-    if answer_candidates and not _is_gap_wording(answer_candidates[0]):
-        return answer_candidates[0]
+    answer_point = _extract_hybrid_answer_point(
+        tabular_answer,
+        ("主要发现和结果", "结论和意义", "结论", "证据"),
+    )
+    if answer_point:
+        return answer_point
+    context_points = _extract_tabular_context_points(table_execution_context, max_items=2)
+    if context_points:
+        return context_points[0]
     table_lead = _lead_from_table_context(table_execution_context)
     if not table_lead:
         return ""
@@ -727,6 +846,22 @@ def _file_only_table_summary_point(*, table_execution_context: str, tabular_answ
         return ""
     if any(marker in table_lead for marker in ("工作表:", "列:", "数据行数:", "代表性行:", "material=", "capacity_mAh=", "note=")):
         return "表格结果补充了文件侧涉及的关键数据对照信息。"
+    return table_lead
+
+
+def _hybrid_table_evidence_point(*, table_execution_context: str, tabular_answer: str) -> str:
+    answer_point = _extract_hybrid_answer_point(
+        tabular_answer,
+        ("主要发现和结果", "结论和意义", "结论", "证据"),
+    )
+    if answer_point:
+        return answer_point
+    context_points = _extract_tabular_context_points(table_execution_context, max_items=2)
+    if context_points:
+        return "；".join(context_points[:2])
+    table_lead = _lead_from_table_context(table_execution_context)
+    if not table_lead or _is_gap_wording(table_lead):
+        return ""
     return table_lead
 
 
@@ -779,6 +914,7 @@ def _synthesize_file_only_hybrid_summary(*, synthesis_contract: dict[str, Any]) 
 
     pdf_candidates = _extract_hybrid_summary_candidates(pdf_evidence_context, pdf_answer, max_items=8, min_chars=10)
     table_candidates = _extract_hybrid_summary_candidates(table_execution_context, tabular_answer, max_items=8, min_chars=10)
+    table_context_points = _extract_tabular_context_points(table_execution_context, max_items=3)
     merged_candidates = _extract_hybrid_summary_candidates(
         pdf_evidence_context,
         pdf_answer,
@@ -810,12 +946,13 @@ def _synthesize_file_only_hybrid_summary(*, synthesis_contract: dict[str, Any]) 
     method_points = [item for index, item in enumerate(method_points) if item and item not in method_points[:index]][:3]
 
     result_points = _select_candidates_by_keywords(
-        merged_candidates,
+        [*table_context_points, *merged_candidates],
         keywords=("result", "results", "改善", "提升", "更安全", "capacity", "mah", "charging", "性能", "结果", "发现"),
         max_items=3,
     )
-    if table_point and table_point not in result_points:
-        result_points.append(table_point)
+    for item in [*table_context_points, table_point]:
+        if item and item not in result_points:
+            result_points.append(item)
     result_points = result_points[:3]
 
     lead = _select_file_only_hybrid_conclusion(
@@ -888,16 +1025,21 @@ def _synthesize_hybrid_literature_answer(*, synthesis_contract: dict[str, Any]) 
     method_points = []
     if pdf_evidence_context:
         method_points.append(_clip_lead_text(f"PDF 原文证据：{pdf_evidence_context}", limit=220))
-    if table_execution_context:
-        method_points.append(_clip_lead_text(f"表格执行结果：{table_execution_context}", limit=220))
+    table_evidence_point = _hybrid_table_evidence_point(
+        table_execution_context=table_execution_context,
+        tabular_answer=tabular_answer,
+    )
+    if table_evidence_point:
+        method_points.append(f"表格结果补充了关键数据对照：{table_evidence_point}")
     if usable_kb_answer or kb_evidence_context:
         method_points.append("知识库结果仅用于交叉验证，不能覆盖文件原文和表格执行结果。")
 
     result_points = _collect_hybrid_points(
-        table_execution_context,
         pdf_evidence_context,
         max_items=3,
     )
+    if table_evidence_point and table_evidence_point not in result_points:
+        result_points.append(table_evidence_point)
     if usable_kb_answer or kb_evidence_context:
         result_points.append(_clip_lead_text(f"知识库补充：{kb_evidence_context or usable_kb_answer}", limit=220))
 
@@ -940,6 +1082,7 @@ def synthesize_patent_hybrid_answer(*, synthesis_contract: dict[str, Any]) -> st
     kb_evidence_context = str(contract.get("kb_evidence_context") or "").strip()
     kb_reference_instruction = str(contract.get("kb_reference_instruction") or "").strip()
     usable_kb_answer = "" if _is_degraded_answer(kb_answer) else kb_answer
+    file_only_hybrid = source_scope == "pdf+table" and not bool(contract.get("include_kb"))
 
     lead = _select_hybrid_direct_conclusion(
         table_execution_context=table_execution_context,
@@ -952,10 +1095,31 @@ def synthesize_patent_hybrid_answer(*, synthesis_contract: dict[str, Any]) -> st
         return "当前未拿到可读的 PDF、表格或知识库证据，暂时无法生成联合回答。"
 
     evidence_lines: list[str] = []
-    if table_execution_context or (tabular_answer and not _is_degraded_answer(tabular_answer)):
-        evidence_lines.append(f"- 表格执行结果：{table_execution_context or tabular_answer}")
-    if pdf_evidence_context or (pdf_answer and not _is_degraded_answer(pdf_answer)):
-        evidence_lines.append(f"- PDF 原文证据：{pdf_evidence_context or pdf_answer}")
+    if file_only_hybrid:
+        table_answer_point = _extract_hybrid_answer_point(
+            tabular_answer,
+            ("结论", "证据", "主要发现和结果", "结论和意义"),
+        )
+        pdf_answer_point = _extract_hybrid_answer_point(
+            pdf_answer,
+            ("结论", "证据", "主要发现和结果", "结论和意义"),
+        )
+        table_context_points = _extract_tabular_context_points(table_execution_context, max_items=2)
+        table_evidence = table_answer_point or ("；".join(table_context_points) if table_context_points else _lead_from_table_context(table_execution_context))
+        pdf_evidence = pdf_answer_point or _lead_from_pdf_context(pdf_evidence_context or pdf_answer)
+        if table_evidence:
+            evidence_lines.append(f"- 表格执行结果：{table_evidence}")
+        if pdf_evidence:
+            evidence_lines.append(f"- PDF 原文证据：{pdf_evidence}")
+    else:
+        table_evidence = _hybrid_table_evidence_point(
+            table_execution_context=table_execution_context,
+            tabular_answer=tabular_answer,
+        )
+        if table_evidence:
+            evidence_lines.append(f"- 表格执行结果：{table_evidence}")
+        if pdf_evidence_context or (pdf_answer and not _is_degraded_answer(pdf_answer)):
+            evidence_lines.append(f"- PDF 原文证据：{pdf_evidence_context or pdf_answer}")
     if usable_kb_answer or kb_evidence_context:
         evidence_lines.append(f"- 知识库证据：{kb_evidence_context or usable_kb_answer}")
 
@@ -1095,6 +1259,11 @@ def _is_degraded_answer(text: str) -> bool:
     return any(marker in normalized for marker in markers)
 
 
+def _is_shell_placeholder_answer(text: str) -> bool:
+    normalized = str(text or "").strip()
+    return bool(normalized) and ("壳子" in normalized or "不应主导最终格式" in normalized)
+
+
 def _has_usable_hybrid_evidence(*, synthesis_contract: dict[str, Any]) -> bool:
     contract = dict(synthesis_contract or {})
     candidates = [
@@ -1105,7 +1274,7 @@ def _has_usable_hybrid_evidence(*, synthesis_contract: dict[str, Any]) -> bool:
         str(contract.get("kb_evidence_context") or "").strip(),
         str(contract.get("kb_answer") or "").strip(),
     ]
-    return any(candidate and not _is_degraded_answer(candidate) for candidate in candidates)
+    return any(candidate and not _is_degraded_answer(candidate) and not _is_shell_placeholder_answer(candidate) for candidate in candidates)
 
 
 def _select_hybrid_direct_conclusion(
@@ -1116,11 +1285,13 @@ def _select_hybrid_direct_conclusion(
     pdf_answer: str,
     kb_answer: str,
 ) -> str:
+    tabular_point = _extract_hybrid_answer_point(tabular_answer, ("结论", "结论和意义", "主要发现和结果", "证据"))
+    pdf_point = _extract_hybrid_answer_point(pdf_answer, ("结论", "结论和意义", "主要发现和结果", "证据"))
     for candidate in (
+        tabular_point,
         _lead_from_table_context(table_execution_context),
+        pdf_point,
         _lead_from_pdf_context(pdf_evidence_context),
-        tabular_answer if tabular_answer and not _is_degraded_answer(tabular_answer) else "",
-        pdf_answer if pdf_answer and not _is_degraded_answer(pdf_answer) else "",
         kb_answer if kb_answer and not _is_degraded_answer(kb_answer) else "",
     ):
         if candidate:
@@ -1136,6 +1307,11 @@ def _lead_from_table_context(text: str) -> str:
     if material_hits:
         parts = [f"{material.strip()} {capacity.strip()}mAh" for material, capacity in material_hits[:3]]
         return "表格结果显示：" + "，".join(parts) + "。"
+    context_points = _extract_tabular_context_points(normalized, max_items=3)
+    if context_points:
+        return "表格结果显示：" + "，".join(context_points[:3]) + "。"
+    if _is_tabular_structure_line(normalized):
+        return ""
     return _clip_lead_text(normalized)
 
 

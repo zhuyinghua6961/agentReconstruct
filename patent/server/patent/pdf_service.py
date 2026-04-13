@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+import logging
 import os
 import json
 import re
@@ -24,10 +26,12 @@ from server.patent.pdf_contract import (
     validate_compare_context,
 )
 from server.patent.file_models import PatentFileContract
+from server.patent.pdf_extraction import extract_pdf_text as extract_patent_file_qa_pdf_text
 from server.patent.summary_formatting import (
     LITERATURE_SUMMARY_NOTE,
     PRIMARY_SUMMARY_HEADINGS,
     classify_summary_answer,
+    count_primary_summary_headings,
     extract_support_points,
 )
 from server.patent.streaming import emit_text_chunks, iter_text_output
@@ -37,6 +41,9 @@ try:
     import fitz  # type: ignore
 except Exception:  # pragma: no cover - dependency guard
     fitz = None
+
+
+_LOGGER = logging.getLogger("patent.pdf_service")
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -54,9 +61,47 @@ def _first_env(*names: str, default: str = "") -> str:
     return str(default or "").strip()
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(str(os.getenv(name) or default).strip())
+    except Exception:
+        return int(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(str(os.getenv(name) or default).strip())
+    except Exception:
+        return float(default)
+
+
 _WHITESPACE_PATTERN = re.compile(r"\s+")
 _KB_BOUNDARY_PLACEHOLDER = "当前无额外知识库验证结果。"
 _MAX_COMPARE_DOCUMENTS = 4
+
+
+def extract_file_qa_pdf_text(
+    pdf_path: str,
+    *,
+    max_pages: int = 50,
+    exclude_references: bool = True,
+) -> str:
+    return extract_patent_file_qa_pdf_text(
+        pdf_path,
+        max_pages=max_pages,
+        exclude_references=exclude_references,
+    )
+
+
+def _call_with_supported_kwargs(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return fn(*args, **kwargs)
+    if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()):
+        return fn(*args, **kwargs)
+    supported = {name: value for name, value in kwargs.items() if name in signature.parameters}
+    return fn(*args, **supported)
 
 
 def _collapse_whitespace(value: str) -> str:
@@ -68,6 +113,10 @@ def _truncate(value: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: max(1, limit - 1)].rstrip() + "…"
+
+
+def _debug_preview(value: str, *, limit: int = 160) -> str:
+    return _truncate(_collapse_whitespace(value), limit)
 
 
 def _find_markdown_support_points(text: str, *, max_items: int = 3, min_chars: int = 18) -> list[str]:
@@ -306,6 +355,13 @@ _SUMMARY_SECTION_FALLBACKS = {
     "结论和意义": "PDF中未提及足够的结论或研究意义描述。",
     "局限性": "PDF中未提及明确的局限性或后续工作说明。",
 }
+_SUMMARY_SECTION_TARGET_ITEMS = {
+    "研究目的和背景": 3,
+    "研究方法/实验设计": 5,
+    "主要发现和结果": 5,
+    "结论和意义": 3,
+    "局限性": 3,
+}
 
 
 def _is_aligned_pdf_summary_request(*, route_hint: str, source_scope: str, selected_pdf_count: int = 1) -> bool:
@@ -433,7 +489,44 @@ def _collect_summary_points(text: str, *, max_items: int, min_chars: int) -> lis
 
 def _point_matches_heading(point: str, heading: str) -> bool:
     normalized = str(point or "").strip().lower()
-    return bool(normalized) and any(keyword in normalized for keyword in _SUMMARY_SECTION_KEYWORDS.get(heading, ()))
+    if not normalized:
+        return False
+    if heading == "研究方法/实验设计" and any(
+        keyword in normalized
+        for keyword in _SUMMARY_SECTION_KEYWORDS.get("主要发现和结果", ())
+    ):
+        return False
+    if any(keyword in normalized for keyword in _SUMMARY_SECTION_KEYWORDS.get(heading, ())):
+        return True
+    if heading == "主要发现和结果" and re.search(r"\d", normalized):
+        return True
+    return False
+
+
+def _extract_section_support_points(body: str, *, max_items: int) -> list[str]:
+    normalized = _normalize_summary_body(body)
+    if not normalized or "PDF中未提及" in normalized or "原文证据不足" in normalized:
+        return []
+    return extract_support_points(normalized, max_items=max_items, min_chars=10)
+
+
+def _has_rich_markdown_structure(body: str) -> bool:
+    lines = [line.rstrip() for line in _normalize_summary_body(body).splitlines() if line.strip()]
+    top_level_bullets = [line for line in lines if line.startswith("- ")]
+    nested_bullets = [line for line in lines if re.match(r"^\s+-\s+", line)]
+    return len(top_level_bullets) >= 2 and bool(nested_bullets)
+
+
+def _summary_section_point_counts(text: str) -> dict[str, int]:
+    sections = _extract_summary_sections(text)
+    return {
+        heading: len(_extract_section_support_points(sections.get(heading, ""), max_items=32))
+        for heading in _SUMMARY_SECTION_ORDER
+    }
+
+
+def _format_summary_point_counts(counts: dict[str, int]) -> str:
+    return ",".join(f"{heading}:{int(counts.get(heading, 0))}" for heading in _SUMMARY_SECTION_ORDER)
 
 
 def _pick_summary_points(
@@ -487,14 +580,35 @@ def _build_summary_section_body(
     allow_general_fallback: bool,
 ) -> str:
     body = _normalize_summary_body(sections.get(heading, ""))
+    target_items = _SUMMARY_SECTION_TARGET_ITEMS.get(heading, 3)
+    existing_points = _extract_section_support_points(body, max_items=target_items)
     if _body_has_support(body):
-        return body
+        if _has_rich_markdown_structure(body):
+            used_points.update(existing_points)
+            return body
+        if len(existing_points) >= target_items:
+            used_points.update(existing_points[:target_items])
+            return body
+        if existing_points:
+            selected = list(existing_points)
+            used_points.update(selected)
+            supplemental = _pick_summary_points(
+                heading=heading,
+                answer_points=answer_points,
+                prepared_points=prepared_points,
+                used_points=used_points,
+                max_items=max(0, target_items - len(selected)),
+                allow_general_fallback=allow_general_fallback,
+            )
+            if supplemental:
+                return "\n".join(f"- {point}" for point in [*selected, *supplemental])
+            return body
     points = _pick_summary_points(
         heading=heading,
         answer_points=answer_points,
         prepared_points=prepared_points,
         used_points=used_points,
-        max_items=2 if heading != "主要发现和结果" else 3,
+        max_items=target_items,
         allow_general_fallback=allow_general_fallback,
     )
     if points:
@@ -510,8 +624,8 @@ def _build_repaired_literature_summary(
     allow_general_fallback: bool,
 ) -> str:
     sections = _extract_summary_sections(answer) if use_model_content else {}
-    answer_points = _collect_summary_points(answer, max_items=10, min_chars=10) if use_model_content else []
-    prepared_points = _collect_summary_points(prepared_pdf_text, max_items=10, min_chars=12)
+    answer_points = _collect_summary_points(answer, max_items=24, min_chars=10) if use_model_content else []
+    prepared_points = _collect_summary_points(prepared_pdf_text, max_items=24, min_chars=12)
     used_points: set[str] = set()
     section_bodies: dict[str, str] = {}
     for heading in _SUMMARY_SELECTION_ORDER:
@@ -546,34 +660,26 @@ def _append_summary_tail_sections(
             allow_general_fallback=False,
         )
     sections = _extract_summary_sections(normalized_answer)
-    answer_points = _collect_summary_points(normalized_answer, max_items=10, min_chars=10)
-    prepared_points = _collect_summary_points(prepared_pdf_text, max_items=10, min_chars=12)
+    answer_points = _collect_summary_points(normalized_answer, max_items=24, min_chars=10)
+    prepared_points = _collect_summary_points(prepared_pdf_text, max_items=24, min_chars=12)
     used_points: set[str] = set()
-    extra_blocks: list[str] = []
-    for heading in _SUMMARY_SECTION_ORDER:
-        if heading in sections and _body_has_support(sections[heading]):
-            continue
-        extra_blocks.extend(
-            [
-                f"## {heading}",
-                _build_summary_section_body(
-                    heading=heading,
-                sections=sections,
-                answer_points=answer_points,
-                prepared_points=prepared_points,
-                used_points=used_points,
-                allow_general_fallback=True,
-            ),
-                "",
-            ]
+    section_bodies: dict[str, str] = {}
+    for heading in _SUMMARY_SELECTION_ORDER:
+        section_bodies[heading] = _build_summary_section_body(
+            heading=heading,
+            sections=sections,
+            answer_points=answer_points,
+            prepared_points=prepared_points,
+            used_points=used_points,
+            allow_general_fallback=True,
         )
-    cleaned = normalized_answer
-    if _LITERATURE_SUMMARY_NOTE in cleaned:
-        cleaned = cleaned.replace(_LITERATURE_SUMMARY_NOTE, "").rstrip()
-    if extra_blocks:
-        extra_text = "\n".join(extra_blocks).strip()
-        cleaned = f"{cleaned}\n\n{extra_text}".strip()
-    return f"{cleaned}\n\n{_LITERATURE_SUMMARY_NOTE}".strip()
+    lines: list[str] = []
+    for heading in _SUMMARY_SECTION_ORDER:
+        lines.append(f"## {heading}")
+        lines.append(section_bodies[heading])
+        lines.append("")
+    lines.append(_LITERATURE_SUMMARY_NOTE)
+    return "\n".join(lines).strip()
 
 
 def _ensure_legacy_literature_summary_structure(
@@ -637,36 +743,65 @@ def _ensure_literature_summary_structure(
     selected_pdf_count: int = 1,
 ) -> str:
     normalized_answer = str(answer or "").strip()
+    raw_counts = _summary_section_point_counts(normalized_answer) if normalized_answer else {}
+    raw_heading_count = count_primary_summary_headings(normalized_answer) if normalized_answer else 0
     if not _is_aligned_pdf_summary_request(
         route_hint=route_hint,
         source_scope=source_scope,
         selected_pdf_count=selected_pdf_count,
     ):
-        return _ensure_legacy_literature_summary_structure(answer=normalized_answer, prepared_pdf_text=prepared_pdf_text)
+        result = _ensure_legacy_literature_summary_structure(answer=normalized_answer, prepared_pdf_text=prepared_pdf_text)
+        _LOGGER.info(
+            "🧾 [PATENT_PDF_SUMMARY_NORMALIZE] mode=legacy raw_chars=%s final_chars=%s raw_headings=%s final_headings=%s raw_points=%s final_points=%s raw_preview=%s final_preview=%s",
+            len(normalized_answer),
+            len(result),
+            raw_heading_count,
+            count_primary_summary_headings(result),
+            _format_summary_point_counts(raw_counts),
+            _format_summary_point_counts(_summary_section_point_counts(result)),
+            _debug_preview(normalized_answer),
+            _debug_preview(result),
+        )
+        return result
     prepared_source_text = _strip_multi_doc_headers(prepared_pdf_text)
     mode = classify_summary_answer(normalized_answer, prepared_text=prepared_source_text)
     if mode == "preserve":
-        return _append_summary_tail_sections(answer=normalized_answer, prepared_pdf_text=prepared_source_text)
-    if mode == "light_repair":
-        return _build_repaired_literature_summary(
+        result = _append_summary_tail_sections(answer=normalized_answer, prepared_pdf_text=prepared_source_text)
+    elif mode == "light_repair":
+        result = _build_repaired_literature_summary(
             answer=normalized_answer,
             prepared_pdf_text=prepared_source_text,
             use_model_content=True,
             allow_general_fallback=True,
         )
-    if mode == "conservative_repair":
-        return _build_repaired_literature_summary(
+    elif mode == "conservative_repair":
+        result = _build_repaired_literature_summary(
             answer=normalized_answer,
             prepared_pdf_text=prepared_source_text,
             use_model_content=True,
             allow_general_fallback=False,
         )
-    return _build_repaired_literature_summary(
-        answer="",
-        prepared_pdf_text=prepared_source_text,
-        use_model_content=False,
-        allow_general_fallback=False,
+    else:
+        result = _build_repaired_literature_summary(
+            answer="",
+            prepared_pdf_text=prepared_source_text,
+            use_model_content=False,
+            allow_general_fallback=False,
+        )
+    _LOGGER.info(
+        "🧾 [PATENT_PDF_SUMMARY_NORMALIZE] mode=%s raw_chars=%s prepared_chars=%s final_chars=%s raw_headings=%s final_headings=%s raw_points=%s final_points=%s raw_preview=%s final_preview=%s",
+        mode,
+        len(normalized_answer),
+        len(prepared_source_text),
+        len(result),
+        raw_heading_count,
+        count_primary_summary_headings(result),
+        _format_summary_point_counts(raw_counts),
+        _format_summary_point_counts(_summary_section_point_counts(result)),
+        _debug_preview(normalized_answer),
+        _debug_preview(result),
     )
+    return result
 
 
 class _NoopLogger:
@@ -678,11 +813,22 @@ class _NoopLogger:
 
 
 class PatentPdfAnswerClient:
-    def __init__(self, *, api_key: str, base_url: str, model: str, timeout_seconds: float = 30.0) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str,
+        model: str,
+        timeout_seconds: float = 30.0,
+        top_p: float = 0.95,
+        max_tokens: int = 2500,
+    ) -> None:
         self._api_key = str(api_key or "").strip()
         self._base_url = str(base_url or "").strip()
         self._model = str(model or "").strip()
         self._timeout_seconds = float(timeout_seconds)
+        self._top_p = float(top_p)
+        self._max_tokens = max(1, int(max_tokens))
         self._client = httpx.Client(timeout=self._timeout_seconds)
 
     @classmethod
@@ -706,7 +852,15 @@ class PatentPdfAnswerClient:
             api_key=api_key,
             base_url=base_url,
             model=model,
-            timeout_seconds=float(str(os.getenv("PATENT_OPENAI_TIMEOUT_SECONDS") or "30").strip()),
+            timeout_seconds=_env_float("PATENT_OPENAI_TIMEOUT_SECONDS", 30.0),
+            top_p=_env_float("PATENT_OPENAI_TOP_P", 0.95),
+            max_tokens=max(
+                1024,
+                _env_int(
+                    "PATENT_OPENAI_MAX_TOKENS",
+                    _env_int("PDF_QA_MAX_TOKENS", 2500),
+                ),
+            ),
         )
 
     def close(self) -> None:
@@ -738,9 +892,11 @@ class PatentPdfAnswerClient:
             route_hint=route_hint,
             source_scope=source_scope,
         )
-        return {
+        payload = {
             "model": self._model,
             "temperature": 0.2,
+            "top_p": self._top_p,
+            "max_tokens": self._max_tokens,
             "stream": bool(stream),
             "messages": [
                 {
@@ -750,6 +906,20 @@ class PatentPdfAnswerClient:
                 {"role": "user", "content": prompt},
             ],
         }
+        if summary_mode:
+            _LOGGER.info(
+                "🧾 [PATENT_PDF_SUMMARY_REQUEST] model=%s stream=%s route=%s source_scope=%s selected_pdf_count=%s pdf_chars=%s prompt_chars=%s max_tokens=%s top_p=%s",
+                self._model,
+                int(bool(stream)),
+                route_hint,
+                source_scope,
+                len(labels or [str(file_name or "").strip() or "unknown.pdf"]),
+                len(str(pdf_text or "")),
+                len(prompt),
+                self._max_tokens,
+                self._top_p,
+            )
+        return payload
 
     @staticmethod
     def _extract_delta_text(payload: dict[str, Any]) -> str:
@@ -830,28 +1000,41 @@ class PatentPdfAnswerClient:
         route_hint: str = "pdf_qa",
         source_scope: str = "pdf",
     ) -> str:
+        request_payload = self._build_request_payload(
+            question=question,
+            pdf_text=pdf_text,
+            file_name=file_name,
+            include_kb=include_kb,
+            stream=False,
+            selected_file_labels=selected_file_labels,
+            route_hint=route_hint,
+            source_scope=source_scope,
+        )
         response = self._client.post(
             f"{self._base_url.rstrip('/')}/chat/completions",
             headers={
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
             },
-            json=self._build_request_payload(
-                question=question,
-                pdf_text=pdf_text,
-                file_name=file_name,
-                include_kb=include_kb,
-                stream=False,
-                selected_file_labels=selected_file_labels,
-                route_hint=route_hint,
-                source_scope=source_scope,
-            ),
+            json=request_payload,
         )
         response.raise_for_status()
         payload = response.json()
         choices = list(payload.get("choices") or [])
         message = dict((choices[0] or {}).get("message") or {}) if choices else {}
-        return str(message.get("content") or "").strip()
+        answer = str(message.get("content") or "").strip()
+        if is_summary_question(question) and not is_compare_question(question, selected_pdf_count=len(selected_file_labels or []) or 1):
+            usage = dict(payload.get("usage") or {}) if isinstance(payload, dict) else {}
+            finish_reason = str((choices[0] or {}).get("finish_reason") or "").strip() if choices else ""
+            _LOGGER.info(
+                "🧾 [PATENT_PDF_SUMMARY_RESPONSE] model=%s raw_chars=%s finish_reason=%s usage=%s preview=%s",
+                self._model,
+                len(answer),
+                finish_reason or "-",
+                json.dumps(usage, ensure_ascii=False, sort_keys=True) if usage else "{}",
+                _debug_preview(answer),
+            )
+        return answer
 
 
 class PatentPdfService:
@@ -860,10 +1043,10 @@ class PatentPdfService:
         *,
         extract_pdf_text_fn: Callable[..., str] | None = None,
         answer_question_fn: Callable[..., str] | None = None,
-        max_pdf_pages: int = 10,
+        max_pdf_pages: int = 50,
         max_pdf_chars: int = 12000,
     ) -> None:
-        self._extract_pdf_text_fn = extract_pdf_text_fn or self._extract_pdf_text
+        self._extract_pdf_text_fn = extract_pdf_text_fn or extract_file_qa_pdf_text
         self._answer_question_fn = answer_question_fn
         self._client = None if answer_question_fn is not None else PatentPdfAnswerClient.from_env()
         self._max_pdf_pages = max(1, int(max_pdf_pages))
@@ -1181,9 +1364,11 @@ class PatentPdfService:
             if not resolved.exists() or not resolved.is_file():
                 continue
             extracted = str(
-                self._extract_pdf_text_fn(
+                _call_with_supported_kwargs(
+                    self._extract_pdf_text_fn,
                     str(resolved),
                     max_pages=self._max_pdf_pages,
+                    exclude_references=True,
                 )
                 or ""
             ).strip()
@@ -1275,8 +1460,18 @@ class PatentPdfService:
                     "prepared_pdf_text": "",
                     "answer_text": message,
                     "answer_mode": "pdf_compare_unavailable",
-                    "failure_reason": str(exc),
-                }
+                "failure_reason": str(exc),
+            }
+
+        if summary_mode:
+            _LOGGER.info(
+                "🧾 [PATENT_PDF_SUMMARY_PREPARED] original_pdf_chars=%s prepared_pdf_chars=%s max_pdf_chars=%s selected_pdf_count=%s prepared_preview=%s",
+                len(str(pdf_text or "")),
+                len(str(prepared_pdf_text or "")),
+                self._max_pdf_chars,
+                len(selected_file_labels),
+                _debug_preview(prepared_pdf_text),
+            )
 
         return {
             "ok": True,
@@ -1408,6 +1603,14 @@ class PatentPdfService:
             if isinstance(output, (str, bytes)):
                 answer = _buffer_text(str(output or ""))
                 if answer:
+                    if summary_mode:
+                        _LOGGER.info(
+                            "🧾 [PATENT_PDF_SUMMARY_RAW_OUTPUT] source=callable raw_chars=%s raw_headings=%s raw_points=%s preview=%s",
+                            len(answer),
+                            count_primary_summary_headings(answer),
+                            _format_summary_point_counts(_summary_section_point_counts(answer)),
+                            _debug_preview(answer),
+                        )
                     try:
                         if compare_mode:
                             answer = _ensure_compare_answer_structure(answer=answer, prepared_pdf_text=prepared_pdf_text)
@@ -1477,6 +1680,14 @@ class PatentPdfService:
                         )
                     )
                     if answer:
+                        if summary_mode:
+                            _LOGGER.info(
+                                "🧾 [PATENT_PDF_SUMMARY_RAW_OUTPUT] source=client raw_chars=%s raw_headings=%s raw_points=%s preview=%s",
+                                len(answer),
+                                count_primary_summary_headings(answer),
+                                _format_summary_point_counts(_summary_section_point_counts(answer)),
+                                _debug_preview(answer),
+                            )
                         try:
                             if compare_mode:
                                 answer = _ensure_compare_answer_structure(answer=answer, prepared_pdf_text=prepared_pdf_text)
@@ -1513,6 +1724,14 @@ class PatentPdfService:
 
         answer = "".join(answer_parts).strip()
         if answer:
+            if summary_mode:
+                _LOGGER.info(
+                    "🧾 [PATENT_PDF_SUMMARY_RAW_OUTPUT] source=stream raw_chars=%s raw_headings=%s raw_points=%s preview=%s",
+                    len(answer),
+                    count_primary_summary_headings(answer),
+                    _format_summary_point_counts(_summary_section_point_counts(answer)),
+                    _debug_preview(answer),
+                )
             try:
                 if compare_mode:
                     answer = _ensure_compare_answer_structure(answer=answer, prepared_pdf_text=prepared_pdf_text)
