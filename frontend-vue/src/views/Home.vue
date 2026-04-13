@@ -399,6 +399,21 @@ function formatQueryModeLabel(mode) {
   return ASK_MODE_LABELS[key] || String(mode || '').trim()
 }
 
+function isGraphKbMessage(message) {
+  const labeledMode = formatQueryModeLabel(message?.queryMode || '')
+  if (labeledMode === '知识图谱') return true
+
+  const rawMode = String(
+    message?.metadata?.query_mode
+    || message?.query_mode
+    || message?.metadata?.queryMode
+    || message?.queryMode
+    || ''
+  ).trim().toLowerCase()
+
+  return ['graph_kb', 'neo4j'].includes(rawMode)
+}
+
 function setUserMessageElement(messageIndex, el) {
   if (el) {
     userMessageElements.set(messageIndex, el)
@@ -2434,7 +2449,7 @@ watch(
             </template>
             <template v-else-if="entry.message.role === 'bot' || entry.message.role === 'assistant'">
               <div class="bot-avatar">✨</div>
-              <div class="message-content">
+              <div class="message-content" :class="{ 'message-graph-kb': isGraphKbMessage(entry.message) }">
                 <div v-if="entry.message.queryMode" class="query-mode-badge">{{ entry.message.queryMode }}</div>
                 <div v-if="entry.message.steps && entry.message.steps.length > 0" class="steps-panel">
                   <div class="steps-header" @click="toggleSteps(entry.absoluteMessageIndex)">
@@ -2471,9 +2486,18 @@ watch(
                   </div>
                 </div>
                 <QuotaLimitCard v-if="getQuotaCard(entry.message)" :card="getQuotaCard(entry.message)" />
-                <div v-else-if="entry.message.content && isStreamingTextMessage(entry.message)" v-html="getStreamingMessageHtml(entry.message)"></div>
+                <div
+                  v-else-if="entry.message.content && isStreamingTextMessage(entry.message)"
+                  class="message-markdown-content"
+                  :class="{ 'graph-kb-markdown': isGraphKbMessage(entry.message) }"
+                  v-html="getStreamingMessageHtml(entry.message)"
+                ></div>
                 <template v-else-if="entry.message.content">
-                  <div v-html="getRenderedMessageHtml(entry.message)"></div>
+                  <div
+                    class="message-markdown-content"
+                    :class="{ 'graph-kb-markdown': isGraphKbMessage(entry.message) }"
+                    v-html="getRenderedMessageHtml(entry.message)"
+                  ></div>
                   <div v-if="getTerminalMessageState(entry.message)" class="terminal-message-inline" :class="'terminal-message-' + getTerminalMessageState(entry.message)">
                     <div class="terminal-message-title">{{ getTerminalMessageTitle(entry.message) }}</div>
                     <div v-if="getTerminalMessageDetail(entry.message)" class="terminal-message-detail">{{ getTerminalMessageDetail(entry.message) }}</div>
@@ -3110,6 +3134,50 @@ watch(
 
 .message-content :deep(.stream-bullet) {
   margin: 4px 0;
+}
+
+.message-content.message-graph-kb {
+  background:
+    linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+  border-color: #cfe0f6;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+.message-content.message-graph-kb :deep(.graph-kb-markdown h2),
+.message-content.message-graph-kb :deep(.graph-kb-markdown h3) {
+  color: #0f3a69;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.message-content.message-graph-kb :deep(.graph-kb-markdown h2) {
+  margin: 4px 0 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #d6e4f5;
+  font-size: 16px;
+}
+
+.message-content.message-graph-kb :deep(.graph-kb-markdown h3) {
+  margin: 16px 0 8px;
+  font-size: 14px;
+}
+
+.message-content.message-graph-kb :deep(.graph-kb-markdown ul) {
+  margin: 0 0 10px;
+  padding-left: 20px;
+}
+
+.message-content.message-graph-kb :deep(.graph-kb-markdown li) {
+  margin: 6px 0;
+  color: #1f2937;
+}
+
+.message-content.message-graph-kb :deep(.graph-kb-markdown .doi-link) {
+  color: #0f5cc0;
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: rgba(15, 92, 192, 0.28);
+  text-underline-offset: 2px;
 }
 
 .bot-avatar {

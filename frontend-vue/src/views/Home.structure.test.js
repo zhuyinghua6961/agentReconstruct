@@ -16,7 +16,7 @@ function assertGraphScopedSelector(selector) {
   assert.match(
     source,
     new RegExp(
-      String.raw`(?:\.message-graph-kb\s*:deep\(${selector}\)|\.message-content\.message-graph-kb\s*:deep\(${selector}\)|:deep\(\.message-graph-kb ${selector.replace('\\.', '.')}\))(?=\s*,|\s*\{)`
+      String.raw`(?:\.message-content\.message-graph-kb\s*:deep\(\.graph-kb-markdown ${selector.replace('\\.', '.')}\)|:deep\(\.message-content\.message-graph-kb \.graph-kb-markdown ${selector.replace('\\.', '.')}\))(?=\s*,|\s*\{)`
     )
   )
 }
@@ -129,9 +129,9 @@ test('Home renders quota limit cards inline for quota failures while keeping mar
   assert.match(source, /function getQuotaCard\(message\)/)
   assert.match(source, /mergedMeta\.quota_card = presentation\.card/)
   assert.match(source, /<QuotaLimitCard v-if="getQuotaCard\(entry\.message\)" :card="getQuotaCard\(entry\.message\)" \/>/)
-  assert.match(source, /<QuotaLimitCard v-if="getQuotaCard\(entry\.message\)" :card="getQuotaCard\(entry\.message\)" \/>\s*<div v-else-if="entry\.message\.content && isStreamingTextMessage\(entry\.message\)"/s)
+  assert.match(source, /<QuotaLimitCard v-if="getQuotaCard\(entry\.message\)" :card="getQuotaCard\(entry\.message\)" \/>\s*<div\s+v-else-if="entry\.message\.content && isStreamingTextMessage\(entry\.message\)"[\s\S]*class="message-markdown-content"/s)
   assert.match(source, /<template v-else-if="entry\.message\.content">/)
-  assert.match(source, /<div v-html="getRenderedMessageHtml\(entry\.message\)"><\/div>/)
+  assert.match(source, /<div\s+class="message-markdown-content"[\s\S]*v-html="getRenderedMessageHtml\(entry\.message\)"[\s\S]*><\/div>/s)
 })
 
 test('Home preserves DOI click routing from rendered markdown into the PDF reader', () => {
@@ -291,6 +291,9 @@ test('Home header no longer renders knowledge-base summary status text', () => {
 })
 
 test('Home scopes graph kb markdown styles through deep selectors instead of global markdown rules', () => {
+  assert.match(source, /class="message-markdown-content"[^>]*:class="\{ 'graph-kb-markdown': isGraphKbMessage\(entry\.message\) \}"/)
+  assert.match(source, /class="message-markdown-content"[^>]*:class="\{ 'graph-kb-markdown': isGraphKbMessage\(entry\.message\) \}"[^>]*v-html="getStreamingMessageHtml\(entry\.message\)"/)
+  assert.match(source, /class="message-markdown-content"[^>]*:class="\{ 'graph-kb-markdown': isGraphKbMessage\(entry\.message\) \}"[^>]*v-html="getRenderedMessageHtml\(entry\.message\)"/)
   assertGraphScopedSelector('h2')
   assertGraphScopedSelector('h3')
   assertGraphScopedSelector('ul')

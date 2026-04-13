@@ -252,7 +252,7 @@ function readDoiPrefixedSpan(text, startIndex) {
 
   let i = startIndex + 3
   while (i < text.length && /\s/.test(text[i])) i += 1
-  if (![':', '='].includes(text[i])) return null
+  if (![':', '=', '：'].includes(text[i])) return null
   i += 1
   while (i < text.length && /\s/.test(text[i])) i += 1
 
