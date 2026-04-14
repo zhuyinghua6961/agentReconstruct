@@ -518,7 +518,7 @@ def test_reused_app_recovers_runtime_readiness_on_successful_rebootstrap(monkeyp
     monkeypatch.setattr(
         patent_fastapi_app,
         "build_default_patent_runtime",
-        lambda: runtimes.pop(0),
+        lambda **kwargs: runtimes.pop(0),
     )
 
     app = create_app()
@@ -587,7 +587,7 @@ def test_create_app_closes_runtime_when_service_bootstrap_fails_after_runtime_cr
         def close(self):
             self.closed = True
 
-    monkeypatch.setattr(patent_fastapi_app, "build_default_patent_runtime", lambda: _Runtime())
+    monkeypatch.setattr(patent_fastapi_app, "build_default_patent_runtime", lambda **kwargs: _Runtime())
     monkeypatch.setattr(patent_fastapi_app, "OriginalViewService", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
 
     with pytest.raises(RuntimeError, match="boom"):
@@ -677,7 +677,7 @@ def test_health_route_allows_durable_file_only_probe_without_runtime(monkeypatch
     monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "true")
     monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
     monkeypatch.setenv("JWT_SECRET", TEST_JWT_SECRET)
-    monkeypatch.setattr(patent_fastapi_app, "build_default_patent_runtime", lambda: None)
+    monkeypatch.setattr(patent_fastapi_app, "build_default_patent_runtime", lambda **kwargs: None)
     app = create_app()
     app.state.component_status["redis"]["ready"] = True
     app.state.component_status["authority"]["ready"] = True

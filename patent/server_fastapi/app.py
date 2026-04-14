@@ -78,7 +78,7 @@ def _bootstrap_service_state(app: FastAPI) -> None:
         execution_cache=execution_cache,
         durable_mode_enabled=bool(app.state.settings.durable_mode_enabled),
     )
-    patent_runtime = build_default_patent_runtime()
+    patent_runtime = build_default_patent_runtime(execution_cache=execution_cache)
     component_status = dict(getattr(app.state, "component_status", {}) or {})
     runtime_status = dict(component_status.get("runtime") or {})
     runtime_status["ready"] = patent_runtime is not None

@@ -1304,6 +1304,95 @@ def test_build_default_patent_runtime_builds_no_vector_lexical_catalog_from_arch
     assert outcome.retrieval_backend == "fulltext_lexical"
     assert outcome.references == ["CN115132975B"]
 
+
+def test_build_default_patent_runtime_wires_injected_execution_cache_into_real_retrieval_service(monkeypatch, tmp_path: Path):
+    resource_root = tmp_path / "resource" / "patentQA"
+    archive_dir = resource_root / "__archive__"
+    patent_dir = archive_dir / "CN115132975B"
+    patent_dir.mkdir(parents=True)
+    (patent_dir / "著录项目.json").write_text(
+        json.dumps(
+            {
+                "data": [
+                    {
+                        "pn": "CN115132975B",
+                        "bibliographic_data": {
+                            "publication_reference": {"country": "CN", "kind": "B", "doc_number": "115132975", "date": "2022-10-01"},
+                            "application_reference": {"doc_number": "CN202110320984.1"},
+                            "invention_title": [{"text": "一种锂离子电池及动力车辆"}],
+                            "abstracts": [{"text": "通过 LMFP/LFP/三元复配改善充电安全与低 SOC 放电功率。"}],
+                        },
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (patent_dir / "权利要求.json").write_text(
+        json.dumps(
+            {
+                "data": [
+                    {
+                        "claims": [
+                            {"claim_text": '<div num="1">一种锂离子电池，其正极活性材料包括 LMFP、LFP 与三元材料。</div>'}
+                        ]
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (patent_dir / "说明书.json").write_text(
+        json.dumps(
+            {
+                "data": [
+                    {
+                        "description": [
+                            {"text": '<b class="d_n">[0001]</b>该电池能够改善高 SOC 充电安全性。<b class="d_n">[0002]</b>该电池能够提升低 SOC 放电功率。'}
+                        ]
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    from server.patent.resource_registry import PatentResourceRegistry
+    from server.patent.runtime import build_default_patent_runtime
+
+    class _AnswerBuilder:
+        def __call__(self, **kwargs):
+            return ""
+
+        def close(self):
+            return None
+
+    cache = ExecutionCache(_FakeRedis(), PatentKeyFactory(env="test"))
+    monkeypatch.setattr(
+        "server.patent.runtime.PatentResourceRegistry.discover",
+        lambda: PatentResourceRegistry(
+            repo_root=tmp_path,
+            abstract_db_path=resource_root / "vector_db_patent_abstracts",
+            chunk_db_path=resource_root / "vector_db_patent_chunks",
+            archive_root=archive_dir,
+        ),
+    )
+    monkeypatch.setattr("server.patent.runtime.PatentAnswerBuilder.from_env", lambda: _AnswerBuilder())
+
+    runtime = build_default_patent_runtime(execution_cache=cache)
+    first = runtime.retrieval_service.retrieve(question="哪篇专利提到低 SOC 放电功率？")
+    second = runtime.retrieval_service.retrieve(question="哪篇专利提到低 SOC 放电功率？")
+
+    assert runtime is not None
+    assert runtime.retrieval_service._execution_cache is cache
+    assert first.cache_hit is False
+    assert second.cache_hit is True
+    assert second.references == ["CN115132975B"]
+
+
 def test_runtime_stage2_targeted_retrieval_delegates_to_patent_retrieval_stage_and_extracts_source_ids():
     runtime = PatentRuntime(
         retrieval_service=_service(identity_registry={"CN123456789A": "CN123456789A"}),

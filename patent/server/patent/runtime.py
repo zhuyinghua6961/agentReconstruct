@@ -412,7 +412,7 @@ class PatentRuntime:
                     continue
 
 
-def build_default_patent_runtime() -> PatentRuntime | None:
+def build_default_patent_runtime(*, execution_cache: Any | None = None) -> PatentRuntime | None:
     registry = PatentResourceRegistry.discover()
     if not registry.archive_available():
         _LOGGER.warning("Patent runtime bootstrap skipped because archive root is unavailable")
@@ -463,6 +463,7 @@ def build_default_patent_runtime() -> PatentRuntime | None:
             )
 
     retrieval_service = PatentRetrievalService(
+        execution_cache=execution_cache,
         identity_registry=archive_loader.build_identity_registry(),
         catalog_records=archive_loader.build_catalog_records(),
         retrieval_version="retrieval-v2",

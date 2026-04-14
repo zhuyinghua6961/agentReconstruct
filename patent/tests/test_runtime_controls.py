@@ -82,13 +82,39 @@ def test_trace_context_generates_header_when_missing():
 
 def test_app_bootstrap_wires_patent_runtime_into_executor_kb_boundary(monkeypatch):
     fake_runtime = type("_FakeRuntime", (), {"retrieval_service": object(), "close": lambda self: None})()
-    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda: fake_runtime)
+    monkeypatch.setattr(
+        "server_fastapi.app.build_default_patent_runtime",
+        lambda **kwargs: fake_runtime,
+    )
 
     app = create_app()
 
     executor = app.state.ask_service._patent_executor
     assert executor._runtime is fake_runtime
     assert executor._kb_service is not None
+
+
+def test_app_bootstrap_wires_execution_cache_into_runtime_retrieval_service(monkeypatch):
+    fake_retrieval_service = type("_FakeRetrievalService", (), {"_execution_cache": None})()
+
+    class _FakeRuntime:
+        def __init__(self, retrieval_service):
+            self.retrieval_service = retrieval_service
+
+        def close(self):
+            return None
+
+    fake_runtime = _FakeRuntime(fake_retrieval_service)
+
+    def _build_runtime(*, execution_cache=None):
+        fake_retrieval_service._execution_cache = execution_cache
+        return fake_runtime
+
+    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", _build_runtime)
+
+    app = create_app()
+
+    assert fake_retrieval_service._execution_cache is app.state.execution_cache
 
 
 def test_build_default_patent_runtime_degrades_to_no_vector_when_vector_bootstrap_fails(monkeypatch, tmp_path: Path):

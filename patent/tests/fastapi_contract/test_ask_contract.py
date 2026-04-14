@@ -2229,7 +2229,7 @@ def test_patent_route_aliases_all_dispatch_to_patent_ask():
 
 def test_create_app_bootstraps_patent_executor_with_staged_runtime(monkeypatch):
     runtime = _StageRuntime()
-    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda: runtime)
+    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda **kwargs: runtime)
 
     app = create_app()
 
@@ -2256,7 +2256,7 @@ def test_ephemeral_sync_ask_returns_success_without_authority_calls():
 
 
 def test_ephemeral_sync_ask_returns_service_not_ready_when_runtime_bootstrap_missing(monkeypatch):
-    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda: None)
+    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda **kwargs: None)
     app = create_app()
     payload = _base_payload()
     payload["conversation_id"] = None
@@ -2271,7 +2271,7 @@ def test_ephemeral_sync_ask_returns_service_not_ready_when_runtime_bootstrap_mis
 
 def test_ephemeral_file_only_routes_still_work_when_runtime_bootstrap_missing(monkeypatch):
     monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
-    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda: None)
+    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda **kwargs: None)
     app = create_app()
 
     with TestClient(app) as client:
@@ -2464,7 +2464,7 @@ def test_durable_file_only_request_skips_runtime_readiness_when_runtime_bootstra
     monkeypatch.setenv("PATENT_DURABLE_AUTHORITY_ENABLED", "true")
     monkeypatch.setenv("PATENT_AUTHORITY_INTERNAL_TOKEN", "secret-token")
     monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
-    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda: None)
+    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda **kwargs: None)
     app = create_app()
     app.state.component_status["redis"]["ready"] = True
     app.state.component_status["authority"]["ready"] = True
