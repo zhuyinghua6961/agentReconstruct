@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from server.patent.pdf_contract import (
     is_compare_question,
     is_summary_question,
     smart_truncate_pdf_content,
+    validate_compare_context,
 )
 from server.patent.pdf_service import PatentPdfAnswerClient
 
@@ -271,6 +273,35 @@ def test_compare_prompt_requires_five_section_contract_for_two_documents():
     assert "差异点" not in prompt
 
 
+def test_compare_prompt_prefers_document_specific_extraction_before_insufficiency():
+    prompt = build_patent_pdf_answer_prompt(
+        question="对比一下这两篇文献",
+        pdf_content="==== 文献 1: paper-a.pdf ====\nA\n\n==== 文献 2: paper-b.pdf ====\nB",
+        kb_section="",
+        is_summary=False,
+        is_compare=True,
+        selected_file_labels=["paper-a.pdf", "paper-b.pdf"],
+    )
+
+    assert "优先提取可确认的逐篇证据" in prompt
+    assert "不要先输出大段“未提及”占位" in prompt
+
+
+def test_compare_prompt_does_not_repeat_placeholder_guidance_excessively():
+    prompt = build_patent_pdf_answer_prompt(
+        question="对比一下这两篇文献",
+        pdf_content="==== 文献 1: paper-a.pdf ====\nA\n\n==== 文献 2: paper-b.pdf ====\nB",
+        kb_section="",
+        is_summary=False,
+        is_compare=True,
+        selected_file_labels=["paper-a.pdf", "paper-b.pdf"],
+    )
+
+    assert prompt.count("PDF中未提及") <= 1
+    assert prompt.count("原文证据不足") <= 1
+    assert prompt.count("证据不足") <= 2
+
+
 def test_compare_prompt_allows_compact_compare_for_three_to_four_documents():
     prompt = build_patent_pdf_answer_prompt(
         question="对比一下这四篇文献的方法和应用方向",
@@ -354,7 +385,7 @@ def test_multi_pdf_compare_truncation_keeps_both_document_labels_and_compare_evi
 
     truncated = smart_truncate_pdf_content(
         formatted,
-        max_chars=420,
+        max_chars=560,
         logger=_Logger(),
         is_summary=False,
         question="对比一下这两篇文献的内容",
@@ -490,6 +521,65 @@ def test_compare_truncation_drops_reference_tail_and_keeps_results_or_conclusion
     assert "Results B observed." in truncated or "Conclusion B final." in truncated
 
 
+def test_compare_truncation_drops_reference_tail_even_when_total_input_fits_budget():
+    front_matter = "作者信息与版权页。 " * 120
+    references = "参考文献\n[1] filler citation block. " * 80
+    formatted = format_multi_pdf_sections(
+        [
+            {
+                "label": "paper-a.pdf",
+                "text": (
+                    f"{front_matter}\n\nAbstract A short.\n\nMethod A.\n\n"
+                    f"Results A observed.\n\nConclusion A final.\n\n{references}"
+                ),
+            },
+            {
+                "label": "paper-b.pdf",
+                "text": (
+                    f"{front_matter}\n\nAbstract B short.\n\nMethod B.\n\n"
+                    f"Results B observed.\n\nConclusion B final.\n\n{references}"
+                ),
+            },
+        ]
+    )
+
+    truncated = smart_truncate_pdf_content(
+        formatted,
+        max_chars=50000,
+        logger=_Logger(),
+        is_summary=False,
+        question="对比一下这两篇文献的内容",
+        is_compare=True,
+    )
+
+    assert "参考文献" not in truncated
+    assert "Results A observed." in truncated or "Conclusion A final." in truncated
+    assert "Results B observed." in truncated or "Conclusion B final." in truncated
+
+
+def test_compare_truncation_accepts_short_documents_when_full_cleaned_context_fits_budget():
+    formatted = format_multi_pdf_sections(
+        [
+            {"label": "paper-a.pdf", "text": "Abstract A.\n\nResults A."},
+            {"label": "paper-b.pdf", "text": "Abstract B.\n\nResults B."},
+        ]
+    )
+
+    truncated = smart_truncate_pdf_content(
+        formatted,
+        max_chars=300,
+        logger=_Logger(),
+        is_summary=False,
+        question="对比一下这两篇文献的内容",
+        is_compare=True,
+    )
+
+    assert "paper-a.pdf" in truncated
+    assert "paper-b.pdf" in truncated
+    assert "Abstract A." in truncated
+    assert "Results B." in truncated
+
+
 def test_compare_truncation_prefers_section_body_over_heading_only_lines():
     front_matter = "作者信息与版权页。 " * 200
     formatted = format_multi_pdf_sections(
@@ -538,6 +628,69 @@ def test_compare_truncation_prefers_section_body_over_heading_only_lines():
     assert "Abstract body B keeps the real" in truncated
     assert "Results body A keeps the real" in truncated or "Conclusion body A keeps the real" in truncated
     assert "Results body B keeps the real" in truncated or "Conclusion body B keeps the real" in truncated
+
+
+def test_compare_truncation_does_not_expose_model_visible_truncation_note():
+    front_matter = "作者信息与版权页。 " * 240
+    formatted = format_multi_pdf_sections(
+        [
+            {
+                "label": "paper-a.pdf",
+                "text": (
+                    f"{front_matter}\n\nAbstract A short.\n\nMethod A with detailed compare evidence.\n\n"
+                    "Results A observed.\n\nConclusion A final."
+                ),
+            },
+            {
+                "label": "paper-b.pdf",
+                "text": (
+                    f"{front_matter}\n\nAbstract B short.\n\nMethod B with detailed compare evidence.\n\n"
+                    "Results B observed.\n\nConclusion B final."
+                ),
+            },
+        ]
+    )
+
+    truncated = smart_truncate_pdf_content(
+        formatted,
+        max_chars=560,
+        logger=_Logger(),
+        is_summary=False,
+        question="对比一下这两篇文献的方法差异",
+        is_compare=True,
+    )
+
+    assert "仅保留原始内容" not in truncated
+    assert re.search(r"原始\s*\d+\s*字符.*保留\s*\d+\s*字符", truncated) is None
+
+
+def test_validate_compare_context_accepts_continuous_truncation_without_old_excerpt_targets():
+    repeated_a = "Method A keeps detailed compare evidence. " * 80
+    repeated_b = "Method B keeps detailed compare evidence. " * 80
+    original_documents = [
+        {
+            "label": "paper-a.pdf",
+            "text": f"Abstract A short.\n\n{repeated_a}\n\nResults A observed.\n\nConclusion A final.",
+        },
+        {
+            "label": "paper-b.pdf",
+            "text": f"Abstract B short.\n\n{repeated_b}\n\nResults B observed.\n\nConclusion B final.",
+        },
+    ]
+    prepared = format_multi_pdf_sections(
+        [
+            {
+                "label": "paper-a.pdf",
+                "text": repeated_a + "Results A observed. " * 12,
+            },
+            {
+                "label": "paper-b.pdf",
+                "text": repeated_b + "Results B observed. " * 12,
+            },
+        ]
+    )
+
+    validate_compare_context(prepared, original_documents)
 
 
 def test_multi_pdf_compare_truncation_raises_when_budget_cannot_preserve_all_documents():

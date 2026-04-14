@@ -1129,7 +1129,7 @@ def test_executor_pdf_compare_route_records_compare_steps_and_metadata_parity(tm
     assert result["steps"][3]["status"] == "success"
 
 
-def test_executor_pdf_compare_success_emits_final_step_before_first_content(tmp_path):
+def test_executor_pdf_compare_success_emits_content_before_final_success(tmp_path):
     pdf_path_a = tmp_path / "paper-a.pdf"
     pdf_path_b = tmp_path / "paper-b.pdf"
     pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
@@ -1183,10 +1183,12 @@ def test_executor_pdf_compare_success_emits_final_step_before_first_content(tmp_
         for index, item in enumerate(events)
         if item[0] == "step" and item[1] == "pdf_answer" and item[2] == "success"
     )
-    assert final_success_index < first_content_index
+    streamed_answer = "".join(item[1] for item in events if item[0] == "content")
+    assert first_content_index < final_success_index
+    assert streamed_answer == result["answer_text"]
 
 
-def test_executor_pdf_compare_streaming_generator_emits_content_before_final_success(tmp_path):
+def test_executor_pdf_compare_streaming_generator_keeps_prefix_consistent_final_parity(tmp_path):
     pdf_path_a = tmp_path / "paper-a.pdf"
     pdf_path_b = tmp_path / "paper-b.pdf"
     pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
@@ -1241,13 +1243,15 @@ def test_executor_pdf_compare_streaming_generator_emits_content_before_final_suc
     assert "### 文献 #2 采用的研究方法" in result["answer_text"]
     assert "### 文献 #1 关注的应用领域" in result["answer_text"]
     assert "### 文献 #2 关注的应用领域" in result["answer_text"]
+    first_content_index = next(index for index, item in enumerate(events) if item[0] == "content")
     final_success_index = max(
         index
         for index, item in enumerate(events)
         if item[0] == "step" and item[1] == "pdf_answer" and item[2] == "success"
     )
-    first_content_index = next(index for index, item in enumerate(events) if item[0] == "content")
-    assert final_success_index < first_content_index
+    streamed_answer = "".join(item[1] for item in events if item[0] == "content")
+    assert first_content_index < final_success_index
+    assert streamed_answer == result["answer_text"]
 
 
 def test_executor_pdf_compare_failure_emits_error_steps_before_failure_body(tmp_path):

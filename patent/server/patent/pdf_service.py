@@ -1044,13 +1044,22 @@ class PatentPdfService:
         extract_pdf_text_fn: Callable[..., str] | None = None,
         answer_question_fn: Callable[..., str] | None = None,
         max_pdf_pages: int = 50,
-        max_pdf_chars: int = 12000,
+        max_pdf_chars: int | None = None,
+        compare_max_pdf_chars: int | None = None,
     ) -> None:
         self._extract_pdf_text_fn = extract_pdf_text_fn or extract_file_qa_pdf_text
         self._answer_question_fn = answer_question_fn
         self._client = None if answer_question_fn is not None else PatentPdfAnswerClient.from_env()
         self._max_pdf_pages = max(1, int(max_pdf_pages))
-        self._max_pdf_chars = max(1000, int(max_pdf_chars))
+        resolved_max_pdf_chars = 12000 if max_pdf_chars is None else int(max_pdf_chars)
+        self._max_pdf_chars = max(1000, resolved_max_pdf_chars)
+        if compare_max_pdf_chars is not None:
+            resolved_compare_max_pdf_chars = int(compare_max_pdf_chars)
+        elif max_pdf_chars is not None:
+            resolved_compare_max_pdf_chars = int(max_pdf_chars)
+        else:
+            resolved_compare_max_pdf_chars = max(1000, _env_int("PATENT_MULTI_PDF_COMPARE_MAX_CHARS", 50000))
+        self._compare_max_pdf_chars = max(1, resolved_compare_max_pdf_chars)
 
     def close(self) -> None:
         close = getattr(self._client, "close", None)
@@ -1422,9 +1431,10 @@ class PatentPdfService:
             }
 
         try:
+            max_pdf_chars = self._compare_max_pdf_chars if compare_mode else self._max_pdf_chars
             prepared_pdf_text = smart_truncate_pdf_content(
                 pdf_text,
-                self._max_pdf_chars,
+                max_pdf_chars,
                 logger=_NoopLogger(),
                 is_summary=summary_mode,
                 question=question,
@@ -1447,7 +1457,7 @@ class PatentPdfService:
 
         if compare_mode:
             try:
-                validate_compare_context(prepared_pdf_text, pdf_documents)
+                validate_compare_context(prepared_pdf_text, pdf_documents, max_chars=max_pdf_chars)
             except CompareBudgetError as exc:
                 message = build_compare_failure_message(
                     question=question,
@@ -1576,6 +1586,15 @@ class PatentPdfService:
         def _buffer_text(text: str) -> str:
             return str(text or "").strip()
 
+        def _emit_compare_final_answer(answer_text: str) -> None:
+            nonlocal live_streamed, streamed_text, stream_mode
+            if not compare_mode or not callable(content_callback) or live_streamed:
+                return
+            emit_text_chunks(answer_text, content_callback=content_callback)
+            live_streamed = True
+            streamed_text = answer_text
+            stream_mode = "compare_buffered_final"
+
         def _compare_failure_response(reason: str) -> dict[str, Any]:
             failure_answer = build_compare_failure_message(
                 question=question,
@@ -1635,6 +1654,7 @@ class PatentPdfService:
                         if compare_mode:
                             return _compare_failure_response(str(exc))
                         raise
+                    _emit_compare_final_answer(answer)
                     return {
                         "ok": True,
                         "answer_text": answer,
@@ -1714,6 +1734,7 @@ class PatentPdfService:
                             if compare_mode:
                                 return _compare_failure_response(str(exc))
                             raise
+                        _emit_compare_final_answer(answer)
                         return {
                             "ok": True,
                             "answer_text": answer,
@@ -1758,16 +1779,19 @@ class PatentPdfService:
                 if compare_mode:
                     return _compare_failure_response(str(exc))
                 raise
-            if callable(content_callback) and not compare_mode and answer_parts:
-                if not live_streamed:
-                    emit_text_chunks(answer, content_callback=content_callback)
-                    live_streamed = True
-                    streamed_text = answer
-                elif answer.startswith(streamed_text):
-                    suffix = answer[len(streamed_text) :]
-                    if suffix:
-                        emit_text_chunks(suffix, content_callback=content_callback)
-                    streamed_text = answer
+            if callable(content_callback):
+                if compare_mode:
+                    _emit_compare_final_answer(answer)
+                elif answer_parts:
+                    if not live_streamed:
+                        emit_text_chunks(answer, content_callback=content_callback)
+                        live_streamed = True
+                        streamed_text = answer
+                    elif answer.startswith(streamed_text):
+                        suffix = answer[len(streamed_text) :]
+                        if suffix:
+                            emit_text_chunks(suffix, content_callback=content_callback)
+                        streamed_text = answer
             _LOGGER.info(
                 "patent pdf render route=%s source_scope=%s summary_mode=%s compare_mode=%s aligned_summary_mode=%s input_stream_mode=%s live_streamed=%s stream_mode=%s buffered_pieces=%s answer_chars=%s content_callback=%s",
                 route_hint,
@@ -1901,6 +1925,177 @@ class CompareAnswerNormalizationError(RuntimeError):
     """Raised when compare output cannot be normalized into the approved structure."""
 
 
+_COMPARE_SECTION_ORDER = ["具体内容对比", "研究方法差异", "应用领域差异", "相同点", "总结"]
+_COMPARE_DOC_SECTION_TITLES = {
+    "具体内容对比": "核心内容（根据PDF原文）",
+    "研究方法差异": "采用的研究方法",
+    "应用领域差异": "关注的应用领域",
+}
+_COMPARE_CANONICAL_PLACEHOLDER_SNIPPETS = (
+    "PDF中未提及",
+    "PDF文献中未提及相关内容",
+    "原文证据不足",
+    "证据不足",
+    "未提及",
+    "信息不足",
+    "暂无足够证据",
+    "暂无足够原文证据",
+)
+_COMPARE_PLACEHOLDER_SNIPPETS = (
+    "概括性描述",
+    "没有更多可以展开的细节",
+    "没有更多可展开的细节",
+    "当前没有更多",
+    "暂不明确",
+    "应该具有一定价值",
+    "需要更多证据",
+    "信息较少",
+    "只能做概括",
+    "难以展开",
+    "难以确定",
+    "片段信息",
+    "被截断后的片段",
+)
+_COMPARE_FACT_AFTER_PLACEHOLDER_MARKERS = ("但", "但是", "不过", "然而", "同时", "并且", "并", "，", ",", "；", ";")
+_COMPARE_CAVEAT_CONNECTOR_SUFFIXES = ("并需要", "且需要", "并需", "且需", "并", "且")
+_COMPARE_GENERIC_REPORTING_FACT_INDICATORS = (
+    "报告",
+    "显示",
+    "表明",
+)
+_COMPARE_FACT_AFTER_PLACEHOLDER_INDICATORS = (
+    "采用",
+    "使用",
+    "提出",
+    "构建",
+    "包含",
+    "实现",
+    "观察",
+    "测量",
+    "用于",
+    "应用",
+    "提升",
+    "降低",
+    "优于",
+    "达到",
+    "引入",
+    "开发",
+)
+_COMPARE_ACTION_FACT_SUFFIX_KEYWORDS = (
+    "分析",
+    "测量",
+    "评估",
+    "表征",
+    "匹配",
+    "定位",
+    "建模",
+    "模拟",
+    "可视化",
+    "对照实验",
+    "策略",
+    "体系",
+    "方案",
+    "包覆",
+    "结构",
+    "峰位",
+    "变化",
+    "分布",
+    "性能",
+    "提升",
+    "降低",
+    "适用",
+    "工况",
+    "结果",
+    "结论",
+)
+_COMPARE_WEAK_ACTION_FACT_PREFIXES = (
+    "补充",
+    "更多",
+    "额外",
+    "相关",
+    "初步",
+    "预备",
+    "此",
+    "该",
+    "这些",
+    "某",
+    "若干",
+    "一些",
+    "其他",
+    "进一步",
+    "后续",
+    "待",
+)
+_COMPARE_NON_FACT_AFTER_PLACEHOLDER_SNIPPETS = (
+    "需要更多",
+    "仍需要",
+    "还需要",
+    "后续",
+    "进一步",
+    "未来",
+    "才能",
+    "当前只能",
+    "目前只能",
+    "补充更多",
+    "补充完整原文",
+    "可靠结论",
+    "可靠判断",
+    "无法",
+    "难以",
+    "不能",
+    "不足以判断",
+    "不足以形成",
+)
+_COMPARE_FACT_PAYLOAD_KEYWORDS = (
+    "变化",
+    "提升",
+    "降低",
+    "优于",
+    "达到",
+    "适用",
+    "分布",
+    "含量",
+    "效率",
+    "误差",
+    "成功率",
+    "准确率",
+    "稳定",
+    "显著",
+    "明显",
+)
+_COMPARE_FACT_PAYLOAD_PATTERNS = (
+    r"变化(?![性值度率])",
+    r"提升(?![性值度率])",
+    r"降低(?![性值度率])",
+    r"优于",
+    r"达到",
+    r"适用(?:于)?(?!性)",
+    r"分布(?![性值度率])",
+    r"含量(?![性值度率])",
+    r"效率(?!值)",
+    r"误差",
+    r"成功率",
+    r"准确率",
+    r"稳定(?!性)",
+    r"显著",
+    r"明显",
+)
+_COMPARE_WEAK_FACT_SUFFIXES = (
+    "变化",
+    "适用于工况",
+    "适用工况",
+    "分析",
+)
+_COMPARE_TRUNCATION_INTERNAL_PATTERNS = (
+    r"仅保留原始内容",
+    r"原始\s*\d+\s*字符",
+    r"保留\s*\d+\s*字符",
+    r"截断比例",
+    r"被截断",
+    r"\b0\.\d+%\b",
+)
+
+
 def _ensure_compare_answer_structure(*, answer: str, prepared_pdf_text: str) -> str:
     normalized_answer = str(answer or "").strip()
     compare_documents = _extract_compare_documents(prepared_pdf_text=prepared_pdf_text)
@@ -1910,14 +2105,13 @@ def _ensure_compare_answer_structure(*, answer: str, prepared_pdf_text: str) -> 
         raise CompareAnswerNormalizationError("缺少可用于逐篇比较的文献证据")
     if _contains_heavy_english_compare_content(normalized_answer):
         raise CompareAnswerNormalizationError("模型返回的比较结果包含无法修复的英文碎片")
-    summary_line = _extract_compare_summary_line(normalized_answer)
-    if not summary_line:
-        raise CompareAnswerNormalizationError("模型返回的比较结果无法修复为合格的中文结构化答案")
+    if _contains_compare_truncation_internals(normalized_answer):
+        raise CompareAnswerNormalizationError("模型返回的比较结果泄漏了内部截断诊断信息")
 
     normalized_compare_answer = _build_normalized_compare_answer(
         answer=normalized_answer,
         compare_documents=compare_documents,
-        summary_line=summary_line,
+        summary_line=_extract_compare_summary_line(normalized_answer),
     )
     if _has_ordered_compare_sections(
         text=normalized_compare_answer,
@@ -1951,82 +2145,47 @@ def _build_normalized_compare_answer(
     summary_line: str,
 ) -> str:
     section_map = _require_compare_section_map(answer)
-    compact_mode = len(compare_documents) > 2
-    lines: list[str] = ["## 具体内容对比"]
-    for index, document in enumerate(compare_documents, start=1):
-        lines.extend(
-            [
-                "",
-                f"### 文献 #{index} 核心内容（根据PDF原文）",
-                *[
-                    f"- {item}"
-                    for item in _require_compare_doc_items(
-                        section_body=section_map.get("具体内容对比", ""),
-                        index=index,
-                        label=str(document.get("label") or ""),
-                        reason="模型返回的比较结果未提供足够的逐篇中文核心内容",
-                        max_items=1 if compact_mode else 2,
-                    )
-                ],
-            ]
-        )
-
-    lines.append("")
-    lines.append("## 研究方法差异")
-    for index, document in enumerate(compare_documents, start=1):
-        lines.extend(
-            [
-                "",
-                f"### 文献 #{index} 采用的研究方法",
-                *[
-                    f"- {item}"
-                    for item in _require_compare_doc_items(
-                        section_body=section_map.get("研究方法差异", ""),
-                        index=index,
-                        label=str(document.get("label") or ""),
-                        reason="模型返回的比较结果未给出逐篇研究方法描述",
-                        max_items=1 if compact_mode else 2,
-                    )
-                ],
-            ]
-        )
-
-    lines.append("")
-    lines.append("## 应用领域差异")
-    for index, document in enumerate(compare_documents, start=1):
-        lines.extend(
-            [
-                "",
-                f"### 文献 #{index} 关注的应用领域",
-                *[
-                    f"- {item}"
-                    for item in _require_compare_doc_items(
-                        section_body=section_map.get("应用领域差异", ""),
-                        index=index,
-                        label=str(document.get("label") or ""),
-                        reason="模型返回的比较结果未给出逐篇应用领域描述",
-                        max_items=1 if compact_mode else 2,
-                    )
-                ],
-            ]
-        )
-
-    lines.extend(
-        [
-            "",
-            "## 相同点",
-            *[f"- {item}" for item in _require_compare_shared_items(section_map.get("相同点", ""))],
-            "",
-            "## 总结",
-            f"- {summary_line}",
-        ]
-    )
+    lines: list[str] = []
+    for section_name in _COMPARE_SECTION_ORDER:
+        lines.append(f"## {section_name}")
+        if section_name in _COMPARE_DOC_SECTION_TITLES:
+            for index, document in enumerate(compare_documents, start=1):
+                lines.extend(
+                    [
+                        "",
+                        f"### 文献 #{index} {_COMPARE_DOC_SECTION_TITLES[section_name]}",
+                        _require_compare_doc_body_content(
+                            section_body=section_map.get(section_name, ""),
+                            index=index,
+                            label=str(document.get("label") or ""),
+                            reason=_compare_doc_reason(section_name),
+                        ),
+                    ]
+                )
+        elif section_name == "相同点":
+            lines.extend(
+                [
+                    "",
+                    _require_compare_shared_body(section_map.get("相同点", "")),
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "",
+                    _require_compare_summary_body(
+                        section_body=section_map.get("总结", ""),
+                        summary_line=summary_line,
+                    ),
+                ]
+            )
+        lines.append("")
     return "\n".join(lines).strip()
 
 
 def _require_compare_section_map(answer: str) -> dict[str, str]:
     sections = _extract_compare_sections(answer)
-    expected = ["具体内容对比", "研究方法差异", "应用领域差异", "相同点", "总结"]
+    expected = list(_COMPARE_SECTION_ORDER)
     ordered_names = [name for name, _body in sections]
     if sorted(ordered_names) != sorted(expected):
         raise CompareAnswerNormalizationError("模型返回的比较结果缺少必要章节")
@@ -2053,37 +2212,91 @@ def _extract_compare_sections(text: str) -> list[tuple[str, str]]:
 
 def _has_ordered_compare_sections(*, text: str, compare_documents: list[dict[str, str]]) -> bool:
     ordered_names = [name for name, _body in _extract_compare_sections(text)]
-    expected = ["具体内容对比", "研究方法差异", "应用领域差异", "相同点", "总结"]
+    expected = list(_COMPARE_SECTION_ORDER)
     if ordered_names != expected:
         return False
     section_map = {name: body for name, body in _extract_compare_sections(text)}
     for index, document in enumerate(compare_documents, start=1):
         label = str(document.get("label") or "")
         try:
-            _require_compare_doc_items(
-                section_body=section_map.get("具体内容对比", ""),
-                index=index,
-                label=label,
-                reason="模型返回的比较结果未提供足够的逐篇中文核心内容",
-                max_items=1,
-            )
-            _require_compare_doc_items(
-                section_body=section_map.get("研究方法差异", ""),
-                index=index,
-                label=label,
-                reason="模型返回的比较结果未给出逐篇研究方法描述",
-                max_items=1,
-            )
-            _require_compare_doc_items(
-                section_body=section_map.get("应用领域差异", ""),
-                index=index,
-                label=label,
-                reason="模型返回的比较结果未给出逐篇应用领域描述",
-                max_items=1,
+            for section_name in _COMPARE_DOC_SECTION_TITLES:
+                _require_compare_doc_body_content(
+                    section_body=section_map.get(section_name, ""),
+                    index=index,
+                    label=label,
+                    reason=_compare_doc_reason(section_name),
+                )
+            _require_compare_shared_body(section_map.get("相同点", ""))
+            _require_compare_summary_body(
+                section_body=section_map.get("总结", ""),
+                summary_line=_extract_compare_summary_line(text),
             )
         except CompareAnswerNormalizationError:
             return False
     return True
+
+
+def _compare_doc_reason(section_name: str) -> str:
+    if section_name == "具体内容对比":
+        return "模型返回的比较结果未提供足够的逐篇中文核心内容"
+    if section_name == "研究方法差异":
+        return "模型返回的比较结果未给出逐篇研究方法描述"
+    return "模型返回的比较结果未给出逐篇应用领域描述"
+
+
+def _normalize_compare_block(body: str) -> str:
+    lines = str(body or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    normalized_lines: list[str] = []
+    blank_pending = False
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        if line.strip():
+            if blank_pending and normalized_lines:
+                normalized_lines.append("")
+            normalized_lines.append(line)
+            blank_pending = False
+        else:
+            blank_pending = True
+    return "\n".join(normalized_lines).strip()
+
+
+def _contains_compare_truncation_internals(text: str) -> bool:
+    normalized = _collapse_whitespace(str(text or ""))
+    if not normalized:
+        return False
+    return any(re.search(pattern, normalized) for pattern in _COMPARE_TRUNCATION_INTERNAL_PATTERNS)
+
+
+def _require_compare_doc_body_content(
+    *,
+    section_body: str,
+    index: int,
+    label: str,
+    reason: str,
+) -> str:
+    doc_body = _extract_compare_doc_body(section_body=section_body, index=index)
+    normalized_doc_body = _normalize_compare_block(doc_body)
+    if not normalized_doc_body:
+        raise CompareAnswerNormalizationError(reason)
+    if _contains_compare_truncation_internals(normalized_doc_body):
+        raise CompareAnswerNormalizationError("模型返回的比较结果泄漏了内部截断诊断信息")
+    substantive_points = _extract_substantive_compare_points(normalized_doc_body, label=label, max_items=24)
+    if not substantive_points:
+        raise CompareAnswerNormalizationError(reason)
+    return normalized_doc_body
+
+
+def _extract_substantive_compare_points(text: str, *, label: str, max_items: int) -> list[str]:
+    return [
+        item
+        for item in _extract_compare_chinese_points(text, max_items=max_items)
+        if not _is_placeholder_compare_point(item=item, label=label)
+        and not _contains_compare_truncation_internals(item)
+    ]
 
 
 def _require_compare_doc_items(
@@ -2116,11 +2329,132 @@ def _is_placeholder_compare_point(*, item: str, label: str) -> bool:
         return True
     if normalized in {"略", "略。"}:
         return True
+    if _looks_like_compare_placeholder_text(normalized):
+        return True
     if normalized_label and normalized.startswith(normalized_label):
         suffix = normalized[len(normalized_label):].lstrip("：:，,;； ")
         if suffix in {"略", "略。"}:
             return True
+        if _looks_like_compare_placeholder_text(suffix):
+            return True
     return False
+
+
+def _looks_like_compare_placeholder_text(text: str) -> bool:
+    normalized = _collapse_whitespace(str(text or ""))
+    if not normalized:
+        return True
+    if any(snippet in normalized for snippet in _COMPARE_CANONICAL_PLACEHOLDER_SNIPPETS):
+        if _has_substantive_compare_fact_after_placeholder(normalized):
+            return False
+        return True
+    return len(normalized) <= 32 and any(snippet in normalized for snippet in _COMPARE_PLACEHOLDER_SNIPPETS)
+
+
+def _has_substantive_compare_fact_after_placeholder(text: str) -> bool:
+    normalized = _collapse_whitespace(str(text or ""))
+    if not any(snippet in normalized for snippet in _COMPARE_CANONICAL_PLACEHOLDER_SNIPPETS):
+        return False
+    for marker in _COMPARE_FACT_AFTER_PLACEHOLDER_MARKERS:
+        marker_parts = normalized.split(marker)
+        for tail in marker_parts[1:]:
+            candidate = tail.strip("：:，,;；。 ")
+            if len(candidate) < 4:
+                continue
+            non_fact_indices = [candidate.find(snippet) for snippet in _COMPARE_NON_FACT_AFTER_PLACEHOLDER_SNIPPETS if snippet in candidate]
+            first_non_fact_index = min(non_fact_indices) if non_fact_indices else None
+            fact_fragment = candidate[:first_non_fact_index] if first_non_fact_index is not None else candidate
+            normalized_fact_fragment = _collapse_whitespace(fact_fragment).strip("：:，,;；。 ")
+            connector_trimmed_fact_fragment = _strip_compare_caveat_connector_suffix(normalized_fact_fragment)
+            has_caveat_connector_boundary = connector_trimmed_fact_fragment != normalized_fact_fragment
+            normalized_fact_fragment = connector_trimmed_fact_fragment
+            fact_fragment = normalized_fact_fragment
+            if first_non_fact_index is not None and normalized_fact_fragment.endswith(("后", "之后")):
+                continue
+            if first_non_fact_index is not None:
+                raw_prefix = candidate[:first_non_fact_index].rstrip()
+                if raw_prefix and raw_prefix[-1] not in "，,；;。.!?！？" and not has_caveat_connector_boundary:
+                    continue
+            if _has_substantive_compare_fact_fragment(
+                fact_fragment,
+                future_work_follows=first_non_fact_index is not None,
+            ):
+                return True
+    return False
+
+
+def _strip_compare_caveat_connector_suffix(text: str) -> str:
+    normalized = _collapse_whitespace(str(text or "")).strip("：:，,;；。 ")
+    for suffix in _COMPARE_CAVEAT_CONNECTOR_SUFFIXES:
+        if normalized.endswith(suffix):
+            return normalized[: -len(suffix)].strip("：:，,;；。 ")
+    return normalized
+
+
+def _has_substantive_compare_fact_fragment(text: str, *, future_work_follows: bool = False) -> bool:
+    normalized = _collapse_whitespace(str(text or "")).strip("：:，,;；。 ")
+    if len(normalized) < 4:
+        return False
+    if any(snippet in normalized for snippet in _COMPARE_NON_FACT_AFTER_PLACEHOLDER_SNIPPETS):
+        return False
+    if not future_work_follows and re.search(r"\d+(?:\.\d+)?\s*(?:%|％|倍|个|项|组|年|月|天|小时|mAh|V|A|℃|°C)", normalized):
+        return True
+    for indicator in _COMPARE_FACT_AFTER_PLACEHOLDER_INDICATORS:
+        if indicator not in normalized:
+            continue
+        suffix = normalized.split(indicator, 1)[1].strip("：:，,;；。 ")
+        if not suffix:
+            continue
+        if future_work_follows:
+            normalized_suffix = _collapse_whitespace(suffix).strip("：:，,;；。 ")
+            if normalized_suffix.startswith(_COMPARE_WEAK_ACTION_FACT_PREFIXES):
+                continue
+            has_action_payload = any(keyword in suffix for keyword in _COMPARE_ACTION_FACT_SUFFIX_KEYWORDS)
+            if not has_action_payload:
+                continue
+            if _compare_chinese_char_count(suffix) >= 4:
+                return True
+            if re.search(r"\d", suffix):
+                return True
+            if re.search(r"[A-Za-z][A-Za-z0-9\-]{1,}", suffix):
+                return True
+            continue
+        if re.search(r"\d", suffix):
+            return True
+        if re.search(r"[\u4e00-\u9fff]{2,}", suffix):
+            return True
+        if re.search(r"[A-Za-z][A-Za-z0-9\-]{1,}", suffix) and re.search(r"[\u4e00-\u9fff]", suffix):
+            return True
+    for indicator in _COMPARE_GENERIC_REPORTING_FACT_INDICATORS:
+        if indicator not in normalized:
+            continue
+        suffix = normalized.split(indicator, 1)[1].strip("：:，,;；。 ")
+        if not suffix:
+            continue
+        if future_work_follows:
+            normalized_suffix = _collapse_whitespace(suffix).strip("：:，,;；。 ")
+            if normalized_suffix in _COMPARE_WEAK_FACT_SUFFIXES:
+                continue
+            if any(re.search(pattern, suffix) for pattern in _COMPARE_FACT_PAYLOAD_PATTERNS) and (
+                _compare_chinese_char_count(suffix) >= 4
+                or re.search(r"\d", suffix)
+                or re.search(r"[A-Za-z][A-Za-z0-9\-]{1,}", suffix)
+            ):
+                return True
+            if any(strong_indicator in suffix for strong_indicator in _COMPARE_FACT_AFTER_PLACEHOLDER_INDICATORS):
+                return _has_substantive_compare_fact_fragment(suffix, future_work_follows=True)
+            continue
+        if re.search(r"\d", suffix):
+            return True
+        if re.search(r"[\u4e00-\u9fff]{2,}", suffix):
+            return True
+        if re.search(r"[A-Za-z][A-Za-z0-9\-]{1,}", suffix) and re.search(r"[\u4e00-\u9fff]", suffix):
+            return True
+    return False
+
+
+def _compare_chinese_char_count(text: str) -> int:
+    return len(re.findall(r"[\u4e00-\u9fff]", str(text or "")))
 
 
 def _extract_compare_doc_body(*, section_body: str, index: int) -> str:
@@ -2166,6 +2500,17 @@ def _require_compare_shared_items(section_body: str) -> list[str]:
     raise CompareAnswerNormalizationError("模型返回的比较结果未给出可用的中文共同点总结")
 
 
+def _require_compare_shared_body(section_body: str) -> str:
+    normalized_body = _normalize_compare_block(section_body)
+    if not normalized_body:
+        raise CompareAnswerNormalizationError("模型返回的比较结果未给出可用的中文共同点总结")
+    if _contains_compare_truncation_internals(normalized_body):
+        raise CompareAnswerNormalizationError("模型返回的比较结果泄漏了内部截断诊断信息")
+    if not _extract_substantive_compare_points(normalized_body, label="", max_items=12):
+        raise CompareAnswerNormalizationError("模型返回的比较结果未给出可用的中文共同点总结")
+    return normalized_body
+
+
 def _contains_heavy_english_compare_content(text: str) -> bool:
     normalized = str(text or "")
     ascii_words = re.findall(r"[A-Za-z]{4,}(?:\s+[A-Za-z0-9%+\-]{2,})*", normalized)
@@ -2188,7 +2533,22 @@ def _extract_compare_summary_line(answer: str) -> str:
         return ""
     if re.search(r"[\u4e00-\u9fff]", candidate) is None:
         return ""
+    if _is_placeholder_compare_point(item=candidate, label="") or _contains_compare_truncation_internals(candidate):
+        return ""
     return _truncate(candidate, 220)
+
+
+def _require_compare_summary_body(*, section_body: str, summary_line: str) -> str:
+    normalized_body = _normalize_compare_block(section_body)
+    if normalized_body and not _contains_compare_truncation_internals(normalized_body):
+        if _extract_substantive_compare_points(normalized_body, label="", max_items=12):
+            return normalized_body
+    fallback = _collapse_whitespace(str(summary_line or ""))
+    if not fallback:
+        raise CompareAnswerNormalizationError("模型返回的比较结果未给出可用的中文总结")
+    if _is_placeholder_compare_point(item=fallback, label="") or _contains_compare_truncation_internals(fallback):
+        raise CompareAnswerNormalizationError("模型返回的比较结果未给出可用的中文总结")
+    return f"- {fallback}"
 
 
 def _extract_markdown_section_body(text: str, *, heading: str) -> str:

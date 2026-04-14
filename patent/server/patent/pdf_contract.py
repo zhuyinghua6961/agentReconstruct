@@ -453,7 +453,8 @@ def build_patent_pdf_answer_prompt(
 - `研究方法差异` 和 `应用领域差异` 中允许使用较短的逐篇要点
 - 每篇文献至少保留一个可区分的事实，不得只写共享套话
 - 必须输出高质量的中文总结，不得直接摘录英文摘要
-- 如果某个比较维度证据不足，明确写出 `PDF中未提及` 或 `原文证据不足`
+- 优先提取可确认的逐篇证据，不要先输出大段“未提及”占位
+- 只有某个比较维度确实没有对应原文时，才写 `PDF中未提及` 或 `原文证据不足`
 """
     else:
         compare_output_contract = """
@@ -477,7 +478,8 @@ def build_patent_pdf_answer_prompt(
   - `### 文献 #2 关注的应用领域`
 - 必须输出高质量的中文总结，不得直接摘录英文摘要
 - 每篇文献至少保留一个可区分的事实，不得只写共享套话
-- 如果某个比较维度证据不足，明确写出 `PDF中未提及` 或 `原文证据不足`
+- 优先提取可确认的逐篇证据，不要先输出大段“未提及”占位
+- 只有某个比较维度确实没有对应原文时，才写 `PDF中未提及` 或 `原文证据不足`
 - `相同点` 和 `总结` 保持精炼，不要重复前面三个主要章节
 """
     return f"""
@@ -491,8 +493,9 @@ def build_patent_pdf_answer_prompt(
 
 2. **必须严格基于PDF原文**：
    - ✅ 只使用每篇PDF原文中明确提到的内容
-   - ✅ 如果某篇文献没有相关信息，明确说明该文献证据不足
-   - ✅ 如果某个比较维度在文献中没有出现，明确说明原文未提及
+   - ✅ 优先提取可确认的逐篇证据，先写每篇文献中能直接确认的研究对象、方法、结果、应用或结论
+   - ✅ 只有某个比较维度确实没有对应原文时，才说明该维度缺少原文支持
+   - ✅ 不要先输出大段“未提及”占位，再补零散事实
 
 3. **知识库验证使用规则**（如果提供了知识库信息）：
    - ✅ 知识库信息仅可用于验证 PDF 中已经出现的内容
@@ -518,7 +521,7 @@ def build_patent_pdf_answer_prompt(
 
 **⚠️ 再次强调**：
 1. 你只能使用上述PDF原文中的信息作为主要内容
-2. 如果某篇文献证据不足，不要假装比较已经完成
+2. 优先输出能确认的逐篇事实，不要先输出大段“未提及”占位
 3. 知识库信息仅用于验证，不能替代或补充PDF内容
 4. 不要输出泛化总结，必须完成逐篇比较
 
@@ -699,6 +702,19 @@ def _strip_reference_like_tail(text: str) -> str:
     return "\n\n".join(paragraphs).strip()
 
 
+def _strip_compare_reference_like_tail(text: str) -> str:
+    paragraphs = _split_paragraphs(text)
+    if len(paragraphs) < 2:
+        return str(text or "").strip()
+    search_start = min(4, max(1, len(paragraphs) // 6))
+    for index, paragraph in enumerate(paragraphs):
+        if index < search_start:
+            continue
+        if _is_reference_like_paragraph(paragraph):
+            return "\n\n".join(paragraphs[:index]).strip()
+    return "\n\n".join(paragraphs).strip()
+
+
 def _split_multi_doc_sections(pdf_content: str) -> list[tuple[str, str]]:
     matches = list(MULTI_DOC_HEADER_PATTERN.finditer(pdf_content))
     if len(matches) < 2:
@@ -825,10 +841,52 @@ def _extract_compare_excerpt(body: str, budget: int) -> str:
     return f"{front}\n...\n{back}"
 
 
-def validate_compare_context(prepared_pdf_text: str, documents: list[dict[str, str]]) -> None:
+def _extract_compare_continuous_window(body: str, budget: int) -> str:
+    normalized = _strip_compare_reference_like_tail(body)
+    if len(normalized) <= budget:
+        return normalized
+    paragraphs = _split_paragraphs(normalized)
+    if not paragraphs:
+        return _clip_text_with_boundary(normalized, budget)
+
+    start_index = _find_first_matching_paragraph(paragraphs, ("abstract", "introduction", "methods", "results"))
+    start_index = _resolve_content_paragraph_index(
+        paragraphs,
+        start_index,
+        ("abstract", "introduction", "methods", "results"),
+    )
+    if start_index is None:
+        start_index = 0
+    sliced = "\n\n".join(paragraphs[start_index:]).strip()
+    if len(sliced) <= budget:
+        return sliced
+    return _clip_text_with_boundary(sliced, budget)
+
+
+def _minimum_compare_retained_chars(*, original_text: str, max_chars: int | None, total_docs: int, header_cost: int) -> int:
+    normalized_original = re.sub(r"\s+", " ", _strip_reference_like_tail(original_text)).strip()
+    original_len = len(normalized_original)
+    if original_len <= 0:
+        return 0
+    if max_chars is None:
+        return min(original_len, 400)
+    reserve = min(260, max(120, int(max_chars * 0.08)))
+    available_for_body = max(0, max_chars - reserve - header_cost)
+    compare_doc_budget = max(1, available_for_body // max(1, total_docs))
+    required = min(1200, max(400, compare_doc_budget // 2))
+    return min(original_len, required)
+
+
+def validate_compare_context(
+    prepared_pdf_text: str,
+    documents: list[dict[str, str]],
+    *,
+    max_chars: int | None = None,
+) -> None:
     sections = _split_multi_doc_sections(prepared_pdf_text)
     if len(sections) < len(documents):
         raise CompareBudgetError("compare 截断后未保留全部文献的最小比较上下文")
+    header_cost = sum(len(header) + 3 for header, _body in sections)
 
     for document in documents:
         label = str(document.get("label") or "").strip()
@@ -845,23 +903,38 @@ def validate_compare_context(prepared_pdf_text: str, documents: list[dict[str, s
         if not matched_body:
             raise CompareBudgetError("compare 截断后缺少文献分段，无法完成逐篇比较")
 
-        _, required_targets = _build_compare_paragraph_selection(original_text)
-        normalized_body = re.sub(r"\s+", " ", _strip_reference_like_tail(matched_body)).strip()
+        cleaned_body = _strip_compare_reference_like_tail(matched_body)
+        normalized_raw_body = re.sub(r"\s+", " ", str(matched_body or "")).strip()
+        normalized_body = re.sub(r"\s+", " ", cleaned_body).strip()
         if not normalized_body:
             raise CompareBudgetError("compare 截断后存在空文献分段，无法完成逐篇比较")
-        if _has_reference_like_tail(matched_body):
+        matched_body_lower = str(matched_body or "").lower()
+        if normalized_body != normalized_raw_body and any(marker in matched_body_lower for marker in REFERENCE_SECTION_MARKERS):
             raise CompareBudgetError("compare 截断后混入了参考文献尾部，无法保留最小比较上下文")
-
-        for target in required_targets:
-            normalized_target = re.sub(r"\s+", " ", str(target or "")).strip()
-            if normalized_target and normalized_target not in normalized_body:
-                raise CompareBudgetError("compare 截断后未保留每篇文献的最小比较上下文")
+        minimum_chars = _minimum_compare_retained_chars(
+            original_text=original_text,
+            max_chars=max_chars,
+            total_docs=len(sections),
+            header_cost=header_cost,
+        )
+        if len(normalized_body) < minimum_chars:
+            raise CompareBudgetError("compare 截断后未保留每篇文献的最小比较上下文")
 
 
 def _truncate_multi_pdf_content(pdf_content: str, *, max_chars: int, logger: Any, compare_mode: bool) -> str:
     sections = _split_multi_doc_sections(pdf_content)
     if len(sections) < 2:
         return ""
+
+    if compare_mode:
+        fully_cleaned_parts = [
+            f"{header}\n{_strip_compare_reference_like_tail(body)}"
+            for header, body in sections
+        ]
+        fully_cleaned_result = "\n\n".join(part.strip() for part in fully_cleaned_parts if part.strip()).strip()
+        if fully_cleaned_result and len(fully_cleaned_result) <= max_chars:
+            logger.info("✅ 多文献 compare 直接保留清洗后的完整上下文，最终长度: %s 字符", len(fully_cleaned_result))
+            return fully_cleaned_result
 
     total_docs = len(sections)
     header_cost = sum(len(header) + 3 for header, _body in sections)
@@ -884,18 +957,22 @@ def _truncate_multi_pdf_content(pdf_content: str, *, max_chars: int, logger: Any
     selected_parts: list[str] = []
     for idx, (header, body) in enumerate(sections):
         budget = base + (1 if idx < remainder else 0)
-        excerpt = _extract_compare_excerpt(body, budget) if compare_mode else _clip_text_with_boundary(body, budget)
+        excerpt = _extract_compare_continuous_window(body, budget) if compare_mode else _clip_text_with_boundary(body, budget)
         selected_parts.append(f"{header}\n{excerpt}")
 
     result = "\n\n".join(selected_parts).strip()
+    if compare_mode:
+        if len(result) > max_chars:
+            raise CompareBudgetError("compare 截断结果超过预算，无法保留全部文献的最小比较上下文")
+        logger.info("✅ 多文献 compare 连续截断完成，最终长度: %s 字符", len(result))
+        return result
+
     note = (
         f"\n\n[注意：已从 {total_docs} 篇文献中按均衡配额截断，原始 {len(pdf_content)} 字符，保留 {len(result)} 字符]"
     )
     max_body_chars = max_chars - len(note)
-    if len(result) > max_body_chars and not compare_mode:
+    if len(result) > max_body_chars:
         result = _clip_text_with_boundary(result, max_body_chars)
-    if len(result) > max_body_chars and compare_mode:
-        raise CompareBudgetError("compare 截断结果超过预算，无法保留全部文献的最小比较上下文")
     final_text = result + note
     logger.info(f"✅ 多文献均衡截断完成，最终长度: {len(final_text)} 字符")
     return final_text
@@ -953,6 +1030,16 @@ def smart_truncate_pdf_content(
     question: str = "",
     is_compare: bool = False,
 ) -> str:
+    if is_compare:
+        multi_doc_result = _truncate_multi_pdf_content(
+            pdf_content,
+            max_chars=max_chars,
+            logger=logger,
+            compare_mode=True,
+        )
+        if multi_doc_result:
+            return multi_doc_result
+
     if len(pdf_content) <= max_chars:
         return pdf_content
 
@@ -960,7 +1047,7 @@ def smart_truncate_pdf_content(
         pdf_content,
         max_chars=max_chars,
         logger=logger,
-        compare_mode=is_compare,
+        compare_mode=False,
     )
     if multi_doc_result:
         return multi_doc_result

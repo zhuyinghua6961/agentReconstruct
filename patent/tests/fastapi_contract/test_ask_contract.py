@@ -3048,7 +3048,7 @@ def test_http_stream_pdf_generator_emits_content_before_final_success(monkeypatc
     assert last_content_index < final_success_index
 
 
-def test_http_stream_pdf_compare_success_emits_final_step_before_first_content(monkeypatch, tmp_path):
+def test_http_stream_pdf_compare_success_emits_content_before_final_success(monkeypatch, tmp_path):
     monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
     app = create_app()
     pdf_path_a = tmp_path / "paper-a.pdf"
@@ -3080,10 +3080,12 @@ def test_http_stream_pdf_compare_success_emits_final_step_before_first_content(m
         for index, event in enumerate(events)
         if event["type"] == "step" and event["step"] == "pdf_answer" and event["status"] == "success"
     )
-    assert final_success_index < first_content_index
+    streamed_answer = "".join(event["content"] for event in events if event["type"] == "content")
+    assert first_content_index < final_success_index
+    assert streamed_answer == events[-1]["final_answer"]
 
 
-def test_http_stream_pdf_compare_generator_emits_content_before_final_success(monkeypatch, tmp_path):
+def test_http_stream_pdf_compare_generator_keeps_prefix_consistent_final_parity(monkeypatch, tmp_path):
     monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
     app = create_app()
     pdf_path_a = tmp_path / "paper-a.pdf"
@@ -3116,13 +3118,82 @@ def test_http_stream_pdf_compare_generator_emits_content_before_final_success(mo
 
     assert response.status_code == 200
     events = _stream_events(response)
+    first_content_index = next(index for index, event in enumerate(events) if event["type"] == "content")
     final_success_index = max(
         index
         for index, event in enumerate(events)
         if event["type"] == "step" and event["step"] == "pdf_answer" and event["status"] == "success"
     )
+    streamed_answer = "".join(event["content"] for event in events if event["type"] == "content")
+    assert first_content_index < final_success_index
+    assert streamed_answer == events[-1]["final_answer"]
+
+
+def test_http_stream_pdf_compare_partial_stream_falls_back_to_buffered_final_if_normalization_changes_shape(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+
+    def _out_of_order_stream(**kwargs):
+        answer = (
+            "## 相同点\n"
+            "- 所有文献都提供了可比较的实验结论。\n\n"
+            "## 总结\n"
+            "- 这些文献展示了不同技术路线下的差异化优化方向。\n\n"
+            "## 应用领域差异\n"
+            "### 文献 #1 关注的应用领域\n"
+            "- paper-a.pdf：面向应用方向 1 的性能优化场景。\n"
+            "### 文献 #2 关注的应用领域\n"
+            "- paper-b.pdf：面向应用方向 2 的性能优化场景。\n\n"
+            "## 研究方法差异\n"
+            "### 文献 #1 采用的研究方法\n"
+            "- paper-a.pdf：采用表征测试与性能验证结合的方法，重点分析方案 1。\n"
+            "### 文献 #2 采用的研究方法\n"
+            "- paper-b.pdf：采用表征测试与性能验证结合的方法，重点分析方案 2。\n\n"
+            "## 具体内容对比\n"
+            "### 文献 #1 核心内容（根据PDF原文）\n"
+            "- paper-a.pdf：围绕方案 1 展开研究，并给出明确的中文结论。\n"
+            "### 文献 #2 核心内容（根据PDF原文）\n"
+            "- paper-b.pdf：围绕方案 2 展开研究，并给出明确的中文结论。"
+        )
+        midpoint = len(answer) // 2
+        yield answer[:midpoint]
+        yield answer[midpoint:]
+
+    app.state.ask_service._patent_executor._pdf_service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: (
+            "Abstract A.\n\nResults A observed.\n\nConclusion A final."
+            if path == str(pdf_path_a)
+            else "Abstract B.\n\nResults B observed.\n\nConclusion B final."
+        ),
+        answer_question_fn=_out_of_order_stream,
+    )
+    payload = _pdf_compare_payload()
+    payload["execution_files"][0]["local_path"] = str(pdf_path_a)
+    payload["execution_files"][1]["local_path"] = str(pdf_path_b)
+    payload["used_files"][0]["local_path"] = str(pdf_path_a)
+    payload["used_files"][1]["local_path"] = str(pdf_path_b)
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask_stream", json=payload)
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    final_answer = events[-1]["final_answer"]
+    streamed_answer = "".join(event["content"] for event in events if event["type"] == "content")
     first_content_index = next(index for index, event in enumerate(events) if event["type"] == "content")
-    assert final_success_index < first_content_index
+    final_success_index = max(
+        index
+        for index, event in enumerate(events)
+        if event["type"] == "step" and event["step"] == "pdf_answer" and event["status"] == "success"
+    )
+
+    assert first_content_index < final_success_index
+    assert streamed_answer == final_answer
+    assert streamed_answer.startswith("## 具体内容对比")
 
 
 def test_http_stream_pdf_compare_failure_emits_error_steps_before_failure_body(monkeypatch, tmp_path):

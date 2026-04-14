@@ -134,6 +134,1073 @@ def _build_valid_compare_answer_out_of_order(labels: list[str]) -> str:
     return "\n\n".join(content_blocks)
 
 
+def _build_rich_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：围绕方案 {index} 的研究背景展开，并说明当前问题设置。",
+                f"- {label}：给出了方案 {index} 的关键实验流程与验证路径。",
+                f"- {label}：补充了方案 {index} 的定量结果与应用解释。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：先完成样品制备与分组设计。",
+                f"- {label}：再进行表征测试与对照实验。",
+                f"- {label}：最后结合定量分析总结方法差异。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：面向场景 {index} 的性能优化。",
+                f"- {label}：强调场景 {index} 的部署限制。",
+                f"- {label}：补充场景 {index} 的应用价值。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 所有文献都提供了逐篇可比的实验设计。",
+            "- 所有文献都给出了中文结果总结。",
+            "",
+            "## 总结",
+            "- 这些文献展示了不同方案在方法路径和应用场景上的差异化取舍。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_placeholder_dominant_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：PDF中未提及该维度的具体信息，因此当前不能形成可靠的逐篇比较结论，只能提示用户补充原文证据后再比较。",
+                "- 原文证据不足，因此当前不能展开研究对象、方法、结果或应用场景的可靠差异，只能提示用户补充完整原文。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, _label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                "- PDF中未提及该维度的具体信息，因此当前不能形成可靠的方法差异结论，只能提示用户补充原文证据后再比较。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, _label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                "- 原文证据不足，因此当前不能展开应用领域、部署场景或价值差异，只能提示用户补充完整原文。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 原文证据不足，因此当前不能形成可靠共同点，只能提示用户补充完整原文后再比较。",
+            "",
+            "## 总结",
+            "- PDF中未提及该维度的具体信息，因此当前不能形成可靠的逐篇比较结论，只能提示用户补充原文证据后再比较。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_mixed_placeholder_and_fact_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：未提及明确的应用场景边界，但报告了方案 {index} 的循环寿命提升 20% 和稳定性验证结果。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：证据不足以判断是否包含额外消融实验，但明确采用了分组对照和定量指标评估方案 {index}。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：信息不足以扩展到其他部署场景，但原文明确将方案 {index} 用于高负载连续运行条件。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 两篇文献都在证据边界内报告了可比较的定量验证结果。",
+            "",
+            "## 总结",
+            "- 两篇文献均保留了具体事实，同时明确说明了原文没有覆盖的比较边界。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_placeholder_future_work_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：PDF中未提及该维度的具体信息，但仍需要更多测试验证后才能形成可靠结论。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：原文证据不足，但仍需要补充更多评估后才能判断方法差异。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：信息不足，但仍需要后续对比分析后才能形成可靠判断。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 两篇文献当前都只能提示需要更多测试验证。",
+            "",
+            "## 总结",
+            "- 当前比较结果仍被占位式未来工作描述主导，不能作为正式结论。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_placeholder_future_work_with_tokens_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：PDF中未提及该维度的具体信息，但仍需要更多 XRD 测试验证后才能形成可靠结论。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：原文证据不足，但仍需要补充 3 组测试后才能形成可靠判断。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：信息不足，但仍需要更多 SEM 对比后才能判断应用边界。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 两篇文献当前都只是在提示需要更多 XRD 或 SEM 验证。",
+            "",
+            "## 总结",
+            "- 当前比较结果仍被带英文术语和数字的未来工作占位描述主导，不能作为正式结论。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_placeholder_future_work_with_action_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：PDF中未提及该维度的具体信息，但仍需要采用 XRD 进行更多测试后才能形成可靠结论。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：原文证据不足，但仍需要使用 3 组补充实验后才能形成可靠判断。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：信息不足，但仍需要构建更多对照验证后才能明确应用边界。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 两篇文献当前都只是在提示后续需要采用更多验证手段。",
+            "",
+            "## 总结",
+            "- 当前比较结果仍被带动作词的未来工作占位描述主导，不能作为正式结论。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_mixed_placeholder_with_punctuation_fact_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：未提及明确的应用场景边界，报告了方案 {index} 的循环寿命提升 20%。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：证据不足，原文明确采用了分组对照和定量指标评估方案 {index}。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：信息不足，原文明确将方案 {index} 用于高负载连续运行条件。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 两篇文献都在证据边界内保留了具体事实。",
+            "",
+            "## 总结",
+            "- 两篇文献均用标点边界同时表达了原文缺口和已确认事实。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_placeholder_future_work_with_reporting_verbs_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：PDF中未提及该维度的具体信息，但报告需要更多测试后才能形成可靠结论。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：原文证据不足，但结果显示进一步验证后才能形成可靠判断。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：信息不足，但表明后续补充原文后才能判断应用边界。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 两篇文献当前都只是在提示未来还需要更多验证。",
+            "",
+            "## 总结",
+            "- 当前比较结果仍被带报告动词的占位式 future-work 描述主导，不能作为正式结论。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_mixed_placeholder_with_reporting_fact_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：未提及明确的应用场景，结果显示方案 {index} 存在明显峰位变化。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：证据不足，原文表明方案 {index} 采用了分层对照实验。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：信息不足，报告显示方案 {index} 适用于连续运行工况。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 两篇文献都保留了纯中文 reporting-fact 证据。",
+            "",
+            "## 总结",
+            "- 两篇文献都同时说明了证据边界和已确认的中文事实载荷。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_placeholder_future_work_with_trailing_after_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：PDF中未提及该维度的具体信息，采用对照实验后才能形成可靠判断。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：原文证据不足，使用更多样本后才能形成可靠结论。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：信息不足，构建补充实验后才能判断应用边界。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 两篇文献当前都只是在描述 future-work 依赖条件。",
+            "",
+            "## 总结",
+            "- 当前比较结果仍被以“后才能”结尾的占位式 future-work 描述主导，不能作为正式结论。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_placeholder_future_work_with_numeric_subject_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：PDF中未提及该维度的具体信息，但结果显示 3 组样品仍需要更多测试后才能形成可靠判断。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：原文证据不足，但报告了 3 组样品仍需要更多测试后才能形成可靠结论。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：信息不足，但表明 2 个工况仍需要进一步验证后才能判断应用边界。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 两篇文献当前都只是在描述带数字主语的 future-work 依赖条件。",
+            "",
+            "## 总结",
+            "- 当前比较结果仍被带数字主语的占位式 future-work 描述主导，不能作为正式结论。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_placeholder_future_work_with_reporting_payload_nouns_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：PDF中未提及该维度的具体信息，但表明 2 个工况仍需要进一步验证后才能判断应用边界。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：原文证据不足，但报告显示性能指标仍需要更多测试后才能形成可靠结论。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：信息不足，但结果显示容量数据仍需要进一步验证后才能判断差异。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 两篇文献当前都只是在描述带名词载荷的 future-work 依赖条件。",
+            "",
+            "## 总结",
+            "- 当前比较结果仍被带结果名词的占位式 future-work 描述主导，不能作为正式结论。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_mixed_placeholder_with_concise_reporting_fact_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：未提及应用场景，结果显示峰位变化。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：证据不足，表明性能提升。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：信息不足，报告显示适用于连续运行工况。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 两篇文献都保留了短句 reporting-fact 证据。",
+            "",
+            "## 总结",
+            "- 两篇文献都同时说明了证据边界和短句形式的已确认事实。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_placeholder_future_work_with_reporting_payload_keywords_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：PDF中未提及该维度的具体信息，但结果显示峰位仍需要进一步验证后才能形成可靠判断。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：原文证据不足，但报告显示差异仍需要更多测试后才能形成可靠结论。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：信息不足，但表明寿命仍需要进一步验证后才能判断差异。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 两篇文献当前都只是在描述带结果名词的 future-work 依赖条件。",
+            "",
+            "## 总结",
+            "- 当前比较结果仍被带结果名词的占位式 future-work 描述主导，不能作为正式结论。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_placeholder_future_work_with_action_subject_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：PDF中未提及该维度的具体信息，但采用更多样本仍需要更多测试后才能形成可靠结论。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：原文证据不足，但使用补充实验仍需要进一步验证后才能形成可靠判断。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：信息不足，但构建更多对照仍需要进一步验证后才能判断应用边界。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 两篇文献当前都只是在描述带强动作词的 future-work 主语。",
+            "",
+            "## 总结",
+            "- 当前比较结果仍被带强动作词的占位式 future-work 描述主导，不能作为正式结论。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_placeholder_future_work_with_reporting_derived_nouns_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：PDF中未提及该维度的具体信息，但报告显示稳定性仍需要更多测试后才能形成可靠结论。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：原文证据不足，但表明效率值仍需要进一步验证后才能判断差异。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：信息不足，但结果显示适用性仍需要进一步确认后才能形成可靠判断。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 两篇文献当前都只是在描述带派生名词的 future-work 依赖条件。",
+            "",
+            "## 总结",
+            "- 当前比较结果仍被带派生名词的占位式 future-work 描述主导，不能作为正式结论。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_placeholder_future_work_with_reporting_result_phrase_subject_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：PDF中未提及该维度的具体信息，但报告显示适用于连续运行工况仍需要进一步验证后才能形成可靠判断。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：原文证据不足，但结果显示性能提升效果仍需要进一步确认后才能形成可靠结论。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：信息不足，但表明含量变化趋势仍需要更多测试后才能判断差异。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 两篇文献当前都只是在描述结果短语作为 future-work 主语。",
+            "",
+            "## 总结",
+            "- 当前比较结果仍被带结果短语主语的占位式 future-work 描述主导，不能作为正式结论。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_mixed_placeholder_with_conjunction_caveat_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：未提及应用场景，但结果显示峰位变化并需要进一步验证。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：未提及应用场景，但报告了循环寿命提升20%并需要更多测试。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：未提及应用场景，但使用 TOF-SIMS 可视化分布并需要进一步验证。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 两篇文献都保留了事实后接 caveat 的 mixed-fact 证据。",
+            "",
+            "## 总结",
+            "- 两篇文献都同时说明了已确认事实和仍需验证的边界。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_placeholder_future_work_with_weak_conjunction_caveat_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：PDF中未提及该维度的具体信息，但结果显示变化并需要进一步验证。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：原文证据不足，但表明适用于工况并需要进一步验证。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：信息不足，但采用分析并需要进一步验证。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 两篇文献当前都只是在描述弱事实词后接 caveat。",
+            "",
+            "## 总结",
+            "- 当前比较结果仍被弱事实词加 caveat 的占位式描述主导，不能作为正式结论。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_mixed_placeholder_with_chinese_method_conjunction_caveat_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：未提及应用场景，但采用分层对照实验并需要进一步验证。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：未提及应用场景，但使用原位退火策略并需要更多测试。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：未提及应用场景，但提出双层包覆方案并需要进一步验证。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 两篇文献都保留了中文方法事实后接 caveat 的 mixed-fact 证据。",
+            "",
+            "## 总结",
+            "- 两篇文献都同时说明了中文方法事实和仍需验证的边界。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_placeholder_future_work_with_weak_method_noun_caveat_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：PDF中未提及该维度的具体信息，但提出补充方案并需要进一步验证。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：原文证据不足，但构建更多对照体系并需要进一步确认。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：信息不足，但使用额外退火策略并需要更多测试。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 两篇文献当前都只是在描述带弱方法名词的 future-work 主语。",
+            "",
+            "## 总结",
+            "- 当前比较结果仍被弱方法名词加 caveat 的占位式描述主导，不能作为正式结论。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_placeholder_future_work_with_weak_method_noun_variants_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：PDF中未提及该维度的具体信息，但提出相关方案并需要进一步验证。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：原文证据不足，但构建预备体系并需要进一步确认。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：信息不足，但采用此包覆方案并需要进一步验证。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 两篇文献当前都只是在描述弱指代方法名词的 future-work 主语。",
+            "",
+            "## 总结",
+            "- 当前比较结果仍被弱指代方法名词加 caveat 的占位式描述主导，不能作为正式结论。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_truncation_leak_compare_answer(labels: list[str]) -> str:
+    lines: list[str] = ["## 具体内容对比"]
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 核心内容（根据PDF原文）",
+                f"- {label}：仅保留原始内容的 0.32%，因此难以确定具体研究内容。",
+                f"- {label}：原始 5064 字符，保留 134 字符。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 研究方法差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 采用的研究方法",
+                f"- {label}：由于截断比例过高，方法细节难以展开。",
+            ]
+        )
+
+    lines.append("")
+    lines.append("## 应用领域差异")
+    for index, label in enumerate(labels, start=1):
+        lines.extend(
+            [
+                "",
+                f"### 文献 #{index} 关注的应用领域",
+                f"- {label}：当前只能看到被截断后的片段信息。",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 相同点",
+            "- 两篇文献都泄漏了内部截断诊断信息。",
+            "",
+            "## 总结",
+            "- 当前比较结果被内部截断信息主导，不能作为正式对比结论。",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def test_build_patent_file_contract_consumes_gateway_canonical_fields_without_recanonicalizing():
     contract = build_patent_file_contract(
         route="hybrid_qa",
@@ -964,6 +2031,34 @@ def test_dispatch_pdf_route_negative_compare_question_targets_only_first_documen
     assert "200-cycle retention" not in seen_inputs[0]
 
 
+def test_pdf_service_compare_mode_uses_dedicated_max_chars_budget_when_explicitly_provided():
+    repeated_a = "Method A keeps detailed compare evidence. " * 500
+    repeated_b = "Method B keeps detailed compare evidence. " * 500
+    pdf_documents = [
+        {"label": "paper-a.pdf", "text": f"Abstract A short.\n\n{repeated_a}\n\nResults A observed.\n\nConclusion A final."},
+        {"label": "paper-b.pdf", "text": f"Abstract B short.\n\n{repeated_b}\n\nResults B observed.\n\nConclusion B final."},
+    ]
+    pdf_text = format_multi_pdf_sections(pdf_documents)
+
+    service = PatentPdfService(
+        answer_question_fn=lambda **kwargs: "不会进入生成阶段",
+        max_pdf_chars=12000,
+        compare_max_pdf_chars=50000,
+    )
+
+    prepared = service._prepare_answer_input(
+        question="比较这两篇文献的方法差异",
+        pdf_text=pdf_text,
+        pdf_documents=pdf_documents,
+        selected_file_labels=["paper-a.pdf", "paper-b.pdf"],
+        available_file_labels=["paper-a.pdf", "paper-b.pdf"],
+        compare_mode=True,
+    )
+
+    assert prepared["ok"] is True
+    assert len(prepared["prepared_pdf_text"]) > 12000
+
+
 def test_dispatch_pdf_route_multi_pdf_summary_keeps_legacy_summary_shape(tmp_path):
     pdf_path_a = tmp_path / "paper-a.pdf"
     pdf_path_b = tmp_path / "paper-b.pdf"
@@ -1261,6 +2356,912 @@ def test_dispatch_pdf_route_compare_answer_preserves_valid_five_section_markdown
     assert "各自概要：" not in answer
     assert "差异点：" not in answer
     assert answer.count("## 总结") == 1
+
+
+def test_compare_normalization_preserves_rich_document_bullets_instead_of_collapsing_to_one_per_section(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "中文摘要 A。\n\n实验结果 A 明确。\n\n结论 A 完整。"
+                if path == str(pdf_path_a)
+                else "中文摘要 B。\n\n实验结果 B 明确。\n\n结论 B 完整。"
+            ),
+            answer_question_fn=lambda **kwargs: _build_rich_compare_answer(["paper-a.pdf", "paper-b.pdf"]),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_text_compare"
+    assert "paper-a.pdf：补充了方案 1 的定量结果与应用解释。" in result["answer_text"]
+    assert "paper-b.pdf：最后结合定量分析总结方法差异。" in result["answer_text"]
+    assert "paper-a.pdf：补充场景 1 的应用价值。" in result["answer_text"]
+    assert result["answer_text"].count("- ") >= 18
+
+
+def test_compare_validation_rejects_placeholder_dominant_answer(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "中文摘要 A。\n\n实验结果 A 明确。\n\n结论 A 完整。"
+                if path == str(pdf_path_a)
+                else "中文摘要 B。\n\n实验结果 B 明确。\n\n结论 B 完整。"
+            ),
+            answer_question_fn=lambda **kwargs: _build_placeholder_dominant_compare_answer(["paper-a.pdf", "paper-b.pdf"]),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+
+
+def test_compare_validation_preserves_mixed_placeholder_boundary_with_specific_facts(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "中文摘要 A。\n\n实验结果 A 明确包含循环寿命提升 20%。\n\n结论 A 完整。"
+                if path == str(pdf_path_a)
+                else "中文摘要 B。\n\n实验结果 B 明确包含循环寿命提升 20%。\n\n结论 B 完整。"
+            ),
+            answer_question_fn=lambda **kwargs: _build_mixed_placeholder_and_fact_compare_answer(
+                ["paper-a.pdf", "paper-b.pdf"]
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_text_compare"
+    assert "未提及明确的应用场景边界，但报告了方案 1 的循环寿命提升 20%" in result["answer_text"]
+    assert "证据不足以判断是否包含额外消融实验，但明确采用了分组对照" in result["answer_text"]
+    assert "信息不足以扩展到其他部署场景，但原文明确将方案 2 用于高负载连续运行条件" in result["answer_text"]
+
+
+def test_compare_validation_rejects_placeholder_with_future_work_tail(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "中文摘要 A。\n\n实验结果 A 明确包含循环寿命提升 20%。\n\n结论 A 完整。"
+                if path == str(pdf_path_a)
+                else "中文摘要 B。\n\n实验结果 B 明确包含循环寿命提升 20%。\n\n结论 B 完整。"
+            ),
+            answer_question_fn=lambda **kwargs: _build_placeholder_future_work_compare_answer(
+                ["paper-a.pdf", "paper-b.pdf"]
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+
+
+def test_compare_validation_rejects_placeholder_with_future_work_tokens(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "中文摘要 A。\n\n实验结果 A 明确包含循环寿命提升 20%。\n\n结论 A 完整。"
+                if path == str(pdf_path_a)
+                else "中文摘要 B。\n\n实验结果 B 明确包含循环寿命提升 20%。\n\n结论 B 完整。"
+            ),
+            answer_question_fn=lambda **kwargs: _build_placeholder_future_work_with_tokens_compare_answer(
+                ["paper-a.pdf", "paper-b.pdf"]
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+
+
+def test_compare_validation_rejects_placeholder_with_future_work_action_tokens(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "中文摘要 A。\n\n实验结果 A 明确包含循环寿命提升 20%。\n\n结论 A 完整。"
+                if path == str(pdf_path_a)
+                else "中文摘要 B。\n\n实验结果 B 明确包含循环寿命提升 20%。\n\n结论 B 完整。"
+            ),
+            answer_question_fn=lambda **kwargs: _build_placeholder_future_work_with_action_compare_answer(
+                ["paper-a.pdf", "paper-b.pdf"]
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+
+
+def test_compare_validation_preserves_mixed_placeholder_with_punctuation_fact(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "中文摘要 A。\n\n实验结果 A 明确包含循环寿命提升 20%。\n\n结论 A 完整。"
+                if path == str(pdf_path_a)
+                else "中文摘要 B。\n\n实验结果 B 明确包含循环寿命提升 20%。\n\n结论 B 完整。"
+            ),
+            answer_question_fn=lambda **kwargs: _build_mixed_placeholder_with_punctuation_fact_compare_answer(
+                ["paper-a.pdf", "paper-b.pdf"]
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_text_compare"
+    assert "未提及明确的应用场景边界，报告了方案 1 的循环寿命提升 20%" in result["answer_text"]
+    assert "证据不足，原文明确采用了分组对照和定量指标评估方案 1" in result["answer_text"]
+    assert "信息不足，原文明确将方案 2 用于高负载连续运行条件" in result["answer_text"]
+
+
+def test_compare_validation_rejects_placeholder_with_reporting_verbs_and_future_work(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "中文摘要 A。\n\n实验结果 A 明确包含循环寿命提升 20%。\n\n结论 A 完整。"
+                if path == str(pdf_path_a)
+                else "中文摘要 B。\n\n实验结果 B 明确包含循环寿命提升 20%。\n\n结论 B 完整。"
+            ),
+            answer_question_fn=lambda **kwargs: _build_placeholder_future_work_with_reporting_verbs_compare_answer(
+                ["paper-a.pdf", "paper-b.pdf"]
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+
+
+def test_compare_validation_preserves_mixed_placeholder_with_reporting_fact(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "中文摘要 A。\n\n实验结果 A 明确包含循环寿命提升 20%。\n\n结论 A 完整。"
+                if path == str(pdf_path_a)
+                else "中文摘要 B。\n\n实验结果 B 明确包含循环寿命提升 20%。\n\n结论 B 完整。"
+            ),
+            answer_question_fn=lambda **kwargs: _build_mixed_placeholder_with_reporting_fact_compare_answer(
+                ["paper-a.pdf", "paper-b.pdf"]
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_text_compare"
+    assert "未提及明确的应用场景，结果显示方案 1 存在明显峰位变化" in result["answer_text"]
+    assert "证据不足，原文表明方案 1 采用了分层对照实验" in result["answer_text"]
+    assert "信息不足，报告显示方案 2 适用于连续运行工况" in result["answer_text"]
+
+
+def test_compare_validation_rejects_placeholder_with_trailing_after_future_work(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "中文摘要 A。\n\n实验结果 A 明确包含循环寿命提升 20%。\n\n结论 A 完整。"
+                if path == str(pdf_path_a)
+                else "中文摘要 B。\n\n实验结果 B 明确包含循环寿命提升 20%。\n\n结论 B 完整。"
+            ),
+            answer_question_fn=lambda **kwargs: _build_placeholder_future_work_with_trailing_after_compare_answer(
+                ["paper-a.pdf", "paper-b.pdf"]
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+
+
+def test_compare_validation_rejects_placeholder_with_numeric_subject_future_work(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "中文摘要 A。\n\n实验结果 A 明确包含循环寿命提升 20%。\n\n结论 A 完整。"
+                if path == str(pdf_path_a)
+                else "中文摘要 B。\n\n实验结果 B 明确包含循环寿命提升 20%。\n\n结论 B 完整。"
+            ),
+            answer_question_fn=lambda **kwargs: _build_placeholder_future_work_with_numeric_subject_compare_answer(
+                ["paper-a.pdf", "paper-b.pdf"]
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+
+
+def test_compare_validation_rejects_placeholder_with_reporting_payload_nouns_future_work(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "中文摘要 A。\n\n实验结果 A 明确包含循环寿命提升 20%。\n\n结论 A 完整。"
+                if path == str(pdf_path_a)
+                else "中文摘要 B。\n\n实验结果 B 明确包含循环寿命提升 20%。\n\n结论 B 完整。"
+            ),
+            answer_question_fn=lambda **kwargs: _build_placeholder_future_work_with_reporting_payload_nouns_compare_answer(
+                ["paper-a.pdf", "paper-b.pdf"]
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+
+
+def test_compare_validation_preserves_mixed_placeholder_with_concise_reporting_fact(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "中文摘要 A。\n\n实验结果 A 明确包含循环寿命提升 20%。\n\n结论 A 完整。"
+                if path == str(pdf_path_a)
+                else "中文摘要 B。\n\n实验结果 B 明确包含循环寿命提升 20%。\n\n结论 B 完整。"
+            ),
+            answer_question_fn=lambda **kwargs: _build_mixed_placeholder_with_concise_reporting_fact_compare_answer(
+                ["paper-a.pdf", "paper-b.pdf"]
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_text_compare"
+    assert "未提及应用场景，结果显示峰位变化" in result["answer_text"]
+    assert "证据不足，表明性能提升" in result["answer_text"]
+    assert "信息不足，报告显示适用于连续运行工况" in result["answer_text"]
+
+
+def test_compare_validation_rejects_placeholder_with_reporting_payload_keywords_future_work(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "中文摘要 A。\n\n实验结果 A 明确包含循环寿命提升 20%。\n\n结论 A 完整。"
+                if path == str(pdf_path_a)
+                else "中文摘要 B。\n\n实验结果 B 明确包含循环寿命提升 20%。\n\n结论 B 完整。"
+            ),
+            answer_question_fn=lambda **kwargs: _build_placeholder_future_work_with_reporting_payload_keywords_compare_answer(
+                ["paper-a.pdf", "paper-b.pdf"]
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+
+
+def test_compare_validation_rejects_placeholder_with_action_subject_future_work(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "中文摘要 A。\n\n实验结果 A 明确包含循环寿命提升 20%。\n\n结论 A 完整。"
+                if path == str(pdf_path_a)
+                else "中文摘要 B。\n\n实验结果 B 明确包含循环寿命提升 20%。\n\n结论 B 完整。"
+            ),
+            answer_question_fn=lambda **kwargs: _build_placeholder_future_work_with_action_subject_compare_answer(
+                ["paper-a.pdf", "paper-b.pdf"]
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+
+
+def test_compare_validation_rejects_placeholder_with_reporting_derived_nouns_future_work(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "中文摘要 A。\n\n实验结果 A 明确包含循环寿命提升 20%。\n\n结论 A 完整。"
+                if path == str(pdf_path_a)
+                else "中文摘要 B。\n\n实验结果 B 明确包含循环寿命提升 20%。\n\n结论 B 完整。"
+            ),
+            answer_question_fn=lambda **kwargs: _build_placeholder_future_work_with_reporting_derived_nouns_compare_answer(
+                ["paper-a.pdf", "paper-b.pdf"]
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+
+
+def test_compare_validation_rejects_placeholder_with_reporting_result_phrase_subject_future_work(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "中文摘要 A。\n\n实验结果 A 明确包含循环寿命提升 20%。\n\n结论 A 完整。"
+                if path == str(pdf_path_a)
+                else "中文摘要 B。\n\n实验结果 B 明确包含循环寿命提升 20%。\n\n结论 B 完整。"
+            ),
+            answer_question_fn=lambda **kwargs: _build_placeholder_future_work_with_reporting_result_phrase_subject_compare_answer(
+                ["paper-a.pdf", "paper-b.pdf"]
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+
+
+def test_compare_validation_preserves_mixed_placeholder_with_conjunction_caveat(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "中文摘要 A。\n\n实验结果 A 明确包含循环寿命提升 20%。\n\n结论 A 完整。"
+                if path == str(pdf_path_a)
+                else "中文摘要 B。\n\n实验结果 B 明确包含循环寿命提升 20%。\n\n结论 B 完整。"
+            ),
+            answer_question_fn=lambda **kwargs: _build_mixed_placeholder_with_conjunction_caveat_compare_answer(
+                ["paper-a.pdf", "paper-b.pdf"]
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_text_compare"
+    assert "未提及应用场景，但结果显示峰位变化并需要进一步验证" in result["answer_text"]
+    assert "未提及应用场景，但报告了循环寿命提升20%并需要更多测试" in result["answer_text"]
+    assert "未提及应用场景，但使用 TOF-SIMS 可视化分布并需要进一步验证" in result["answer_text"]
+
+
+def test_compare_validation_rejects_placeholder_with_weak_conjunction_caveat(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "中文摘要 A。\n\n实验结果 A 明确包含循环寿命提升 20%。\n\n结论 A 完整。"
+                if path == str(pdf_path_a)
+                else "中文摘要 B。\n\n实验结果 B 明确包含循环寿命提升 20%。\n\n结论 B 完整。"
+            ),
+            answer_question_fn=lambda **kwargs: _build_placeholder_future_work_with_weak_conjunction_caveat_compare_answer(
+                ["paper-a.pdf", "paper-b.pdf"]
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+
+
+def test_compare_validation_preserves_mixed_placeholder_with_chinese_method_conjunction_caveat(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "中文摘要 A。\n\n实验结果 A 明确包含循环寿命提升 20%。\n\n结论 A 完整。"
+                if path == str(pdf_path_a)
+                else "中文摘要 B。\n\n实验结果 B 明确包含循环寿命提升 20%。\n\n结论 B 完整。"
+            ),
+            answer_question_fn=lambda **kwargs: _build_mixed_placeholder_with_chinese_method_conjunction_caveat_compare_answer(
+                ["paper-a.pdf", "paper-b.pdf"]
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_text_compare"
+    assert "未提及应用场景，但采用分层对照实验并需要进一步验证" in result["answer_text"]
+    assert "未提及应用场景，但使用原位退火策略并需要更多测试" in result["answer_text"]
+    assert "未提及应用场景，但提出双层包覆方案并需要进一步验证" in result["answer_text"]
+
+
+def test_compare_validation_rejects_placeholder_with_weak_method_noun_caveat(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "中文摘要 A。\n\n实验结果 A 明确包含循环寿命提升 20%。\n\n结论 A 完整。"
+                if path == str(pdf_path_a)
+                else "中文摘要 B。\n\n实验结果 B 明确包含循环寿命提升 20%。\n\n结论 B 完整。"
+            ),
+            answer_question_fn=lambda **kwargs: _build_placeholder_future_work_with_weak_method_noun_caveat_compare_answer(
+                ["paper-a.pdf", "paper-b.pdf"]
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+
+
+def test_compare_validation_rejects_placeholder_with_weak_method_noun_variants_caveat(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "中文摘要 A。\n\n实验结果 A 明确包含循环寿命提升 20%。\n\n结论 A 完整。"
+                if path == str(pdf_path_a)
+                else "中文摘要 B。\n\n实验结果 B 明确包含循环寿命提升 20%。\n\n结论 B 完整。"
+            ),
+            answer_question_fn=lambda **kwargs: _build_placeholder_future_work_with_weak_method_noun_variants_compare_answer(
+                ["paper-a.pdf", "paper-b.pdf"]
+            ),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
+
+
+def test_compare_validation_rejects_answer_that_leaks_truncation_internals(tmp_path):
+    pdf_path_a = tmp_path / "paper-a.pdf"
+    pdf_path_b = tmp_path / "paper-b.pdf"
+    pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    pdf_path_b.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="对比一下这两篇文献的内容",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11, 12],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "paper-a.pdf", "local_path": str(pdf_path_a)},
+            {**PDF_FILE_2, "file_name": "paper-b.pdf", "local_path": str(pdf_path_b)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 12], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: (
+                "中文摘要 A。\n\n实验结果 A 明确。\n\n结论 A 完整。"
+                if path == str(pdf_path_a)
+                else "中文摘要 B。\n\n实验结果 B 明确。\n\n结论 B 完整。"
+            ),
+            answer_question_fn=lambda **kwargs: _build_truncation_leak_compare_answer(["paper-a.pdf", "paper-b.pdf"]),
+        ),
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_compare_unavailable"
+    assert "无法完成完整比较" in result["answer_text"]
 
 
 def test_dispatch_pdf_route_compare_answer_restructures_when_headings_exist_but_document_facts_are_missing(tmp_path):
@@ -1733,7 +3734,7 @@ def test_dispatch_pdf_route_preserves_tail_evidence_from_each_large_pdf_in_compa
     assert "Conclusion B rejects route A." in captured["pdf_text"]
 
 
-def test_dispatch_pdf_route_preserves_per_document_abstract_for_four_doc_compare(tmp_path):
+def test_dispatch_pdf_route_preserves_per_document_abstract_for_four_doc_compare_with_sufficient_compare_budget(tmp_path):
     pdf_paths = []
     execution_files = []
     selected_ids = []
@@ -1778,6 +3779,7 @@ def test_dispatch_pdf_route_preserves_per_document_abstract_for_four_doc_compare
         answer_question_fn=lambda **kwargs: captured.update({"pdf_text": str(kwargs["pdf_text"])})
         or _build_valid_compare_answer([f"paper-{index}.pdf" for index in range(1, 5)]),
         max_pdf_chars=1000,
+        compare_max_pdf_chars=50000,
     )
 
     result = dispatch_patent_file_route(
@@ -1792,7 +3794,7 @@ def test_dispatch_pdf_route_preserves_per_document_abstract_for_four_doc_compare
         assert f"Results {index} observed." in captured["pdf_text"] or f"Conclusion {index} final." in captured["pdf_text"]
 
 
-def test_dispatch_pdf_route_drops_reference_tail_from_compare_context(tmp_path):
+def test_dispatch_pdf_route_drops_reference_tail_from_compare_context_with_compare_budget_override(tmp_path):
     pdf_path_a = tmp_path / "paper-a.pdf"
     pdf_path_b = tmp_path / "paper-b.pdf"
     pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
@@ -1829,6 +3831,7 @@ def test_dispatch_pdf_route_drops_reference_tail_from_compare_context(tmp_path):
         answer_question_fn=lambda **kwargs: captured.update({"pdf_text": str(kwargs["pdf_text"])})
         or _build_valid_compare_answer(["paper-a.pdf", "paper-b.pdf"]),
         max_pdf_chars=560,
+        compare_max_pdf_chars=50000,
     )
 
     result = dispatch_patent_file_route(
@@ -1843,7 +3846,7 @@ def test_dispatch_pdf_route_drops_reference_tail_from_compare_context(tmp_path):
     assert "Results B observed." in captured["pdf_text"] or "Conclusion B final." in captured["pdf_text"]
 
 
-def test_dispatch_pdf_route_rejects_invalid_compare_excerpt_after_truncation(tmp_path, monkeypatch):
+def test_dispatch_pdf_route_rejects_invalid_compare_context_after_truncation(tmp_path, monkeypatch):
     pdf_path_a = tmp_path / "paper-a.pdf"
     pdf_path_b = tmp_path / "paper-b.pdf"
     pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
@@ -1933,7 +3936,7 @@ def test_dispatch_pdf_route_allows_appendix_word_inside_body_content(tmp_path):
     assert "appendix-based evaluation setup" in captured["pdf_text"]
 
 
-def test_dispatch_pdf_route_rejects_compare_excerpt_when_only_other_document_keeps_shared_targets(tmp_path, monkeypatch):
+def test_dispatch_pdf_route_rejects_compare_context_when_one_document_loses_minimum_body(tmp_path, monkeypatch):
     pdf_path_a = tmp_path / "paper-a.pdf"
     pdf_path_b = tmp_path / "paper-b.pdf"
     pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
@@ -1981,7 +3984,7 @@ def test_dispatch_pdf_route_rejects_compare_excerpt_when_only_other_document_kee
     assert "无法完成完整比较" in result["answer_text"]
 
 
-def test_dispatch_pdf_route_accepts_long_compare_paragraphs_when_required_slices_are_preserved(tmp_path):
+def test_dispatch_pdf_route_accepts_long_compare_paragraphs_when_continuous_body_budget_is_sufficient(tmp_path):
     pdf_paths = []
     execution_files = []
     selected_ids = []
@@ -2011,12 +4014,15 @@ def test_dispatch_pdf_route_accepts_long_compare_paragraphs_when_required_slices
     )
     long_abstract = "Abstract section with detailed compare evidence. " * 12
     long_conclusion = "Conclusion section with detailed tail evidence. " * 12
+    captured: dict[str, str] = {}
     service = PatentPdfService(
         extract_pdf_text_fn=lambda path, max_pages=10: (
             f"{long_abstract}\n\nMethod {Path(path).stem}.\n\nResults {Path(path).stem} observed.\n\n{long_conclusion}"
         ),
-        answer_question_fn=lambda **kwargs: _build_valid_compare_answer([f"paper-{index}.pdf" for index in range(1, 5)]),
+        answer_question_fn=lambda **kwargs: captured.update({"pdf_text": str(kwargs["pdf_text"])})
+        or _build_valid_compare_answer([f"paper-{index}.pdf" for index in range(1, 5)]),
         max_pdf_chars=1000,
+        compare_max_pdf_chars=50000,
     )
 
     result = dispatch_patent_file_route(
@@ -2026,9 +4032,12 @@ def test_dispatch_pdf_route_accepts_long_compare_paragraphs_when_required_slices
     )
 
     assert result["metadata"]["answer_mode"] == "pdf_text_compare"
+    normalized = re.sub(r"\s+", " ", captured["pdf_text"])
+    assert normalized.count("Abstract section with detailed compare evidence.") >= 4
+    assert normalized.count("Conclusion section with detailed tail evidence.") >= 4
 
 
-def test_dispatch_pdf_route_preserves_compare_slices_for_flattened_single_newline_pdf_text(tmp_path):
+def test_dispatch_pdf_route_preserves_continuous_compare_body_for_flattened_single_newline_pdf_text(tmp_path):
     pdf_path_a = tmp_path / "paper-a.pdf"
     pdf_path_b = tmp_path / "paper-b.pdf"
     pdf_path_a.write_bytes(b"%PDF-1.4\nplaceholder\n")
@@ -2058,6 +4067,7 @@ def test_dispatch_pdf_route_preserves_compare_slices_for_flattened_single_newlin
         answer_question_fn=lambda **kwargs: captured.update({"pdf_text": str(kwargs["pdf_text"])})
         or _build_valid_compare_answer(["paper-a.pdf", "paper-b.pdf"]),
         max_pdf_chars=560,
+        compare_max_pdf_chars=50000,
     )
 
     result = dispatch_patent_file_route(
