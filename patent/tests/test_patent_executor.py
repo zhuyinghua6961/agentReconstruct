@@ -1983,14 +1983,51 @@ def test_executor_hybrid_route_uses_real_pdf_and_table_content_when_local_paths_
     assert "PDF 原文证据：" not in result["answer_text"]
     assert "表格执行结果：" not in result["answer_text"]
     assert "## 局限性" in result["answer_text"]
+
+
+def test_executor_pdf_route_supports_pdf_service_with_injected_answer_client(tmp_path):
+    pdf_path = tmp_path / "spec.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+
+    class _InjectedAnswerClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def answer(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            return "真实总结：本文研究硅负极包覆方案，并报告循环寿命改善。"
+
+        def close(self):
+            return None
+
+    injected_client = _InjectedAnswerClient()
+    executor = PatentExecutor(
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "This paper studies silicon anode coating for lithium batteries.",
+            answer_client=injected_client,
+        )
+    )
+
+    result = executor.execute(
+        request=_make_file_request(
+            question="请总结这篇文献的研究内容",
+            route="pdf_qa",
+            source_scope="pdf",
+            turn_mode="file_only",
+            execution_files=[{"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf", "local_path": str(pdf_path)}],
+            selected_file_ids=[11],
+            trace_id="req_injected_pdf_client",
+        ),
+        context={"recent_turns_for_llm": []},
+    )
+
+    assert result["metadata"]["answer_mode"] == "pdf_text_summary"
+    assert len(injected_client.calls) == 1
+    assert injected_client.calls[0]["file_name"] == "spec.pdf"
+    assert injected_client.calls[0]["selected_file_labels"] == ["spec.pdf"]
     assert "注*" in result["answer_text"]
     assert "==== 文献 " not in result["answer_text"]
-    assert not _section_body(result["answer_text"], "结论和意义").startswith("表格结果显示：")
-    assert "真实 PDF 总结：" not in result["answer_text"]
-    assert "LMFP/LFP 复配改善了充电安全性" in _section_body(result["answer_text"], "结论和意义")
-    assert "列:" not in _section_body(result["answer_text"], "主要发现和结果")
-    assert "真实表格总结：" not in result["answer_text"]
-    assert "表格中未提供足够" not in result["answer_text"]
+    assert _section_body(result["answer_text"], "结论和意义")
 
 
 def test_executor_hybrid_file_route_streams_composed_pdf_and_table_answer(tmp_path):

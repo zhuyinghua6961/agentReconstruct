@@ -9,7 +9,9 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from config import get_settings
 from server.patent.executor import PatentExecutor
 from server.patent.original_service import OriginalViewService
+from server.patent.pdf_service import PatentPdfAnswerClient, PatentPdfService
 from server.patent.runtime import build_default_patent_runtime
+from server.patent.upstream_http import PatentSharedUpstreamHttpProvider
 from server.runtime.ordered_task_dispatcher import OrderedTaskDispatcher
 from server.runtime.request_context import clear_trace_id, generate_trace_id, get_trace_id, set_trace_id
 from server.services.ask_service import AskService
@@ -21,6 +23,9 @@ from server.services.redis_client import bootstrap_redis_state
 from server_fastapi.errors import register_exception_handlers
 from server_fastapi.logging import configure_logging
 from server_fastapi.routers import register_routers
+
+
+_LOGGER = logging.getLogger("patent.server_fastapi")
 
 
 class TraceContextMiddleware:
@@ -78,22 +83,56 @@ def _bootstrap_service_state(app: FastAPI) -> None:
         execution_cache=execution_cache,
         durable_mode_enabled=bool(app.state.settings.durable_mode_enabled),
     )
-    patent_runtime = build_default_patent_runtime(execution_cache=execution_cache)
-    component_status = dict(getattr(app.state, "component_status", {}) or {})
-    runtime_status = dict(component_status.get("runtime") or {})
-    runtime_status["ready"] = patent_runtime is not None
-    if patent_runtime is None:
-        runtime_status["detail"] = "patent runtime bootstrap unavailable"
-    else:
-        runtime_status.pop("detail", None)
-    component_status["runtime"] = runtime_status
-    app.state.component_status = component_status
+    patent_shared_upstream_provider = None
+    patent_pdf_service = None
+    patent_runtime = None
+    shared_http_client = None
     try:
+        try:
+            patent_shared_upstream_provider = PatentSharedUpstreamHttpProvider.from_env()
+            shared_http_client = (
+                patent_shared_upstream_provider.client()
+                if patent_shared_upstream_provider is not None
+                else None
+            )
+        except Exception:
+            _LOGGER.warning(
+                "Patent shared upstream provider bootstrap failed; degrading to private clients",
+                exc_info=True,
+            )
+            close = getattr(patent_shared_upstream_provider, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+            patent_shared_upstream_provider = None
+            shared_http_client = None
+        pdf_answer_client = (
+            PatentPdfAnswerClient.from_env(http_client=shared_http_client)
+            if shared_http_client is not None
+            else PatentPdfAnswerClient.from_env()
+        )
+        patent_pdf_service = PatentPdfService(answer_client=pdf_answer_client)
+        patent_runtime = build_default_patent_runtime(
+            execution_cache=execution_cache,
+            http_client=shared_http_client,
+        )
+        component_status = dict(getattr(app.state, "component_status", {}) or {})
+        runtime_status = dict(component_status.get("runtime") or {})
+        runtime_status["ready"] = patent_runtime is not None
+        if patent_runtime is None:
+            runtime_status["detail"] = "patent runtime bootstrap unavailable"
+        else:
+            runtime_status.pop("detail", None)
+        component_status["runtime"] = runtime_status
+        app.state.component_status = component_status
         ask_service = AskService(
             patent_executor=PatentExecutor(
                 runtime=patent_runtime,
                 execution_cache=execution_cache,
                 runtime_required=True,
+                pdf_service=patent_pdf_service,
             ),
             persistence_service=chat_persistence_service,
         )
@@ -101,7 +140,19 @@ def _bootstrap_service_state(app: FastAPI) -> None:
             execution_cache=execution_cache,
         )
     except Exception:
+        close = getattr(patent_pdf_service, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
         close = getattr(patent_runtime, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+        close = getattr(patent_shared_upstream_provider, "close", None)
         if callable(close):
             try:
                 close()
@@ -111,6 +162,8 @@ def _bootstrap_service_state(app: FastAPI) -> None:
     app.state.execution_lock_manager = execution_lock_manager
     app.state.execution_cache = execution_cache
     app.state.chat_persistence_service = chat_persistence_service
+    app.state.patent_shared_upstream_provider = patent_shared_upstream_provider
+    app.state.patent_pdf_service = patent_pdf_service
     app.state.patent_runtime = patent_runtime
     app.state.ask_service = ask_service
     app.state.original_service = original_service
@@ -140,6 +193,8 @@ def _bootstrap_app_state(app: FastAPI) -> None:
         _bootstrap_service_state(app)
     except Exception:
         _close_state_resource(app.state, "authority_client")
+        _close_state_resource(app.state, "patent_pdf_service")
+        _close_state_resource(app.state, "patent_shared_upstream_provider")
         _close_state_resource(app.state, "patent_runtime")
         redis_bindings = getattr(app.state, "redis_bindings", None)
         if redis_bindings is not None:
@@ -156,6 +211,8 @@ async def _lifespan(app: FastAPI):
         yield
     finally:
         _close_state_resource(app.state, "authority_client")
+        _close_state_resource(app.state, "patent_pdf_service")
+        _close_state_resource(app.state, "patent_shared_upstream_provider")
         _close_state_resource(app.state, "patent_runtime")
         redis_bindings = getattr(app.state, "redis_bindings", None)
         if redis_bindings is not None:

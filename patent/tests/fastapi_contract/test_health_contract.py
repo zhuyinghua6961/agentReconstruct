@@ -35,6 +35,15 @@ def test_create_app_exposes_patent_runtime_defaults():
     assert app.state.component_status["runtime"]["ready"] is True
 
 
+def test_config_shared_env_example_documents_shared_upstream_pool_defaults():
+    content = (ROOT_DIR / "config.shared.env.example").read_text(encoding="utf-8")
+
+    assert "PATENT_LLM_HTTP_SHARED_POOL_ENABLED=false" in content
+    assert "PATENT_LLM_HTTP_KEEPALIVE_EXPIRY_SECONDS=120" in content
+    assert "PATENT_LLM_HTTP_MAX_KEEPALIVE_CONNECTIONS=20" in content
+    assert "PATENT_LLM_HTTP_MAX_CONNECTIONS=100" in content
+
+
 def test_get_settings_reads_environment_at_call_time(monkeypatch):
     monkeypatch.setenv("PATENT_PORT", "9898")
     monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "true")
@@ -228,7 +237,8 @@ def test_pyproject_includes_server_package_discovery_for_future_tasks():
     assert '"server*"' in pyproject
 
 
-def test_versioned_health_route_returns_ok_by_default():
+def test_versioned_health_route_returns_ok_by_default(monkeypatch):
+    monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "false")
     app = create_app()
 
     with TestClient(app) as client:
@@ -244,6 +254,7 @@ def test_versioned_health_route_returns_ok_by_default():
 def test_health_contract_exposes_runtime_concurrency_and_trace(monkeypatch):
     monkeypatch.setenv("PATENT_ASK_STREAM_MAX_CONCURRENT", "2")
     monkeypatch.setenv("PATENT_ASK_EXECUTOR_MAX_WORKERS", "3")
+    monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "false")
     app = create_app()
 
     with TestClient(app) as client:
@@ -346,6 +357,7 @@ def test_durable_patent_auth_maps_bad_serializer_data_to_401(monkeypatch):
 
 def test_durable_mode_is_disabled_by_default(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", TEST_JWT_SECRET)
+    monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "false")
     app = create_app()
     token = _make_bearer_token(42)
 
@@ -595,6 +607,122 @@ def test_create_app_closes_runtime_when_service_bootstrap_fails_after_runtime_cr
 
     assert len(runtime_instances) == 1
     assert runtime_instances[0].closed is True
+
+
+def test_create_app_closes_shared_provider_and_pdf_service_when_service_bootstrap_fails(monkeypatch):
+    runtime_instances = []
+    pdf_services = []
+
+    class _Runtime:
+        def __init__(self):
+            self.closed = False
+            runtime_instances.append(self)
+
+        def close(self):
+            self.closed = True
+
+    class _SharedProvider:
+        def __init__(self):
+            self.closed = False
+
+        def client(self):
+            return object()
+
+        def close(self):
+            self.closed = True
+
+    class _AnswerClient:
+        def close(self):
+            return None
+
+    class _PdfService:
+        def __init__(self, *, answer_client=None, **kwargs):
+            self.answer_client = answer_client
+            self.closed = False
+            pdf_services.append(self)
+
+        def close(self):
+            self.closed = True
+
+    provider = _SharedProvider()
+
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentSharedUpstreamHttpProvider",
+        type("_ProviderFactory", (), {"from_env": staticmethod(lambda: provider)}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentPdfAnswerClient",
+        type("_PdfAnswerClientFactory", (), {"from_env": staticmethod(lambda http_client=None: _AnswerClient())}),
+        raising=False,
+    )
+    monkeypatch.setattr(patent_fastapi_app, "PatentPdfService", _PdfService, raising=False)
+    monkeypatch.setattr(patent_fastapi_app, "build_default_patent_runtime", lambda **kwargs: _Runtime())
+    monkeypatch.setattr(patent_fastapi_app, "OriginalViewService", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        create_app()
+
+    assert provider.closed is True
+    assert len(pdf_services) == 1
+    assert pdf_services[0].closed is True
+    assert len(runtime_instances) == 1
+    assert runtime_instances[0].closed is True
+
+
+def test_lifespan_shutdown_closes_app_owned_shared_provider_and_pdf_service(monkeypatch):
+    pdf_services = []
+
+    class _SharedProvider:
+        def __init__(self):
+            self.closed = False
+
+        def client(self):
+            return object()
+
+        def close(self):
+            self.closed = True
+
+    class _AnswerClient:
+        def close(self):
+            return None
+
+    class _PdfService:
+        def __init__(self, *, answer_client=None, **kwargs):
+            self.answer_client = answer_client
+            self.closed = False
+            pdf_services.append(self)
+
+        def close(self):
+            self.closed = True
+
+    provider = _SharedProvider()
+
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentSharedUpstreamHttpProvider",
+        type("_ProviderFactory", (), {"from_env": staticmethod(lambda: provider)}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentPdfAnswerClient",
+        type("_PdfAnswerClientFactory", (), {"from_env": staticmethod(lambda http_client=None: _AnswerClient())}),
+        raising=False,
+    )
+    monkeypatch.setattr(patent_fastapi_app, "PatentPdfService", _PdfService, raising=False)
+    monkeypatch.setattr(patent_fastapi_app, "build_default_patent_runtime", lambda **kwargs: None)
+
+    app = create_app()
+
+    with TestClient(app):
+        pass
+
+    assert provider.closed is True
+    assert len(pdf_services) == 1
+    assert pdf_services[0].closed is True
 
 
 def test_rebootstrap_failure_closes_reopened_resources(monkeypatch):

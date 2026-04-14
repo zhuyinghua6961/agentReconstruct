@@ -860,7 +860,12 @@ def _extract_compare_continuous_window(body: str, budget: int) -> str:
     sliced = "\n\n".join(paragraphs[start_index:]).strip()
     if len(sliced) <= budget:
         return sliced
-    return _clip_text_with_boundary(sliced, budget)
+    clipped = _clip_text_with_boundary(sliced, budget)
+    normalized_clipped = re.sub(r"\s+", " ", clipped).strip()
+    minimum_target = min(budget, MIN_COMPARE_DOC_CHARS)
+    if len(normalized_clipped) < minimum_target:
+        return _truncate(sliced, budget)
+    return clipped
 
 
 def _minimum_compare_retained_chars(*, original_text: str, max_chars: int | None, total_docs: int, header_cost: int) -> int:
@@ -873,7 +878,9 @@ def _minimum_compare_retained_chars(*, original_text: str, max_chars: int | None
     reserve = min(260, max(120, int(max_chars * 0.08)))
     available_for_body = max(0, max_chars - reserve - header_cost)
     compare_doc_budget = max(1, available_for_body // max(1, total_docs))
-    required = min(1200, max(400, compare_doc_budget // 2))
+    # The validator cannot demand more per-document context than the truncator
+    # can allocate within the same compare budget.
+    required = min(compare_doc_budget, min(1200, max(MIN_COMPARE_DOC_CHARS, compare_doc_budget // 2)))
     return min(original_len, required)
 
 

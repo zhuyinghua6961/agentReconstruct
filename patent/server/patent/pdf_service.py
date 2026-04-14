@@ -822,6 +822,7 @@ class PatentPdfAnswerClient:
         timeout_seconds: float = 30.0,
         top_p: float = 0.95,
         max_tokens: int = 2500,
+        http_client: Any | None = None,
     ) -> None:
         self._api_key = str(api_key or "").strip()
         self._base_url = str(base_url or "").strip()
@@ -829,10 +830,19 @@ class PatentPdfAnswerClient:
         self._timeout_seconds = float(timeout_seconds)
         self._top_p = float(top_p)
         self._max_tokens = max(1, int(max_tokens))
-        self._client = httpx.Client(timeout=self._timeout_seconds)
+        self._owns_http_client = http_client is None
+        self._client = http_client or httpx.Client(timeout=self._timeout_seconds)
+        _LOGGER.info(
+            "patent pdf answer client initialized model=%s base_url=%s timeout_seconds=%s client_owner=%s shared_client_id=%s",
+            self._model,
+            self._base_url,
+            self._timeout_seconds,
+            "private" if self._owns_http_client else "shared",
+            hex(id(self._client)),
+        )
 
     @classmethod
-    def from_env(cls) -> "PatentPdfAnswerClient | None":
+    def from_env(cls, *, http_client: Any | None = None) -> "PatentPdfAnswerClient | None":
         use_shared_env = _env_flag("PATENT_OPENAI_USE_SHARED_ENV", default=False)
         api_key = _first_env(
             "PATENT_OPENAI_API_KEY",
@@ -861,10 +871,12 @@ class PatentPdfAnswerClient:
                     _env_int("PDF_QA_MAX_TOKENS", 2500),
                 ),
             ),
+            http_client=http_client,
         )
 
     def close(self) -> None:
-        self._client.close()
+        if self._owns_http_client:
+            self._client.close()
 
     def _build_request_payload(
         self,
@@ -961,6 +973,16 @@ class PatentPdfAnswerClient:
             route_hint=route_hint,
             source_scope=source_scope,
         )
+        _LOGGER.info(
+            "patent pdf answer client stream start model=%s base_url=%s timeout_seconds=%s client_owner=%s shared_client_id=%s route=%s source_scope=%s",
+            self._model,
+            self._base_url,
+            self._timeout_seconds,
+            "private" if self._owns_http_client else "shared",
+            hex(id(self._client)),
+            route_hint,
+            source_scope,
+        )
         with self._client.stream(
             "POST",
             f"{self._base_url.rstrip('/')}/chat/completions",
@@ -970,6 +992,7 @@ class PatentPdfAnswerClient:
                 "Accept": "application/json, text/event-stream",
             },
             json=request_payload,
+            timeout=self._timeout_seconds,
         ) as response:
             response.raise_for_status()
             for raw_line in response.iter_lines():
@@ -1010,6 +1033,16 @@ class PatentPdfAnswerClient:
             route_hint=route_hint,
             source_scope=source_scope,
         )
+        _LOGGER.info(
+            "patent pdf answer client request start model=%s base_url=%s timeout_seconds=%s client_owner=%s shared_client_id=%s route=%s source_scope=%s",
+            self._model,
+            self._base_url,
+            self._timeout_seconds,
+            "private" if self._owns_http_client else "shared",
+            hex(id(self._client)),
+            route_hint,
+            source_scope,
+        )
         response = self._client.post(
             f"{self._base_url.rstrip('/')}/chat/completions",
             headers={
@@ -1017,6 +1050,7 @@ class PatentPdfAnswerClient:
                 "Content-Type": "application/json",
             },
             json=request_payload,
+            timeout=self._timeout_seconds,
         )
         response.raise_for_status()
         payload = response.json()
@@ -1043,13 +1077,14 @@ class PatentPdfService:
         *,
         extract_pdf_text_fn: Callable[..., str] | None = None,
         answer_question_fn: Callable[..., str] | None = None,
+        answer_client: PatentPdfAnswerClient | Any | None = None,
         max_pdf_pages: int = 50,
         max_pdf_chars: int | None = None,
         compare_max_pdf_chars: int | None = None,
     ) -> None:
         self._extract_pdf_text_fn = extract_pdf_text_fn or extract_file_qa_pdf_text
         self._answer_question_fn = answer_question_fn
-        self._client = None if answer_question_fn is not None else PatentPdfAnswerClient.from_env()
+        self._client = None if answer_question_fn is not None else (answer_client or PatentPdfAnswerClient.from_env())
         self._max_pdf_pages = max(1, int(max_pdf_pages))
         resolved_max_pdf_chars = 12000 if max_pdf_chars is None else int(max_pdf_chars)
         self._max_pdf_chars = max(1000, resolved_max_pdf_chars)

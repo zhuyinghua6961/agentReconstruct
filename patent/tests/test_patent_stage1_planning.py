@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import httpx
+
 from types import SimpleNamespace
 
-from server.patent.runtime import PatentRuntime
+from server.patent.runtime import PatentPlanningClient, PatentRuntime
 from server.patent.stages.planning import run_stage1_pre_answer_and_planning
 
 
@@ -208,3 +210,50 @@ def test_patent_runtime_stage1_uses_configured_planning_client():
     assert result["success"] is True
     assert result["deep_answer"] == "runtime answer"
     assert result["retrieval_claims"][0].claim == "runtime answer"
+
+
+def test_patent_planning_client_uses_injected_http_client_and_request_timeout():
+    class _FakeHttpClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+            self.closed = False
+
+        def post(self, url, *, headers=None, json=None, timeout=None):
+            self.calls.append(
+                {
+                    "url": url,
+                    "headers": headers,
+                    "json": json,
+                    "timeout": timeout,
+                }
+            )
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", str(url)),
+                json={"choices": [{"message": {"content": "planner response"}}]},
+            )
+
+        def close(self):
+            self.closed = True
+
+    http_client = _FakeHttpClient()
+    client = PatentPlanningClient(
+        api_key="test-key",
+        base_url="http://example.invalid",
+        timeout_seconds=17.0,
+        http_client=http_client,
+    )
+
+    response = client.chat.completions.create(
+        model="planner-model",
+        messages=[{"role": "user", "content": "what should we check?"}],
+        temperature=0.2,
+        max_tokens=128,
+        response_format={"type": "json_object"},
+    )
+
+    assert response.choices[0].message.content == "planner response"
+    assert len(http_client.calls) == 1
+    assert http_client.calls[0]["timeout"] == 17.0
+    client.close()
+    assert http_client.closed is False

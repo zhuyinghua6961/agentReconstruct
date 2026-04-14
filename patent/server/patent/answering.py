@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterator
 
 import httpx
@@ -13,6 +13,8 @@ from server.patent.retrieval_models import PatentEvidence, PatentRetrievalOutcom
 
 _LOGGER = logging.getLogger("patent.answering")
 _PATENT_ID_CITATION_RE = re.compile(r"\(\s*patent_id\s*=\s*([A-Za-z0-9._/\-]+)\s*\)", re.IGNORECASE)
+_BACKTICK_CODE_SPAN_RE = re.compile(r"`(?P<body>[^`\n]{1,200})`")
+_PATENT_CITATION_LIST_ITEM_RE = re.compile(r"^(?:patent_id\s*=\s*)?([A-Za-z0-9._/\-]+)$", re.IGNORECASE)
 _CLAUSE_BOUNDARIES = "\n。！？!?；;，,"
 _STREAM_CITATION_TAIL_HOLD = 160
 
@@ -117,6 +119,33 @@ def extract_cited_patent_ids(answer_text: str) -> list[str]:
     return cited
 
 
+def _unwrap_backticked_patent_citation_blocks(text: str, *, allowed_patent_ids: list[str] | None) -> str:
+    allowed = set(_normalize_patent_id_list(allowed_patent_ids))
+    if not allowed:
+        return str(text or "")
+
+    def _replace(match: re.Match[str]) -> str:
+        body = str(match.group("body") or "").strip()
+        if not (body.startswith("(") and body.endswith(")")):
+            return match.group(0)
+        inner = body[1:-1].strip()
+        if not inner:
+            return match.group(0)
+        raw_parts = [part.strip() for part in re.split(r"\s*[,，、;；]\s*", inner) if str(part).strip()]
+        if not raw_parts:
+            return match.group(0)
+        for raw_part in raw_parts:
+            token_match = _PATENT_CITATION_LIST_ITEM_RE.fullmatch(raw_part)
+            if token_match is None:
+                return match.group(0)
+            patent_id = _normalize_patent_id(token_match.group(1))
+            if not patent_id or patent_id not in allowed:
+                return match.group(0)
+        return body
+
+    return _BACKTICK_CODE_SPAN_RE.sub(_replace, str(text or ""))
+
+
 def render_patent_citations_for_user(
     answer_text: str,
     *,
@@ -131,7 +160,11 @@ def render_patent_citations_for_user(
             return f"({patent_id})"
         return ""
 
-    rendered = _PATENT_ID_CITATION_RE.sub(_replace, str(answer_text or ""))
+    rendered = _unwrap_backticked_patent_citation_blocks(
+        str(answer_text or ""),
+        allowed_patent_ids=allowed_patent_ids,
+    )
+    rendered = _PATENT_ID_CITATION_RE.sub(_replace, rendered)
     rendered = re.sub(r"patent_id\s*=\s*", "", rendered, flags=re.IGNORECASE)
     rendered = re.sub(r"\(\s+\)", "", rendered)
     rendered = re.sub(r"\s+([，。！？；：,.;!?])", r"\1", rendered)
@@ -436,12 +469,27 @@ class PatentAnswerBuilder:
     model: str
     timeout_seconds: float = 30.0
     transport: httpx.BaseTransport | None = None
+    http_client: Any | None = None
+    _client: Any = field(init=False, repr=False)
+    _owns_http_client: bool = field(init=False, repr=False, default=False)
 
     def __post_init__(self) -> None:
-        self._client = httpx.Client(timeout=self.timeout_seconds, transport=self.transport)
+        if self.transport is not None and self.http_client is not None:
+            raise ValueError("transport cannot be combined with http_client")
+        self._owns_http_client = self.http_client is None
+        self._client = self.http_client or httpx.Client(timeout=self.timeout_seconds, transport=self.transport)
+        _LOGGER.info(
+            "patent answer builder initialized model=%s base_url=%s timeout_seconds=%s client_owner=%s shared_client_id=%s",
+            self.model,
+            self.base_url,
+            self.timeout_seconds,
+            "private" if self._owns_http_client else "shared",
+            hex(id(self._client)),
+        )
 
     def close(self) -> None:
-        self._client.close()
+        if self._owns_http_client:
+            self._client.close()
 
     def __call__(
         self,
@@ -474,8 +522,12 @@ class PatentAnswerBuilder:
         )
         min_distinct_citations = _resolve_min_distinct_citations(context=context, allowed_patent_ids=allowed_patent_ids)
         _LOGGER.info(
-            "patent answer builder request start model=%s allowed_patent_ids=%s evidence_count=%s evidence_chars=%s prompt_chars=%s",
+            "patent answer builder request start model=%s base_url=%s timeout_seconds=%s client_owner=%s shared_client_id=%s allowed_patent_ids=%s evidence_count=%s evidence_chars=%s prompt_chars=%s",
             self.model,
+            self.base_url,
+            self.timeout_seconds,
+            "private" if self._owns_http_client else "shared",
+            hex(id(self._client)),
             allowed_patent_ids,
             int(prompt_metadata.get("evidence_item_count", 0)),
             int(prompt_metadata.get("evidence_chars", 0)),
@@ -494,6 +546,7 @@ class PatentAnswerBuilder:
                     stream=False,
                     min_distinct_citations=min_distinct_citations,
                 ),
+                timeout=self.timeout_seconds,
             )
             response.raise_for_status()
             payload = response.json()
@@ -553,8 +606,12 @@ class PatentAnswerBuilder:
         )
         min_distinct_citations = _resolve_min_distinct_citations(context=context, allowed_patent_ids=allowed_patent_ids)
         _LOGGER.info(
-            "patent answer builder stream start model=%s allowed_patent_ids=%s evidence_count=%s evidence_chars=%s prompt_chars=%s",
+            "patent answer builder stream start model=%s base_url=%s timeout_seconds=%s client_owner=%s shared_client_id=%s allowed_patent_ids=%s evidence_count=%s evidence_chars=%s prompt_chars=%s",
             self.model,
+            self.base_url,
+            self.timeout_seconds,
+            "private" if self._owns_http_client else "shared",
+            hex(id(self._client)),
             allowed_patent_ids,
             int(prompt_metadata.get("evidence_item_count", 0)),
             int(prompt_metadata.get("evidence_chars", 0)),
@@ -575,6 +632,7 @@ class PatentAnswerBuilder:
                     stream=True,
                     min_distinct_citations=min_distinct_citations,
                 ),
+                timeout=self.timeout_seconds,
             ) as response:
                 response.raise_for_status()
                 for line in response.iter_lines():
@@ -618,7 +676,7 @@ class PatentAnswerBuilder:
             yield fallback
 
     @staticmethod
-    def from_env() -> "PatentAnswerBuilder":
+    def from_env(*, http_client: Any | None = None) -> "PatentAnswerBuilder":
         use_shared_env = _env_flag("PATENT_OPENAI_USE_SHARED_ENV", default=False)
         return PatentAnswerBuilder(
             api_key=str(
@@ -637,6 +695,7 @@ class PatentAnswerBuilder:
                 or "deepseek-v3.1"
             ).strip(),
             timeout_seconds=float(str(os.getenv("PATENT_OPENAI_TIMEOUT_SECONDS") or "30").strip()),
+            http_client=http_client,
         )
 
     def _build_prompt(

@@ -78,14 +78,31 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 
 class PatentPlanningClient:
-    def __init__(self, *, api_key: str, base_url: str, timeout_seconds: float) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str,
+        timeout_seconds: float,
+        http_client: Any | None = None,
+    ) -> None:
         self._api_key = str(api_key or "").strip()
         self._base_url = str(base_url or "").strip()
-        self._http = httpx.Client(timeout=float(timeout_seconds))
+        self._timeout_seconds = float(timeout_seconds)
+        self._owns_http_client = http_client is None
+        self._http = http_client or httpx.Client(timeout=self._timeout_seconds)
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+        _LOGGER.info(
+            "Patent planning client initialized base_url=%s timeout_seconds=%s client_owner=%s shared_client_id=%s",
+            self._base_url,
+            self._timeout_seconds,
+            "private" if self._owns_http_client else "shared",
+            hex(id(self._http)),
+        )
 
     def close(self) -> None:
-        self._http.close()
+        if self._owns_http_client:
+            self._http.close()
 
     def _create(
         self,
@@ -104,6 +121,14 @@ class PatentPlanningClient:
         }
         if response_format is not None:
             payload["response_format"] = dict(response_format)
+        _LOGGER.info(
+            "Patent planning client request start model=%s base_url=%s timeout_seconds=%s client_owner=%s shared_client_id=%s",
+            str(model or "").strip(),
+            self._base_url,
+            self._timeout_seconds,
+            "private" if self._owns_http_client else "shared",
+            hex(id(self._http)),
+        )
         response = self._http.post(
             f"{self._base_url.rstrip('/')}/chat/completions",
             headers={
@@ -111,6 +136,7 @@ class PatentPlanningClient:
                 "Content-Type": "application/json",
             },
             json=payload,
+            timeout=self._timeout_seconds,
         )
         response.raise_for_status()
         body = response.json()
@@ -121,7 +147,7 @@ class PatentPlanningClient:
         )
 
 
-def _build_patent_planning_runtime_inputs() -> tuple[Any | None, str]:
+def _build_patent_planning_runtime_inputs(*, http_client: Any | None = None) -> tuple[Any | None, str]:
     use_shared_env = _env_flag(
         "PATENT_STAGE1_OPENAI_USE_SHARED_ENV",
         default=_env_flag("PATENT_OPENAI_USE_SHARED_ENV", default=False),
@@ -170,7 +196,12 @@ def _build_patent_planning_runtime_inputs() -> tuple[Any | None, str]:
         base_url,
         timeout_seconds,
     )
-    return PatentPlanningClient(api_key=api_key, base_url=base_url, timeout_seconds=timeout_seconds), model
+    return PatentPlanningClient(
+        api_key=api_key,
+        base_url=base_url,
+        timeout_seconds=timeout_seconds,
+        http_client=http_client,
+    ), model
 
 
 class PatentEmbeddingClient:
@@ -412,16 +443,24 @@ class PatentRuntime:
                     continue
 
 
-def build_default_patent_runtime(*, execution_cache: Any | None = None) -> PatentRuntime | None:
+def build_default_patent_runtime(
+    *,
+    execution_cache: Any | None = None,
+    http_client: Any | None = None,
+) -> PatentRuntime | None:
     registry = PatentResourceRegistry.discover()
     if not registry.archive_available():
         _LOGGER.warning("Patent runtime bootstrap skipped because archive root is unavailable")
         return None
 
     archive_loader = PatentArchiveLoader(registry.archive_root)
-    answer_builder = PatentAnswerBuilder.from_env()
+    answer_builder = PatentAnswerBuilder.from_env(http_client=http_client) if http_client is not None else PatentAnswerBuilder.from_env()
     resources: list[Any] = [answer_builder]
-    planning_client, planning_model = _build_patent_planning_runtime_inputs()
+    planning_client, planning_model = (
+        _build_patent_planning_runtime_inputs(http_client=http_client)
+        if http_client is not None
+        else _build_patent_planning_runtime_inputs()
+    )
     if planning_client is not None:
         resources.append(planning_client)
     abstract_search = None
@@ -461,19 +500,28 @@ def build_default_patent_runtime(*, execution_cache: Any | None = None) -> Paten
                 top_k=top_k,
                 patent_ids=candidate_patent_ids,
             )
-
-    retrieval_service = PatentRetrievalService(
-        execution_cache=execution_cache,
-        identity_registry=archive_loader.build_identity_registry(),
-        catalog_records=archive_loader.build_catalog_records(),
-        retrieval_version="retrieval-v2",
-        catalog_index_version="catalog-v2",
-        abstract_vector_search=abstract_search,
-        chunk_vector_search=chunk_search,
-        table_loader=archive_loader.load_tables,
-        answer_builder=answer_builder,
-        archive_loader=archive_loader,
-    )
+    try:
+        retrieval_service = PatentRetrievalService(
+            execution_cache=execution_cache,
+            identity_registry=archive_loader.build_identity_registry(),
+            catalog_records=archive_loader.build_catalog_records(),
+            retrieval_version="retrieval-v2",
+            catalog_index_version="catalog-v2",
+            abstract_vector_search=abstract_search,
+            chunk_vector_search=chunk_search,
+            table_loader=archive_loader.load_tables,
+            answer_builder=answer_builder,
+            archive_loader=archive_loader,
+        )
+    except Exception:
+        for resource in reversed(resources):
+            close = getattr(resource, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    continue
+        raise
     _LOGGER.info(
         "Patent runtime bootstrap complete archive_root=%s abstract_db=%s chunk_db=%s planner_ready=%s planning_model=%s answer_builder_ready=%s answer_model=%s vector_enabled=%s",
         registry.archive_root,

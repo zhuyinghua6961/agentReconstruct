@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from itsdangerous import URLSafeTimedSerializer
 from pydantic import ValidationError
 
+import server_fastapi.app as patent_fastapi_app
 from server.patent.models import PatentRetrievalClaim, PatentRetrievalPlan
 from server.patent.pdf_service import PatentPdfService
 from server.patent.tabular_service import PatentTabularService
@@ -1332,6 +1333,62 @@ def test_stream_ask_strips_raw_patent_id_from_streaming_and_done_payload():
     assert "CN115132975B" in done_event["final_answer"]
 
 
+def test_stream_ask_unwraps_backticked_patent_citations_but_preserves_regular_code():
+    class _ReadableCitationStageRuntime(_StageRuntime):
+        class _StreamingBuilder:
+            def __call__(self, **kwargs):
+                raise AssertionError("stream path should be used")
+
+            def stream(self, *, question, retrieval_outcome, context):
+                del question, retrieval_outcome, context
+                yield "结论来自专利 `(patent_id=CN115132975B)`。补充列表 `(CN115132975B；CN115132975B)`。"
+                yield "普通代码 `x = y + z`。"
+
+        def stage4_synthesis_with_patent_evidence(
+            self,
+            *,
+            user_question: str,
+            deep_answer: str,
+            patent_evidence_bundle: dict[str, object],
+            retrieval_results: dict[str, object] | None = None,
+            should_cancel=None,
+            content_callback=None,
+            conversation_context=None,
+        ) -> dict[str, object]:
+            del should_cancel
+            return run_stage4_synthesis_with_patent_evidence(
+                user_question=user_question,
+                deep_answer=deep_answer,
+                patent_evidence_bundle=patent_evidence_bundle,
+                retrieval_results=retrieval_results,
+                answer_builder=self._StreamingBuilder(),
+                content_callback=content_callback,
+                conversation_context=conversation_context,
+            )
+
+    service = AskService(
+        patent_executor=PatentExecutor(runtime=_ReadableCitationStageRuntime()),
+        persistence_service=_FakePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    events = list(service.stream_ask(parse_patent_request(_base_payload()), user_id=42))
+    content_text = "".join(event["content"] for event in events if event["type"] == "content")
+    done_event = events[-1]
+
+    assert "`(CN115132975B)`" not in content_text
+    assert "(CN115132975B)" in content_text
+    assert "`(CN115132975B；CN115132975B)`" not in content_text
+    assert "(CN115132975B；CN115132975B)" in content_text
+    assert "`x = y + z`" in content_text
+    assert done_event["type"] == "done"
+    assert "`(CN115132975B)`" not in done_event["final_answer"]
+    assert "(CN115132975B)" in done_event["final_answer"]
+    assert "`(CN115132975B；CN115132975B)`" not in done_event["final_answer"]
+    assert "(CN115132975B；CN115132975B)" in done_event["final_answer"]
+    assert "`x = y + z`" in done_event["final_answer"]
+
+
 def test_stream_ask_short_circuits_after_stage1_when_no_retrieval_claims_are_available():
     runtime = _Stage1OnlyRuntime()
     service = AskService(
@@ -2237,6 +2294,118 @@ def test_create_app_bootstraps_patent_executor_with_staged_runtime(monkeypatch):
     assert app.state.ask_service._patent_executor._runtime is runtime
 
 
+def test_create_app_bootstraps_app_owned_pdf_service_with_shared_upstream_client(monkeypatch):
+    shared_client = object()
+    runtime = _StageRuntime()
+    captured: dict[str, object] = {}
+
+    class _SharedProvider:
+        def __init__(self) -> None:
+            self.closed = False
+            self.client_calls = 0
+
+        def client(self):
+            self.client_calls += 1
+            return shared_client
+
+        def close(self):
+            self.closed = True
+
+    class _AnswerClient:
+        def __init__(self, *, http_client=None) -> None:
+            self.http_client = http_client
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    provider = _SharedProvider()
+
+    def _build_answer_client(*, http_client=None):
+        captured["pdf_answer_http_client"] = http_client
+        client = _AnswerClient(http_client=http_client)
+        captured["pdf_answer_client"] = client
+        return client
+
+    def _build_runtime(*, execution_cache=None, http_client=None):
+        captured["runtime_execution_cache"] = execution_cache
+        captured["runtime_http_client"] = http_client
+        return runtime
+
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentSharedUpstreamHttpProvider",
+        type("_ProviderFactory", (), {"from_env": staticmethod(lambda: provider)}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentPdfAnswerClient",
+        type("_PdfAnswerClientFactory", (), {"from_env": staticmethod(_build_answer_client)}),
+        raising=False,
+    )
+    monkeypatch.setattr(patent_fastapi_app, "build_default_patent_runtime", _build_runtime)
+
+    app = create_app()
+
+    assert app.state.patent_runtime is runtime
+    assert app.state.patent_shared_upstream_provider is provider
+    assert app.state.patent_pdf_service is app.state.ask_service._patent_executor._pdf_service
+    assert app.state.patent_pdf_service._client is captured["pdf_answer_client"]
+    assert captured["pdf_answer_http_client"] is shared_client
+    assert captured["runtime_http_client"] is shared_client
+    assert captured["runtime_execution_cache"] is app.state.execution_cache
+    assert app.state.ask_service._patent_executor._runtime is runtime
+    assert provider.client_calls == 1
+
+
+def test_create_app_falls_back_to_private_pdf_service_when_shared_provider_bootstrap_fails(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _AnswerClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    def _build_answer_client(*, http_client=None):
+        captured.setdefault("http_clients", []).append(http_client)
+        client = _AnswerClient()
+        captured["answer_client"] = client
+        return client
+
+    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda **kwargs: None)
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentSharedUpstreamHttpProvider",
+        type(
+            "_FailingProviderFactory",
+            (),
+            {
+                "from_env": staticmethod(
+                    lambda: (_ for _ in ()).throw(RuntimeError("shared provider boom"))
+                )
+            },
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentPdfAnswerClient",
+        type("_PdfAnswerClientFactory", (), {"from_env": staticmethod(_build_answer_client)}),
+        raising=False,
+    )
+
+    app = create_app()
+
+    assert app.state.patent_runtime is None
+    assert app.state.patent_shared_upstream_provider is None
+    assert app.state.patent_pdf_service is app.state.ask_service._patent_executor._pdf_service
+    assert app.state.patent_pdf_service._client is captured["answer_client"]
+    assert captured["http_clients"] == [None]
+
+
 def test_ephemeral_sync_ask_returns_success_without_authority_calls():
     app = create_app()
     payload = _base_payload()
@@ -2273,6 +2442,9 @@ def test_ephemeral_file_only_routes_still_work_when_runtime_bootstrap_missing(mo
     monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
     monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda **kwargs: None)
     app = create_app()
+
+    assert app.state.patent_runtime is None
+    assert app.state.patent_pdf_service is app.state.ask_service._patent_executor._pdf_service
 
     with TestClient(app) as client:
         pdf_response = client.post("/api/ask", json=_pdf_payload())

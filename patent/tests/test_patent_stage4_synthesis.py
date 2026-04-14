@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from server.patent.answering import PatentAnswerBuilder, build_fallback_patent_answer
 from server.patent.retrieval_models import PatentEvidence, PatentRetrievalOutcome, PatentTableSupplement
@@ -580,6 +581,135 @@ def test_stage4_synthesis_forwards_streamed_chunks_and_sanitizes_final_answer():
     assert result["final_answer"] == "这是流式输出的答案 (CN115132975B)"
     assert result["metadata"]["citation_mode"] == "programmatic_repair"
     assert result["metadata"]["invalid_cited_patent_ids"] == ["CN000000000A"]
+
+
+def test_stage4_synthesis_unwraps_backticked_patent_citations_but_keeps_regular_code(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE4_MIN_CITATIONS", "1")
+    monkeypatch.setenv("PATENT_STAGE4_REFERENCE_TOPK", "2")
+    streamed_chunks: list[str] = []
+    patent_ids = ["P1", "P2"]
+    long_prefix = "前言" * 90
+
+    class _StreamingAnswerBuilder:
+        def __call__(self, **kwargs):
+            raise AssertionError("stream path should be preferred when available")
+
+        def stream(self, *, question, retrieval_outcome, context):
+            del question, retrieval_outcome, context
+            yield long_prefix
+            yield "结论来自专利 `"
+            yield "(patent_id=P1)`。补充证据见 `(patent_id=P1；P2)`。补充列表 `(P1、P2)`。普通代码 `x = y + z`。"
+
+    result = run_stage4_synthesis_with_patent_evidence(
+        user_question="请总结专利结论并保留普通代码示例",
+        deep_answer="先保留正文结构。",
+        patent_evidence_bundle=_sample_multi_patent_evidence_bundle(patent_ids),
+        retrieval_results=_sample_multi_patent_retrieval_results(patent_ids),
+        answer_builder=_StreamingAnswerBuilder(),
+        content_callback=streamed_chunks.append,
+    )
+
+    streamed_text = "".join(streamed_chunks)
+    assert "`(P1)`" not in streamed_text
+    assert "`(P1；P2)`" not in streamed_text
+    assert "`(P1、P2)`" not in streamed_text
+    assert "(P1)" in streamed_text
+    assert "(P1；P2)" in streamed_text
+    assert "(P1、P2)" in streamed_text
+    assert "`x = y + z`" in streamed_text
+    assert result["success"] is True
+    assert "`(P1)`" not in result["final_answer"]
+    assert "`(P1；P2)`" not in result["final_answer"]
+    assert "`(P1、P2)`" not in result["final_answer"]
+    assert "(P1)" in result["final_answer"]
+    assert "(P1；P2)" in result["final_answer"]
+    assert "(P1、P2)" in result["final_answer"]
+    assert "`x = y + z`" in result["final_answer"]
+
+
+def test_patent_answer_builder_uses_injected_http_client_and_request_timeout():
+    class _FakeHttpClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+            self.closed = False
+
+        def post(self, url, *, headers=None, json=None, timeout=None):
+            self.calls.append(
+                {
+                    "url": url,
+                    "headers": headers,
+                    "json": json,
+                    "timeout": timeout,
+                }
+            )
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", str(url)),
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "该方案改善了高SOC充电安全性 (patent_id=CN115132975B)。"
+                            }
+                        }
+                    ]
+                },
+            )
+
+        def close(self):
+            self.closed = True
+
+    http_client = _FakeHttpClient()
+    builder = PatentAnswerBuilder(
+        api_key="test-key",
+        base_url="http://example.invalid",
+        model="test-model",
+        timeout_seconds=19.0,
+        http_client=http_client,
+    )
+
+    answer = builder(
+        question="如何评估该方案的替代窗口与风险？",
+        retrieval_outcome=PatentRetrievalOutcome(
+            retrieval_backend="vector_hybrid",
+            retrieval_version="retrieval-v2",
+            catalog_index_version="catalog-v2",
+            references=["CN115132975B"],
+            reference_objects=[dict(_sample_retrieval_results()["reference_objects"][0])],
+            reference_links=[dict(_sample_retrieval_results()["reference_links"][0])],
+            original_links=[dict(_sample_retrieval_results()["original_links"][0])],
+            evidences=[
+                PatentEvidence(
+                    canonical_patent_id="CN115132975B",
+                    publication_number="CN115132975B",
+                    application_number="CN202110320984.1",
+                    title="一种锂离子电池及动力车辆",
+                    abstract_text="通过 LMFP/LFP/三元复配改善充电安全与低 SOC 放电功率。",
+                    matched_section_type="claim",
+                    matched_section_label="Claim 1",
+                    matched_snippet="一种锂离子电池，其正极活性材料包括 LMFP、LFP 与三元材料。",
+                )
+            ],
+        ),
+        context={"allowed_patent_ids": ["CN115132975B"]},
+    )
+
+    assert "(patent_id=CN115132975B)" in answer
+    assert len(http_client.calls) == 1
+    assert http_client.calls[0]["timeout"] == 19.0
+    builder.close()
+    assert http_client.closed is False
+
+
+def test_patent_answer_builder_rejects_transport_and_http_client_mix():
+    with pytest.raises(ValueError, match="transport"):
+        PatentAnswerBuilder(
+            api_key="test-key",
+            base_url="http://example.invalid",
+            model="test-model",
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, request=request, json={"choices": []})),
+            http_client=object(),
+        )
 
 
 def test_patent_answer_builder_sanitizes_invalid_patent_id_citations_from_llm_response():

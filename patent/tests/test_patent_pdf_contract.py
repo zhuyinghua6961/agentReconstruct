@@ -4,6 +4,7 @@ import importlib.util
 import re
 from pathlib import Path
 
+import httpx
 import pytest
 
 from server.patent.pdf_contract import (
@@ -186,6 +187,75 @@ def test_request_payload_sets_explicit_output_budget_for_pdf_summary():
 
     assert int(payload.get("max_tokens") or 0) >= 1800
     assert float(payload.get("top_p") or 0) >= 0.9
+
+
+def test_pdf_answer_client_uses_injected_http_client_and_request_timeout():
+    class _FakeHttpClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+            self.closed = False
+
+        def post(self, url, *, headers=None, json=None, timeout=None):
+            self.calls.append(
+                {
+                    "url": url,
+                    "headers": headers,
+                    "json": json,
+                    "timeout": timeout,
+                }
+            )
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", str(url)),
+                json={"choices": [{"message": {"content": "pdf answer"}}]},
+            )
+
+        def close(self):
+            self.closed = True
+
+    http_client = _FakeHttpClient()
+    client = PatentPdfAnswerClient(
+        api_key="key",
+        base_url="https://example.com",
+        model="model",
+        timeout_seconds=23.0,
+        http_client=http_client,
+    )
+
+    answer = client.answer(
+        question="请总结这篇文献",
+        pdf_text="标题: A study\nAbstract text\nResults text",
+        file_name="paper-a.pdf",
+        include_kb=False,
+        selected_file_labels=["paper-a.pdf"],
+    )
+
+    assert answer == "pdf answer"
+    assert len(http_client.calls) == 1
+    assert http_client.calls[0]["timeout"] == 23.0
+    client.close()
+    assert http_client.closed is False
+
+
+def test_pdf_answer_client_from_env_accepts_injected_http_client(monkeypatch):
+    class _FakeHttpClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setenv("PATENT_OPENAI_API_KEY", "key")
+    monkeypatch.setenv("PATENT_OPENAI_BASE_URL", "https://example.com")
+    monkeypatch.setenv("PATENT_OPENAI_MODEL", "model")
+    http_client = _FakeHttpClient()
+
+    client = PatentPdfAnswerClient.from_env(http_client=http_client)
+
+    assert client is not None
+    assert client._client is http_client
+    client.close()
+    assert http_client.closed is False
 
 
 def test_compare_detection_accepts_implicit_compare_requests():
@@ -628,6 +698,50 @@ def test_compare_truncation_prefers_section_body_over_heading_only_lines():
     assert "Abstract body B keeps the real" in truncated
     assert "Results body A keeps the real" in truncated or "Conclusion body A keeps the real" in truncated
     assert "Results body B keeps the real" in truncated or "Conclusion body B keeps the real" in truncated
+
+
+def test_validate_compare_context_accepts_balanced_heading_only_compare_windows():
+    front_matter = "作者信息与版权页。 " * 200
+    documents = [
+        {
+            "label": "paper-a.pdf",
+            "text": (
+                f"{front_matter}\n\n"
+                "Abstract\n\n"
+                "Abstract body A keeps the real summary evidence.\n\n"
+                "Methods\n\n"
+                "Method body A.\n\n"
+                "Results\n\n"
+                "Results body A keeps the real compare evidence.\n\n"
+                "Conclusion\n\n"
+                "Conclusion body A keeps the real tail evidence."
+            ),
+        },
+        {
+            "label": "paper-b.pdf",
+            "text": (
+                f"{front_matter}\n\n"
+                "Abstract\n\n"
+                "Abstract body B keeps the real summary evidence.\n\n"
+                "Methods\n\n"
+                "Method body B.\n\n"
+                "Results\n\n"
+                "Results body B keeps the real compare evidence.\n\n"
+                "Conclusion\n\n"
+                "Conclusion body B keeps the real tail evidence."
+            ),
+        },
+    ]
+    truncated = smart_truncate_pdf_content(
+        format_multi_pdf_sections(documents),
+        max_chars=560,
+        logger=_Logger(),
+        is_summary=False,
+        question="对比一下这两篇文献的内容",
+        is_compare=True,
+    )
+
+    validate_compare_context(truncated, documents, max_chars=560)
 
 
 def test_compare_truncation_does_not_expose_model_visible_truncation_note():

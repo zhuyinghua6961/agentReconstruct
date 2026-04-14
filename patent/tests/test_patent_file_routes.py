@@ -10,7 +10,7 @@ import server.patent.tabular_service as tabular_service_module
 from server.patent.file_contract import build_patent_file_contract
 from server.patent.file_routes import dispatch_patent_file_route, plan_patent_file_route
 from server.patent.pdf_contract import format_multi_pdf_sections
-from server.patent.pdf_service import PatentPdfService
+from server.patent.pdf_service import PatentPdfAnswerClient, PatentPdfService
 from server.patent.tabular_service import PatentTabularService
 
 
@@ -1517,6 +1517,60 @@ def test_pdf_service_default_extractor_uses_file_qna_entrypoint_and_budget(monke
         "max_pages": 50,
         "exclude_references": True,
     }
+
+
+def test_pdf_service_prefers_injected_answer_client_over_env_builder(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "battery-paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    contract = build_patent_file_contract(
+        question="请总结这篇文献",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11],
+        primary_file_id=11,
+        execution_files=[{**PDF_FILE, "local_path": str(pdf_path)}],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    monkeypatch.setattr(
+        PatentPdfAnswerClient,
+        "from_env",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("from_env should not be used when answer_client is injected")),
+    )
+
+    class _InjectedAnswerClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+            self.closed = False
+
+        def answer(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            return "真实总结：本文提出电池回收催化方案，实验显示效率提升 15%，同时降低成本。"
+
+        def close(self):
+            self.closed = True
+
+    injected_client = _InjectedAnswerClient()
+    service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: "This paper proposes a battery recycling catalyst.",
+        answer_client=injected_client,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=service,
+        tabular_service=PatentTabularService(),
+    )
+
+    assert result["handler"] == "pdf"
+    assert result["metadata"]["answer_mode"] == "pdf_text_summary"
+    assert len(injected_client.calls) == 1
+    assert injected_client.calls[0]["file_name"] == "battery-paper.pdf"
+    assert injected_client.calls[0]["route_hint"] == "pdf_qa"
+    assert "注*" in result["answer_text"]
+    service.close()
+    assert injected_client.closed is True
 
 
 def test_pdf_service_keeps_injected_extract_pdf_text_fn_contract(tmp_path):
