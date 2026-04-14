@@ -866,6 +866,120 @@ def test_admission_worker_sends_patent_protocol_fields_to_upstream_stream(monkey
     assert captured_payload["execution_files"] == [{"file_id": 11, "file_type": "pdf", "file_name": "battery-paper.pdf"}]
 
 
+def test_admission_worker_sends_patent_stream_capability_header_for_file_route_tasks(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    queue_store = app.state.execution_queue_status_store
+    relay_store = app.state.execution_event_relay_store
+    slot_store = app.state.execution_slot_lease_store
+    queue_store.put_request(
+        _queued_task_record(
+            request_id="req_worker_patent_capability",
+            requested_mode="patent",
+            actual_mode="patent",
+            target_backend="patent",
+            route="hybrid_qa",
+            turn_mode="file_only",
+            source_scope="pdf+table",
+            kb_enabled=False,
+            allow_kb_verification=False,
+            selected_file_ids=[11, 33],
+            execution_files=[
+                {"file_id": 11, "file_type": "pdf", "file_name": "battery-paper.pdf"},
+                {"file_id": 33, "file_type": "excel", "file_name": "claims.xlsx"},
+            ],
+            assistant_message_id="msg_worker_patent_capability",
+            quota_grant_id="grant-worker-patent-capability",
+            execution_snapshot={
+                "question": "请对比两个文件",
+                "conversation_id": 123,
+                "user_id": 42,
+                "chat_history": [],
+                "requested_mode": "patent",
+                "actual_mode": "patent",
+                "route": "hybrid_qa",
+                "source_scope": "pdf+table",
+                "turn_mode": "file_only",
+                "kb_enabled": False,
+                "allow_kb_verification": False,
+                "used_files": [
+                    {"file_id": 11, "file_type": "pdf", "file_name": "battery-paper.pdf"},
+                    {"file_id": 33, "file_type": "excel", "file_name": "claims.xlsx"},
+                ],
+                "execution_files": [
+                    {"file_id": 11, "file_type": "pdf", "file_name": "battery-paper.pdf"},
+                    {"file_id": 33, "file_type": "excel", "file_name": "claims.xlsx"},
+                ],
+                "selected_file_ids": [11, 33],
+                "primary_file_id": 11,
+                "file_selection": {
+                    "selected_file_ids": [11, 33],
+                    "primary_file_id": 11,
+                    "turn_mode": "file_only",
+                    "source_scope": "pdf+table",
+                },
+                "trace_id": "req_worker_patent_capability",
+                "options": {"patent_stream_capability": "preview_v1"},
+            },
+        ),
+        ttl_seconds=900,
+    )
+    relay_store.append_frame("req_worker_patent_capability", {"type": "state", "status": "queued"}, ttl_seconds=900)
+    captured_headers = {}
+
+    class _Handle:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        async def body_iter(self):
+            yield (
+                b'data: {"type":"metadata","query_mode":"patent","route":"hybrid_qa","trace_id":"req_worker_patent_capability"}\n\n'
+                b'data: {"type":"done","final_answer":"ok","query_mode":"patent","route":"hybrid_qa","trace_id":"req_worker_patent_capability"}\n\n'
+            )
+
+        async def abort(self):
+            return None
+
+    async def _fake_open_json_stream(*, request, target, path, payload):
+        _ = target, path, payload
+        captured_headers.update({key.decode("latin1").lower(): value.decode("latin1") for key, value in request.scope.get("headers", [])})
+        return _Handle()
+
+    original_open_json_stream = app.state.proxy_service.open_json_stream
+    app.state.proxy_service.open_json_stream = _fake_open_json_stream
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        payload = _json_request_body(request)
+        if path == "/internal/conversations/123/tasks/req_worker_patent_capability/assistant-progress":
+            return httpx.Response(200, json={"success": True, "status": payload.get("status")})
+        if path == "/internal/conversations/123/tasks/req_worker_patent_capability/assistant-terminal":
+            return httpx.Response(200, json={"success": True, "status": payload.get("terminal_status")})
+        if path == "/internal/quota/grants/grant-worker-patent-capability/finalize":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-worker-patent-capability", "counted": payload["success"], "idempotent": False}})
+        raise AssertionError(f"unexpected upstream path: {path}")
+
+    _set_task_transport(handler)
+    dispatcher = ExecutionAdmissionDispatcher(
+        settings=app.state.settings,
+        queue_status_store=queue_store,
+        slot_lease_store=slot_store,
+    )
+    worker = ExecutionAdmissionWorker(
+        dispatcher=dispatcher,
+        owner_id="worker-patent-capability",
+        executor=qa_task_module.GatewayTaskExecutor(app).execute,
+        timestamp_factory=lambda: "2026-04-06T10:00:10+00:00",
+    )
+
+    try:
+        result = worker.run_dispatch_cycle()
+    finally:
+        app.state.proxy_service.open_json_stream = original_open_json_stream
+
+    assert result.outcome == "completed"
+    assert captured_headers["x-patent-stream-capability"] == "preview_v1"
+
+
 def test_get_task_normalizes_raw_cancelled_status_to_public_canceled():
     _set_health_transport()
     queue_store = app.state.execution_queue_status_store
@@ -1284,6 +1398,112 @@ def test_admission_worker_idle_flush_persists_progress_before_next_event_arrives
     assert result.outcome == "completed"
     progress_calls = [payload for path, payload in calls if path == f"/internal/conversations/99/tasks/{request_id}/assistant-progress"]
     assert any(payload.get("content_delta") == "hello" for payload in progress_calls)
+
+
+def test_admission_worker_patent_preview_chunks_do_not_sync_into_main_assistant_progress(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    queue_store = app.state.execution_queue_status_store
+    relay_store = app.state.execution_event_relay_store
+    slot_store = app.state.execution_slot_lease_store
+    request_id = "req_worker_patent_preview_progress"
+    queue_store.put_request(
+        _queued_task_record(
+            request_id=request_id,
+            conversation_id=99,
+            assistant_message_id="msg_worker_patent_preview_progress",
+            requested_mode="patent",
+            actual_mode="patent",
+            target_backend="patent",
+            route="hybrid_qa",
+            turn_mode="file_only",
+            source_scope="pdf+table",
+            quota_grant_id="grant-worker-patent-preview-progress",
+            execution_snapshot={
+                "question": "请对比两个文件",
+                "conversation_id": 99,
+                "user_id": 42,
+                "chat_history": [],
+                "requested_mode": "patent",
+                "actual_mode": "patent",
+                "route": "hybrid_qa",
+                "turn_mode": "file_only",
+                "source_scope": "pdf+table",
+                "trace_id": request_id,
+                "options": {"patent_stream_capability": "preview_v1"},
+            },
+        ),
+        ttl_seconds=900,
+    )
+    relay_store.append_frame(request_id, {"type": "state", "status": "queued"}, ttl_seconds=900)
+    progress_calls: list[dict] = []
+    terminal_calls: list[dict] = []
+
+    class _Handle:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        async def body_iter(self):
+            yield (
+                b'data: {"type":"metadata","query_mode":"patent","route":"hybrid_qa","trace_id":"req_worker_patent_preview_progress"}\n\n'
+                b'data: {"type":"content","content":"PDF preview","content_role":"preview","content_source":"pdf","content_stream_id":"pdf:primary","content_phase":"start","replace_stream":true}\n\n'
+                b'data: {"type":"content","content":" plus more","content_role":"preview","content_source":"pdf","content_stream_id":"pdf:primary","content_phase":"delta"}\n\n'
+                b'data: {"type":"content","content":"final","content_role":"final","content_source":"hybrid","content_stream_id":"final:answer","content_phase":"start","replace_stream":true}\n\n'
+                b'data: {"type":"content","content":" answer","content_role":"final","content_source":"hybrid","content_stream_id":"final:answer","content_phase":"delta"}\n\n'
+                b'data: {"type":"done","final_answer":"final answer","query_mode":"patent","route":"hybrid_qa","trace_id":"req_worker_patent_preview_progress"}\n\n'
+            )
+
+        async def abort(self):
+            return None
+
+    async def _fake_open_json_stream(*, request, target, path, payload):
+        _ = request, target, path, payload
+        return _Handle()
+
+    original_open_json_stream = app.state.proxy_service.open_json_stream
+    app.state.proxy_service.open_json_stream = _fake_open_json_stream
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        payload = _json_request_body(request)
+        if path == f"/internal/conversations/99/tasks/{request_id}/assistant-progress":
+            progress_calls.append(payload)
+            return httpx.Response(200, json={"success": True, "status": payload.get("status")})
+        if path == f"/internal/conversations/99/tasks/{request_id}/assistant-terminal":
+            terminal_calls.append(payload)
+            return httpx.Response(200, json={"success": True, "status": payload.get("terminal_status")})
+        if path == "/internal/quota/grants/grant-worker-patent-preview-progress/finalize":
+            return httpx.Response(
+                200,
+                json={"success": True, "data": {"grant_id": "grant-worker-patent-preview-progress", "counted": payload["success"], "idempotent": False}},
+            )
+        raise AssertionError(f"unexpected upstream path: {path}")
+
+    _set_task_transport(handler)
+    dispatcher = ExecutionAdmissionDispatcher(
+        settings=app.state.settings,
+        queue_status_store=queue_store,
+        slot_lease_store=slot_store,
+    )
+    worker = ExecutionAdmissionWorker(
+        dispatcher=dispatcher,
+        owner_id="worker-patent-preview-progress",
+        executor=qa_task_module.GatewayTaskExecutor(app).execute,
+        timestamp_factory=lambda: "2026-04-06T10:00:11+00:00",
+    )
+
+    try:
+        result = worker.run_dispatch_cycle()
+    finally:
+        app.state.proxy_service.open_json_stream = original_open_json_stream
+
+    assert result.outcome == "completed"
+    progress_text = "".join(payload.get("content_delta") or "" for payload in progress_calls)
+    assert progress_text == "final answer"
+    assert terminal_calls[0]["answer_text"] == "final answer"
+    replay = relay_store.get_frames(request_id, after_sequence=0)
+    content_events = [frame["payload"] for frame in replay if frame["payload"].get("type") == "content"]
+    assert any(event.get("content_role") == "preview" for event in content_events)
+    assert any(event.get("content_role") == "final" for event in content_events)
 
 
 def test_admission_worker_idle_flush_does_not_duplicate_content_when_first_flush_overlaps_new_content(monkeypatch):

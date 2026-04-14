@@ -34,6 +34,62 @@ from app.integrations.storage.factory import get_storage_backend
 _PATENT_ID_INLINE_CITATION_RE = re.compile(r"\(\s*patent_id\s*=\s*([A-Za-z0-9._/\-]+)\s*\)", re.IGNORECASE)
 _PATENT_INLINE_REFERENCE_RE = re.compile(r"[\(（]\s*([A-Za-z]{2}\d{6,14}[A-Za-z]\d?)\s*[\)）]", re.IGNORECASE)
 _RAW_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+_PATENT_PUBLICATION_RE = re.compile(r"\b[A-Z]{2}\d{6,14}[A-Z]\d?\b", re.IGNORECASE)
+_BACKTICK_PATENT_SPAN_RE = re.compile(r"`[^`\n]*[A-Z]{2}\d{6,14}[A-Z]\d?[^`\n]*`", re.IGNORECASE)
+_BACKTICK_PATENT_ID_INLINE_CITATION_RE = re.compile(r"`\(\s*patent_id\s*=\s*[A-Za-z0-9._/\-]+\s*\)`", re.IGNORECASE)
+_BACKTICK_RENDERED_PATENT_REFERENCE_RE = re.compile(
+    r"`[\(（][^`\n]*[A-Z]{2}\d{6,14}[A-Z]\d?[^`\n]*[\)）]`",
+    re.IGNORECASE,
+)
+
+
+def _truncate_patent_log_excerpt(value: Any, *, limit: int = 220) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(1, limit - 1)].rstrip() + "…"
+
+
+def _sample_patent_log_matches(pattern: re.Pattern[str], text: Any, *, limit: int = 5) -> list[str]:
+    source = str(text or "")
+    samples: list[str] = []
+    for match in pattern.finditer(source):
+        sample = _truncate_patent_log_excerpt(match.group(0), limit=120)
+        if sample and sample not in samples:
+            samples.append(sample)
+        if len(samples) >= limit:
+            break
+    return samples
+
+
+def _collect_patent_citation_diagnostics(text: Any) -> dict[str, Any]:
+    source = str(text or "")
+    patent_ids: list[str] = []
+    for match in _PATENT_PUBLICATION_RE.finditer(source):
+        patent_id = str(match.group(0) or "").strip().upper()
+        if patent_id and patent_id not in patent_ids:
+            patent_ids.append(patent_id)
+    patent_id_inline_matches = list(_PATENT_ID_INLINE_CITATION_RE.finditer(source))
+    visible_reference_matches = list(_PATENT_INLINE_REFERENCE_RE.finditer(source))
+    backtick_patent_span_matches = list(_BACKTICK_PATENT_SPAN_RE.finditer(source))
+    backtick_patent_id_inline_matches = list(_BACKTICK_PATENT_ID_INLINE_CITATION_RE.finditer(source))
+    backtick_rendered_reference_matches = list(_BACKTICK_RENDERED_PATENT_REFERENCE_RE.finditer(source))
+    return {
+        "chars": len(source),
+        "patent_publication_count": len(list(_PATENT_PUBLICATION_RE.finditer(source))),
+        "distinct_patent_publication_count": len(patent_ids),
+        "distinct_patent_publication_ids_sample": patent_ids[:8],
+        "patent_id_inline_citation_count": len(patent_id_inline_matches),
+        "visible_patent_reference_count": len(visible_reference_matches),
+        "backtick_patent_span_count": len(backtick_patent_span_matches),
+        "backtick_patent_id_inline_citation_count": len(backtick_patent_id_inline_matches),
+        "backtick_rendered_patent_reference_count": len(backtick_rendered_reference_matches),
+        "patent_id_inline_citation_samples": _sample_patent_log_matches(_PATENT_ID_INLINE_CITATION_RE, source),
+        "visible_patent_reference_samples": _sample_patent_log_matches(_PATENT_INLINE_REFERENCE_RE, source),
+        "backtick_patent_span_samples": _sample_patent_log_matches(_BACKTICK_PATENT_SPAN_RE, source),
+        "backtick_patent_id_inline_citation_samples": _sample_patent_log_matches(_BACKTICK_PATENT_ID_INLINE_CITATION_RE, source),
+        "backtick_rendered_patent_reference_samples": _sample_patent_log_matches(_BACKTICK_RENDERED_PATENT_REFERENCE_RE, source),
+    }
 
 
 def _normalize_patent_publication_number(value: Any) -> str:
@@ -207,7 +263,54 @@ class ConversationService:
             return True
         return "patent_id" in str(content or "").lower()
 
-    def _normalize_user_visible_patent_citations(self, value: Any, *, trim: bool) -> str:
+    def _log_patent_citation_normalization(
+        self,
+        *,
+        before_text: str,
+        after_text: str,
+        trim: bool,
+        diagnostics: dict[str, Any] | None = None,
+    ) -> None:
+        before = _collect_patent_citation_diagnostics(before_text)
+        after = _collect_patent_citation_diagnostics(after_text)
+        has_patent_signal = bool(
+            before.get("patent_publication_count")
+            or before.get("patent_id_inline_citation_count")
+            or before.get("backtick_patent_span_count")
+            or after.get("patent_publication_count")
+            or after.get("patent_id_inline_citation_count")
+            or after.get("backtick_patent_span_count")
+        )
+        if not has_patent_signal:
+            return
+        suspicious = bool(
+            before.get("backtick_patent_span_count")
+            or before.get("backtick_patent_id_inline_citation_count")
+            or before.get("backtick_rendered_patent_reference_count")
+            or after.get("backtick_patent_span_count")
+            or after.get("backtick_patent_id_inline_citation_count")
+            or after.get("backtick_rendered_patent_reference_count")
+        )
+        log_level = logging.WARNING if suspicious else logging.INFO
+        self._logger.log(
+            log_level,
+            "conversation patent citation normalization diagnostics context=%s trim=%s changed=%s before=%s after=%s before_excerpt=%s after_excerpt=%s",
+            dict(diagnostics or {}),
+            bool(trim),
+            before_text != after_text,
+            before,
+            after,
+            _truncate_patent_log_excerpt(before_text, limit=320),
+            _truncate_patent_log_excerpt(after_text, limit=320),
+        )
+
+    def _normalize_user_visible_patent_citations(
+        self,
+        value: Any,
+        *,
+        trim: bool,
+        diagnostics: dict[str, Any] | None = None,
+    ) -> str:
         text = str(value or "")
         rendered = _PATENT_ID_INLINE_CITATION_RE.sub(lambda match: f"({str(match.group(1) or '').strip().upper()})", text)
         rendered = re.sub(r"patent_id\s*=\s*", "", rendered, flags=re.IGNORECASE)
@@ -217,7 +320,13 @@ class ConversationService:
         rendered = re.sub(r"\n{3,}", "\n\n", rendered)
         if trim:
             rendered = re.sub(r"[ \t]{2,}", " ", rendered)
-            return rendered.strip()
+            rendered = rendered.strip()
+        self._log_patent_citation_normalization(
+            before_text=text,
+            after_text=rendered,
+            trim=trim,
+            diagnostics=diagnostics,
+        )
         return rendered
 
     def _normalize_parse_status(self, value: Any, *, default: str = "uploaded") -> str:
@@ -778,7 +887,17 @@ class ConversationService:
                 metadata=metadata,
                 content=content_text,
             ):
-                content_text = self._normalize_user_visible_patent_citations(content_text, trim=True)
+                content_text = self._normalize_user_visible_patent_citations(
+                    content_text,
+                    trim=True,
+                    diagnostics={
+                        "context": "prepare_response_rows",
+                        "message_id": str(item.get("message_id") or ""),
+                        "trace_id": str(metadata.get("trace_id") or ""),
+                        "route": str(metadata.get("route") or ""),
+                        "source_service": str(metadata.get("source_service") or ""),
+                    },
+                )
             rows.append(
                 {
                     "id": self._message_numeric_id(item, idx),
@@ -2156,7 +2275,20 @@ class ConversationService:
                     requested_mode=metadata.get("requested_mode"),
                     actual_mode=metadata.get("actual_mode"),
                 ):
-                    delta = self._normalize_user_visible_patent_citations(delta, trim=False)
+                    delta = self._normalize_user_visible_patent_citations(
+                        delta,
+                        trim=False,
+                        diagnostics={
+                            "context": "authority_task_progress",
+                            "user_id": int(user_id),
+                            "conversation_id": int(conversation_id),
+                            "task_id": str(task_id or "").strip(),
+                            "trace_id": str(metadata.get("trace_id") or ""),
+                            "route": str(metadata.get("route") or ""),
+                            "source_service": str(metadata.get("source_service") or ""),
+                            "last_seq": int(last_seq),
+                        },
+                    )
                 if delta:
                     updated["content"] = f"{str(updated.get('content') or '')}{delta}"
                 metadata["task_id"] = str(task_id or "").strip()
@@ -2240,7 +2372,21 @@ class ConversationService:
                         requested_mode=metadata.get("requested_mode"),
                         actual_mode=metadata.get("actual_mode"),
                     ):
-                        resolved_answer_text = self._normalize_user_visible_patent_citations(resolved_answer_text, trim=True)
+                        resolved_answer_text = self._normalize_user_visible_patent_citations(
+                            resolved_answer_text,
+                            trim=True,
+                            diagnostics={
+                                "context": "authority_task_terminal",
+                                "user_id": int(user_id),
+                                "conversation_id": int(conversation_id),
+                                "task_id": str(task_id or "").strip(),
+                                "trace_id": str(metadata.get("trace_id") or ""),
+                                "route": str(metadata.get("route") or ""),
+                                "source_service": str(metadata.get("source_service") or ""),
+                                "last_seq": int(last_seq),
+                                "terminal_status": normalized_status,
+                            },
+                        )
                     updated["content"] = resolved_answer_text
                 metadata["task_id"] = str(task_id or "").strip()
                 metadata["task_status"] = normalized_status
@@ -2481,7 +2627,20 @@ class ConversationService:
             requested_mode=metadata.get("requested_mode"),
             actual_mode=metadata.get("actual_mode"),
         ):
-            answer_text = self._normalize_user_visible_patent_citations(answer_text, trim=True)
+            answer_text = self._normalize_user_visible_patent_citations(
+                answer_text,
+                trim=True,
+                diagnostics={
+                    "context": "materialize_authority_assistant",
+                    "user_id": int(user_id),
+                    "conversation_id": int(conversation_id),
+                    "task_id": str(refreshed_task.get("task_id") or ""),
+                    "trace_id": str(metadata.get("trace_id") or ""),
+                    "route": str(metadata.get("route") or ""),
+                    "source_service": str(metadata.get("source_service") or ""),
+                    "terminal_status": terminal_status,
+                },
+            )
         if self._is_completed_status(terminal_status) and not answer_text:
             return {"success": False, "error": "empty_answer_text", "code": "VALIDATION_ERROR"}
         try:
@@ -2617,7 +2776,19 @@ class ConversationService:
             metadata=metadata_payload,
             content=content_text,
         ):
-            content_text = self._normalize_user_visible_patent_citations(content_text, trim=True)
+            content_text = self._normalize_user_visible_patent_citations(
+                content_text,
+                trim=True,
+                diagnostics={
+                    "context": "add_message",
+                    "user_id": int(user_id),
+                    "conversation_id": int(conversation_id),
+                    "route": str(metadata_payload.get("route") or ""),
+                    "trace_id": str(metadata_payload.get("trace_id") or ""),
+                    "source_service": str(metadata_payload.get("source_service") or ""),
+                    "message_terminal_status": str(metadata_payload.get("terminal_status") or ""),
+                },
+            )
         if not content_text:
             return {"success": False, "error": "empty_content", "code": "VALIDATION_ERROR"}
         try:

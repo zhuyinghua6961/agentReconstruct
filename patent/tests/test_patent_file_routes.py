@@ -2738,6 +2738,65 @@ def test_dispatch_hybrid_route_marks_failure_when_no_usable_file_evidence_exists
     assert result["metadata"]["steps"][-1]["status"] == "error"
 
 
+def test_dispatch_hybrid_route_with_structured_stream_router_emits_preview_then_final(tmp_path):
+    pdf_path = tmp_path / "battery-paper-preview.pdf"
+    csv_path = tmp_path / "cells-preview.csv"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    _write_csv(csv_path)
+    contract = build_patent_file_contract(
+        question="请结合 PDF 和表格总结结论",
+        route="hybrid_qa",
+        source_scope="pdf+table",
+        selected_file_ids=[11, 33],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "file_name": "battery-paper-preview.pdf", "local_path": str(pdf_path)},
+            {"file_id": 33, "file_type": "csv", "file_name": "cells-preview.csv", "local_path": str(csv_path)},
+        ],
+        file_selection={"strategy": "explicit_selection", "source_scope": "pdf+table"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    pdf_service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: "This paper studies LMFP/LFP blending and reports safer charging behavior.",
+        answer_question_fn=lambda **kwargs: "真实 PDF 总结：LMFP/LFP 复配改善了充电安全性，并提供了实验验证。",
+    )
+    tabular_service = PatentTabularService(
+        answer_question_fn=lambda **kwargs: "真实表格总结：LMFP 120mAh，LFP 115mAh，NCM 140mAh，并且备注字段体现了差异。",
+    )
+    streamed_payloads: list[object] = []
+
+    from server.patent import stream_events as stream_events_module
+
+    router_cls = getattr(stream_events_module, "PatentStructuredContentRouter", None)
+    assert router_cls is not None
+    state = stream_events_module.PatentContentStreamState()
+    router = router_cls(callback=streamed_payloads.append)
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=pdf_service,
+        tabular_service=tabular_service,
+        content_callback=router,
+    )
+
+    typed_events = [payload for payload in streamed_payloads if isinstance(payload, dict)]
+    assert typed_events
+    assert any(event["content_role"] == "preview" and event["content_source"] == "pdf" for event in typed_events)
+    assert any(event["content_role"] == "preview" and event["content_source"] == "table" for event in typed_events)
+    assert any(event["content_role"] == "final" and event["content_source"] == "hybrid" for event in typed_events)
+    first_final_index = next(index for index, event in enumerate(typed_events) if event["content_role"] == "final")
+    assert all(
+        index < first_final_index
+        for index, event in enumerate(typed_events)
+        if event["content_role"] == "preview"
+    )
+    for event in typed_events:
+        state.observe(event)
+    final_text = "".join(event["content"] for event in typed_events if event["content_role"] == "final")
+    assert final_text == result["answer_text"]
+
+
 def test_dispatch_hybrid_route_does_not_use_shell_subanswers_as_direct_conclusion(tmp_path):
     pdf_path = tmp_path / "spec.pdf"
     csv_path = tmp_path / "claims.csv"

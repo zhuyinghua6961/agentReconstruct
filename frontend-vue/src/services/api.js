@@ -2,6 +2,7 @@
 // This adapter normalizes current backend contracts to the shape expected by the UI.
 
 import { getRouteModeLabel } from '../utils/routingStatus.js'
+import { buildPatentStreamingCapability } from '../utils/patentStreaming.js'
 import { streamSseJson } from '../utils/sse.js'
 
 function resolveBackendBase() {
@@ -554,6 +555,10 @@ export const api = {
 
   async *askStream(question, chatHistory = [], conversationId = null, pdfContext = null, signal = undefined, mode = 'thinking') {
     const normalizedMode = String(mode || 'thinking').trim().toLowerCase();
+    const patentStreamingCapability = buildPatentStreamingCapability({
+      mode: normalizedMode,
+      pdfContext,
+    });
     const body = {
       question,
       chat_history: chatHistory.slice(-10),
@@ -563,6 +568,9 @@ export const api = {
     const userId = readStoredUserId();
     if (userId) body.user_id = userId;
     if (pdfContext) body.pdf_context = pdfContext;
+    if (Object.keys(patentStreamingCapability.requestOptions).length > 0) {
+      body.options = { ...patentStreamingCapability.requestOptions };
+    }
 
     const askPath = ['fast', 'thinking', 'patent'].includes(normalizedMode)
       ? `${V1}/${normalizedMode}/ask_stream`
@@ -570,7 +578,10 @@ export const api = {
 
     const response = await fetch(`${API_BASE}${askPath}`, {
       method: 'POST',
-      headers: authHeaders(true),
+      headers: {
+        ...authHeaders(true),
+        ...patentStreamingCapability.headers,
+      },
       body: JSON.stringify(body),
       signal,
     });
@@ -620,6 +631,10 @@ export const api = {
 
   async createTask(question, chatHistory = [], conversationId = null, pdfContext = null, mode = 'thinking', clientRequestId = '') {
     const normalizedMode = String(mode || 'thinking').trim().toLowerCase();
+    const patentStreamingCapability = buildPatentStreamingCapability({
+      mode: normalizedMode,
+      pdfContext,
+    });
     const body = {
       question,
       chat_history: chatHistory.slice(-10),
@@ -630,10 +645,16 @@ export const api = {
     if (userId) body.user_id = userId;
     if (pdfContext) body.pdf_context = pdfContext;
     if (String(clientRequestId || '').trim()) body.client_request_id = String(clientRequestId).trim();
+    if (Object.keys(patentStreamingCapability.requestOptions).length > 0) {
+      body.options = { ...patentStreamingCapability.requestOptions };
+    }
 
     return await requestJson(`${API_BASE}${V1}/v1/tasks`, {
       method: 'POST',
-      headers: authHeaders(true),
+      headers: {
+        ...authHeaders(true),
+        ...patentStreamingCapability.headers,
+      },
       body: JSON.stringify(body),
     });
   },

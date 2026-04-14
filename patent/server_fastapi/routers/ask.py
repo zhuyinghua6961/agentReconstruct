@@ -12,6 +12,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from server.errors import codes
 from server.errors.core import APIError
+from server.patent.stream_events import (
+    PATENT_STREAM_CAPABILITY_HEADER,
+    inject_stream_capability_option,
+)
 from server.schemas.request_models import ProtocolMismatchRequestError, parse_patent_request
 from server.services.ask_service import AskService
 from server.runtime.request_context import get_trace_id
@@ -94,6 +98,7 @@ async def _parse_patent_request_or_raise(request: Request):
     payload = await _read_json_payload(request)
     gateway_task_execution = _is_truthy_header(request.headers.get("x-gateway-task-execution"))
     gateway_owned_persistence = _is_truthy_header(request.headers.get("x-gateway-owned-persistence"))
+    patent_stream_capability = request.headers.get(PATENT_STREAM_CAPABILITY_HEADER)
     existing_options = payload.get("options")
     if isinstance(existing_options, dict):
         normalized_options = dict(existing_options)
@@ -103,14 +108,28 @@ async def _parse_patent_request_or_raise(request: Request):
             normalized_options["gateway_task_execution"] = True
         if gateway_owned_persistence:
             normalized_options["gateway_owned_persistence"] = True
-        payload["options"] = normalized_options
+        payload["options"] = inject_stream_capability_option(
+            normalized_options,
+            header_value=patent_stream_capability,
+            route=payload.get("route"),
+        )
     elif gateway_task_execution or gateway_owned_persistence:
         normalized_options: dict[str, Any] = {}
         if gateway_task_execution:
             normalized_options["gateway_task_execution"] = True
         if gateway_owned_persistence:
             normalized_options["gateway_owned_persistence"] = True
-        payload["options"] = normalized_options
+        payload["options"] = inject_stream_capability_option(
+            normalized_options,
+            header_value=patent_stream_capability,
+            route=payload.get("route"),
+        )
+    elif patent_stream_capability is not None:
+        payload["options"] = inject_stream_capability_option(
+            None,
+            header_value=patent_stream_capability,
+            route=payload.get("route"),
+        )
     try:
         return parse_patent_request(payload)
     except ProtocolMismatchRequestError as exc:

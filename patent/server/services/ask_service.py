@@ -11,6 +11,10 @@ from typing import Any, Callable, Iterator
 from server.errors import codes
 from server.errors.core import APIError
 from server.patent.executor import PatentExecutor
+from server.patent.stream_events import (
+    final_content_source_for_route,
+    structured_content_streaming_enabled,
+)
 from server.patent.result_builder import PatentResultBuilder, default_now_factory
 from server.runtime.request_context import clear_trace_id, set_trace_id
 from server.schemas.request_models import PatentAskRequest
@@ -175,6 +179,10 @@ class AskService:
         seq = 0
         telemetry: dict[str, int] = {}
         prepare_queue: queue.Queue[tuple[str, Any]] | None = None
+        structured_file_streaming = structured_content_streaming_enabled(
+            options=request.options,
+            route=request.route,
+        )
 
         def _mark_telemetry_once(field_name: str) -> None:
             if field_name not in telemetry:
@@ -236,12 +244,25 @@ class AskService:
                     ),
                     preflight_steps=preflight_steps,
                 )
-                progress_events = list(
-                    self._result_builder.iter_progress_events(
-                        execution_result=execution_result,
-                        starting_seq=seq,
+                progress_events: list[dict[str, Any]] = []
+                next_seq = seq
+                for step in list(execution_result.get("steps") or []):
+                    progress_events.append(
+                        self._result_builder.build_step_event(
+                            seq=next_seq,
+                            step=dict(step or {}),
+                        )
                     )
-                )
+                    next_seq += 1
+                answer_text = str(execution_result.get("answer_text") or "")
+                if answer_text:
+                    progress_events.append(
+                        self._build_single_answer_content_event(
+                            request=request,
+                            seq=next_seq,
+                            content=answer_text,
+                        )
+                    )
                 for event in progress_events:
                     if str(event.get("type") or "") == "step":
                         _mark_telemetry_once("first_step_at_ms")
@@ -273,7 +294,10 @@ class AskService:
             def _progress_callback(step: dict[str, Any]) -> None:
                 progress_queue.put(("progress", dict(step or {})))
 
-            def _content_callback(chunk: str) -> None:
+            def _content_callback(chunk: Any) -> None:
+                if isinstance(chunk, dict):
+                    progress_queue.put(("content", dict(chunk)))
+                    return
                 progress_queue.put(("content", str(chunk or "")))
 
             def _execute_worker() -> None:
@@ -313,6 +337,23 @@ class AskService:
                     streamed_step_count += 1
                     continue
                 if event_type == "content":
+                    if isinstance(payload, dict):
+                        chunk = str(payload.get("content") or "")
+                        phase = str(payload.get("content_phase") or "")
+                        if chunk or phase == "end":
+                            _mark_telemetry_once("first_content_at_ms")
+                            yield self._result_builder.build_content_event(
+                                seq=seq,
+                                content=chunk,
+                                content_role=payload.get("content_role"),
+                                content_source=payload.get("content_source"),
+                                content_stream_id=payload.get("content_stream_id"),
+                                content_phase=payload.get("content_phase"),
+                                replace_stream=payload.get("replace_stream"),
+                            )
+                            seq += 1
+                            streamed_content_count += 1
+                        continue
                     chunk = str(payload or "")
                     if chunk:
                         _mark_telemetry_once("first_content_at_ms")
@@ -347,7 +388,11 @@ class AskService:
                 answer_text = str(execution_result.get("answer_text") or "")
                 if answer_text and streamed_content_count == 0:
                     _mark_telemetry_once("first_content_at_ms")
-                    yield self._result_builder.build_content_event(seq=seq, content=answer_text)
+                    yield self._build_single_answer_content_event(
+                        request=request,
+                        seq=seq,
+                        content=answer_text,
+                    )
                     seq += 1
 
             turn_result = self._finalize_turn(
@@ -502,6 +547,25 @@ class AskService:
                 "seq": int(seq),
                 "ts": "1970-01-01T00:00:00Z",
             }
+
+    def _build_single_answer_content_event(
+        self,
+        *,
+        request: PatentAskRequest,
+        seq: int,
+        content: str,
+    ) -> dict[str, Any]:
+        if structured_content_streaming_enabled(options=request.options, route=request.route):
+            return self._result_builder.build_content_event(
+                seq=seq,
+                content=content,
+                content_role="final",
+                content_source=final_content_source_for_route(request.route),
+                content_stream_id="final:answer",
+                content_phase="snapshot",
+                replace_stream=True,
+            )
+        return self._result_builder.build_content_event(seq=seq, content=content)
 
     def _persist_terminal_failure(
         self,

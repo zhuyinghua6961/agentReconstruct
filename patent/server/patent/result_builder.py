@@ -116,12 +116,27 @@ class PatentResultBuilder:
             data=dict(payload.get("data") or {}) if isinstance(payload.get("data"), dict) else None,
         ).model_dump()
 
-    def build_content_event(self, *, seq: int, content: str) -> dict[str, Any]:
+    def build_content_event(
+        self,
+        *,
+        seq: int,
+        content: str,
+        content_role: str | None = None,
+        content_source: str | None = None,
+        content_stream_id: str | None = None,
+        content_phase: str | None = None,
+        replace_stream: bool | None = None,
+    ) -> dict[str, Any]:
         return ContentEvent(
             seq=int(seq),
             ts=self._timestamp(),
             content=str(content or ""),
-        ).model_dump()
+            content_role=content_role,
+            content_source=content_source,
+            content_stream_id=content_stream_id,
+            content_phase=content_phase,
+            replace_stream=replace_stream,
+        ).model_dump(exclude_none=True)
 
     def build_done_event(
         self,

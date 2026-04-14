@@ -172,6 +172,17 @@ test('Home ignores late content frames and drops buffered leftovers after a done
   assert.match(source, /function flushPendingStreamContent\(chatId\) \{[\s\S]*const target = getStreamingTargetMessage\(chatId\)[\s\S]*if \(shouldIgnoreLateStreamContent\(target\?\.message \|\| \{\}\)\) \{\s*runtime\.pendingContent = ''\s*return\s*\}/s)
 })
 
+test('Home splits patent preview streams away from the main final-answer body', () => {
+  assert.match(source, /import \{[^}]*buildPatentStreamingMessagePatch[^}]*getPatentPreviewStreams[^}]*isPatentFinalAnswerPending[^}]*reducePatentStreamingState[^}]*\} from '\.\.\/utils\/patentStreaming'/)
+  assert.match(source, /const patentStreamingUpdate = reducePatentStreamingState\(targetMessage, data\)/)
+  assert.match(source, /if \(patentStreamingUpdate\.handled\) \{[\s\S]*updateStreamingTargetMessage\(chatId, buildPatentStreamingMessagePatch\(targetMessage, patentStreamingUpdate\.state\)\)/s)
+  assert.match(source, /if \(patentStreamingUpdate\.mainContentMode === 'preview'\) \{[\s\S]*return \{ terminal: false \}\s*\}/)
+  assert.match(source, /if \(patentStreamingUpdate\.replaceContent\) \{[\s\S]*updateStreamingTargetMessage\(chatId, \{ content: '' \}\)/s)
+  assert.match(source, /<div v-if="getPatentPreviewStreams\(entry\.message\)\.length > 0" class="patent-preview-panel">/)
+  assert.match(source, /v-for="stream in getPatentPreviewStreams\(entry\.message\)"/)
+  assert.match(source, /<div v-if="isPatentFinalAnswerPending\(entry\.message\)" class="patent-preview-pending">正在汇总最终答案\.\.\.<\/div>/)
+})
+
 test('Home scopes busy controls to the current chat instead of globally locking the page', () => {
   assert.match(source, /const isCurrentChatBusy = computed\(\(\) => store\.isChatBusy\(store\.currentChatId\)\)/)
   assert.match(source, /const canSend = computed\(\(\) => inputMessage\.value\.trim\(\) && !isCurrentChatBusy\.value\)/)

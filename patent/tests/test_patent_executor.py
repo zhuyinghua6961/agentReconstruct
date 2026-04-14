@@ -5,6 +5,7 @@ from server.errors.core import APIError
 from server.patent.executor import PatentExecutor
 from server.patent.kb_service import PatentKbService
 from server.patent.pdf_service import PatentPdfService
+from server.patent.stream_events import PatentContentStreamState
 from server.patent.stages.synthesis import run_stage4_synthesis_with_patent_evidence
 from server.patent.tabular_service import PatentTabularService
 from server.patent.models import PatentRetrievalClaim, PatentRetrievalPlan
@@ -103,6 +104,7 @@ def _make_file_request(
     selected_file_ids: list[int],
     trace_id: str = "req_file",
     question: str = "Use the selected files.",
+    options: dict[str, object] | None = None,
 ) -> PatentAskRequest:
     return PatentAskRequest(
         question=question,
@@ -125,7 +127,7 @@ def _make_file_request(
             "source_scope": source_scope,
         },
         trace_id=trace_id,
-        options={},
+        options=dict(options or {}),
     )
 
 
@@ -741,6 +743,43 @@ def test_executor_pdf_unreadable_fallback_emits_final_steps_before_failure_body(
         index for index, item in enumerate(events) if item[0] == "step" and item[1] in {"pdf_extract", "pdf_answer"}
     )
     assert final_step_index < first_content_index
+
+
+def test_executor_capability_enabled_file_route_does_not_emit_final_end_on_stream_failure(tmp_path):
+    pdf_path = tmp_path / "spec.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+
+    class _BrokenPdfService:
+        def execute(self, *, contract, include_kb: bool, progress_callback=None, content_callback=None):
+            if callable(content_callback):
+                content_callback("partial final body ")
+            raise RuntimeError("pdf stream interrupted")
+
+    executor = PatentExecutor(pdf_service=_BrokenPdfService())
+    streamed_payloads: list[object] = []
+
+    with pytest.raises(RuntimeError, match="pdf stream interrupted"):
+        executor.execute_with_progress(
+            request=_make_file_request(
+                question="请总结这篇文献的研究内容",
+                route="pdf_qa",
+                source_scope="pdf",
+                turn_mode="file_only",
+                execution_files=[{"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf", "local_path": str(pdf_path)}],
+                selected_file_ids=[11],
+                trace_id="req_stream_pdf_failure_typed",
+                options={"patent_stream_capability": "preview_v1"},
+            ),
+            context={"recent_turns_for_llm": []},
+            content_callback=streamed_payloads.append,
+        )
+
+    typed_events = [payload for payload in streamed_payloads if isinstance(payload, dict)]
+    assert typed_events
+    assert typed_events[0]["content_role"] == "final"
+    assert typed_events[0]["content_source"] == "pdf"
+    assert typed_events[0]["content_phase"] == "start"
+    assert all(event.get("content_phase") != "end" for event in typed_events)
 
 
 def test_executor_pdf_streaming_generator_emits_content_before_final_success(tmp_path):
@@ -2001,6 +2040,121 @@ def test_executor_hybrid_file_route_streams_composed_pdf_and_table_answer(tmp_pa
     assert "表格中未提供足够" not in result["answer_text"]
 
 
+def test_executor_capability_enabled_pdf_table_hybrid_emits_preview_streams_before_final(tmp_path):
+    pdf_path = tmp_path / "spec-preview.pdf"
+    csv_path = tmp_path / "claims-preview.csv"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    _write_csv(csv_path)
+    executor = PatentExecutor(
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "This paper studies LMFP/LFP blending and reports safer charging behavior.",
+            answer_question_fn=lambda **kwargs: "真实 PDF 总结：LMFP/LFP 复配改善了充电安全性，并提供了实验验证。",
+        ),
+        tabular_service=PatentTabularService(
+            answer_question_fn=lambda **kwargs: "真实表格总结：LMFP 120mAh，LFP 115mAh，NCM 140mAh，并且备注字段体现了差异。",
+        ),
+    )
+    streamed_payloads: list[object] = []
+
+    result = executor.execute_with_progress(
+        request=_make_file_request(
+            question="请结合 PDF 和表格总结结论",
+            route="hybrid_qa",
+            source_scope="pdf+table",
+            turn_mode="file_only",
+            execution_files=[
+                {"file_id": 11, "file_type": "pdf", "file_name": "spec-preview.pdf", "local_path": str(pdf_path)},
+                {"file_id": 33, "file_type": "csv", "file_name": "claims-preview.csv", "local_path": str(csv_path)},
+            ],
+            selected_file_ids=[11, 33],
+            trace_id="req_stream_hybrid_preview",
+            options={"patent_stream_capability": "preview_v1"},
+        ),
+        context={"recent_turns_for_llm": []},
+        content_callback=streamed_payloads.append,
+    )
+
+    typed_events = [payload for payload in streamed_payloads if isinstance(payload, dict)]
+    assert typed_events
+    assert any(event["content_role"] == "preview" and event["content_source"] == "pdf" for event in typed_events)
+    assert any(event["content_role"] == "preview" and event["content_source"] == "table" for event in typed_events)
+    assert any(event["content_role"] == "final" and event["content_source"] == "hybrid" for event in typed_events)
+    first_final_index = next(index for index, event in enumerate(typed_events) if event["content_role"] == "final")
+    assert all(
+        index < first_final_index
+        for index, event in enumerate(typed_events)
+        if event["content_role"] == "preview"
+    )
+    state = PatentContentStreamState()
+    for event in typed_events:
+        state.observe(event)
+    final_text = "".join(event["content"] for event in typed_events if event["content_role"] == "final")
+    assert final_text == result["answer_text"]
+
+
+def test_executor_capability_enabled_pdf_kb_hybrid_keeps_pdf_preview_before_final(tmp_path):
+    pdf_path = tmp_path / "spec-kb-preview.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+
+    class _PreviewKbService(PatentKbService):
+        def run(self, *, request, runtime=None, conversation_context=None, progress_callback=None, content_callback=None):
+            return {
+                "answer_text": "知识库补充：该路线在专利布局上强调包覆材料与热稳定性。",
+                "route": request.route,
+                "query_mode": "patent_hybrid_qa",
+                "steps": [{"step": "stage4", "title": "阶段四", "message": "ok", "status": "success"}],
+                "references": ["CN123456789A"],
+                "reference_objects": [{"canonical_patent_id": "CN123456789A"}],
+                "reference_links": [],
+                "original_links": [],
+                "metadata": {
+                    "retrieval_backend": "patent-local-kb",
+                    "kb_evidence_context": "知识库证据强调包覆材料与热稳定性。",
+                    "kb_reference_instruction": "引用知识库时使用 CN123456789A。",
+                },
+                "timings": {"kb_ms": 7},
+            }
+
+    executor = PatentExecutor(
+        kb_service=_PreviewKbService(),
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "This paper proposes a silicon anode coating method and reports improved cycle life.",
+            answer_question_fn=lambda **kwargs: "真实 PDF 总结：本文提出硅负极包覆方法，并报告循环寿命改善。",
+        ),
+    )
+    streamed_payloads: list[object] = []
+
+    result = executor.execute_with_progress(
+        request=_make_file_request(
+            route="hybrid_qa",
+            source_scope="pdf+kb",
+            turn_mode="mixed",
+            execution_files=[{"file_id": 11, "file_type": "pdf", "file_name": "spec-kb-preview.pdf", "local_path": str(pdf_path)}],
+            selected_file_ids=[11],
+            trace_id="req_stream_pdf_kb_preview",
+            options={"patent_stream_capability": "preview_v1"},
+        ),
+        context={"recent_turns_for_llm": []},
+        content_callback=streamed_payloads.append,
+    )
+
+    typed_events = [payload for payload in streamed_payloads if isinstance(payload, dict)]
+    assert typed_events
+    assert any(event["content_role"] == "preview" and event["content_source"] == "pdf" for event in typed_events)
+    assert any(event["content_role"] == "final" and event["content_source"] == "hybrid" for event in typed_events)
+    first_final_index = next(index for index, event in enumerate(typed_events) if event["content_role"] == "final")
+    assert all(
+        index < first_final_index
+        for index, event in enumerate(typed_events)
+        if event["content_role"] == "preview"
+    )
+    state = PatentContentStreamState()
+    for event in typed_events:
+        state.observe(event)
+    final_text = "".join(event["content"] for event in typed_events if event["content_role"] == "final")
+    assert final_text == result["answer_text"]
+
+
 def test_executor_pdf_kb_hybrid_explicitly_reports_conflict_between_file_and_kb_evidence():
     class _ConflictPdfService:
         def execute(self, *, contract, include_kb: bool, progress_callback=None, content_callback=None):
@@ -2319,6 +2473,80 @@ def test_executor_pdf_kb_hybrid_preserves_file_route_cache_metadata_alongside_kb
     assert result["metadata"]["file_route_cache_namespace"] == "file-route"
     assert result["metadata"]["file_route_cache_fingerprint"]
     assert result["metadata"]["file_route_cache_fingerprint"] != result["metadata"]["cache_fingerprint"]
+
+
+def test_executor_capability_enabled_pdf_kb_cache_hit_does_not_replay_preview_events():
+    class _ExplodingPdfService:
+        def execute(self, *, contract, include_kb: bool, progress_callback=None, content_callback=None):
+            raise AssertionError("pdf service should not run on file-route cache hit")
+
+    class _FileRouteCacheHit:
+        def get_file_route_cache(self, *, fingerprint: str):
+            return {
+                "handler": "pdf",
+                "answer_text": "文件结论：电芯容量为 120mAh。",
+                "route": "hybrid_qa",
+                "query_mode": "patent_hybrid_qa",
+                "source_scope": "pdf+kb",
+                "steps": [{"step": "pdf_answer", "title": "生成文件答案", "message": "ok", "status": "success"}],
+                "metadata": {
+                    "answer_mode": "pdf_text_summary",
+                    "pdf_evidence_context": "PDF 原文记录容量为 120mAh，循环稳定。",
+                },
+                "timings": {"pdf_ms": 3},
+                "used_files": [{"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"}],
+                "selected_file_ids": [11],
+                "file_selection": {"strategy": "explicit_selection", "selected_file_ids": [11], "source_scope": "pdf+kb"},
+                "kb_enabled": True,
+            }
+
+    class _CachedKbService(PatentKbService):
+        def run(self, *, request, runtime=None, conversation_context=None, progress_callback=None, content_callback=None):
+            return {
+                "answer_text": "知识库结论：该体系容量为 120mAh。",
+                "route": request.route,
+                "query_mode": "patent_hybrid_qa",
+                "steps": [{"step": "stage4", "title": "阶段四", "message": "ok", "status": "success"}],
+                "references": ["CN123456789A"],
+                "reference_objects": [{"canonical_patent_id": "CN123456789A"}],
+                "reference_links": [],
+                "original_links": [],
+                "metadata": {
+                    "retrieval_backend": "patent-local-kb",
+                    "kb_evidence_context": "知识库证据显示容量为 120mAh。",
+                    "kb_reference_instruction": "引用知识库时使用 CN123456789A。",
+                },
+                "timings": {"kb_ms": 7},
+            }
+
+    executor = PatentExecutor(
+        kb_service=_CachedKbService(),
+        pdf_service=_ExplodingPdfService(),
+        execution_cache=_FileRouteCacheHit(),
+    )
+    streamed_payloads: list[object] = []
+
+    result = executor.execute_with_progress(
+        request=_make_file_request(
+            route="hybrid_qa",
+            source_scope="pdf+kb",
+            turn_mode="mixed",
+            execution_files=[{"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"}],
+            selected_file_ids=[11],
+            trace_id="req_pdf_kb_cache_preview_guard",
+            options={"patent_stream_capability": "preview_v1"},
+        ),
+        context={"recent_turns_for_llm": []},
+        content_callback=streamed_payloads.append,
+    )
+
+    typed_events = [payload for payload in streamed_payloads if isinstance(payload, dict)]
+    assert typed_events
+    assert not any(event["content_role"] == "preview" for event in typed_events)
+    assert all(event["content_role"] == "final" for event in typed_events)
+    assert all(event["content_source"] == "hybrid" for event in typed_events)
+    final_text = "".join(event["content"] for event in typed_events if event["content_role"] == "final")
+    assert final_text == result["answer_text"]
 
 
 def test_executor_pdf_kb_hybrid_no_evidence_keeps_live_and_final_hybrid_step_in_error_state():

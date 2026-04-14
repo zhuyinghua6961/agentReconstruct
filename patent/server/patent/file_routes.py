@@ -62,6 +62,25 @@ def _mark_file_route_cache_metadata(
     return payload
 
 
+def _emit_cached_content(
+    *,
+    answer_text: str,
+    content_callback: Callable[[str], None] | None,
+    content_source: str,
+) -> int:
+    if not callable(content_callback):
+        return 0
+    emit_snapshot = getattr(content_callback, "emit_snapshot", None)
+    if callable(emit_snapshot):
+        emit_snapshot(answer_text)
+        return 1 if str(answer_text or "") else 0
+    emit_final_snapshot = getattr(content_callback, "emit_final_snapshot", None)
+    if callable(emit_final_snapshot):
+        emit_final_snapshot(content=answer_text, content_source=content_source)
+        return 1 if str(answer_text or "") else 0
+    return emit_text_chunks(str(answer_text or ""), content_callback=content_callback)
+
+
 def _run_cached_file_route(
     *,
     execution_cache: Any | None,
@@ -313,6 +332,14 @@ def dispatch_patent_file_route(
     pdf_handler = pdf_service or PatentPdfService()
     tabular_handler = tabular_service or PatentTabularService()
     dispatch_step = _route_dispatch_step(plan.handler)
+    _LOGGER.info(
+        "patent file-route dispatch route=%s source_scope=%s handler=%s include_kb=%s content_callback=%s",
+        contract.route,
+        contract.source_scope,
+        plan.handler,
+        plan.include_kb,
+        callable(content_callback),
+    )
     renew_interval = (
         min(float(max(1, int(singleflight_ttl_seconds))) / 3.0, 10.0)
         if singleflight_renew_interval_seconds is None
@@ -357,8 +384,22 @@ def dispatch_patent_file_route(
                 None if singleflight_wait_timeout_seconds is None else max(0.0, float(singleflight_wait_timeout_seconds))
             ),
         )
-        if callable(content_callback) and bool(dict(result.get("metadata") or {}).get("cache_hit")):
-            emit_text_chunks(str(result.get("answer_text") or ""), content_callback=content_callback)
+        if (
+            callable(content_callback)
+            and bool(dict(result.get("metadata") or {}).get("cache_hit"))
+            and not plan.include_kb
+        ):
+            emitted = _emit_cached_content(
+                answer_text=str(result.get("answer_text") or ""),
+                content_callback=content_callback,
+                content_source="pdf",
+            )
+            _LOGGER.info(
+                "patent file-route cached replay route=%s handler=pdf emitted_chunks=%s answer_chars=%s",
+                contract.route,
+                emitted,
+                len(str(result.get("answer_text") or "")),
+            )
         return result
     if plan.handler == "tabular":
         service = tabular_handler
@@ -383,8 +424,22 @@ def dispatch_patent_file_route(
                 None if singleflight_wait_timeout_seconds is None else max(0.0, float(singleflight_wait_timeout_seconds))
             ),
         )
-        if callable(content_callback) and bool(dict(result.get("metadata") or {}).get("cache_hit")):
-            emit_text_chunks(str(result.get("answer_text") or ""), content_callback=content_callback)
+        if (
+            callable(content_callback)
+            and bool(dict(result.get("metadata") or {}).get("cache_hit"))
+            and not plan.include_kb
+        ):
+            emitted = _emit_cached_content(
+                answer_text=str(result.get("answer_text") or ""),
+                content_callback=content_callback,
+                content_source="table",
+            )
+            _LOGGER.info(
+                "patent file-route cached replay route=%s handler=tabular emitted_chunks=%s answer_chars=%s",
+                contract.route,
+                emitted,
+                len(str(result.get("answer_text") or "")),
+            )
         return result
     result = _run_cached_file_route(
         execution_cache=execution_cache,
@@ -407,7 +462,18 @@ def dispatch_patent_file_route(
         ),
     )
     if callable(content_callback) and bool(dict(result.get("metadata") or {}).get("cache_hit")) and not plan.include_kb:
-        emit_text_chunks(str(result.get("answer_text") or ""), content_callback=content_callback)
+        emitted = _emit_cached_content(
+            answer_text=str(result.get("answer_text") or ""),
+            content_callback=content_callback,
+            content_source="hybrid",
+        )
+        _LOGGER.info(
+            "patent file-route cached replay route=%s handler=hybrid emitted_chunks=%s answer_chars=%s include_kb=%s",
+            contract.route,
+            emitted,
+            len(str(result.get("answer_text") or "")),
+            plan.include_kb,
+        )
     return result
 
 
@@ -423,20 +489,62 @@ def _build_hybrid_result(
 ) -> dict[str, Any]:
     used_files = [item.as_payload() for item in contract.selected_execution_files]
     profile = get_patent_mode_profile(contract.route)
-
-    pdf_result = _call_with_supported_kwargs(
-        pdf_service.execute,
-        contract=contract,
-        include_kb=False,
-        progress_callback=progress_callback,
-        content_callback=None,
+    build_preview_emitter = getattr(content_callback, "preview_emitter", None)
+    build_final_emitter = getattr(content_callback, "final_emitter", None)
+    pdf_preview_emitter = (
+        build_preview_emitter(content_source="pdf", content_stream_id="pdf:primary")
+        if callable(build_preview_emitter)
+        else None
     )
-    tabular_result = _call_with_supported_kwargs(
-        tabular_service.execute,
-        contract=contract,
-        include_kb=False,
-        progress_callback=progress_callback,
-        content_callback=None,
+    table_preview_emitter = (
+        build_preview_emitter(content_source="table", content_stream_id="table:selected")
+        if callable(build_preview_emitter)
+        else None
+    )
+
+    pdf_branch_succeeded = False
+    try:
+        pdf_result = _call_with_supported_kwargs(
+            pdf_service.execute,
+            contract=contract,
+            include_kb=False,
+            progress_callback=progress_callback,
+            content_callback=pdf_preview_emitter,
+        )
+        pdf_branch_succeeded = True
+    finally:
+        if pdf_preview_emitter is not None:
+            if pdf_branch_succeeded:
+                pdf_preview_emitter.close()
+            else:
+                pdf_preview_emitter.abort()
+
+    table_branch_succeeded = False
+    try:
+        tabular_result = _call_with_supported_kwargs(
+            tabular_service.execute,
+            contract=contract,
+            include_kb=False,
+            progress_callback=progress_callback,
+            content_callback=table_preview_emitter,
+        )
+        table_branch_succeeded = True
+    finally:
+        if table_preview_emitter is not None:
+            if table_branch_succeeded:
+                table_preview_emitter.close()
+            else:
+                table_preview_emitter.abort()
+    _LOGGER.info(
+        "patent hybrid file-route branch results route=%s source_scope=%s include_kb=%s outer_content_callback=%s pdf_branch_stream=%s tabular_branch_stream=%s pdf_chars=%s tabular_chars=%s",
+        contract.route,
+        contract.source_scope,
+        include_kb,
+        callable(content_callback),
+        pdf_preview_emitter is not None,
+        table_preview_emitter is not None,
+        len(str(pdf_result.get("answer_text") or "")),
+        len(str(tabular_result.get("answer_text") or "")),
     )
     if callable(progress_callback) and not include_kb:
         progress_callback(
@@ -473,7 +581,26 @@ def _build_hybrid_result(
     }
     include_file_hybrid_step = not include_kb
     if callable(content_callback) and include_file_hybrid_step:
-        emit_text_chunks(answer_text, content_callback=content_callback)
+        if callable(build_final_emitter):
+            final_emitter = build_final_emitter(content_source="hybrid")
+            final_succeeded = False
+            try:
+                emitted = emit_text_chunks(answer_text, content_callback=final_emitter)
+                final_succeeded = True
+            finally:
+                if final_succeeded:
+                    final_emitter.close()
+                else:
+                    final_emitter.abort()
+        else:
+            emitted = emit_text_chunks(answer_text, content_callback=content_callback)
+        _LOGGER.info(
+            "patent hybrid synthesized replay route=%s source_scope=%s emitted_chunks=%s answer_chars=%s",
+            contract.route,
+            contract.source_scope,
+            emitted,
+            len(answer_text),
+        )
     if callable(progress_callback) and include_file_hybrid_step:
         progress_callback(dict(hybrid_step))
     hybrid_steps = [dict(hybrid_step)] if include_file_hybrid_step else []

@@ -47,6 +47,42 @@ function normalizeDoiLocations(doiLocations = {}) {
     }, {})
 }
 
+function normalizePatentPreviewStream(stream = {}, streamId = '') {
+  return {
+    contentStreamId: normalizeString(stream?.contentStreamId || streamId),
+    contentSource: normalizeString(stream?.contentSource),
+    content: normalizeString(stream?.content),
+    contentPhase: normalizeString(stream?.contentPhase),
+    completed: Boolean(stream?.completed),
+  }
+}
+
+function normalizePatentStreaming(message = {}) {
+  const metadata = message?.metadata && typeof message.metadata === 'object' ? message.metadata : {}
+  const state = message?.patentStreaming && typeof message.patentStreaming === 'object'
+    ? message.patentStreaming
+    : (metadata?.patent_streaming && typeof metadata.patent_streaming === 'object'
+        ? metadata.patent_streaming
+        : null)
+  if (!state) return null
+
+  const previewStreams = state?.previewStreams && typeof state.previewStreams === 'object'
+    ? state.previewStreams
+    : {}
+  const previewOrder = Array.isArray(state?.previewOrder)
+    ? state.previewOrder.map((streamId) => normalizeString(streamId)).filter(Boolean)
+    : Object.keys(previewStreams).sort()
+
+  return {
+    capabilityEnabled: Boolean(state?.capabilityEnabled),
+    finalSeen: Boolean(state?.finalSeen),
+    finalSource: normalizeString(state?.finalSource),
+    finalPhase: normalizeString(state?.finalPhase),
+    previewOrder,
+    previewStreams: previewOrder.map((streamId) => normalizePatentPreviewStream(previewStreams[streamId], streamId)),
+  }
+}
+
 function normalizeTerminalStatus(message = {}) {
   const metadata = message?.metadata && typeof message.metadata === 'object' ? message.metadata : {}
   return normalizeString(
@@ -78,6 +114,10 @@ function buildRenderSnapshot(message = {}) {
     referencesRef: Array.isArray(message?.references) ? message.references : null,
     referenceLinksRef: Array.isArray(message?.referenceLinks) ? message.referenceLinks : null,
     doiLocationsRef: message?.doiLocations && typeof message.doiLocations === 'object' ? message.doiLocations : null,
+    patentStreamingRef:
+      (message?.patentStreaming && typeof message.patentStreaming === 'object')
+      || (message?.metadata?.patent_streaming && typeof message.metadata.patent_streaming === 'object')
+      || null,
   }
 }
 
@@ -94,6 +134,7 @@ function hasSameRenderSnapshot(left, right) {
     && left.referencesRef === right.referencesRef
     && left.referenceLinksRef === right.referenceLinksRef
     && left.doiLocationsRef === right.doiLocationsRef
+    && left.patentStreamingRef === right.patentStreamingRef
 }
 
 export function buildMessageRenderMemoKey(message = {}) {
@@ -119,6 +160,7 @@ export function buildMessageRenderMemoKey(message = {}) {
     references: Array.isArray(snapshot.referencesRef) ? snapshot.referencesRef.map(normalizeReference) : [],
     referenceLinks: Array.isArray(snapshot.referenceLinksRef) ? snapshot.referenceLinksRef.map(normalizeReferenceLink) : [],
     doiLocations: normalizeDoiLocations(snapshot.doiLocationsRef),
+    patentStreaming: normalizePatentStreaming(message),
   })
 
   memoCache.set(message, { snapshot, key: signature })

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import asdict
 from typing import Any, Callable
 
@@ -21,6 +22,100 @@ from server.patent.retrieval_models import (
 )
 
 _LOGGER = logging.getLogger("patent.stage4")
+_PATENT_PUBLICATION_RE = re.compile(r"\b[A-Z]{2}\d{6,14}[A-Z]\d?\b", re.IGNORECASE)
+_PATENT_ID_CITATION_RE = re.compile(r"\(\s*patent_id\s*=\s*([A-Za-z0-9._/\-]+)\s*\)", re.IGNORECASE)
+_RENDERED_PATENT_CITATION_RE = re.compile(
+    r"[\(（]\s*([A-Z]{2}\d{6,14}[A-Z]\d?(?:\s*[,，;；、]\s*[A-Z]{2}\d{6,14}[A-Z]\d?)*)\s*[\)）]",
+    re.IGNORECASE,
+)
+_BACKTICK_PATENT_SPAN_RE = re.compile(r"`[^`\n]*[A-Z]{2}\d{6,14}[A-Z]\d?[^`\n]*`", re.IGNORECASE)
+_BACKTICK_PATENT_ID_CITATION_RE = re.compile(r"`\(\s*patent_id\s*=\s*[A-Za-z0-9._/\-]+\s*\)`", re.IGNORECASE)
+_BACKTICK_RENDERED_PATENT_CITATION_RE = re.compile(
+    r"`[\(（][^`\n]*[A-Z]{2}\d{6,14}[A-Z]\d?[^`\n]*[\)）]`",
+    re.IGNORECASE,
+)
+
+
+def _truncate_log_excerpt(value: Any, *, limit: int = 220) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(1, limit - 1)].rstrip() + "…"
+
+
+def _sample_regex_matches(pattern: re.Pattern[str], text: Any, *, limit: int = 5) -> list[str]:
+    source = str(text or "")
+    samples: list[str] = []
+    for match in pattern.finditer(source):
+        sample = _truncate_log_excerpt(match.group(0), limit=120)
+        if sample and sample not in samples:
+            samples.append(sample)
+        if len(samples) >= limit:
+            break
+    return samples
+
+
+def _collect_patent_answer_diagnostics(text: Any, *, allowed_patent_ids: list[str] | None = None) -> dict[str, Any]:
+    source = str(text or "")
+    patent_ids: list[str] = []
+    for match in _PATENT_PUBLICATION_RE.finditer(source):
+        patent_id = str(match.group(0) or "").strip().upper()
+        if patent_id and patent_id not in patent_ids:
+            patent_ids.append(patent_id)
+    allowed = {str(item or "").strip().upper() for item in list(allowed_patent_ids or []) if str(item).strip()}
+    patent_id_citation_matches = list(_PATENT_ID_CITATION_RE.finditer(source))
+    rendered_citation_matches = list(_RENDERED_PATENT_CITATION_RE.finditer(source))
+    backtick_patent_span_matches = list(_BACKTICK_PATENT_SPAN_RE.finditer(source))
+    backtick_patent_id_citation_matches = list(_BACKTICK_PATENT_ID_CITATION_RE.finditer(source))
+    backtick_rendered_citation_matches = list(_BACKTICK_RENDERED_PATENT_CITATION_RE.finditer(source))
+    patent_ids_outside_allowed = [item for item in patent_ids if allowed and item not in allowed]
+    return {
+        "chars": len(source),
+        "patent_publication_count": len(list(_PATENT_PUBLICATION_RE.finditer(source))),
+        "distinct_patent_publication_count": len(patent_ids),
+        "distinct_patent_publication_ids_sample": patent_ids[:8],
+        "patent_ids_outside_allowed_sample": patent_ids_outside_allowed[:8],
+        "patent_id_citation_count": len(patent_id_citation_matches),
+        "rendered_patent_citation_count": len(rendered_citation_matches),
+        "backtick_patent_span_count": len(backtick_patent_span_matches),
+        "backtick_patent_id_citation_count": len(backtick_patent_id_citation_matches),
+        "backtick_rendered_patent_citation_count": len(backtick_rendered_citation_matches),
+        "patent_id_citation_samples": _sample_regex_matches(_PATENT_ID_CITATION_RE, source),
+        "rendered_patent_citation_samples": _sample_regex_matches(_RENDERED_PATENT_CITATION_RE, source),
+        "backtick_patent_span_samples": _sample_regex_matches(_BACKTICK_PATENT_SPAN_RE, source),
+        "backtick_patent_id_citation_samples": _sample_regex_matches(_BACKTICK_PATENT_ID_CITATION_RE, source),
+        "backtick_rendered_patent_citation_samples": _sample_regex_matches(_BACKTICK_RENDERED_PATENT_CITATION_RE, source),
+    }
+
+
+def _has_suspicious_patent_shape(diagnostics: dict[str, Any]) -> bool:
+    return bool(
+        diagnostics.get("backtick_patent_span_count")
+        or diagnostics.get("backtick_patent_id_citation_count")
+        or diagnostics.get("backtick_rendered_patent_citation_count")
+    )
+
+
+def _log_patent_answer_diagnostics(
+    *,
+    stage: str,
+    text: Any,
+    allowed_patent_ids: list[str] | None,
+    citation_mode: str,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    diagnostics = _collect_patent_answer_diagnostics(text, allowed_patent_ids=allowed_patent_ids)
+    log_level = logging.WARNING if _has_suspicious_patent_shape(diagnostics) else logging.INFO
+    _LOGGER.log(
+        log_level,
+        "patent stage4 answer diagnostics stage=%s citation_mode=%s diagnostics=%s extra=%s excerpt=%s",
+        stage,
+        citation_mode,
+        diagnostics,
+        dict(extra or {}),
+        _truncate_log_excerpt(text, limit=320),
+    )
+    return diagnostics
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1, maximum: int = 100) -> int:
@@ -370,28 +465,93 @@ def run_stage4_synthesis_with_patent_evidence(
         stage4_min_citations_configured,
         stage4_min_citations_required,
     )
+    if str(deep_answer or "").strip():
+        _log_patent_answer_diagnostics(
+            stage="stage1_deep_answer",
+            text=deep_answer,
+            allowed_patent_ids=stage4_allowed_patent_ids,
+            citation_mode=citation_mode,
+            extra={
+                "deep_answer_chars": len(str(deep_answer or "")),
+                "allowed_patent_ids_count": len(stage4_allowed_patent_ids),
+            },
+        )
     if callable(answer_builder):
         raw_answer = ""
         stream_builder = getattr(answer_builder, "stream", None)
         if callable(stream_builder):
             streamed_chunks: list[str] = []
             stream_sanitizer = PatentCitationStreamSanitizer(allowed_patent_ids=stage4_allowed_patent_ids)
-            for chunk in stream_builder(
-                question=user_question,
-                retrieval_outcome=retrieval_outcome,
-                context=synthesis_context,
+            suspicious_chunk_samples: list[dict[str, Any]] = []
+            suspicious_visible_delta_samples: list[dict[str, Any]] = []
+            suspicious_chunk_count = 0
+            suspicious_visible_delta_count = 0
+            for chunk_index, chunk in enumerate(
+                stream_builder(
+                    question=user_question,
+                    retrieval_outcome=retrieval_outcome,
+                    context=synthesis_context,
+                ),
+                start=1,
             ):
                 text = str(chunk or "")
                 if not text:
                     continue
                 streamed_chunks.append(text)
+                if ("CN" in text or "cn" in text or "`" in text or "patent_id" in text.lower()):
+                    chunk_diagnostics = _collect_patent_answer_diagnostics(text, allowed_patent_ids=stage4_allowed_patent_ids)
+                    if _has_suspicious_patent_shape(chunk_diagnostics):
+                        suspicious_chunk_count += 1
+                        if len(suspicious_chunk_samples) < 5:
+                            suspicious_chunk_samples.append(
+                                {
+                                    "chunk_index": chunk_index,
+                                    "chars": len(text),
+                                    "diagnostics": chunk_diagnostics,
+                                    "excerpt": _truncate_log_excerpt(text, limit=220),
+                                }
+                            )
                 if callable(content_callback):
                     visible_delta = stream_sanitizer.consume(text)
                     if visible_delta:
+                        if ("CN" in visible_delta or "cn" in visible_delta or "`" in visible_delta or "patent_id" in visible_delta.lower()):
+                            visible_delta_diagnostics = _collect_patent_answer_diagnostics(
+                                visible_delta,
+                                allowed_patent_ids=stage4_allowed_patent_ids,
+                            )
+                            if _has_suspicious_patent_shape(visible_delta_diagnostics):
+                                suspicious_visible_delta_count += 1
+                                if len(suspicious_visible_delta_samples) < 5:
+                                    suspicious_visible_delta_samples.append(
+                                        {
+                                            "chunk_index": chunk_index,
+                                            "chars": len(visible_delta),
+                                            "diagnostics": visible_delta_diagnostics,
+                                            "excerpt": _truncate_log_excerpt(visible_delta, limit=220),
+                                        }
+                                    )
                         content_callback(visible_delta)
+            if suspicious_chunk_count or suspicious_visible_delta_count:
+                _LOGGER.warning(
+                    "patent stage4 stream suspicious chunk diagnostics suspicious_chunk_count=%s suspicious_visible_delta_count=%s chunk_samples=%s visible_delta_samples=%s",
+                    suspicious_chunk_count,
+                    suspicious_visible_delta_count,
+                    suspicious_chunk_samples,
+                    suspicious_visible_delta_samples,
+                )
             if callable(content_callback):
                 trailing_visible_delta = stream_sanitizer.finalize()
                 if trailing_visible_delta:
+                    trailing_diagnostics = _collect_patent_answer_diagnostics(
+                        trailing_visible_delta,
+                        allowed_patent_ids=stage4_allowed_patent_ids,
+                    )
+                    if _has_suspicious_patent_shape(trailing_diagnostics):
+                        _LOGGER.warning(
+                            "patent stage4 stream suspicious trailing visible delta diagnostics=%s excerpt=%s",
+                            trailing_diagnostics,
+                            _truncate_log_excerpt(trailing_visible_delta, limit=220),
+                        )
                     content_callback(trailing_visible_delta)
             raw_answer = "".join(streamed_chunks).strip()
             if raw_answer:
@@ -414,9 +574,30 @@ def run_stage4_synthesis_with_patent_evidence(
         ).strip()
         used_fallback_builder = True
         _LOGGER.warning("patent stage4 synthesis using fallback answer builder because no callable answer_builder is configured")
+    raw_answer_diagnostics = _log_patent_answer_diagnostics(
+        stage="raw_answer",
+        text=raw_answer,
+        allowed_patent_ids=stage4_allowed_patent_ids,
+        citation_mode=citation_mode,
+        extra={
+            "used_fallback_builder": used_fallback_builder,
+            "answer_builder_callable": callable(answer_builder),
+        },
+    )
     final_answer, cited_patent_ids, invalid_cited_patent_ids = sanitize_patent_id_citations(
         raw_answer,
         allowed_patent_ids=stage4_allowed_patent_ids,
+    )
+    sanitized_answer_diagnostics = _log_patent_answer_diagnostics(
+        stage="sanitized_answer",
+        text=final_answer,
+        allowed_patent_ids=stage4_allowed_patent_ids,
+        citation_mode=citation_mode,
+        extra={
+            "cited_patent_ids": list(cited_patent_ids),
+            "invalid_cited_patent_ids": list(invalid_cited_patent_ids),
+            "raw_answer_patent_publication_count": raw_answer_diagnostics.get("patent_publication_count"),
+        },
     )
     if stage4_allowed_patent_ids and len(cited_patent_ids) < stage4_min_citations_required and final_answer:
         repaired_candidate = _programmatic_repair_patent_citations(
@@ -442,6 +623,19 @@ def run_stage4_synthesis_with_patent_evidence(
         final_answer,
         allowed_patent_ids=stage4_allowed_patent_ids,
         trim=True,
+    )
+    rendered_answer_diagnostics = _log_patent_answer_diagnostics(
+        stage="rendered_answer_for_user",
+        text=final_answer,
+        allowed_patent_ids=stage4_allowed_patent_ids,
+        citation_mode=citation_mode,
+        extra={
+            "cited_patent_ids": list(cited_patent_ids),
+            "invalid_cited_patent_ids": list(invalid_cited_patent_ids),
+            "sanitized_backtick_rendered_patent_citation_count": sanitized_answer_diagnostics.get(
+                "backtick_rendered_patent_citation_count"
+            ),
+        },
     )
     metadata = dict(dict(retrieval_results or {}).get("metadata") or {})
     metadata.update(
@@ -483,11 +677,13 @@ def run_stage4_synthesis_with_patent_evidence(
         answer_text=final_answer,
     )
     _LOGGER.info(
-        "patent stage4 synthesis completed success=%s citation_mode=%s final_answer_chars=%s cited_patent_ids=%s invalid_cited_patent_ids=%s",
+        "patent stage4 synthesis completed success=%s citation_mode=%s final_answer_chars=%s cited_patent_ids=%s invalid_cited_patent_ids=%s raw_answer_diagnostics=%s rendered_answer_diagnostics=%s",
         bool(final_answer),
         citation_mode,
         len(final_answer),
         list(metadata.get("cited_patent_ids") or []),
         list(metadata.get("invalid_cited_patent_ids") or []),
+        raw_answer_diagnostics,
+        rendered_answer_diagnostics,
     )
     return asdict(result)

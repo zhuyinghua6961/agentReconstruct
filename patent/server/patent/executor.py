@@ -17,6 +17,13 @@ from server.patent.kb_service import PatentKbService
 from server.patent.orchestrators.generation import PatentGenerationOrchestrator
 from server.patent.pdf_service import PatentPdfService
 from server.patent.retrieval_service import PatentRetrievalService
+from server.patent.stream_events import (
+    PatentStructuredContentRouter,
+    PatentFinalContentStreamEmitter,
+    final_content_source_for_route,
+    preview_streaming_enabled,
+    structured_content_streaming_enabled,
+)
 from server.patent.streaming import emit_text_chunks
 from server.patent.tabular_service import PatentTabularService
 from server.schemas.request_models import PatentAskRequest
@@ -134,13 +141,86 @@ class PatentExecutor:
             kb_enabled=request.kb_enabled,
             allow_kb_verification=request.allow_kb_verification,
         )
-        file_result = dispatch_patent_file_route(
-            contract=contract,
-            pdf_service=self._pdf_service,
-            tabular_service=self._tabular_service,
-            execution_cache=self._execution_cache,
-            progress_callback=progress_callback,
-            content_callback=None if contract.includes_kb else content_callback,
+        structured_file_streaming = structured_content_streaming_enabled(
+            options=request.options,
+            route=request.route,
+        )
+        preview_file_streaming = preview_streaming_enabled(
+            options=request.options,
+            route=request.route,
+            source_scope=request.source_scope,
+        )
+        structured_router: PatentStructuredContentRouter | None = None
+        final_stream_emitter: PatentFinalContentStreamEmitter | None = None
+        preview_stream_emitter: Any | None = None
+        forwarded_content_callback = None if contract.includes_kb else content_callback
+        if callable(content_callback) and structured_file_streaming:
+            structured_router = PatentStructuredContentRouter(callback=content_callback)
+        if (
+            structured_router is not None
+            and preview_file_streaming
+        ):
+            if request.source_scope in {"pdf+table", "pdf+table+kb"}:
+                forwarded_content_callback = structured_router
+            elif request.source_scope == "pdf+kb":
+                preview_stream_emitter = structured_router.preview_emitter(
+                    content_source="pdf",
+                    content_stream_id="pdf:primary",
+                )
+                forwarded_content_callback = preview_stream_emitter
+            elif request.source_scope == "table+kb":
+                preview_stream_emitter = structured_router.preview_emitter(
+                    content_source="table",
+                    content_stream_id="table:selected",
+                )
+                forwarded_content_callback = preview_stream_emitter
+        if (
+            structured_router is not None
+            and not preview_file_streaming
+            and not contract.includes_kb
+        ):
+            final_stream_emitter = structured_router.final_emitter(
+                content_source=final_content_source_for_route(request.route),
+            )
+            forwarded_content_callback = final_stream_emitter
+        _LOGGER.info(
+            "patent file-route start trace=%s route=%s source_scope=%s handler_scope_kb=%s content_callback=%s forwarded_content_callback=%s",
+            request.trace_id,
+            request.route,
+            request.source_scope,
+            contract.includes_kb,
+            callable(content_callback),
+            callable(forwarded_content_callback),
+        )
+        file_route_succeeded = False
+        try:
+            file_result = dispatch_patent_file_route(
+                contract=contract,
+                pdf_service=self._pdf_service,
+                tabular_service=self._tabular_service,
+                execution_cache=self._execution_cache,
+                progress_callback=progress_callback,
+                content_callback=forwarded_content_callback,
+            )
+            file_route_succeeded = True
+        finally:
+            if final_stream_emitter is not None:
+                if file_route_succeeded:
+                    final_stream_emitter.close()
+                else:
+                    final_stream_emitter.abort()
+            if preview_stream_emitter is not None:
+                if file_route_succeeded:
+                    preview_stream_emitter.close()
+                else:
+                    preview_stream_emitter.abort()
+        _LOGGER.info(
+            "patent file-route result trace=%s route=%s handler=%s answer_chars=%s cache_hit=%s",
+            request.trace_id,
+            request.route,
+            file_result.get("handler"),
+            len(str(file_result.get("answer_text") or "")),
+            bool(dict(file_result.get("metadata") or {}).get("cache_hit")),
         )
         if not contract.includes_kb:
             return file_result
@@ -189,7 +269,27 @@ class PatentExecutor:
             {"step": "hybrid_answer", "title": "统一合成答案", "message": "🧩 已完成文件与知识库统一合成", "status": "success"},
         )
         if callable(content_callback):
-            emit_text_chunks(str(merged.get("answer_text") or ""), content_callback=content_callback)
+            if structured_router is not None and preview_file_streaming:
+                merged_final_emitter = structured_router.final_emitter(content_source="hybrid")
+                merged_final_succeeded = False
+                try:
+                    emitted = emit_text_chunks(str(merged.get("answer_text") or ""), content_callback=merged_final_emitter)
+                    merged_final_succeeded = True
+                finally:
+                    if merged_final_succeeded:
+                        merged_final_emitter.close()
+                    else:
+                        merged_final_emitter.abort()
+            else:
+                emitted = emit_text_chunks(str(merged.get("answer_text") or ""), content_callback=content_callback)
+            _LOGGER.info(
+                "patent file-route merged stream trace=%s route=%s source_scope=%s emitted_chunks=%s answer_chars=%s",
+                request.trace_id,
+                request.route,
+                request.source_scope,
+                emitted,
+                len(str(merged.get("answer_text") or "")),
+            )
         if callable(progress_callback):
             progress_callback(dict(final_hybrid_step))
         return merged

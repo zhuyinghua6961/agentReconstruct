@@ -598,6 +598,46 @@ def test_stream_events_require_seq_and_ts():
     assert event.ts == "2026-03-25T12:00:00Z"
 
 
+def test_content_event_supports_structured_patent_stream_fields():
+    event = ContentEvent(
+        content="chunk",
+        content_role="final",
+        content_source="pdf",
+        content_stream_id="final:answer",
+        replace_stream=True,
+        seq=2,
+        ts="2026-03-25T12:00:00Z",
+    )
+
+    assert event.content_role == "final"
+    assert event.content_source == "pdf"
+    assert event.content_stream_id == "final:answer"
+    assert event.content_phase == "snapshot"
+    assert event.replace_stream is True
+
+
+def test_content_event_rejects_invalid_preview_shapes():
+    with pytest.raises(ValidationError):
+        ContentEvent(
+            content="chunk",
+            content_role="preview",
+            content_source="pdf",
+            content_phase="start",
+            seq=2,
+            ts="2026-03-25T12:00:00Z",
+        )
+
+    with pytest.raises(ValidationError):
+        ContentEvent(
+            content="chunk",
+            content_role="preview",
+            content_source="pdf",
+            content_stream_id="pdf:primary",
+            seq=2,
+            ts="2026-03-25T12:00:00Z",
+        )
+
+
 def test_done_event_shape_matches_patent_contract():
     event = DoneEvent(
         final_answer="Patent answer",
@@ -1159,6 +1199,41 @@ def test_stream_ask_emits_streaming_content_before_done_when_stage4_streams():
     assert events.index(content_events[0]) < len(events) - 1
     assert events[-1]["type"] == "done", events
     assert events[-1]["final_answer"] == "streamed answer"
+
+
+def test_stream_ask_replayed_pdf_turn_with_capability_emits_typed_final_content():
+    class _ReplayPersistence(_FakePersistenceService):
+        def prepare_turn(self, *, request, user_id):
+            prepared = super().prepare_turn(request=request, user_id=user_id)
+            prepared["assistant_accept_skipped"] = True
+            prepared["execution_result"] = {
+                "answer_text": "replayed pdf answer",
+                "route": request.route,
+                "query_mode": "patent_pdf_qa",
+                "source_scope": request.source_scope,
+                "timings": {"pdf_ms": 3},
+                "metadata": {"answer_mode": "pdf_text_summary"},
+                "used_files": list(request.used_files),
+                "file_selection": dict(request.file_selection),
+            }
+            return prepared
+
+    request_payload = _pdf_payload()
+    request_payload["options"] = {"patent_stream_capability": "preview_v1"}
+    service = AskService(
+        patent_executor=PatentExecutor(),
+        persistence_service=_ReplayPersistence(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    events = list(service.stream_ask(parse_patent_request(request_payload), user_id=42))
+
+    content_events = [event for event in events if event["type"] == "content"]
+    assert len(content_events) == 1
+    assert content_events[0]["content"] == "replayed pdf answer"
+    assert content_events[0]["content_role"] == "final"
+    assert content_events[0]["content_source"] == "pdf"
+    assert content_events[0]["content_phase"] == "snapshot"
 
 
 def test_stream_ask_emits_first_chunk_latency_telemetry_in_metadata_and_done():
@@ -2533,6 +2608,297 @@ def test_http_stream_pdf_route_emits_incremental_content_before_done(monkeypatch
     assert events[-1]["type"] == "done"
 
 
+def test_http_stream_pdf_route_with_stream_capability_emits_only_final_pdf_content(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    pdf_path = tmp_path / "spec.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    answer_text = "真实总结：本文提出硅负极包覆方法，并报告循环寿命改善与倍率性能提升，同时给出了清晰的实验验证过程。"
+    app.state.ask_service._patent_executor._pdf_service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: "This paper proposes a silicon anode coating method and reports improved cycle life.",
+        answer_question_fn=lambda **kwargs: answer_text,
+    )
+    payload = _pdf_payload()
+    payload["execution_files"][0]["local_path"] = str(pdf_path)
+    payload["used_files"][0]["local_path"] = str(pdf_path)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/ask_stream",
+            json=payload,
+            headers={"X-Patent-Stream-Capability": "preview_v1"},
+        )
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    content_events = [event for event in events if event["type"] == "content"]
+
+    assert content_events
+    assert all(event["content_role"] == "final" for event in content_events)
+    assert all(event["content_source"] == "pdf" for event in content_events)
+    assert all(event["content_phase"] in {"start", "delta", "end", "snapshot"} for event in content_events)
+    assert not any(event["content_role"] == "preview" for event in content_events)
+    assert "".join(event["content"] for event in content_events) == events[-1]["final_answer"]
+
+
+def test_http_stream_pdf_route_without_stream_capability_keeps_legacy_untyped_content(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    pdf_path = tmp_path / "spec.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    app.state.ask_service._patent_executor._pdf_service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: "This paper proposes a silicon anode coating method and reports improved cycle life.",
+        answer_question_fn=lambda **kwargs: "真实总结：本文提出硅负极包覆方法，并报告循环寿命改善与倍率性能提升。",
+    )
+    payload = _pdf_payload()
+    payload["execution_files"][0]["local_path"] = str(pdf_path)
+    payload["used_files"][0]["local_path"] = str(pdf_path)
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask_stream", json=payload)
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    content_events = [event for event in events if event["type"] == "content"]
+
+    assert content_events
+    assert all("content_role" not in event for event in content_events)
+    assert all("content_source" not in event for event in content_events)
+
+
+def test_http_stream_pdf_route_cache_hit_with_stream_capability_replays_single_final_snapshot(monkeypatch):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+
+    class _CacheHitExecutionCache:
+        available = True
+
+        def get_file_route_cache(self, *, fingerprint: str):
+            return {
+                "handler": "pdf",
+                "answer_text": "缓存命中：这是一段来自 PDF 文件问答缓存的最终答案。",
+                "route": "pdf_qa",
+                "query_mode": "patent_pdf_qa",
+                "source_scope": "pdf",
+                "steps": [{"step": "dispatch", "title": "进入文件分支", "message": "进入 PDF 问答分支", "status": "success"}],
+                "metadata": {"answer_mode": "pdf_text_summary"},
+                "timings": {"patent_pdf_route_ms": 1},
+                "used_files": [{"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"}],
+                "selected_file_ids": [11],
+                "file_selection": {"strategy": "explicit_selection", "selected_file_ids": [11], "source_scope": "pdf"},
+                "kb_enabled": False,
+            }
+
+    class _ExplodingPdfService:
+        def execute(self, *, contract, include_kb: bool, progress_callback=None, content_callback=None):
+            raise AssertionError("pdf service should not run on file-route cache hit")
+
+    app.state.ask_service._patent_executor._execution_cache = _CacheHitExecutionCache()
+    app.state.ask_service._patent_executor._pdf_service = _ExplodingPdfService()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/ask_stream",
+            json=_pdf_payload(),
+            headers={"X-Patent-Stream-Capability": "preview_v1"},
+        )
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    content_events = [event for event in events if event["type"] == "content"]
+
+    assert len(content_events) == 1
+    assert content_events[0]["content_role"] == "final"
+    assert content_events[0]["content_source"] == "pdf"
+    assert content_events[0]["content_phase"] == "snapshot"
+    assert content_events[0]["content"] == events[-1]["final_answer"]
+
+
+def test_http_stream_hybrid_pdf_table_without_stream_capability_keeps_legacy_untyped_content(monkeypatch):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+
+    class _StreamingPdfService:
+        def execute(self, *, contract, include_kb: bool, progress_callback=None, content_callback=None):
+            if callable(content_callback):
+                content_callback("PDF 预览：材料设计与实验背景。")
+            return {
+                "answer_text": "PDF 文件结论：该文献给出了完整的实验设计。",
+                "route": contract.route,
+                "query_mode": "patent_hybrid_qa",
+                "source_scope": contract.source_scope,
+                "steps": [{"step": "pdf_answer", "title": "PDF", "message": "ok", "status": "success"}],
+                "metadata": {"answer_mode": "pdf_text_summary"},
+                "timings": {"pdf_ms": 2},
+                "used_files": [item.as_payload() for item in contract.selected_execution_files],
+                "selected_file_ids": [item.file_id for item in contract.selected_execution_files],
+                "file_selection": dict(contract.file_selection),
+                "kb_enabled": include_kb,
+            }
+
+    class _StreamingTabularService:
+        def execute(self, *, contract, include_kb: bool, progress_callback=None, content_callback=None):
+            if callable(content_callback):
+                content_callback("表格预览：容量与循环寿命指标。")
+            return {
+                "answer_text": "表格文件结论：指标对比显示容量和循环寿命存在差异。",
+                "route": contract.route,
+                "query_mode": "patent_hybrid_qa",
+                "source_scope": contract.source_scope,
+                "steps": [{"step": "tabular_answer", "title": "表格", "message": "ok", "status": "success"}],
+                "metadata": {"answer_mode": "table_summary"},
+                "timings": {"tabular_ms": 2},
+                "used_files": [item.as_payload() for item in contract.selected_execution_files],
+                "selected_file_ids": [item.file_id for item in contract.selected_execution_files],
+                "file_selection": dict(contract.file_selection),
+                "kb_enabled": include_kb,
+            }
+
+    app.state.ask_service._patent_executor._pdf_service = _StreamingPdfService()
+    app.state.ask_service._patent_executor._tabular_service = _StreamingTabularService()
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask_stream", json=_hybrid_payload("pdf+table"))
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    content_events = [event for event in events if event["type"] == "content"]
+
+    assert content_events
+    assert all("content_role" not in event for event in content_events)
+    assert all("content_source" not in event for event in content_events)
+
+
+def test_http_stream_hybrid_pdf_table_with_stream_capability_emits_preview_before_final(monkeypatch):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+
+    class _StreamingPdfService:
+        def execute(self, *, contract, include_kb: bool, progress_callback=None, content_callback=None):
+            if callable(content_callback):
+                content_callback("PDF 预览：材料设计与实验背景。")
+            return {
+                "answer_text": "PDF 文件结论：该文献给出了完整的实验设计。",
+                "route": contract.route,
+                "query_mode": "patent_hybrid_qa",
+                "source_scope": contract.source_scope,
+                "steps": [{"step": "pdf_answer", "title": "PDF", "message": "ok", "status": "success"}],
+                "metadata": {"answer_mode": "pdf_text_summary"},
+                "timings": {"pdf_ms": 2},
+                "used_files": [item.as_payload() for item in contract.selected_execution_files],
+                "selected_file_ids": [item.file_id for item in contract.selected_execution_files],
+                "file_selection": dict(contract.file_selection),
+                "kb_enabled": include_kb,
+            }
+
+    class _StreamingTabularService:
+        def execute(self, *, contract, include_kb: bool, progress_callback=None, content_callback=None):
+            if callable(content_callback):
+                content_callback("表格预览：容量与循环寿命指标。")
+            return {
+                "answer_text": "表格文件结论：指标对比显示容量和循环寿命存在差异。",
+                "route": contract.route,
+                "query_mode": "patent_hybrid_qa",
+                "source_scope": contract.source_scope,
+                "steps": [{"step": "tabular_answer", "title": "表格", "message": "ok", "status": "success"}],
+                "metadata": {"answer_mode": "table_summary"},
+                "timings": {"tabular_ms": 2},
+                "used_files": [item.as_payload() for item in contract.selected_execution_files],
+                "selected_file_ids": [item.file_id for item in contract.selected_execution_files],
+                "file_selection": dict(contract.file_selection),
+                "kb_enabled": include_kb,
+            }
+
+    app.state.ask_service._patent_executor._pdf_service = _StreamingPdfService()
+    app.state.ask_service._patent_executor._tabular_service = _StreamingTabularService()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/ask_stream",
+            json=_hybrid_payload("pdf+table"),
+            headers={"X-Patent-Stream-Capability": "preview_v1"},
+        )
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    content_events = [event for event in events if event["type"] == "content"]
+    preview_indices = [
+        index
+        for index, event in enumerate(events)
+        if event["type"] == "content" and event.get("content_role") == "preview"
+    ]
+    final_indices = [
+        index
+        for index, event in enumerate(events)
+        if event["type"] == "content" and event.get("content_role") == "final"
+    ]
+
+    assert content_events
+    assert preview_indices
+    assert final_indices
+    assert {"pdf", "table"} <= {event["content_source"] for event in content_events if event.get("content_role") == "preview"}
+    assert all(event["content_source"] == "hybrid" for event in content_events if event.get("content_role") == "final")
+    assert min(preview_indices) < min(final_indices)
+    assert not any(index > min(final_indices) for index in preview_indices)
+    assert events[-1]["type"] == "done"
+
+
+def test_http_stream_hybrid_route_cache_hit_with_stream_capability_replays_single_final_snapshot(monkeypatch):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+
+    class _CacheHitExecutionCache:
+        available = True
+
+        def get_file_route_cache(self, *, fingerprint: str):
+            return {
+                "handler": "hybrid",
+                "answer_text": "缓存命中：这是来自 hybrid 文件问答缓存的最终答案。",
+                "route": "hybrid_qa",
+                "query_mode": "patent_hybrid_qa",
+                "source_scope": "pdf+table",
+                "steps": [{"step": "dispatch", "title": "进入文件分支", "message": "进入 Hybrid 问答分支", "status": "success"}],
+                "metadata": {"answer_mode": "hybrid_summary"},
+                "timings": {"patent_hybrid_route_ms": 1},
+                "used_files": [
+                    {"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf"},
+                    {"file_id": 33, "file_type": "xlsx", "file_name": "claims.xlsx"},
+                ],
+                "selected_file_ids": [11, 33],
+                "file_selection": {"strategy": "explicit_selection", "selected_file_ids": [11, 33], "source_scope": "pdf+table"},
+                "kb_enabled": False,
+            }
+
+    class _ExplodingPdfService:
+        def execute(self, *, contract, include_kb: bool, progress_callback=None, content_callback=None):
+            raise AssertionError("pdf service should not run on hybrid file-route cache hit")
+
+    class _ExplodingTabularService:
+        def execute(self, *, contract, include_kb: bool, progress_callback=None, content_callback=None):
+            raise AssertionError("tabular service should not run on hybrid file-route cache hit")
+
+    app.state.ask_service._patent_executor._execution_cache = _CacheHitExecutionCache()
+    app.state.ask_service._patent_executor._pdf_service = _ExplodingPdfService()
+    app.state.ask_service._patent_executor._tabular_service = _ExplodingTabularService()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/ask_stream",
+            json=_hybrid_payload("pdf+table"),
+            headers={"X-Patent-Stream-Capability": "preview_v1"},
+        )
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    content_events = [event for event in events if event["type"] == "content"]
+
+    assert len(content_events) == 1
+    assert content_events[0]["content_role"] == "final"
+    assert content_events[0]["content_source"] == "hybrid"
+    assert content_events[0]["content_phase"] == "snapshot"
+    assert content_events[0]["content"] == events[-1]["final_answer"]
+
+
 def test_http_stream_pdf_route_emits_live_step_events_before_done(monkeypatch, tmp_path):
     monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
     app = create_app()
@@ -2923,6 +3289,38 @@ def test_http_sync_tabular_route_summarizes_readable_local_table_instead_of_stub
     assert body["metadata"]["answer_mode"] == "table_execution_summary"
     assert "匹配工作表" in body["metadata"]["table_evidence_context"]
     assert "local_path" not in body["used_files"][0]
+
+
+def test_http_stream_tabular_route_with_stream_capability_emits_only_final_table_content(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    csv_path = tmp_path / "claims.csv"
+    _write_csv(csv_path)
+    answer_text = "真实表格总结：LMFP 120mAh，LFP 115mAh，NCM 140mAh，并且表格结果显示不同材料在容量和备注字段上存在清晰差异。"
+    app.state.ask_service._patent_executor._tabular_service = PatentTabularService(
+        answer_question_fn=lambda **kwargs: answer_text,
+    )
+    payload = _tabular_payload()
+    payload["execution_files"][0].update({"file_type": "csv", "file_name": "claims.csv", "local_path": str(csv_path)})
+    payload["used_files"][0].update({"file_type": "csv", "file_name": "claims.csv", "local_path": str(csv_path)})
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/ask_stream",
+            json=payload,
+            headers={"X-Patent-Stream-Capability": "preview_v1"},
+        )
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    content_events = [event for event in events if event["type"] == "content"]
+
+    assert content_events
+    assert all(event["content_role"] == "final" for event in content_events)
+    assert all(event["content_source"] == "table" for event in content_events)
+    assert all(event["content_phase"] in {"start", "delta", "end", "snapshot"} for event in content_events)
+    assert not any(event["content_role"] == "preview" for event in content_events)
+    assert "".join(event["content"] for event in content_events) == events[-1]["final_answer"]
 
 
 @pytest.mark.parametrize(
@@ -3594,6 +3992,62 @@ def test_durable_stream_body_gateway_owned_options_are_ignored_without_trusted_h
     assert response.status_code == 200
     assert "gateway_task_execution" not in fake.stream_options
     assert "gateway_owned_persistence" not in fake.stream_options
+
+
+def test_file_stream_capability_header_is_injected_for_file_routes(monkeypatch):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+
+    class _OptionCaptureAskService(_RouteFakeAskService):
+        def __init__(self):
+            super().__init__()
+            self.stream_options = {}
+
+        def stream_ask(self, request, *, user_id):
+            self.stream_options = dict(request.options or {})
+            return super().stream_ask(request, user_id=user_id)
+
+    fake = _OptionCaptureAskService()
+    app.state.ask_service = fake
+    payload = _hybrid_payload("pdf+kb")
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/ask_stream",
+            json=payload,
+            headers={"X-Patent-Stream-Capability": "preview_v1"},
+        )
+
+    assert response.status_code == 200
+    assert fake.stream_options["patent_stream_capability"] == "preview_v1"
+
+
+def test_stream_capability_header_is_ignored_for_standalone_kb_route(monkeypatch):
+    app = create_app()
+
+    class _OptionCaptureAskService(_RouteFakeAskService):
+        def __init__(self):
+            super().__init__()
+            self.stream_options = {}
+
+        def stream_ask(self, request, *, user_id):
+            self.stream_options = dict(request.options or {})
+            return super().stream_ask(request, user_id=user_id)
+
+    fake = _OptionCaptureAskService()
+    app.state.ask_service = fake
+    payload = _base_payload()
+    payload["conversation_id"] = None
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/ask_stream",
+            json=payload,
+            headers={"X-Patent-Stream-Capability": "preview_v1"},
+        )
+
+    assert response.status_code == 200
+    assert "patent_stream_capability" not in fake.stream_options
 
 
 def test_durable_stream_requires_auth_before_dependency_readiness(monkeypatch):

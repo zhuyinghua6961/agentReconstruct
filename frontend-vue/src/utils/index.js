@@ -53,6 +53,94 @@ function isPatentPublicationNumber(value) {
   return /^[A-Z]{2}\d{6,14}[A-Z]\d?$/i.test(String(value || '').trim())
 }
 
+const PATENT_PUBLICATION_GLOBAL_RE = /\b[A-Za-z]{2}\d{6,14}[A-Za-z]\d?\b/g
+const PATENT_ID_INLINE_CITATION_GLOBAL_RE = /\(\s*patent_id\s*=\s*([A-Za-z0-9._/\-]+)\s*\)/gi
+const RENDERED_PATENT_CITATION_GLOBAL_RE = /[\(（]\s*([A-Za-z]{2}\d{6,14}[A-Za-z]\d?(?:\s*[,，;；、]\s*[A-Za-z]{2}\d{6,14}[A-Za-z]\d?)*)\s*[\)）]/gi
+const BACKTICK_PATENT_SPAN_GLOBAL_RE = /`[^`\n]*[A-Za-z]{2}\d{6,14}[A-Za-z]\d?[^`\n]*`/gi
+const BACKTICK_RENDERED_PATENT_CITATION_GLOBAL_RE = /`[\(（][^`\n]*[A-Za-z]{2}\d{6,14}[A-Za-z]\d?[^`\n]*[\)）]`/gi
+
+function truncatePatentLogExcerpt(value, limit = 220) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim()
+  if (text.length <= limit) return text
+  return `${text.slice(0, Math.max(1, limit - 1)).trimEnd()}…`
+}
+
+function samplePatternMatches(pattern, text, limit = 5) {
+  const source = String(text || '')
+  const matcher = new RegExp(pattern.source, pattern.flags)
+  const samples = []
+  for (const match of source.matchAll(matcher)) {
+    const sample = truncatePatentLogExcerpt(match[0], 120)
+    if (sample && !samples.includes(sample)) {
+      samples.push(sample)
+    }
+    if (samples.length >= limit) break
+  }
+  return samples
+}
+
+function collectPatentTextDiagnostics(text) {
+  const source = String(text || '')
+  const patentMatches = [...source.matchAll(new RegExp(PATENT_PUBLICATION_GLOBAL_RE.source, PATENT_PUBLICATION_GLOBAL_RE.flags))]
+    .map((match) => String(match[0] || '').toUpperCase())
+  const distinctPatentIds = []
+  for (const patentId of patentMatches) {
+    if (patentId && !distinctPatentIds.includes(patentId)) {
+      distinctPatentIds.push(patentId)
+    }
+  }
+  return {
+    chars: source.length,
+    patentPublicationCount: patentMatches.length,
+    distinctPatentPublicationCount: distinctPatentIds.length,
+    distinctPatentPublicationIdsSample: distinctPatentIds.slice(0, 8),
+    patentIdInlineCitationCount: [...source.matchAll(new RegExp(PATENT_ID_INLINE_CITATION_GLOBAL_RE.source, PATENT_ID_INLINE_CITATION_GLOBAL_RE.flags))].length,
+    renderedPatentCitationCount: [...source.matchAll(new RegExp(RENDERED_PATENT_CITATION_GLOBAL_RE.source, RENDERED_PATENT_CITATION_GLOBAL_RE.flags))].length,
+    backtickPatentSpanCount: [...source.matchAll(new RegExp(BACKTICK_PATENT_SPAN_GLOBAL_RE.source, BACKTICK_PATENT_SPAN_GLOBAL_RE.flags))].length,
+    backtickRenderedPatentCitationCount: [...source.matchAll(new RegExp(BACKTICK_RENDERED_PATENT_CITATION_GLOBAL_RE.source, BACKTICK_RENDERED_PATENT_CITATION_GLOBAL_RE.flags))].length,
+    patentIdInlineCitationSamples: samplePatternMatches(PATENT_ID_INLINE_CITATION_GLOBAL_RE, source),
+    renderedPatentCitationSamples: samplePatternMatches(RENDERED_PATENT_CITATION_GLOBAL_RE, source),
+    backtickPatentSpanSamples: samplePatternMatches(BACKTICK_PATENT_SPAN_GLOBAL_RE, source),
+    backtickRenderedPatentCitationSamples: samplePatternMatches(BACKTICK_RENDERED_PATENT_CITATION_GLOBAL_RE, source),
+  }
+}
+
+function collectPatentHtmlDiagnostics(html) {
+  const source = String(html || '')
+  const anchorMatches = [...source.matchAll(/data-patent-id="([^"]+)"/g)].map((match) => String(match[1] || '').toUpperCase())
+  const codePatentSpans = [...source.matchAll(/<code>([\s\S]*?)<\/code>/gi)]
+    .map((match) => String(match[1] || ''))
+    .filter((segment) => /[A-Za-z]{2}\d{6,14}[A-Za-z]\d?/i.test(segment))
+  return {
+    chars: source.length,
+    patentAnchorCount: anchorMatches.length,
+    patentAnchorSamples: anchorMatches.slice(0, 8),
+    codePatentSpanCount: codePatentSpans.length,
+    codePatentSpanSamples: codePatentSpans.slice(0, 8).map((segment) => truncatePatentLogExcerpt(segment, 120)),
+  }
+}
+
+function logPatentRenderDiagnostics({ renderer, phase, originalText, normalizedText, html, fallbackUsed = false }) {
+  const textDiagnostics = collectPatentTextDiagnostics(normalizedText)
+  const htmlDiagnostics = collectPatentHtmlDiagnostics(html)
+  const suspicious = (
+    textDiagnostics.backtickPatentSpanCount > 0
+    || textDiagnostics.backtickRenderedPatentCitationCount > 0
+    || htmlDiagnostics.codePatentSpanCount > 0
+    || (textDiagnostics.patentPublicationCount > 0 && htmlDiagnostics.patentAnchorCount === 0)
+  )
+  if (!suspicious) return
+  console.warn('[patent-render-debug]', {
+    renderer,
+    phase,
+    fallbackUsed,
+    textDiagnostics,
+    htmlDiagnostics,
+    originalExcerpt: truncatePatentLogExcerpt(originalText, 320),
+    normalizedExcerpt: truncatePatentLogExcerpt(normalizedText, 320),
+  })
+}
+
 function isPatentLeadingBoundary(char) {
   return !char || /[\s([{<"'“‘《「『（【，。！？；：,.;!?:\\|、】【」』》]/.test(char)
 }
@@ -1042,17 +1130,29 @@ export function formatAnswer(text, referenceSnippets = []) {
   const normalizedText = normalizeAnswerMarkdown(text)
 
   let html = ''
+  let fallbackUsed = false
   try {
     html = renderMarkdownToHtml(normalizedText)
     if (looksLikeUnrenderedMarkdown(normalizedText, html)) {
       html = formatStreamingFallback(normalizedText)
+      fallbackUsed = true
     }
   } catch (e) {
     console.error('Markdown解析失败:', e)
     html = formatStreamingFallback(normalizedText)
+    fallbackUsed = true
   }
 
-  return decorateRenderedAnswerHtml(html)
+  const decoratedHtml = decorateRenderedAnswerHtml(html)
+  logPatentRenderDiagnostics({
+    renderer: 'formatAnswer',
+    phase: 'final',
+    originalText: text,
+    normalizedText,
+    html: decoratedHtml,
+    fallbackUsed,
+  })
+  return decoratedHtml
 }
 
 export function formatStreamingAnswer(text) {
@@ -1062,23 +1162,44 @@ export function formatStreamingAnswer(text) {
   const shouldRenderMath = containsMathMarkup(baseText) || containsInlineRenderMarkup(baseText)
 
   if (!containsStructuredMarkdown(baseText) && !shouldRenderMath) {
-    return decorateRenderedAnswerHtml(formatStreamingFallback(baseText))
+    const fallbackHtml = decorateRenderedAnswerHtml(formatStreamingFallback(baseText))
+    logPatentRenderDiagnostics({
+      renderer: 'formatStreamingAnswer',
+      phase: 'fallback',
+      originalText: text,
+      normalizedText: baseText,
+      html: fallbackHtml,
+      fallbackUsed: true,
+    })
+    return fallbackHtml
   }
 
   const normalizedText = shouldRenderMath ? renderMathMarkup(baseText) : baseText
   let html = ''
+  let fallbackUsed = false
 
   try {
     html = renderMarkdownToHtml(normalizedText)
     if (looksLikeUnrenderedMarkdown(normalizedText, html)) {
       html = formatStreamingFallback(normalizedText)
+      fallbackUsed = true
     }
   } catch (e) {
     console.error('流式Markdown解析失败:', e)
     html = formatStreamingFallback(normalizedText)
+    fallbackUsed = true
   }
 
-  return decorateRenderedAnswerHtml(html)
+  const decoratedHtml = decorateRenderedAnswerHtml(html)
+  logPatentRenderDiagnostics({
+    renderer: 'formatStreamingAnswer',
+    phase: 'streaming',
+    originalText: text,
+    normalizedText,
+    html: decoratedHtml,
+    fallbackUsed,
+  })
+  return decoratedHtml
 }
 
 // 修复表格格式

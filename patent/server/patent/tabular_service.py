@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import logging
 import posixpath
 import re
 import zipfile
@@ -23,6 +24,7 @@ _XML_NS = {
     "rel": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
     "pkgrel": "http://schemas.openxmlformats.org/package/2006/relationships",
 }
+_LOGGER = logging.getLogger("patent.tabular_service")
 
 
 def _collapse_whitespace(value: object) -> str:
@@ -664,6 +666,8 @@ class PatentTabularService:
         content_callback: Callable[[str], None] | None = None,
     ) -> str:
         summary_mode = _is_summary_question(question)
+        route_name = str(route_hint or "tabular_qa").strip() or "tabular_qa"
+        live_stream_possible = False
         prompt = _build_patent_tabular_prompt(
             question=question,
             table_text=table_text,
@@ -694,7 +698,16 @@ class PatentTabularService:
                             source_scope=source_scope,
                         )
                     )
-                    emit_text_chunks(answer, content_callback=content_callback)
+                    emitted = emit_text_chunks(answer, content_callback=content_callback)
+                    _LOGGER.info(
+                        "patent tabular answer route=%s source_scope=%s summary_mode=%s live_stream_possible=%s output_mode=callable_text emitted_chunks=%s answer_chars=%s",
+                        route_name,
+                        source_scope,
+                        summary_mode,
+                        live_stream_possible,
+                        emitted,
+                        len(answer),
+                    )
                     return answer
             else:
                 answer_parts: list[str] = []
@@ -716,7 +729,17 @@ class PatentTabularService:
                             source_scope=source_scope,
                         )
                     )
-                    emit_text_chunks(answer, content_callback=content_callback)
+                    emitted = emit_text_chunks(answer, content_callback=content_callback)
+                    _LOGGER.info(
+                        "patent tabular answer route=%s source_scope=%s summary_mode=%s live_stream_possible=%s output_mode=callable_iter_buffered buffered_pieces=%s emitted_chunks=%s answer_chars=%s",
+                        route_name,
+                        source_scope,
+                        summary_mode,
+                        live_stream_possible,
+                        len(answer_parts),
+                        emitted,
+                        len(answer),
+                    )
                     return answer
         fallback = _table_fallback_answer(question=question, table_text=table_text)
         answer = (
@@ -730,7 +753,16 @@ class PatentTabularService:
                 source_scope=source_scope,
             )
         )
-        emit_text_chunks(answer, content_callback=content_callback)
+        emitted = emit_text_chunks(answer, content_callback=content_callback)
+        _LOGGER.info(
+            "patent tabular answer route=%s source_scope=%s summary_mode=%s live_stream_possible=%s output_mode=fallback emitted_chunks=%s answer_chars=%s",
+            route_name,
+            source_scope,
+            summary_mode,
+            live_stream_possible,
+            emitted,
+            len(answer),
+        )
         return answer
 
     @staticmethod

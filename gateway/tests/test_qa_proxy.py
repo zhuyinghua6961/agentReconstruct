@@ -2488,6 +2488,66 @@ def test_mode_ask_stream_routes_patent_mixed_question_to_patent_backend():
     assert response.headers["x-gateway-backend"] == "patent"
 
 
+def test_mode_ask_stream_patent_preserves_structured_content_fields_and_capability_header():
+    original = app.state.conversation_file_service
+    original_settings = app.state.settings
+    app.state.conversation_file_service = _ConversationFilesStub(
+        [
+            ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf"),
+            ConversationFileRow(file_id=33, file_type="excel", file_name="claims.xlsx"),
+        ]
+    )
+    app.state.settings = replace(original_settings, patent_file_routes_enabled=True)
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["headers"] = dict(request.headers)
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        assert str(request.url).endswith("/api/patent/ask_stream")
+        return httpx.Response(
+            200,
+            content=(
+                b'data: {"type":"metadata","query_mode":"patent","route":"hybrid_qa","source_scope":"pdf+table"}\n\n'
+                b'data: {"type":"content","content":"PDF preview","content_role":"preview","content_source":"pdf","content_stream_id":"pdf:primary","content_phase":"start","replace_stream":true}\n\n'
+                b'data: {"type":"content","content":"final answer","content_role":"final","content_source":"hybrid","content_stream_id":"final:answer","content_phase":"snapshot","replace_stream":true}\n\n'
+                b'data: {"type":"done","final_answer":"final answer","route":"hybrid_qa","source_scope":"pdf+table"}\n\n'
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            with client.stream(
+                "POST",
+                "/api/patent/ask_stream",
+                headers={"X-Patent-Stream-Capability": "preview_v1"},
+                json={
+                    "question": "请比较前两个文件",
+                    "requested_mode": "patent",
+                    "pdf_context": {"all_available_ids": [11, 33]},
+                },
+            ) as response:
+                body = b"".join(response.iter_bytes())
+    finally:
+        app.state.conversation_file_service = original
+        app.state.settings = original_settings
+
+    assert response.status_code == 200
+    assert captured["url"].endswith("/api/patent/ask_stream")
+    assert captured["headers"]["x-patent-stream-capability"] == "preview_v1"
+    assert captured["body"]["route"] == "hybrid_qa"
+    assert captured["body"]["source_scope"] == "pdf+table"
+    assert b'"content_role":"preview"' in body
+    assert b'"content_source":"pdf"' in body
+    assert b'"content_stream_id":"pdf:primary"' in body
+    assert b'"content_phase":"start"' in body
+    assert b'"replace_stream":true' in body
+    assert b'"content_role":"final"' in body
+    assert b'"content_source":"hybrid"' in body
+
+
 def test_mode_ask_stream_passthroughs_sse():
     def handler(request: httpx.Request) -> httpx.Response:
         assert str(request.url).endswith("/api/thinking/ask_stream")

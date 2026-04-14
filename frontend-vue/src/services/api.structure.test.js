@@ -18,9 +18,97 @@ test('api reads refresh-survivable task rollout flag and keeps legacy ask_stream
   assert.match(source, /const askPath = \['fast', 'thinking', 'patent'\]\.includes\(normalizedMode\)\s*\? `\$\{V1\}\/\$\{normalizedMode\}\/ask_stream`/s)
 })
 
+test('api enables patent structured streaming capability for patent file and hybrid requests', async () => {
+  global.localStorage = {
+    getItem() {
+      return null
+    },
+  }
+
+  const originalFetch = global.fetch
+  const captured = []
+  global.fetch = async (url, options = {}) => {
+    captured.push({ url: String(url || ''), options })
+    if (String(url || '').includes('/ask_stream')) {
+      return {
+        ok: true,
+        headers: new Headers({ 'content-type': 'text/event-stream' }),
+        body: {
+          getReader() {
+            let done = false
+            return {
+              async read() {
+                if (done) return { done: true, value: undefined }
+                done = true
+                return { done: true, value: undefined }
+              },
+            }
+          },
+        },
+      }
+    }
+    return {
+      ok: true,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      async json() {
+        return {
+          task_id: 'task_preview_v1',
+          status: 'queued',
+          last_seq: 0,
+          replay_available: true,
+        }
+      },
+    }
+  }
+
+  try {
+    const { api } = await import('./api.js')
+
+    const stream = api.askStream(
+      '总结文件',
+      [],
+      42,
+      {
+        all_available_ids: [11],
+        selected_ids: [11],
+        newly_uploaded_ids: [],
+        last_focus_ids: [],
+        last_turn_route: '',
+      },
+      undefined,
+      'patent',
+    )
+    await stream.next()
+
+    await api.createTask(
+      '总结文件',
+      [],
+      42,
+      {
+        all_available_ids: [11],
+        selected_ids: [11],
+        newly_uploaded_ids: [],
+        last_focus_ids: [],
+        last_turn_route: '',
+      },
+      'patent',
+      'client_preview_v1',
+    )
+
+    assert.equal(captured.length, 2)
+    assert.equal(captured[0].options.headers['X-Patent-Stream-Capability'], 'preview_v1')
+    assert.equal(
+      JSON.parse(String(captured[1].options.body || '{}')).options.patent_stream_capability,
+      'preview_v1',
+    )
+  } finally {
+    global.fetch = originalFetch
+  }
+})
+
 test('api exposes task endpoints behind the refresh-survivable QA task rollout surface', () => {
   assert.match(source, /refreshSurvivableQATasksEnabled:/)
-  assert.match(source, /async createTask\(question, chatHistory = \[\], conversationId = null, pdfContext = null, mode = 'thinking'\)/)
+  assert.match(source, /async createTask\(question, chatHistory = \[\], conversationId = null, pdfContext = null, mode = 'thinking', clientRequestId = ''\)/)
   assert.match(source, /requestJson\(`\$\{API_BASE\}\$\{V1\}\/v1\/tasks`/)
   assert.match(source, /async getTask\(taskId\)/)
   assert.match(source, /async streamTaskEvents\(taskId, afterSeq = 0, options = \{\}\)/)

@@ -40,6 +40,9 @@ _TERMINAL_SYNCABLE_STATUSES = {"completed", "failed", "canceled", "expired"}
 _TASK_EVENT_STREAM_POLL_SECONDS = 0.1
 _PROGRESS_FLUSH_MAX_PENDING_EVENTS = 5
 _PROGRESS_FLUSH_MAX_IDLE_SECONDS = 0.25
+_PATENT_STREAM_CAPABILITY_HEADER = b"x-patent-stream-capability"
+_PATENT_STREAM_CAPABILITY_OPTION = "patent_stream_capability"
+_PATENT_STREAM_CAPABILITY_PREVIEW_V1 = "preview_v1"
 
 
 def _is_truthy_env_flag(value: Any) -> bool:
@@ -137,6 +140,29 @@ def _public_task_telemetry(record: dict[str, Any]) -> dict[str, int]:
         end_field="first_content_at_ms",
     )
     return public
+
+
+def _normalized_patent_stream_capability(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized == _PATENT_STREAM_CAPABILITY_PREVIEW_V1:
+        return normalized
+    return ""
+
+
+def _resolve_task_patent_stream_capability(request: dict[str, Any]) -> str:
+    actual_mode = str(request.get("actual_mode") or "").strip().lower()
+    route = str(request.get("route") or (request.get("execution_snapshot") or {}).get("route") or "").strip().lower()
+    if actual_mode != "patent" or route not in _FILE_ROUTES:
+        return ""
+    execution_snapshot = dict(request.get("execution_snapshot") or {})
+    options = execution_snapshot.get("options") if isinstance(execution_snapshot.get("options"), dict) else {}
+    if not options and isinstance(request.get("options"), dict):
+        options = dict(request.get("options") or {})
+    return _normalized_patent_stream_capability(options.get(_PATENT_STREAM_CAPABILITY_OPTION))
+
+
+def _task_content_persists_in_main_body(payload: dict[str, Any]) -> bool:
+    return str(payload.get("content_role") or "").strip().lower() != "preview"
 
 
 def _live_runtime_handle(entry: Any) -> Any:
@@ -1463,6 +1489,7 @@ class GatewayTaskExecutor:
             actual_mode=request.get("actual_mode"),
             downstream_authorization=request.get("downstream_authorization")
             or (request.get("execution_snapshot") or {}).get("downstream_authorization"),
+            patent_stream_capability=_resolve_task_patent_stream_capability(request),
         )
         dispatcher = ExecutionAdmissionDispatcher(
             settings=self.settings,
@@ -1655,16 +1682,17 @@ class GatewayTaskExecutor:
                         if _normalized_epoch_ms((request.get("telemetry") or {}).get("first_content_at_ms")) is None:
                             self._persist_request_telemetry(request, first_content_at_ms=_epoch_ms())
                         delta = str(payload.get("content") or payload.get("delta") or "")
-                        if delta:
-                            content_parts.append(delta)
-                        self._runtime_observe_progress(
-                            live_runtime,
-                            status="running",
-                            last_seq=latest_seq,
-                            content_delta=delta,
-                            steps=[step_map[key] for key in step_order],
-                        )
-                        await self._flush_runtime_progress(live_runtime)
+                        if _task_content_persists_in_main_body(payload):
+                            if delta:
+                                content_parts.append(delta)
+                            self._runtime_observe_progress(
+                                live_runtime,
+                                status="running",
+                                last_seq=latest_seq,
+                                content_delta=delta,
+                                steps=[step_map[key] for key in step_order],
+                            )
+                            await self._flush_runtime_progress(live_runtime)
                         continue
                     if event_type == "done":
                         terminalized = self._terminalized_execution_outcome(request_id)
@@ -1767,7 +1795,14 @@ class GatewayTaskExecutor:
         )
         return AdmissionExecutionOutcome(outcome="failed", reason="stream_ended_without_done", terminal_status="failed")
 
-    def _build_internal_request(self, *, trace_id: str, actual_mode: Any, downstream_authorization: Any = None) -> Request:
+    def _build_internal_request(
+        self,
+        *,
+        trace_id: str,
+        actual_mode: Any,
+        downstream_authorization: Any = None,
+        patent_stream_capability: Any = None,
+    ) -> Request:
         internal_token = self.conversation_persistence_service._internal_token()
         headers = [
             (b"accept", b"text/event-stream"),
@@ -1780,6 +1815,9 @@ class GatewayTaskExecutor:
         authorization = str(downstream_authorization or "").strip()
         if authorization:
             headers.append((b"authorization", authorization.encode("utf-8")))
+        stream_capability = _normalized_patent_stream_capability(patent_stream_capability)
+        if stream_capability:
+            headers.append((_PATENT_STREAM_CAPABILITY_HEADER, stream_capability.encode("utf-8")))
         scope = {
             "type": "http",
             "http_version": "1.1",

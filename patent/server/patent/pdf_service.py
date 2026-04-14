@@ -1499,6 +1499,7 @@ class PatentPdfService:
         missing_labels = [label for label in selected_file_labels if label not in set(available_file_labels)]
         live_streamed = False
         stream_mode = "unknown"
+        input_stream_mode = "none"
         streamed_text = ""
         pending_stream_whitespace = ""
         summary_mode = is_summary_question(question) and not compare_mode
@@ -1652,6 +1653,7 @@ class PatentPdfService:
             try:
                 stream_builder = getattr(self._client, "stream_answer", None)
                 if callable(stream_builder):
+                    input_stream_mode = "client_stream"
                     for piece in iter_text_output(
                         stream_builder(
                             question=question,
@@ -1668,6 +1670,7 @@ class PatentPdfService:
                 answer_parts = []
             if not "".join(answer_parts).strip():
                 try:
+                    input_stream_mode = "client_answer"
                     answer = _buffer_text(
                         self._client.answer(
                             question=question,
@@ -1765,6 +1768,20 @@ class PatentPdfService:
                     if suffix:
                         emit_text_chunks(suffix, content_callback=content_callback)
                     streamed_text = answer
+            _LOGGER.info(
+                "patent pdf render route=%s source_scope=%s summary_mode=%s compare_mode=%s aligned_summary_mode=%s input_stream_mode=%s live_streamed=%s stream_mode=%s buffered_pieces=%s answer_chars=%s content_callback=%s",
+                route_hint,
+                source_scope,
+                summary_mode,
+                compare_mode,
+                aligned_summary_mode,
+                input_stream_mode,
+                live_streamed,
+                stream_mode,
+                len(answer_parts),
+                len(answer),
+                callable(content_callback),
+            )
             return {
                 "ok": True,
                 "answer_text": answer,
@@ -1801,6 +1818,19 @@ class PatentPdfService:
             )
         )
         if compare_mode:
+            _LOGGER.info(
+                "patent pdf render fallback route=%s source_scope=%s summary_mode=%s compare_mode=%s aligned_summary_mode=%s input_stream_mode=%s live_streamed=%s stream_mode=%s answer_chars=%s content_callback=%s",
+                route_hint,
+                source_scope,
+                summary_mode,
+                compare_mode,
+                aligned_summary_mode,
+                input_stream_mode,
+                live_streamed,
+                stream_mode,
+                len(fallback),
+                callable(content_callback),
+            )
             return {
                 "ok": False,
                 "answer_text": fallback,
@@ -1809,6 +1839,19 @@ class PatentPdfService:
                 "stream_after_steps": True,
             }
         emit_text_chunks(fallback, content_callback=content_callback)
+        _LOGGER.info(
+            "patent pdf render fallback route=%s source_scope=%s summary_mode=%s compare_mode=%s aligned_summary_mode=%s input_stream_mode=%s live_streamed=%s stream_mode=%s answer_chars=%s content_callback=%s",
+            route_hint,
+            source_scope,
+            summary_mode,
+            compare_mode,
+            aligned_summary_mode,
+            input_stream_mode,
+            live_streamed,
+            stream_mode,
+            len(fallback),
+            callable(content_callback),
+        )
         return {
             "ok": True,
             "answer_text": fallback,

@@ -3,7 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from server.patent.stream_events import normalize_content_event_fields
 from server.schemas.request_models import PatentRouteName, PatentSourceScope
 
 
@@ -69,6 +70,27 @@ class MetadataEvent(_BaseEvent):
 class ContentEvent(_BaseEvent):
     type: Literal["content"] = "content"
     content: str
+    content_role: Literal["preview", "final"] | None = None
+    content_source: Literal["pdf", "table", "kb", "hybrid"] | None = None
+    content_stream_id: str | None = None
+    content_phase: Literal["start", "delta", "end", "snapshot"] | None = None
+    replace_stream: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_content_contract(self) -> "ContentEvent":
+        normalized = normalize_content_event_fields(
+            content_role=self.content_role,
+            content_source=self.content_source,
+            content_stream_id=self.content_stream_id,
+            content_phase=self.content_phase,
+            replace_stream=self.replace_stream,
+        )
+        self.content_role = normalized["content_role"]
+        self.content_source = normalized["content_source"]
+        self.content_stream_id = normalized["content_stream_id"]
+        self.content_phase = normalized["content_phase"]
+        self.replace_stream = normalized["replace_stream"]
+        return self
 
 
 class StepEvent(_BaseEvent):

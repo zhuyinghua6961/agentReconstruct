@@ -17,6 +17,12 @@ import { normalizeTaskReplayCursor } from '../utils/taskReplayCursor'
 import { consumePendingStreamContent, shouldClearRecoveredActiveTask } from '../utils/taskRecoveryRuntime'
 import { createTaskRecoveryDebugLogger, summarizeTaskRecoveryDetail } from '../utils/taskRecoveryDebug'
 import { createRecoverableTaskController } from '../utils/recoverableTaskController'
+import {
+  buildPatentStreamingMessagePatch,
+  getPatentPreviewStreams,
+  isPatentFinalAnswerPending,
+  reducePatentStreamingState,
+} from '../utils/patentStreaming'
 import PdfReader from '../components/PdfReader.vue'
 import QuotaLimitCard from '../components/QuotaLimitCard.vue'
 import { buildCitationLocationsForDoi } from '../utils/citationEvidence'
@@ -1003,12 +1009,28 @@ function applyGatewayEvent(chatId, data, runtime = getStreamRuntime(chatId)) {
       })
       return { terminal: false, skipped: true }
     }
-    activeRuntime.pendingContent += String(data.content || data.delta || '')
+    const patentStreamingUpdate = reducePatentStreamingState(targetMessage, data)
+    if (patentStreamingUpdate.handled) {
+      updateStreamingTargetMessage(chatId, buildPatentStreamingMessagePatch(targetMessage, patentStreamingUpdate.state))
+      if (patentStreamingUpdate.mainContentMode === 'preview') {
+        if (normalizeChatId(store.currentChatId) === normalizeChatId(chatId)) {
+          scrollToBottom()
+        }
+        return { terminal: false }
+      }
+      if (patentStreamingUpdate.replaceContent) {
+        activeRuntime.pendingContent = ''
+        updateStreamingTargetMessage(chatId, { content: '' })
+      }
+      activeRuntime.pendingContent += patentStreamingUpdate.content
+    } else {
+      activeRuntime.pendingContent += String(data.content || data.delta || '')
+    }
     taskRecoveryDebug.log('home:event-content', {
       chatId,
       taskId: String(activeRuntime?.requestId || ''),
       seq: Number(data.seq || 0) || 0,
-      deltaLength: String(data.content || data.delta || '').length,
+      deltaLength: String(patentStreamingUpdate.handled ? patentStreamingUpdate.content : (data.content || data.delta || '')).length,
       pendingLength: String(activeRuntime.pendingContent || '').length,
       localLastSeq: store.getChatLastTaskSeq(chatId),
     })
@@ -1170,6 +1192,19 @@ function isStreamingTextMessage(msg) {
 
 function getStreamingMessageHtml(msg) {
   return renderStreamingMessageHtml(msg)
+}
+
+function getPatentPreviewSourceLabel(stream) {
+  const source = String(stream?.contentSource || '').trim().toLowerCase()
+  if (source === 'pdf') return 'PDF 预览'
+  if (source === 'table') return '表格预览'
+  if (source === 'kb') return '知识库预览'
+  if (source === 'hybrid') return '混合预览'
+  return '处理中证据'
+}
+
+function getPatentPreviewHtml(stream) {
+  return formatAnswer(String(stream?.content || ''), [])
 }
 
 function getMessageRenderMemoKey(msg) {
@@ -2485,6 +2520,29 @@ watch(
                     </div>
                   </div>
                 </div>
+                <div v-if="getPatentPreviewStreams(entry.message).length > 0" class="patent-preview-panel">
+                  <div class="patent-preview-header">
+                    <span class="patent-preview-title">处理中证据</span>
+                    <span class="patent-preview-count">{{ getPatentPreviewStreams(entry.message).length }}</span>
+                  </div>
+                  <div v-if="isPatentFinalAnswerPending(entry.message)" class="patent-preview-pending">正在汇总最终答案...</div>
+                  <div
+                    v-for="stream in getPatentPreviewStreams(entry.message)"
+                    :key="stream.contentStreamId"
+                    class="patent-preview-stream"
+                  >
+                    <div class="patent-preview-stream-header">
+                      <span class="patent-preview-stream-title">{{ getPatentPreviewSourceLabel(stream) }}</span>
+                      <span class="patent-preview-stream-status">{{ stream.completed ? '已完成' : '生成中' }}</span>
+                    </div>
+                    <div
+                      v-if="stream.content"
+                      class="patent-preview-stream-body"
+                      v-html="getPatentPreviewHtml(stream)"
+                    ></div>
+                    <div v-else class="patent-preview-stream-empty">处理中...</div>
+                  </div>
+                </div>
                 <QuotaLimitCard v-if="getQuotaCard(entry.message)" :card="getQuotaCard(entry.message)" />
                 <div
                   v-else-if="entry.message.content && isStreamingTextMessage(entry.message)"
@@ -3250,6 +3308,71 @@ watch(
 .steps-overview {
   background: #e0ecff;
   color: #1d4ed8;
+}
+
+.patent-preview-panel {
+  margin: 0 0 12px;
+  padding: 12px;
+  border: 1px solid #bfdbfe;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #eff6ff 0%, #f8fbff 100%);
+}
+
+.patent-preview-header,
+.patent-preview-stream-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.patent-preview-header {
+  margin-bottom: 8px;
+}
+
+.patent-preview-title,
+.patent-preview-stream-title {
+  color: #1d4ed8;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.patent-preview-count,
+.patent-preview-stream-status {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(29, 78, 216, 0.08);
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.patent-preview-pending {
+  margin-bottom: 10px;
+  color: #334155;
+  font-size: 12px;
+}
+
+.patent-preview-stream {
+  padding-top: 10px;
+  border-top: 1px solid rgba(147, 197, 253, 0.45);
+}
+
+.patent-preview-stream:first-of-type {
+  padding-top: 0;
+  border-top: none;
+}
+
+.patent-preview-stream-body,
+.patent-preview-stream-empty {
+  margin-top: 8px;
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.patent-preview-stream-empty {
+  color: #64748b;
 }
 
 .steps-summary {
