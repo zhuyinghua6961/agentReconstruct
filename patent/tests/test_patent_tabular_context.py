@@ -88,3 +88,44 @@ def test_build_tabular_context_bundle_includes_summary_stats_and_top_rows():
     assert "统计摘要:" in bundle["answer_context"]
     assert "代表性行:" in bundle["answer_context"]
     assert "命中结果:" in bundle["answer_context"]
+
+
+def test_build_tabular_context_bundle_stats_follow_filtered_result_rows():
+    result = {
+        "sheet_name": "Sheet1",
+        "operation": "lookup",
+        "rows": [
+            {"material": "LMFP", "capacity_mah": 120.0},
+            {"material": "LFP", "capacity_mah": 115.0},
+        ],
+        "row_count": 2,
+        "empty_reason": "",
+        "summary_stats": {
+            "aggregate": "lookup",
+            "group_by": "",
+            "metric_columns": ["capacity_mah"],
+            "source_row_count": 2,
+            "filters": [{"column": "material", "value": "LMFP/LFP"}],
+        },
+    }
+
+    bundle = build_tabular_context_bundle(
+        question="请对比 LMFP 和 LFP 的容量",
+        workbook=_sample_workbook(),
+        plan={
+            **_sample_plan(),
+            "operation": "lookup",
+            "aggregate": "",
+            "group_by": "",
+            "filters": [{"column": "material", "value": "LMFP/LFP"}],
+        },
+        result=result,
+        file_name="claims.csv",
+        compact_limit=1200,
+        answer_limit=12000,
+        synthesis_limit=6000,
+    )
+
+    assert "- 命中行数: 2" in bundle["answer_context"]
+    assert "- capacity_mah: count=2, min=115, max=120, mean=117.5" in bundle["answer_context"]
+    assert "max=140" not in bundle["answer_context"]

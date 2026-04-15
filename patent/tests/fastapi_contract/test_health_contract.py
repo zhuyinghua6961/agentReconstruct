@@ -30,9 +30,13 @@ def test_create_app_exposes_patent_runtime_defaults():
     assert "redis" in app.state.component_status
     assert "authority" in app.state.component_status
     assert "runtime" in app.state.component_status
+    assert "patent_graph_kb" in app.state.component_status
     assert app.state.component_status["redis"]["ready"] is False
     assert app.state.component_status["authority"]["ready"] is False
     assert app.state.component_status["runtime"]["ready"] is True
+    assert app.state.component_status["patent_graph_kb"]["ready"] is False
+    assert app.state.component_status["patent_graph_kb"]["enabled"] is False
+    assert app.state.component_status["patent_graph_kb"]["status"] == "skipped"
 
 
 def test_config_shared_env_example_documents_shared_upstream_pool_defaults():
@@ -266,7 +270,111 @@ def test_health_contract_exposes_runtime_concurrency_and_trace(monkeypatch):
     assert runtime["stream_slots_capacity"] == 2
     assert runtime["stream_slots_available"] == 2
     assert runtime["ask_executor_max_workers"] == 3
+    assert payload["patent_graph_kb_enabled"] is False
+    assert payload["patent_graph_kb_ready"] is False
+    assert payload["components"]["patent_graph_kb"]["status"] == "skipped"
     assert response.headers["X-Trace-ID"] == "req_contract"
+
+
+def test_health_remains_200_when_patent_graph_kb_is_degraded_but_runtime_is_ready(monkeypatch):
+    monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "false")
+    monkeypatch.setenv("PATENT_GRAPH_KB_ENABLED", "true")
+    app = create_app()
+    app.state.component_status["patent_graph_kb"] = {
+        "ready": False,
+        "enabled": True,
+        "status": "degraded",
+        "detail": "graph unavailable",
+    }
+
+    with TestClient(app) as client:
+        response = client.get("/api/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["patent_graph_kb_enabled"] is True
+    assert payload["patent_graph_kb_ready"] is False
+    assert payload["components"]["patent_graph_kb"]["status"] == "degraded"
+
+
+def test_create_app_bootstraps_patent_graph_kb_client_when_enabled(monkeypatch):
+    monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "false")
+    monkeypatch.setenv("PATENT_GRAPH_KB_ENABLED", "true")
+    captured = {}
+
+    class _GraphClient:
+        def __init__(self):
+            self.closed = False
+            self.available = True
+            self.degraded = False
+            self.error = ""
+            self.database = "neo4j"
+
+        def close(self):
+            self.closed = True
+
+    graph_client = _GraphClient()
+
+    def _bootstrap_patent_neo4j_client(*, url, username, password, database, logger=None):
+        captured.update(
+            {
+                "url": url,
+                "username": username,
+                "password": password,
+                "database": database,
+                "logger_present": logger is not None,
+            }
+        )
+        return graph_client
+
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "bootstrap_patent_neo4j_client",
+        _bootstrap_patent_neo4j_client,
+    )
+
+    app = create_app()
+
+    assert app.state.patent_graph_kb_client is graph_client
+    assert app.state.ask_service._patent_executor._kb_service._graph_kb_client is graph_client
+    assert captured["url"] == "bolt://127.0.0.1:8687"
+    assert captured["username"] == "neo4j"
+    assert captured["password"] == ""
+    assert captured["database"] == "neo4j"
+    assert app.state.component_status["patent_graph_kb"]["ready"] is True
+    assert app.state.component_status["patent_graph_kb"]["status"] == "ok"
+
+
+def test_create_app_closes_patent_graph_kb_client_on_shutdown(monkeypatch):
+    monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "false")
+    monkeypatch.setenv("PATENT_GRAPH_KB_ENABLED", "true")
+    instances = []
+
+    class _GraphClient:
+        def __init__(self):
+            self.closed = False
+            self.available = True
+            self.degraded = False
+            self.error = ""
+            self.database = "neo4j"
+            instances.append(self)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "bootstrap_patent_neo4j_client",
+        lambda **kwargs: _GraphClient(),
+    )
+    app = create_app()
+
+    with TestClient(app):
+        pass
+
+    assert len(instances) == 1
+    assert instances[0].closed is True
 
 def test_health_returns_503_when_runtime_not_ready():
     app = create_app()

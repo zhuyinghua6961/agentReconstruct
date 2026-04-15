@@ -693,8 +693,11 @@ def _build_hybrid_result(
                 or ""
             ).strip()
             if candidate:
-                answer_text = candidate
-                hybrid_backend = "llm"
+                answer_text, used_fallback_rules = _normalize_patent_hybrid_answer(
+                    answer=candidate,
+                    synthesis_contract=synthesis_contract,
+                )
+                hybrid_backend = "fallback_rules" if used_fallback_rules else "llm"
         except Exception:
             skip_cache = True
             _LOGGER.warning(
@@ -1240,6 +1243,66 @@ def _build_hybrid_literature_section(title: str, points: list[str], fallback: st
     return lines
 
 
+def _has_ordered_markdown_sections(text: str, headings: tuple[str, ...]) -> bool:
+    normalized = str(text or "")
+    last_start = -1
+    for heading in headings:
+        matched = re.search(
+            rf"(^|\n)\s*(?:#{{1,6}}\s*)?{re.escape(heading)}\s*[：:]?",
+            normalized,
+            flags=re.MULTILINE,
+        )
+        if matched is None or matched.start() <= last_start:
+            return False
+        last_start = matched.start()
+    return True
+
+
+def _has_hybrid_fastqa_sections(text: str) -> bool:
+    return _has_ordered_markdown_sections(text, ("结论", "证据", "对比", "限制"))
+
+
+def _has_hybrid_literature_sections(text: str) -> bool:
+    return _has_ordered_markdown_sections(
+        text,
+        ("研究目的和背景", "研究方法/实验设计", "主要发现和结果", "结论和意义", "局限性"),
+    )
+
+
+def _sanitize_hybrid_llm_answer(answer: str) -> str:
+    sanitized_lines: list[str] = []
+    for raw_line in str(answer or "").replace("\r\n", "\n").replace("\r", "\n").splitlines():
+        line = str(raw_line or "").strip()
+        if not line:
+            if sanitized_lines and sanitized_lines[-1] != "":
+                sanitized_lines.append("")
+            continue
+        if "source_scope=" in line:
+            continue
+        line = re.sub(r"^(?:真实 PDF 总结：|真实表格总结：)", "", line).strip()
+        probe = re.sub(r"^[#>\-\*\d\.\)\s]+", "", line).strip()
+        if not line or _is_tabular_structure_line(probe):
+            continue
+        sanitized_lines.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(sanitized_lines)).strip()
+
+
+def _normalize_patent_hybrid_answer(*, answer: str, synthesis_contract: dict[str, Any]) -> tuple[str, bool]:
+    fallback_answer = synthesize_patent_hybrid_answer(synthesis_contract=synthesis_contract)
+    cleaned = _sanitize_hybrid_llm_answer(answer)
+    if not cleaned:
+        return fallback_answer, True
+    if is_summary_question(str(dict(synthesis_contract or {}).get("question") or "")):
+        if _has_hybrid_literature_sections(cleaned):
+            if _LITERATURE_SUMMARY_NOTE in cleaned:
+                return cleaned, False
+            return f"{cleaned}\n\n{_LITERATURE_SUMMARY_NOTE}".strip(), False
+        return fallback_answer, True
+    if _has_hybrid_fastqa_sections(cleaned):
+        return cleaned, False
+    return fallback_answer, True
+
+
 def _synthesize_hybrid_literature_answer(*, synthesis_contract: dict[str, Any]) -> str:
     contract = dict(synthesis_contract or {})
     pdf_answer = str(contract.get("pdf_answer") or "").strip()
@@ -1286,6 +1349,34 @@ def _synthesize_hybrid_literature_answer(*, synthesis_contract: dict[str, Any]) 
     if usable_kb_answer or kb_evidence_context:
         result_points.append(_clip_lead_text(f"知识库补充：{kb_evidence_context or usable_kb_answer}", limit=220))
 
+    limitation_candidates = _extract_hybrid_summary_candidates(
+        pdf_answer,
+        tabular_answer,
+        usable_kb_answer,
+        pdf_evidence_context,
+        table_execution_context,
+        kb_evidence_context,
+        max_items=12,
+        min_chars=10,
+    )
+    limitation_points = _select_candidates_by_keywords(
+        limitation_candidates,
+        keywords=("limited", "limitation", "局限", "不足", "future", "需要进一步", "仍需", "边界"),
+        max_items=2,
+    )
+    if not limitation_points:
+        limitation_points = [
+            "当前总结仅基于已上传 PDF 原文、表格执行结果和命中的知识库证据整理，未引入文件外补充事实。",
+            "若文件原文、表格或知识库未提供更完整的长期验证、机理解释或边界条件，当前回答不做补写。",
+        ]
+        if usable_kb_answer or kb_evidence_context:
+            limitation_points.append("知识库仅用于交叉验证，不能覆盖文件原文和表格执行结果。")
+    limitation_points = [
+        item
+        for index, item in enumerate(limitation_points)
+        if item and item not in limitation_points[:index]
+    ][:3]
+
     conflict_message = _detect_conflict_message(
         file_context="\n".join(part for part in (table_execution_context, pdf_evidence_context) if part),
         kb_context=kb_evidence_context or usable_kb_answer,
@@ -1304,6 +1395,7 @@ def _synthesize_hybrid_literature_answer(*, synthesis_contract: dict[str, Any]) 
         *_build_hybrid_literature_section("研究方法/实验设计", method_points, "当前文件与知识库证据中未提供足够的研究方法、实验设计或验证路径信息。"),
         *_build_hybrid_literature_section("主要发现和结果", result_points, "当前文件与知识库证据中未提供足够的主要发现、关键指标或结果数据。"),
         *_build_hybrid_literature_section("结论和意义", conclusion_points, "当前文件与知识库证据中未提供足够的结论或应用意义描述。"),
+        *_build_hybrid_literature_section("局限性", limitation_points, "当前文件与知识库证据中未明确给出局限性或后续工作说明。"),
         _LITERATURE_SUMMARY_NOTE,
     ]
     return "\n".join(sections).strip()

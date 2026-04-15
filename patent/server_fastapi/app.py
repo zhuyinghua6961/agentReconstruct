@@ -8,6 +8,8 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from config import get_settings
 from server.patent.executor import PatentExecutor
+from server.patent.graph_kb import bootstrap_patent_neo4j_client
+from server.patent.graph_kb.service import try_patent_graph_kb_answer
 from server.patent.hybrid_synthesis import PatentHybridSynthesisClient
 from server.patent.original_service import OriginalViewService
 from server.patent.pdf_service import PatentPdfAnswerClient, PatentPdfService
@@ -90,6 +92,7 @@ def _bootstrap_service_state(app: FastAPI) -> None:
     patent_tabular_service = None
     patent_hybrid_synthesis_client = None
     patent_runtime = None
+    patent_graph_kb_client = None
     shared_http_client = None
     try:
         try:
@@ -181,6 +184,40 @@ def _bootstrap_service_state(app: FastAPI) -> None:
         else:
             runtime_status.pop("detail", None)
         component_status["runtime"] = runtime_status
+        graph_settings = app.state.settings.graph_kb
+        graph_status = dict(component_status.get("patent_graph_kb") or {})
+        if not bool(graph_settings.enabled):
+            graph_status.update(
+                {
+                    "ready": False,
+                    "enabled": False,
+                    "status": "skipped",
+                    "url": str(graph_settings.neo4j_url or ""),
+                    "database": str(graph_settings.neo4j_database or "neo4j"),
+                }
+            )
+        else:
+            patent_graph_kb_client = bootstrap_patent_neo4j_client(
+                url=str(graph_settings.neo4j_url or ""),
+                username=str(graph_settings.neo4j_username or "neo4j"),
+                password=str(graph_settings.neo4j_password or ""),
+                database=str(graph_settings.neo4j_database or "neo4j"),
+                logger=_LOGGER,
+            )
+            graph_ready = bool(getattr(patent_graph_kb_client, "available", False)) and not bool(
+                getattr(patent_graph_kb_client, "degraded", False)
+            )
+            graph_status.update(
+                {
+                    "ready": graph_ready,
+                    "enabled": True,
+                    "status": "ok" if graph_ready else "degraded",
+                    "url": str(graph_settings.neo4j_url or ""),
+                    "database": str(graph_settings.neo4j_database or "neo4j"),
+                    "error": str(getattr(patent_graph_kb_client, "error", "") or ""),
+                }
+            )
+        component_status["patent_graph_kb"] = graph_status
         app.state.component_status = component_status
         ask_service = AskService(
             patent_executor=PatentExecutor(
@@ -190,6 +227,11 @@ def _bootstrap_service_state(app: FastAPI) -> None:
                 pdf_service=patent_pdf_service,
                 tabular_service=patent_tabular_service,
                 hybrid_synthesis_service=patent_hybrid_synthesis_client,
+                graph_kb_service=try_patent_graph_kb_answer,
+                graph_kb_client=patent_graph_kb_client,
+                graph_kb_enabled=bool(graph_settings.enabled),
+                graph_kb_max_rows=int(graph_settings.max_rows or 20),
+                graph_kb_timeout_ms=int(graph_settings.timeout_ms or 3000),
             ),
             persistence_service=chat_persistence_service,
         )
@@ -221,6 +263,12 @@ def _bootstrap_service_state(app: FastAPI) -> None:
                 close()
             except Exception:
                 pass
+        close = getattr(patent_graph_kb_client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
         close = getattr(patent_shared_upstream_provider, "close", None)
         if callable(close):
             try:
@@ -236,6 +284,7 @@ def _bootstrap_service_state(app: FastAPI) -> None:
     app.state.patent_tabular_service = patent_tabular_service
     app.state.patent_hybrid_synthesis_client = patent_hybrid_synthesis_client
     app.state.patent_runtime = patent_runtime
+    app.state.patent_graph_kb_client = patent_graph_kb_client
     app.state.ask_service = ask_service
     app.state.original_service = original_service
 
@@ -269,6 +318,7 @@ def _bootstrap_app_state(app: FastAPI) -> None:
         _close_state_resource(app.state, "patent_hybrid_synthesis_client")
         _close_state_resource(app.state, "patent_shared_upstream_provider")
         _close_state_resource(app.state, "patent_runtime")
+        _close_state_resource(app.state, "patent_graph_kb_client")
         redis_bindings = getattr(app.state, "redis_bindings", None)
         if redis_bindings is not None:
             _close_state_resource(redis_bindings, "client")
@@ -289,6 +339,7 @@ async def _lifespan(app: FastAPI):
         _close_state_resource(app.state, "patent_hybrid_synthesis_client")
         _close_state_resource(app.state, "patent_shared_upstream_provider")
         _close_state_resource(app.state, "patent_runtime")
+        _close_state_resource(app.state, "patent_graph_kb_client")
         redis_bindings = getattr(app.state, "redis_bindings", None)
         if redis_bindings is not None:
             _close_state_resource(redis_bindings, "client")
@@ -314,6 +365,11 @@ def create_app() -> FastAPI:
         "redis": {"ready": False},
         "authority": {"ready": False},
         "runtime": dispatcher.runtime_state(),
+        "patent_graph_kb": {
+            "ready": False,
+            "enabled": bool(settings.graph_kb.enabled),
+            "status": "degraded" if bool(settings.graph_kb.enabled) else "skipped",
+        },
     }
     app.state.original_route_compatibility_enabled = False
     app.state._rebootstrap_on_startup = False

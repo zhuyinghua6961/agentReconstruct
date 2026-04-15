@@ -9,6 +9,7 @@ from server.errors.core import APIError
 from server.patent.file_contract import build_patent_file_contract
 from server.patent.file_routes import (
     _has_usable_hybrid_evidence,
+    _normalize_patent_hybrid_answer,
     build_patent_hybrid_synthesis_contract,
     dispatch_patent_file_route,
     synthesize_patent_hybrid_answer,
@@ -110,6 +111,11 @@ class PatentExecutor:
         runtime: Any | None = None,
         execution_cache: Any | None = None,
         runtime_required: bool = False,
+        graph_kb_service: Any | None = None,
+        graph_kb_client: Any | None = None,
+        graph_kb_enabled: bool = False,
+        graph_kb_max_rows: int = 20,
+        graph_kb_timeout_ms: int = 3000,
     ) -> None:
         self._mode_profile = mode_profile or get_patent_mode_profile()
         self._runtime = runtime
@@ -120,6 +126,11 @@ class PatentExecutor:
             retrieval_service=retrieval_service,
             mode_profile=self._mode_profile,
             runtime=runtime,
+            graph_kb_service=graph_kb_service,
+            graph_kb_client=graph_kb_client,
+            graph_kb_enabled=graph_kb_enabled,
+            graph_kb_max_rows=graph_kb_max_rows,
+            graph_kb_timeout_ms=graph_kb_timeout_ms,
         )
         self._pdf_service = pdf_service or PatentPdfService()
         self._tabular_service = tabular_service or PatentTabularService()
@@ -427,8 +438,11 @@ class PatentExecutor:
                     or ""
                 ).strip()
                 if candidate:
-                    merged["answer_text"] = candidate
-                    hybrid_backend = "llm"
+                    merged["answer_text"], used_fallback_rules = _normalize_patent_hybrid_answer(
+                        answer=candidate,
+                        synthesis_contract=synthesis_contract,
+                    )
+                    hybrid_backend = "fallback_rules" if used_fallback_rules else "llm"
             except Exception:
                 _LOGGER.warning(
                     "patent hybrid synthesis service failed during executor merge; degrading to fallback rules source_scope=%s",

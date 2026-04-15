@@ -651,11 +651,13 @@ class PatentTabularService:
             compact_context = _truncate(table_text, min(self._max_table_chars, 1200))
             answer_context = _truncate(table_text, self._max_table_chars)
             synthesis_context = _truncate(table_text, min(self._max_table_chars, 6000))
+            skip_file_route_cache = False
         else:
             context_bundle = self._load_table_context_bundle(contract=contract)
             compact_context = str(context_bundle.get("compact_evidence_context") or "")
             answer_context = str(context_bundle.get("answer_context") or "")
             synthesis_context = str(context_bundle.get("synthesis_context") or "")
+            skip_file_route_cache = bool(context_bundle.get("_skip_file_route_cache"))
 
         if answer_context:
             self._record_step(
@@ -722,7 +724,7 @@ class PatentTabularService:
             "query_mode": profile.query_mode,
             "source_scope": contract.source_scope,
             "_table_synthesis_context": synthesis_context,
-            "_skip_file_route_cache": bool(answer_context and answer_backend == "unavailable"),
+            "_skip_file_route_cache": bool(skip_file_route_cache or (answer_context and answer_backend == "unavailable")),
             "steps": [dict(item) for item in steps],
             "metadata": {
                 "handler": "tabular",
@@ -749,6 +751,7 @@ class PatentTabularService:
         compact_sections: list[str] = []
         answer_sections: list[str] = []
         synthesis_sections: list[str] = []
+        skip_file_route_cache = False
         for item in contract.selected_execution_files:
             if item.family != "table":
                 continue
@@ -783,6 +786,7 @@ class PatentTabularService:
                 else:
                     result = execute_tabular_plan(workbook=workbook, plan=plan)
             except Exception:
+                skip_file_route_cache = True
                 continue
             if not has_usable_tabular_result(result):
                 continue
@@ -809,6 +813,7 @@ class PatentTabularService:
             "compact_evidence_context": "\n\n".join(section for section in compact_sections if section).strip(),
             "answer_context": "\n\n".join(section for section in answer_sections if section).strip(),
             "synthesis_context": "\n\n".join(section for section in synthesis_sections if section).strip(),
+            "_skip_file_route_cache": bool(skip_file_route_cache),
         }
 
     @staticmethod

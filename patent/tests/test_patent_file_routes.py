@@ -4855,6 +4855,57 @@ def test_file_only_hybrid_uses_injected_hybrid_synthesis_service(tmp_path):
     assert "table_synthesis_context" not in result["metadata"]["synthesis_contract"]
 
 
+def test_file_only_hybrid_normalizes_malformed_llm_answer_and_strips_internal_markers(tmp_path):
+    pdf_path = tmp_path / "battery-paper.pdf"
+    csv_path = tmp_path / "cells.csv"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    _write_csv(csv_path)
+    contract = build_patent_file_contract(
+        question="请结合 PDF 和表格回答结论",
+        route="hybrid_qa",
+        source_scope="pdf+table",
+        selected_file_ids=[11, 33],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "local_path": str(pdf_path)},
+            {"file_id": 33, "file_type": "csv", "file_name": "cells.csv", "local_path": str(csv_path)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 33], "source_scope": "pdf+table"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    service = _FakeHybridSynthesisService(
+        answer_text=(
+            "source_scope=pdf+table\n"
+            "匹配工作表: cells\n"
+            "执行操作: aggregate\n"
+            "LMFP/LFP 复配改善充电安全，表格显示 LMFP 120mAh、LFP 115mAh。"
+        )
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "LMFP/LFP 复配改善充电安全，并报告循环稳定性提升。",
+            answer_question_fn=lambda **kwargs: "真实 PDF 总结：LMFP/LFP 复配改善充电安全性。",
+        ),
+        tabular_service=PatentTabularService(
+            answer_question_fn=lambda **kwargs: "真实表格总结：LMFP 120mAh，LFP 115mAh，NCM 140mAh。",
+        ),
+        hybrid_synthesis_service=service,
+    )
+
+    assert result["metadata"]["hybrid_synthesis_backend"] == "fallback_rules"
+    assert "## 结论" in result["answer_text"]
+    assert "## 证据" in result["answer_text"]
+    assert "## 对比" in result["answer_text"]
+    assert "## 限制" in result["answer_text"]
+    assert "LMFP/LFP 复配改善充电安全" in result["answer_text"]
+    assert "source_scope=" not in result["answer_text"]
+    assert "匹配工作表:" not in result["answer_text"]
+    assert "执行操作:" not in result["answer_text"]
+
+
 def test_hybrid_route_with_kb_stashes_internal_state_and_public_contract_stays_compact(tmp_path):
     pdf_path = tmp_path / "battery-paper.pdf"
     csv_path = tmp_path / "cells.csv"
@@ -5078,6 +5129,54 @@ def test_tabular_client_failure_does_not_seed_file_route_cache(tmp_path):
     result = dispatch_patent_file_route(
         contract=contract,
         tabular_service=PatentTabularService(answer_client=_ExplodingTabularClient(), auto_answer_client=False),
+        execution_cache=cache,
+    )
+
+    assert result["answer_text"]
+    assert result["metadata"]["cache_hit"] is False
+    assert cache.set_calls == 0
+
+
+def test_tabular_structured_loader_failure_does_not_seed_file_route_cache(tmp_path, monkeypatch):
+    csv_path = tmp_path / "cells.csv"
+    _write_csv(csv_path)
+
+    class _CacheStub:
+        def __init__(self) -> None:
+            self.set_calls = 0
+
+        def get_file_route_cache(self, *, fingerprint: str):
+            return None
+
+        def claim_file_route_singleflight(self, *, fingerprint: str, ttl_seconds: int):
+            return "token-1"
+
+        def clear_file_route_singleflight(self, *, fingerprint: str, token: str):
+            return True
+
+        def set_file_route_cache(self, *, fingerprint: str, payload, ttl_seconds: int):
+            self.set_calls += 1
+            return True
+
+    def _boom(**_kwargs):
+        raise RuntimeError("workbook boom")
+
+    monkeypatch.setattr(tabular_service_module, "load_workbook_cached", _boom)
+    cache = _CacheStub()
+    contract = build_patent_file_contract(
+        question="请总结表格结论",
+        route="tabular_qa",
+        source_scope="table",
+        selected_file_ids=[33],
+        primary_file_id=33,
+        execution_files=[{"file_id": 33, "file_type": "csv", "file_name": "cells.csv", "local_path": str(csv_path)}],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [33], "source_scope": "table"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
         execution_cache=cache,
     )
 

@@ -179,6 +179,9 @@ class AskService:
         seq = 0
         telemetry: dict[str, int] = {}
         prepare_queue: queue.Queue[tuple[str, Any]] | None = None
+        prepare_cancelled: threading.Event | None = None
+        stream_completed = False
+        terminal_persisted = False
         structured_file_streaming = structured_content_streaming_enabled(
             options=request.options,
             route=request.route,
@@ -191,11 +194,16 @@ class AskService:
         try:
             if request.is_gateway_owned_persistence and request.is_durable:
                 prepare_queue = queue.Queue(maxsize=1)
+                prepare_cancelled = threading.Event()
 
                 def _prepare_turn_worker() -> None:
                     worker_trace_token = set_trace_id(trace_id)
                     try:
-                        prepare_queue.put(("prepared", self._prepare_turn(request=request, user_id=user_id)))
+                        prepared_turn = self._prepare_turn(request=request, user_id=user_id)
+                        if prepare_cancelled is not None and prepare_cancelled.is_set():
+                            self._abort_turn(dict(prepared_turn or {}))
+                            return
+                        prepare_queue.put(("prepared", prepared_turn))
                     except Exception as exc:
                         prepare_queue.put(("exception", exc))
                     finally:
@@ -271,6 +279,7 @@ class AskService:
                     yield event
                 seq += len(progress_events)
                 self._ensure_done_allowed(prepared)
+                stream_completed = True
                 yield _attach_event_telemetry(
                     self._result_builder.build_done_event(
                         request=request,
@@ -402,6 +411,7 @@ class AskService:
             )
             trace_id = str(turn_result.get("trace_id") or trace_id)
             self._ensure_done_allowed(turn_result)
+            stream_completed = True
             yield _attach_event_telemetry(
                 self._result_builder.build_done_event(
                     request=request,
@@ -414,9 +424,16 @@ class AskService:
         except Exception as exc:
             self._logger.exception("stream_ask failed trace_id=%s error=%s", trace_id, exc)
             self._persist_terminal_failure(request=request, prepared_turn=prepared, exc=exc)
+            terminal_persisted = True
             self._abort_turn(prepared)
             yield self._build_error_event(trace_id=trace_id, seq=seq, exc=exc)
         finally:
+            if not stream_completed:
+                if prepare_cancelled is not None:
+                    prepare_cancelled.set()
+                if not terminal_persisted:
+                    self._persist_terminal_cancellation(request=request, prepared_turn=prepared)
+                self._abort_turn(prepared)
             clear_trace_id(trace_token)
 
     def _prepare_turn(self, *, request: PatentAskRequest, user_id: int | None) -> dict[str, Any]:
@@ -601,6 +618,41 @@ class AskService:
         except Exception as persist_exc:
             self._logger.exception(
                 "terminal failure persistence failed trace=%s error=%s",
+                prepared.get("trace_id") or request.trace_id,
+                persist_exc,
+            )
+
+    def _persist_terminal_cancellation(
+        self,
+        *,
+        request: PatentAskRequest,
+        prepared_turn: dict[str, Any],
+    ) -> None:
+        accept_terminal_turn = getattr(self._persistence_service, "accept_assistant_terminal_turn", None)
+        if not callable(accept_terminal_turn):
+            return
+        prepared = dict(prepared_turn or {})
+        if not prepared:
+            return
+        try:
+            accept_terminal_turn(
+                prepared,
+                request=request,
+                terminal_status="canceled",
+                answer_text="",
+                metadata={},
+                steps=[],
+                timings={},
+                failure={
+                    "stage": None,
+                    "message": "stream canceled by client",
+                    "code": "client_canceled",
+                    "retriable": True,
+                },
+            )
+        except Exception as persist_exc:
+            self._logger.exception(
+                "terminal cancellation persistence failed trace=%s error=%s",
                 prepared.get("trace_id") or request.trace_id,
                 persist_exc,
             )

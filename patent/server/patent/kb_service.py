@@ -6,6 +6,7 @@ from typing import Any
 
 from server.errors import codes
 from server.errors.core import APIError
+from server.patent.graph_kb.models import PatentGraphKbExecutionResult
 from server.patent.models import PatentQaExecutionResult
 from server.patent.orchestrators.generation import PatentGenerationOrchestrator
 from server.patent.pipeline import (
@@ -29,11 +30,21 @@ class PatentKbService:
         retrieval_service: PatentRetrievalService | None = None,
         mode_profile: PatentModeProfile | None = None,
         runtime: Any | None = None,
+        graph_kb_service: Any | None = None,
+        graph_kb_client: Any | None = None,
+        graph_kb_enabled: bool = False,
+        graph_kb_max_rows: int = 20,
+        graph_kb_timeout_ms: int = 3000,
     ) -> None:
         self._orchestrator = orchestrator or PatentGenerationOrchestrator()
         self._retrieval_service = retrieval_service
         self._mode_profile = mode_profile or get_patent_mode_profile()
         self._runtime = runtime
+        self._graph_kb_service = graph_kb_service
+        self._graph_kb_client = graph_kb_client
+        self._graph_kb_enabled = bool(graph_kb_enabled)
+        self._graph_kb_max_rows = max(1, int(graph_kb_max_rows or 20))
+        self._graph_kb_timeout_ms = max(100, int(graph_kb_timeout_ms or 3000))
 
     def run(
         self,
@@ -55,6 +66,19 @@ class PatentKbService:
             _supports_staged_runtime(active_runtime),
             retrieval_service is not None,
         )
+        graph_result = self._try_graph_preflight(
+            request=request,
+            profile=profile,
+            active_runtime=active_runtime,
+            conversation_context=conversation_context,
+        )
+        if graph_result is not None:
+            _LOGGER.info(
+                "patent kb_service run completed via graph preflight trace=%s references=%s",
+                request.trace_id,
+                list(graph_result.get("references") or []),
+            )
+            return graph_result
         if _supports_staged_runtime(active_runtime):
             result = _call_with_supported_kwargs(
                 self._orchestrator.run,
@@ -108,6 +132,39 @@ class PatentKbService:
             profile=profile,
         )
 
+    def _try_graph_preflight(
+        self,
+        *,
+        request: PatentAskRequest,
+        profile: PatentModeProfile,
+        active_runtime: Any | None,
+        conversation_context: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if str(request.route or "").strip() != "kb_qa":
+            return None
+        if not self._graph_kb_enabled or self._graph_kb_client is None or not callable(self._graph_kb_service):
+            return None
+        try:
+            result = _call_with_supported_kwargs(
+                self._graph_kb_service,
+                question=request.question,
+                conversation_context=conversation_context,
+                neo4j_client=self._graph_kb_client,
+                max_rows=self._graph_kb_max_rows,
+                timeout_ms=self._graph_kb_timeout_ms,
+                generation_runtime=active_runtime,
+            )
+        except Exception:
+            _LOGGER.warning("patent kb_service graph preflight failed trace=%s", request.trace_id, exc_info=True)
+            return None
+        if not isinstance(result, PatentGraphKbExecutionResult) or not result.handled:
+            return None
+        return self._graph_execution_result_from_graph_result(
+            request=request,
+            profile=profile,
+            result=result,
+        )
+
     def _execution_result_from_pipeline_result(
         self,
         *,
@@ -136,6 +193,46 @@ class PatentKbService:
             "original_links": list(raw.get("original_links") or []),
             "metadata": metadata,
             "timings": dict(result.metadata.stage_timings_ms or {}),
+            "used_files": [],
+            "file_selection": dict(request.file_selection or {}),
+            "source_scope": request.source_scope,
+        }
+
+    def _graph_execution_result_from_graph_result(
+        self,
+        *,
+        request: PatentAskRequest,
+        profile: PatentModeProfile,
+        result: PatentGraphKbExecutionResult,
+    ) -> dict[str, Any]:
+        metadata = dict(result.metadata or {})
+        metadata.update(
+            {
+                "success": True,
+                "query_mode": "patent_graph_kb",
+                "template_id": str(result.template_id or ""),
+                "result_count": int(result.result_count or 0),
+                "source_ids": list(result.references),
+            }
+        )
+        return {
+            "answer_text": str(result.answer or ""),
+            "route": str(profile.route),
+            "query_mode": "patent_graph_kb",
+            "steps": [
+                {
+                    "step": "patent_graph_kb",
+                    "title": "专利图谱",
+                    "message": "专利图谱：已完成结构化图谱查询",
+                    "status": "success",
+                }
+            ],
+            "references": list(result.references),
+            "reference_objects": [dict(item) for item in list(result.reference_objects or []) if isinstance(item, dict)],
+            "reference_links": [],
+            "original_links": [],
+            "metadata": metadata,
+            "timings": {"patent_graph_kb": float(result.latency_ms or 0.0)},
             "used_files": [],
             "file_selection": dict(request.file_selection or {}),
             "source_scope": request.source_scope,

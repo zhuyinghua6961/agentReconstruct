@@ -130,6 +130,8 @@ async def health_check(
             "status": status,
             "durable_mode_enabled": bool(settings.durable_mode_enabled),
             "durable_requested": durable_requested,
+            "patent_graph_kb_enabled": bool(getattr(settings, "graph_kb", None) and settings.graph_kb.enabled),
+            "patent_graph_kb_ready": bool(dict(components.get("patent_graph_kb") or {}).get("ready", False)),
             "components": components,
         },
     )

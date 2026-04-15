@@ -4,6 +4,7 @@ import pytest
 
 from server.errors import codes
 from server.errors.core import APIError
+from server.patent.graph_kb.models import PatentGraphKbExecutionResult
 from server.patent.kb_service import PatentKbService
 from server.patent.models import PatentQaExecutionMetadata, PatentQaExecutionResult
 from server.patent.retrieval_models import (
@@ -128,6 +129,169 @@ def test_kb_service_returns_shell_compatible_execution_result_from_orchestrator(
     ]
 
 
+def test_kb_service_returns_graph_result_before_staged_runtime():
+    class _FailingOrchestrator:
+        def run(self, *, question: str, runtime, conversation_context=None) -> PatentQaExecutionResult:
+            raise AssertionError("staged orchestrator should not run after graph hit")
+
+    captured = {}
+
+    def _graph_kb_service(*, question, conversation_context, neo4j_client, max_rows, timeout_ms, generation_runtime=None):
+        captured.update(
+            {
+                "question": question,
+                "conversation_context": conversation_context,
+                "neo4j_client": neo4j_client,
+                "max_rows": max_rows,
+                "timeout_ms": timeout_ms,
+                "generation_runtime": generation_runtime,
+            }
+        )
+        return PatentGraphKbExecutionResult(
+            handled=True,
+            answer="graph answer",
+            references=("CN100355122C",),
+            reference_objects=(
+                {
+                    "canonical_patent_id": "CN100355122C",
+                    "patent_id": "CN100355122C",
+                    "title": "一种提高磷酸铁锂大电流放电性能的方法",
+                    "source": "patent_graph",
+                },
+            ),
+            query_mode="patent_graph_kb",
+            template_id="lookup_patent_by_id",
+            result_count=1,
+            latency_ms=12.5,
+            metadata={"stub_filtered_count": 0},
+        )
+
+    graph_client = object()
+    service = PatentKbService(
+        orchestrator=_FailingOrchestrator(),
+        graph_kb_service=_graph_kb_service,
+        graph_kb_client=graph_client,
+        graph_kb_enabled=True,
+        graph_kb_max_rows=15,
+        graph_kb_timeout_ms=2500,
+    )
+
+    execution_result = service.run(
+        request=_make_request(question="CN100355122C 这件专利是什么？"),
+        runtime=_FakeStagedRuntime(),
+        conversation_context={"recent_turns_for_llm": []},
+    )
+
+    assert execution_result["answer_text"] == "graph answer"
+    assert execution_result["query_mode"] == "patent_graph_kb"
+    assert execution_result["references"] == ["CN100355122C"]
+    assert execution_result["reference_objects"][0]["patent_id"] == "CN100355122C"
+    assert execution_result["steps"] == [
+        {
+            "step": "patent_graph_kb",
+            "title": "专利图谱",
+            "message": "专利图谱：已完成结构化图谱查询",
+            "status": "success",
+        }
+    ]
+    assert execution_result["timings"] == {"patent_graph_kb": 12.5}
+    assert execution_result["metadata"]["query_mode"] == "patent_graph_kb"
+    assert execution_result["metadata"]["template_id"] == "lookup_patent_by_id"
+    assert captured["neo4j_client"] is graph_client
+    assert captured["max_rows"] == 15
+    assert captured["timeout_ms"] == 2500
+    assert captured["generation_runtime"] is not None
+
+
+def test_kb_service_falls_back_to_staged_runtime_when_graph_service_does_not_handle():
+    class _RecordingOrchestrator(_FakeOrchestrator):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run(self, *, question: str, runtime, conversation_context=None) -> PatentQaExecutionResult:
+            self.calls += 1
+            return super().run(question=question, runtime=runtime, conversation_context=conversation_context)
+
+    orchestrator = _RecordingOrchestrator()
+    service = PatentKbService(
+        orchestrator=orchestrator,
+        graph_kb_service=lambda **kwargs: PatentGraphKbExecutionResult(handled=False, fallback_reason="no_plan"),
+        graph_kb_client=object(),
+        graph_kb_enabled=True,
+    )
+
+    execution_result = service.run(
+        request=_make_request(),
+        runtime=_FakeStagedRuntime(),
+        conversation_context={"recent_turns_for_llm": [{"role": "user", "content": "Earlier turn"}]},
+    )
+
+    assert orchestrator.calls == 1
+    assert execution_result["answer_text"] == "staged patent answer"
+    assert execution_result["query_mode"] == "patent_kb_qa"
+
+
+def test_kb_service_skips_graph_preflight_when_graph_disabled():
+    class _RecordingOrchestrator(_FakeOrchestrator):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run(self, *, question: str, runtime, conversation_context=None) -> PatentQaExecutionResult:
+            self.calls += 1
+            return super().run(question=question, runtime=runtime, conversation_context=conversation_context)
+
+    graph_calls = {"count": 0}
+
+    def _graph_kb_service(**kwargs):
+        graph_calls["count"] += 1
+        return PatentGraphKbExecutionResult(handled=True, answer="should not be used")
+
+    orchestrator = _RecordingOrchestrator()
+    service = PatentKbService(
+        orchestrator=orchestrator,
+        graph_kb_service=_graph_kb_service,
+        graph_kb_client=object(),
+        graph_kb_enabled=False,
+    )
+
+    execution_result = service.run(
+        request=_make_request(),
+        runtime=_FakeStagedRuntime(),
+        conversation_context={"recent_turns_for_llm": [{"role": "user", "content": "Earlier turn"}]},
+    )
+
+    assert graph_calls["count"] == 0
+    assert orchestrator.calls == 1
+    assert execution_result["answer_text"] == "staged patent answer"
+
+
+def test_kb_service_falls_back_to_staged_runtime_when_graph_service_raises():
+    class _RecordingOrchestrator(_FakeOrchestrator):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run(self, *, question: str, runtime, conversation_context=None) -> PatentQaExecutionResult:
+            self.calls += 1
+            return super().run(question=question, runtime=runtime, conversation_context=conversation_context)
+
+    orchestrator = _RecordingOrchestrator()
+    service = PatentKbService(
+        orchestrator=orchestrator,
+        graph_kb_service=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("graph failure")),
+        graph_kb_client=object(),
+        graph_kb_enabled=True,
+    )
+
+    execution_result = service.run(
+        request=_make_request(),
+        runtime=_FakeStagedRuntime(),
+        conversation_context={"recent_turns_for_llm": [{"role": "user", "content": "Earlier turn"}]},
+    )
+
+    assert orchestrator.calls == 1
+    assert execution_result["answer_text"] == "staged patent answer"
+
+
 def test_kb_service_falls_back_to_runtime_retrieval_service_when_runtime_is_not_staged():
     class _FailingOrchestrator:
         def run(self, *, question: str, runtime, conversation_context=None) -> PatentQaExecutionResult:
@@ -241,7 +405,17 @@ def test_kb_service_uses_stage3_evidence_context_instead_of_final_answer_excerpt
 
 
 def test_kb_service_rejects_stub_fallback_for_file_kb_routes_without_live_kb_backend():
-    service = PatentKbService()
+    graph_calls = {"count": 0}
+
+    def _graph_kb_service(**kwargs):
+        graph_calls["count"] += 1
+        return PatentGraphKbExecutionResult(handled=True, answer="should not be used")
+
+    service = PatentKbService(
+        graph_kb_service=_graph_kb_service,
+        graph_kb_client=object(),
+        graph_kb_enabled=True,
+    )
 
     request = PatentAskRequest(
         question="请结合 PDF 和知识库总结结论",
@@ -270,6 +444,7 @@ def test_kb_service_rejects_stub_fallback_for_file_kb_routes_without_live_kb_bac
             conversation_context={"recent_turns_for_llm": []},
         )
 
+    assert graph_calls["count"] == 0
     assert exc_info.value.code == codes.SERVICE_NOT_READY
     assert exc_info.value.error == "service_not_ready"
 

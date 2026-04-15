@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import server.patent.tabular_service as tabular_service_module
 from server.patent.file_models import PatentExecutionFile, PatentFileContract
 from server.patent.tabular_service import PatentTabularAnswerClient, PatentTabularService
 
@@ -144,3 +145,20 @@ def test_tabular_service_passes_rich_answer_context_to_answer_fn_and_keeps_publi
     assert "统计摘要:" not in result["metadata"]["table_evidence_context"]
     assert result["metadata"]["table_answer_context_chars"] >= len(result["metadata"]["table_evidence_context"])
     assert result["metadata"]["table_synthesis_context_chars"] >= len(result["metadata"]["table_evidence_context"])
+
+
+def test_tabular_service_marks_skip_cache_when_structured_context_loading_fails(tmp_path, monkeypatch):
+    csv_path = tmp_path / "claims.csv"
+    _write_csv(csv_path)
+
+    def _boom(**_kwargs):
+        raise RuntimeError("workbook boom")
+
+    monkeypatch.setattr(tabular_service_module, "load_workbook_cached", _boom)
+    service = PatentTabularService(auto_answer_client=False)
+
+    result = service.execute(contract=_make_contract(csv_path), include_kb=False)
+
+    assert result["metadata"]["answer_backend"] == "unavailable"
+    assert result["_skip_file_route_cache"] is True
+    assert "无法生成基于表格的回答" in result["answer_text"]

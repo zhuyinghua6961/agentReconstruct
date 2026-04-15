@@ -99,8 +99,17 @@ def _render_stats(sheet: dict[str, Any], result: dict[str, Any]) -> list[str]:
     aggregate = str(summary_stats.get("aggregate") or result.get("operation") or "").strip()
     if aggregate:
         lines.append(f"- 聚合方式: {aggregate}")
-    rows = [dict(item) for item in (sheet.get("rows") or []) if isinstance(item, dict)]
-    numeric_columns = [str(item) for item in (sheet.get("numeric_columns") or []) if str(item)]
+    result_rows = [dict(item) for item in (result.get("rows") or []) if isinstance(item, dict)]
+    rows = result_rows or [dict(item) for item in (sheet.get("rows") or []) if isinstance(item, dict)]
+    numeric_columns = [
+        str(item)
+        for item in (
+            summary_stats.get("metric_columns")
+            or sheet.get("numeric_columns")
+            or []
+        )
+        if str(item)
+    ]
     for column in numeric_columns[:3]:
         values = [_to_float(row.get(column)) for row in rows]
         values = [value for value in values if value is not None]

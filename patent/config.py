@@ -126,6 +126,18 @@ class AuthSettings:
 
 
 @dataclass(frozen=True)
+class PatentGraphSettings:
+    enabled: bool
+    neo4j_url: str
+    neo4j_username: str
+    neo4j_password: str
+    neo4j_database: str
+    timeout_ms: int
+    max_rows: int
+    query_logging: bool
+
+
+@dataclass(frozen=True)
 class Settings:
     service_name: str
     durable_mode_enabled: bool
@@ -137,6 +149,7 @@ class Settings:
     redis: RedisSettings
     authority: AuthoritySettings
     auth: AuthSettings
+    graph_kb: PatentGraphSettings
 
 
 
@@ -184,5 +197,15 @@ def get_settings() -> Settings:
             jwt_secret=str(os.getenv("JWT_SECRET", "") or "").strip(),
             jwt_expire_seconds=_read_int("JWT_EXPIRE_SECONDS", 86400),
             jwt_compatible_access_salts=compat_salts,
+        ),
+        graph_kb=PatentGraphSettings(
+            enabled=_read_bool("PATENT_GRAPH_KB_ENABLED", False),
+            neo4j_url=str(os.getenv("PATENT_NEO4J_URL", "bolt://127.0.0.1:8687") or "").strip(),
+            neo4j_username=str(os.getenv("PATENT_NEO4J_USERNAME", "neo4j") or "neo4j").strip(),
+            neo4j_password=str(os.getenv("PATENT_NEO4J_PASSWORD", "") or ""),
+            neo4j_database=str(os.getenv("PATENT_NEO4J_DATABASE", "neo4j") or "neo4j").strip() or "neo4j",
+            timeout_ms=max(100, _read_int("PATENT_GRAPH_KB_TIMEOUT_MS", 3000)),
+            max_rows=max(1, _read_int("PATENT_GRAPH_KB_MAX_ROWS", 20)),
+            query_logging=_read_bool("PATENT_GRAPH_KB_QUERY_LOGGING", False),
         ),
     )

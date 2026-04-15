@@ -1088,6 +1088,50 @@ def test_abort_turn_releases_inflight_and_lock_for_split_phase_streaming():
     assert redis.get("patent:test:exec:conversation-lock:123") is None
 
 
+def test_closing_durable_stream_releases_runtime_state():
+    persistence, authority, redis = _build_service()
+    ask_service = AskService(
+        patent_executor=PatentExecutor(),
+        persistence_service=persistence,
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    stream = ask_service.stream_ask(_make_request(), user_id=42)
+
+    assert next(stream)["type"] == "metadata"
+
+    stream.close()
+
+    assert authority.assistant_terminal_accepts[0]["terminal_status"] == "canceled"
+    assert persistence.execution_cache.get_pending_turn(conversation_id=123) == ""
+    assert redis.get("patent:test:coord:inflight:123:req_123") is None
+    assert redis.get("patent:test:exec:conversation-lock:123") is None
+
+
+def test_closing_gateway_owned_stream_releases_runtime_state():
+    persistence, authority, redis = _build_service()
+    ask_service = AskService(
+        patent_executor=PatentExecutor(),
+        persistence_service=persistence,
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    stream = ask_service.stream_ask(
+        _make_request(options={"gateway_task_execution": True, "gateway_owned_persistence": True}),
+        user_id=42,
+    )
+
+    assert next(stream)["type"] == "metadata"
+
+    stream.close()
+    time.sleep(0.2)
+
+    assert authority.assistant_terminal_accepts == []
+    assert persistence.execution_cache.get_pending_turn(conversation_id=123) == ""
+    assert redis.get("patent:test:coord:inflight:123:req_123") is None
+    assert redis.get("patent:test:exec:conversation-lock:123") is None
+
+
 
 def test_new_trace_is_blocked_while_previous_failed_turn_is_pending():
     service, authority, _ = _build_service()
