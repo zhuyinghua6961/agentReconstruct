@@ -1500,6 +1500,8 @@ def test_executor_tabular_route_uses_real_table_content_when_local_path_is_avail
 
     assert result["metadata"]["answer_mode"] == "table_execution_summary"
     assert "匹配工作表" in result["metadata"]["table_evidence_context"]
+    assert result["metadata"]["table_answer_context_chars"] >= len(result["metadata"]["table_evidence_context"])
+    assert result["metadata"]["table_synthesis_context_chars"] >= len(result["metadata"]["table_evidence_context"])
     assert "真实表格总结" in result["answer_text"]
     assert "Patent tabular route answered" not in result["answer_text"]
 
@@ -2439,6 +2441,151 @@ def test_executor_pdf_table_kb_hybrid_answer_keeps_current_mixed_evidence_behavi
     assert "执行操作:" not in answer
     assert "文件:" not in answer
     assert "知识库补充：" in answer or "知识库交叉验证：" in answer
+
+
+class _FakeHybridSynthesisService:
+    def __init__(self, *, answer_text: str = "统一合成答案") -> None:
+        self.answer_text = answer_text
+        self.calls: list[dict[str, object]] = []
+
+    def answer(self, *, synthesis_contract: dict[str, object]) -> str:
+        self.calls.append(dict(synthesis_contract))
+        return self.answer_text
+
+    def runtime_signature(self) -> dict[str, object]:
+        return {"model": "hybrid-model", "prompt_version": "hybrid-v1"}
+
+
+class _ExplodingHybridSynthesisService(_FakeHybridSynthesisService):
+    def answer(self, *, synthesis_contract: dict[str, object]) -> str:
+        self.calls.append(dict(synthesis_contract))
+        raise RuntimeError("hybrid synthesis boom")
+
+
+def test_executor_kb_merge_uses_same_hybrid_synthesis_service_and_strips_internal_state(tmp_path):
+    pdf_path = tmp_path / "spec.pdf"
+    csv_path = tmp_path / "claims.csv"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    _write_csv(csv_path)
+
+    class _HybridKbService(PatentKbService):
+        def run(self, *, request, runtime=None, conversation_context=None, progress_callback=None, content_callback=None):
+            return {
+                "answer_text": "知识库补充：该路线强调热稳定性和倍率性能平衡。",
+                "route": request.route,
+                "query_mode": "patent_hybrid_qa",
+                "steps": [{"step": "stage4", "title": "阶段四", "message": "ok", "status": "success"}],
+                "references": ["CN123456789A"],
+                "reference_objects": [{"canonical_patent_id": "CN123456789A"}],
+                "reference_links": [],
+                "original_links": [],
+                "metadata": {
+                    "retrieval_backend": "patent-local-kb",
+                    "kb_evidence_context": "知识库证据指出该路线强调热稳定性和倍率性能平衡。",
+                    "kb_reference_instruction": "引用知识库时使用 CN123456789A。",
+                },
+                "timings": {"kb_ms": 7},
+            }
+
+    hybrid_service = _FakeHybridSynthesisService(
+        answer_text="## 结论\n统一合成答案\n\n## 证据\n- 文件与知识库都支持\n\n## 对比\n- 文件证据优先\n\n## 限制\n- 仍需更多样本"
+    )
+    executor = PatentExecutor(
+        kb_service=_HybridKbService(),
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "This paper studies LMFP/LFP blending and reports safer charging behavior.",
+            answer_question_fn=lambda **kwargs: "真实 PDF 总结：LMFP/LFP 复配改善了充电安全性。",
+        ),
+        tabular_service=PatentTabularService(
+            answer_question_fn=lambda **kwargs: "真实表格总结：LMFP 120mAh，LFP 115mAh，NCM 140mAh。",
+        ),
+        hybrid_synthesis_service=hybrid_service,
+    )
+
+    result = executor.execute(
+        request=_make_file_request(
+            question="请结合 PDF、表格和知识库总结结论",
+            route="hybrid_qa",
+            source_scope="pdf+table+kb",
+            turn_mode="mixed",
+            execution_files=[
+                {"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf", "local_path": str(pdf_path)},
+                {"file_id": 33, "file_type": "csv", "file_name": "claims.csv", "local_path": str(csv_path)},
+            ],
+            selected_file_ids=[11, 33],
+            trace_id="req_pdf_table_kb_hybrid_llm",
+        ),
+        context={"recent_turns_for_llm": []},
+    )
+
+    assert hybrid_service.calls
+    assert result["answer_text"].startswith("## 结论")
+    assert "_hybrid_internal_state" not in result
+    assert "_hybrid_internal_state" not in result["metadata"]
+    assert result["metadata"]["hybrid_synthesis_backend"] == "llm"
+    assert result["metadata"]["hybrid_synthesis_prompt_version"]
+    assert result["metadata"]["hybrid_synthesis_context_chars"] > 0
+    assert "pdf_synthesis_context" not in result["metadata"]["synthesis_contract"]
+    assert "table_synthesis_context" not in result["metadata"]["synthesis_contract"]
+
+
+def test_executor_hybrid_synthesis_failure_falls_back_to_rules_and_strips_internal_state(tmp_path):
+    pdf_path = tmp_path / "spec.pdf"
+    csv_path = tmp_path / "claims.csv"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    _write_csv(csv_path)
+
+    class _HybridKbService(PatentKbService):
+        def run(self, *, request, runtime=None, conversation_context=None, progress_callback=None, content_callback=None):
+            return {
+                "answer_text": "知识库补充：该路线强调热稳定性和倍率性能平衡。",
+                "route": request.route,
+                "query_mode": "patent_hybrid_qa",
+                "steps": [{"step": "stage4", "title": "阶段四", "message": "ok", "status": "success"}],
+                "references": [],
+                "reference_objects": [],
+                "reference_links": [],
+                "original_links": [],
+                "metadata": {
+                    "retrieval_backend": "patent-local-kb",
+                    "kb_evidence_context": "知识库证据指出该路线强调热稳定性和倍率性能平衡。",
+                    "kb_reference_instruction": "引用知识库时使用 CN123456789A。",
+                },
+                "timings": {"kb_ms": 7},
+            }
+
+    executor = PatentExecutor(
+        kb_service=_HybridKbService(),
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "This paper studies LMFP/LFP blending and reports safer charging behavior.",
+            answer_question_fn=lambda **kwargs: "真实 PDF 总结：LMFP/LFP 复配改善了充电安全性。",
+        ),
+        tabular_service=PatentTabularService(
+            answer_question_fn=lambda **kwargs: "真实表格总结：LMFP 120mAh，LFP 115mAh，NCM 140mAh。",
+        ),
+        hybrid_synthesis_service=_ExplodingHybridSynthesisService(),
+    )
+
+    result = executor.execute(
+        request=_make_file_request(
+            question="请结合 PDF、表格和知识库总结结论",
+            route="hybrid_qa",
+            source_scope="pdf+table+kb",
+            turn_mode="mixed",
+            execution_files=[
+                {"file_id": 11, "file_type": "pdf", "file_name": "spec.pdf", "local_path": str(pdf_path)},
+                {"file_id": 33, "file_type": "csv", "file_name": "claims.csv", "local_path": str(csv_path)},
+            ],
+            selected_file_ids=[11, 33],
+            trace_id="req_pdf_table_kb_hybrid_fallback",
+        ),
+        context={"recent_turns_for_llm": []},
+    )
+
+    assert result["answer_text"]
+    assert result["metadata"]["hybrid_synthesis_backend"] == "fallback_rules"
+    assert "_hybrid_internal_state" not in result
+    assert "_hybrid_internal_state" not in result["metadata"]
 
 
 def test_executor_pdf_kb_hybrid_preserves_file_route_cache_metadata_alongside_kb_metadata():

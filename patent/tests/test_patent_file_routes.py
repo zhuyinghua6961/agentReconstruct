@@ -7,8 +7,10 @@ from pathlib import Path
 
 import server.patent.pdf_service as pdf_service_module
 import server.patent.tabular_service as tabular_service_module
+from server.patent.cache_keys import build_file_route_cache_fingerprint
 from server.patent.file_contract import build_patent_file_contract
-from server.patent.file_routes import dispatch_patent_file_route, plan_patent_file_route
+from server.patent.file_routes import _file_route_runtime_signature, dispatch_patent_file_route, plan_patent_file_route
+from server.patent.hybrid_synthesis import HYBRID_SYNTHESIS_PROMPT_VERSION
 from server.patent.pdf_contract import format_multi_pdf_sections
 from server.patent.pdf_service import PatentPdfAnswerClient, PatentPdfService
 from server.patent.tabular_service import PatentTabularService
@@ -4775,6 +4777,369 @@ def test_dispatch_hybrid_route_with_kb_defers_hybrid_step_until_executor_merge(t
     assert all(step.get("step") != "hybrid_answer" for step in result["metadata"]["steps"])
     assert all(step.get("step") != "hybrid_answer" for step in progress_steps)
     assert result["metadata"]["synthesis_contract"]["source_scope"] == "pdf+table+kb"
+
+
+class _FakeHybridSynthesisService:
+    def __init__(self, *, answer_text: str = "统一合成答案", runtime_signature: dict[str, object] | None = None) -> None:
+        self.answer_text = answer_text
+        self._runtime_signature = dict(runtime_signature or {"model": "hybrid-model", "prompt_version": "hybrid-v1"})
+        self.calls: list[dict[str, object]] = []
+
+    def answer(self, *, synthesis_contract: dict[str, object]) -> str:
+        self.calls.append(dict(synthesis_contract))
+        return self.answer_text
+
+    def runtime_signature(self) -> dict[str, object]:
+        return dict(self._runtime_signature)
+
+
+class _ExplodingHybridSynthesisService(_FakeHybridSynthesisService):
+    def answer(self, *, synthesis_contract: dict[str, object]) -> str:
+        self.calls.append(dict(synthesis_contract))
+        raise RuntimeError("hybrid synthesis boom")
+
+
+class _FakeTabularAnswerClient:
+    def __init__(self, *, model: str = "tabular-model") -> None:
+        self._model = model
+
+    def runtime_signature(self) -> dict[str, object]:
+        return {"model": self._model, "top_p": 0.95}
+
+    def answer(self, **kwargs):
+        return "## 结论\n表格答案\n\n## 证据\n- LMFP 120mAh\n\n## 对比\n- 待后续对照\n\n## 限制\n- 仅表格证据"
+
+
+def test_file_only_hybrid_uses_injected_hybrid_synthesis_service(tmp_path):
+    pdf_path = tmp_path / "battery-paper.pdf"
+    csv_path = tmp_path / "cells.csv"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    _write_csv(csv_path)
+    contract = build_patent_file_contract(
+        question="请结合 PDF 和表格回答结论",
+        route="hybrid_qa",
+        source_scope="pdf+table",
+        selected_file_ids=[11, 33],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "local_path": str(pdf_path)},
+            {"file_id": 33, "file_type": "csv", "file_name": "cells.csv", "local_path": str(csv_path)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 33], "source_scope": "pdf+table"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    service = _FakeHybridSynthesisService(
+        answer_text="## 结论\n统一合成答案\n\n## 证据\n- PDF 与表格都支持\n\n## 对比\n- 文件证据一致\n\n## 限制\n- 仍需更多样本"
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "LMFP/LFP 复配改善充电安全，并报告循环稳定性提升。",
+            answer_question_fn=lambda **kwargs: "真实 PDF 总结：LMFP/LFP 复配改善充电安全性。",
+        ),
+        tabular_service=PatentTabularService(
+            answer_question_fn=lambda **kwargs: "真实表格总结：LMFP 120mAh，LFP 115mAh，NCM 140mAh。",
+        ),
+        hybrid_synthesis_service=service,
+    )
+
+    assert service.calls
+    assert result["answer_text"].startswith("## 结论")
+    assert result["metadata"]["hybrid_synthesis_backend"] == "llm"
+    assert result["metadata"]["hybrid_synthesis_prompt_version"] == HYBRID_SYNTHESIS_PROMPT_VERSION
+    assert result["metadata"]["hybrid_synthesis_context_chars"] > 0
+    assert "_hybrid_internal_state" not in result
+    assert "pdf_synthesis_context" not in result["metadata"]["synthesis_contract"]
+    assert "table_synthesis_context" not in result["metadata"]["synthesis_contract"]
+
+
+def test_hybrid_route_with_kb_stashes_internal_state_and_public_contract_stays_compact(tmp_path):
+    pdf_path = tmp_path / "battery-paper.pdf"
+    csv_path = tmp_path / "cells.csv"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    _write_csv(csv_path)
+    contract = build_patent_file_contract(
+        question="请结合 PDF、表格和知识库回答结论",
+        route="hybrid_qa",
+        source_scope="pdf+table+kb",
+        selected_file_ids=[11, 33],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "local_path": str(pdf_path)},
+            {"file_id": 33, "file_type": "csv", "file_name": "cells.csv", "local_path": str(csv_path)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 33], "source_scope": "pdf+table+kb"},
+        kb_enabled=True,
+        allow_kb_verification=True,
+    )
+    service = _FakeHybridSynthesisService()
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "LMFP/LFP 复配改善充电安全，并报告循环稳定性提升。",
+            answer_question_fn=lambda **kwargs: "真实 PDF 总结：LMFP/LFP 复配改善充电安全性。",
+        ),
+        tabular_service=PatentTabularService(
+            answer_question_fn=lambda **kwargs: "真实表格总结：LMFP 120mAh，LFP 115mAh，NCM 140mAh。",
+        ),
+        hybrid_synthesis_service=service,
+    )
+
+    assert service.calls == []
+    assert result["_hybrid_internal_state"]["synthesis_contract"]["pdf_synthesis_context"]
+    assert result["_hybrid_internal_state"]["synthesis_contract"]["table_synthesis_context"]
+    assert result["_hybrid_internal_state"]["synthesis_contract"]["kb_synthesis_context"] == ""
+    assert result["_hybrid_internal_state"]["synthesis_contract"]["available_sources"] == ["pdf", "table"]
+    assert result["_hybrid_internal_state"]["synthesis_contract"]["source_answer_modes"]["pdf"]
+    assert result["_hybrid_internal_state"]["synthesis_contract"]["source_answer_modes"]["table"]
+    assert "pdf_synthesis_context" not in result["metadata"]["synthesis_contract"]
+    assert "table_synthesis_context" not in result["metadata"]["synthesis_contract"]
+
+
+def test_hybrid_synthesis_failure_falls_back_to_rule_synthesis(tmp_path):
+    pdf_path = tmp_path / "battery-paper.pdf"
+    csv_path = tmp_path / "cells.csv"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    _write_csv(csv_path)
+    contract = build_patent_file_contract(
+        question="请结合 PDF 和表格回答结论",
+        route="hybrid_qa",
+        source_scope="pdf+table",
+        selected_file_ids=[11, 33],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "local_path": str(pdf_path)},
+            {"file_id": 33, "file_type": "csv", "file_name": "cells.csv", "local_path": str(csv_path)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 33], "source_scope": "pdf+table"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "LMFP/LFP 复配改善充电安全，并报告循环稳定性提升。",
+            answer_question_fn=lambda **kwargs: "真实 PDF 总结：LMFP/LFP 复配改善充电安全性。",
+        ),
+        tabular_service=PatentTabularService(
+            answer_question_fn=lambda **kwargs: "真实表格总结：LMFP 120mAh，LFP 115mAh，NCM 140mAh。",
+        ),
+        hybrid_synthesis_service=_ExplodingHybridSynthesisService(),
+    )
+
+    assert result["metadata"]["hybrid_synthesis_backend"] == "fallback_rules"
+    assert result["answer_text"]
+    assert "source_scope=" not in result["answer_text"]
+    assert "匹配工作表:" not in result["answer_text"]
+    assert "执行操作:" not in result["answer_text"]
+
+
+def test_file_route_cache_fingerprint_changes_when_hybrid_runtime_signature_changes():
+    contract = build_patent_file_contract(
+        question="请结合 PDF 和表格回答结论",
+        route="hybrid_qa",
+        source_scope="pdf+table",
+        selected_file_ids=[11, 33],
+        primary_file_id=11,
+        execution_files=[PDF_FILE, TABLE_FILE],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 33], "source_scope": "pdf+table"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    plan = plan_patent_file_route(contract)
+    tabular_service = PatentTabularService(answer_client=_FakeTabularAnswerClient(model="tabular-v1"), auto_answer_client=False)
+    left = build_file_route_cache_fingerprint(
+        question=contract.question,
+        route=contract.route,
+        source_scope=contract.source_scope,
+        selected_file_ids=list(contract.selected_file_ids),
+        primary_file_id=contract.primary_file_id,
+        selected_execution_files=[item.as_payload() for item in contract.selected_execution_files],
+        file_selection=dict(contract.file_selection),
+        runtime_signature=_file_route_runtime_signature(
+            plan=plan,
+            pdf_service=PatentPdfService(),
+            tabular_service=tabular_service,
+            hybrid_synthesis_service=None,
+        ),
+    )
+    right = build_file_route_cache_fingerprint(
+        question=contract.question,
+        route=contract.route,
+        source_scope=contract.source_scope,
+        selected_file_ids=list(contract.selected_file_ids),
+        primary_file_id=contract.primary_file_id,
+        selected_execution_files=[item.as_payload() for item in contract.selected_execution_files],
+        file_selection=dict(contract.file_selection),
+        runtime_signature=_file_route_runtime_signature(
+            plan=plan,
+            pdf_service=PatentPdfService(),
+            tabular_service=tabular_service,
+            hybrid_synthesis_service=_FakeHybridSynthesisService(runtime_signature={"model": "hybrid-v2", "prompt_version": "hybrid-v2"}),
+        ),
+    )
+
+    assert left != right
+
+
+def test_file_route_cache_fingerprint_changes_when_tabular_runtime_signature_changes():
+    contract = build_patent_file_contract(
+        question="请总结表格结论",
+        route="tabular_qa",
+        source_scope="table",
+        selected_file_ids=[33],
+        primary_file_id=33,
+        execution_files=[TABLE_FILE],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [33], "source_scope": "table"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    plan = plan_patent_file_route(contract)
+    left = build_file_route_cache_fingerprint(
+        question=contract.question,
+        route=contract.route,
+        source_scope=contract.source_scope,
+        selected_file_ids=list(contract.selected_file_ids),
+        primary_file_id=contract.primary_file_id,
+        selected_execution_files=[item.as_payload() for item in contract.selected_execution_files],
+        file_selection=dict(contract.file_selection),
+        runtime_signature=_file_route_runtime_signature(
+            plan=plan,
+            pdf_service=PatentPdfService(),
+            tabular_service=PatentTabularService(answer_client=_FakeTabularAnswerClient(model="tabular-v1"), auto_answer_client=False),
+            hybrid_synthesis_service=None,
+        ),
+    )
+    right = build_file_route_cache_fingerprint(
+        question=contract.question,
+        route=contract.route,
+        source_scope=contract.source_scope,
+        selected_file_ids=list(contract.selected_file_ids),
+        primary_file_id=contract.primary_file_id,
+        selected_execution_files=[item.as_payload() for item in contract.selected_execution_files],
+        file_selection=dict(contract.file_selection),
+        runtime_signature=_file_route_runtime_signature(
+            plan=plan,
+            pdf_service=PatentPdfService(),
+            tabular_service=PatentTabularService(
+                answer_client=_FakeTabularAnswerClient(model="tabular-v2"),
+                auto_answer_client=False,
+                max_table_chars=16000,
+            ),
+            hybrid_synthesis_service=None,
+        ),
+    )
+
+    assert left != right
+
+
+def test_tabular_client_failure_does_not_seed_file_route_cache(tmp_path):
+    csv_path = tmp_path / "cells.csv"
+    _write_csv(csv_path)
+
+    class _CacheStub:
+        def __init__(self) -> None:
+            self.set_calls = 0
+
+        def get_file_route_cache(self, *, fingerprint: str):
+            return None
+
+        def claim_file_route_singleflight(self, *, fingerprint: str, ttl_seconds: int):
+            return "token-1"
+
+        def clear_file_route_singleflight(self, *, fingerprint: str, token: str):
+            return True
+
+        def set_file_route_cache(self, *, fingerprint: str, payload, ttl_seconds: int):
+            self.set_calls += 1
+            return True
+
+    class _ExplodingTabularClient:
+        def answer(self, **kwargs):
+            raise RuntimeError("tabular llm boom")
+
+    cache = _CacheStub()
+    contract = build_patent_file_contract(
+        question="请总结表格结论",
+        route="tabular_qa",
+        source_scope="table",
+        selected_file_ids=[33],
+        primary_file_id=33,
+        execution_files=[{"file_id": 33, "file_type": "csv", "file_name": "cells.csv", "local_path": str(csv_path)}],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [33], "source_scope": "table"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        tabular_service=PatentTabularService(answer_client=_ExplodingTabularClient(), auto_answer_client=False),
+        execution_cache=cache,
+    )
+
+    assert result["answer_text"]
+    assert result["metadata"]["cache_hit"] is False
+    assert cache.set_calls == 0
+
+
+def test_file_only_hybrid_llm_failure_does_not_seed_file_route_cache(tmp_path):
+    pdf_path = tmp_path / "battery-paper.pdf"
+    csv_path = tmp_path / "cells.csv"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    _write_csv(csv_path)
+
+    class _CacheStub:
+        def __init__(self) -> None:
+            self.set_calls = 0
+
+        def get_file_route_cache(self, *, fingerprint: str):
+            return None
+
+        def claim_file_route_singleflight(self, *, fingerprint: str, ttl_seconds: int):
+            return "token-1"
+
+        def clear_file_route_singleflight(self, *, fingerprint: str, token: str):
+            return True
+
+        def set_file_route_cache(self, *, fingerprint: str, payload, ttl_seconds: int):
+            self.set_calls += 1
+            return True
+
+    cache = _CacheStub()
+    contract = build_patent_file_contract(
+        question="请结合 PDF 和表格回答结论",
+        route="hybrid_qa",
+        source_scope="pdf+table",
+        selected_file_ids=[11, 33],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "local_path": str(pdf_path)},
+            {"file_id": 33, "file_type": "csv", "file_name": "cells.csv", "local_path": str(csv_path)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 33], "source_scope": "pdf+table"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+
+    result = dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "LMFP/LFP 复配改善充电安全，并报告循环稳定性提升。",
+            answer_question_fn=lambda **kwargs: "真实 PDF 总结：LMFP/LFP 复配改善充电安全性。",
+        ),
+        tabular_service=PatentTabularService(
+            answer_question_fn=lambda **kwargs: "真实表格总结：LMFP 120mAh，LFP 115mAh，NCM 140mAh。",
+        ),
+        hybrid_synthesis_service=_ExplodingHybridSynthesisService(),
+        execution_cache=cache,
+    )
+
+    assert result["metadata"]["hybrid_synthesis_backend"] == "fallback_rules"
+    assert cache.set_calls == 0
 
 
 def test_dispatch_hybrid_route_marks_failure_when_no_usable_file_evidence_exists():

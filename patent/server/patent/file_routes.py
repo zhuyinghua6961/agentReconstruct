@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import os
 import re
 import threading
 import time
@@ -9,8 +10,9 @@ from typing import Any, Callable
 
 from server.patent.cache_keys import build_file_route_cache_fingerprint
 from server.patent.file_models import PatentFileContract, PatentFileRoutePlan
+from server.patent.hybrid_synthesis import HYBRID_SYNTHESIS_PROMPT_VERSION, build_patent_hybrid_synthesis_contract
 from server.patent.pdf_contract import is_summary_question
-from server.patent.pdf_service import PatentPdfService
+from server.patent.pdf_service import PatentPdfService, build_pdf_synthesis_context
 from server.patent.summary_formatting import LITERATURE_SUMMARY_NOTE
 from server.patent.streaming import emit_text_chunks
 from server.patent.tabular_service import PatentTabularService
@@ -28,17 +30,97 @@ _LOGGER = logging.getLogger("patent.file_routes")
 _LITERATURE_SUMMARY_NOTE = LITERATURE_SUMMARY_NOTE
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(str(os.getenv(name) or default).strip())
+    except Exception:
+        return int(default)
+
+
+def _table_hybrid_context_limit() -> int:
+    return max(1000, _env_int("PATENT_HYBRID_TABLE_CONTEXT_CHARS", 6000))
+
+
+def _trim_text(value: object, *, limit: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(1, limit - 1)].rstrip() + "…"
+
+
+def _public_hybrid_synthesis_contract(contract: dict[str, Any]) -> dict[str, Any]:
+    public_keys = {
+        "question",
+        "source_scope",
+        "pdf_answer",
+        "tabular_answer",
+        "kb_answer",
+        "pdf_evidence_context",
+        "table_execution_context",
+        "kb_evidence_context",
+        "kb_reference_instruction",
+        "include_kb",
+        "file_precedence",
+        "available_sources",
+        "source_answer_modes",
+        "synthesis_prompt_version",
+    }
+    return {
+        key: value
+        for key, value in dict(contract or {}).items()
+        if key in public_keys
+    }
+
+
+def _hybrid_synthesis_context_chars(contract: dict[str, Any]) -> int:
+    normalized = dict(contract or {})
+    return sum(
+        len(str(normalized.get(key) or ""))
+        for key in ("pdf_synthesis_context", "table_synthesis_context", "kb_synthesis_context")
+    )
+
+
+def _clone_payload_without_internal_state(payload: dict[str, Any]) -> dict[str, Any]:
+    cloned = dict(payload or {})
+    cloned.pop("_hybrid_internal_state", None)
+    cloned.pop("_table_synthesis_context", None)
+    cloned.pop("_skip_file_route_cache", None)
+    metadata = dict(cloned.get("metadata") or {})
+    metadata.pop("_hybrid_internal_state", None)
+    cloned["metadata"] = metadata
+    return cloned
+
+
+def _should_skip_file_route_cache(payload: dict[str, Any]) -> bool:
+    normalized = dict(payload or {})
+    if bool(normalized.get("_skip_file_route_cache")):
+        return True
+    metadata = dict(normalized.get("metadata") or {})
+    return bool(metadata.get("_skip_file_route_cache"))
+
+
 def _file_route_runtime_signature(
     *,
     plan: PatentFileRoutePlan,
     pdf_service: PatentPdfService,
     tabular_service: PatentTabularService,
+    hybrid_synthesis_service: Any | None = None,
 ) -> dict[str, Any]:
+    tabular_runtime_signature = getattr(tabular_service, "runtime_signature", None)
+    hybrid_runtime_signature = getattr(hybrid_synthesis_service, "runtime_signature", None)
     return {
         "handler": plan.handler,
         "include_kb": bool(plan.include_kb),
         "pdf_service_type": type(pdf_service).__name__,
         "tabular_service_type": type(tabular_service).__name__,
+        "tabular_answer_backend": getattr(tabular_service, "answer_backend", lambda: "fallback")(),
+        "tabular_prompt_version": getattr(tabular_service, "prompt_version", lambda: "")(),
+        "tabular_runtime_signature": dict(tabular_runtime_signature() or {}) if callable(tabular_runtime_signature) else {},
+        "tabular_max_context_chars": int(getattr(tabular_service, "_max_table_chars", 0) or 0),
+        "hybrid_synthesis_backend": "llm" if hybrid_synthesis_service is not None else "fallback_rules",
+        "hybrid_synthesis_prompt_version": HYBRID_SYNTHESIS_PROMPT_VERSION,
+        "hybrid_runtime_signature": dict(hybrid_runtime_signature() or {}) if callable(hybrid_runtime_signature) else {},
+        "hybrid_table_context_chars": _table_hybrid_context_limit(),
     }
 
 
@@ -252,13 +334,22 @@ def _run_cached_file_route(
             renew_thread.start()
 
         computed = dict(compute() or {})
+        skip_cache = _should_skip_file_route_cache(computed)
+        preserve_internal_state = bool(computed.get("_hybrid_internal_state")) or (
+            bool(computed.get("_table_synthesis_context")) and bool(computed.get("kb_enabled"))
+        )
+        computed = _clone_payload_without_internal_state(computed) if not preserve_internal_state else {
+            **dict(computed),
+            "_skip_file_route_cache": None,
+        }
+        computed.pop("_skip_file_route_cache", None)
         if renew_stop is not None:
             renew_stop.set()
         if renew_thread is not None and renew_thread.is_alive():
             renew_thread.join(timeout=0.05)
             if renew_thread.is_alive() and not renew_error:
                 renew_error.append("file-route singleflight renew completion pending")
-        if not renew_error:
+        if not renew_error and not skip_cache:
             try:
                 cache.set_file_route_cache(
                     fingerprint=fingerprint,
@@ -319,6 +410,7 @@ def dispatch_patent_file_route(
     contract: PatentFileContract,
     pdf_service: PatentPdfService | None = None,
     tabular_service: PatentTabularService | None = None,
+    hybrid_synthesis_service: Any | None = None,
     execution_cache: Any | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     content_callback: Callable[[str], None] | None = None,
@@ -357,6 +449,7 @@ def dispatch_patent_file_route(
             plan=plan,
             pdf_service=pdf_handler,
             tabular_service=tabular_handler,
+            hybrid_synthesis_service=hybrid_synthesis_service,
         ),
     )
     if callable(progress_callback):
@@ -449,6 +542,7 @@ def dispatch_patent_file_route(
             include_kb=plan.include_kb,
             pdf_service=pdf_handler,
             tabular_service=tabular_handler,
+            hybrid_synthesis_service=hybrid_synthesis_service,
             progress_callback=progress_callback,
             content_callback=content_callback,
             dispatch_step=dispatch_step,
@@ -483,6 +577,7 @@ def _build_hybrid_result(
     include_kb: bool,
     pdf_service: PatentPdfService,
     tabular_service: PatentTabularService,
+    hybrid_synthesis_service: Any | None,
     progress_callback: Callable[[dict[str, Any]], None] | None,
     content_callback: Callable[[str], None] | None,
     dispatch_step: dict[str, Any],
@@ -557,16 +652,57 @@ def _build_hybrid_result(
         )
     pdf_answer = str(pdf_result.get("answer_text") or "").strip()
     tabular_answer = str(tabular_result.get("answer_text") or "").strip()
+    pdf_metadata = dict(pdf_result.get("metadata") or {})
+    tabular_metadata = dict(tabular_result.get("metadata") or {})
     synthesis_contract = build_patent_hybrid_synthesis_contract(
         question=contract.question,
         source_scope=contract.source_scope,
         pdf_answer=pdf_answer,
         tabular_answer=tabular_answer,
-        pdf_evidence_context=str(dict(pdf_result.get("metadata") or {}).get("pdf_evidence_context") or ""),
-        table_execution_context=str(dict(tabular_result.get("metadata") or {}).get("table_evidence_context") or ""),
+        pdf_evidence_context=str(pdf_metadata.get("pdf_evidence_context") or ""),
+        table_execution_context=str(tabular_metadata.get("table_evidence_context") or ""),
+        pdf_synthesis_context=build_pdf_synthesis_context(
+            prepared_pdf_text=str(pdf_metadata.get("prepared_pdf_text") or ""),
+            pdf_text="",
+        ),
+        table_synthesis_context=_trim_text(
+            tabular_result.get("_table_synthesis_context") or tabular_metadata.get("table_evidence_context") or "",
+            limit=_table_hybrid_context_limit(),
+        ),
         include_kb=include_kb,
+        available_sources=["pdf", "table"],
+        source_answer_modes={
+            "pdf": str(pdf_metadata.get("answer_mode") or ""),
+            "table": str(tabular_metadata.get("answer_mode") or ""),
+        },
     )
+    hybrid_backend = "fallback_rules"
+    skip_cache = False
     answer_text = synthesize_patent_hybrid_answer(synthesis_contract=synthesis_contract)
+    if (
+        not include_kb
+        and hybrid_synthesis_service is not None
+        and _has_usable_hybrid_evidence(synthesis_contract=synthesis_contract)
+    ):
+        try:
+            candidate = str(
+                _call_with_supported_kwargs(
+                    hybrid_synthesis_service.answer,
+                    synthesis_contract=synthesis_contract,
+                )
+                or ""
+            ).strip()
+            if candidate:
+                answer_text = candidate
+                hybrid_backend = "llm"
+        except Exception:
+            skip_cache = True
+            _LOGGER.warning(
+                "patent hybrid synthesis service failed; degrading to fallback rules route=%s source_scope=%s",
+                contract.route,
+                contract.source_scope,
+                exc_info=True,
+            )
     hybrid_success = _has_usable_hybrid_evidence(synthesis_contract=synthesis_contract)
     hybrid_step = {
         "step": "hybrid_answer",
@@ -622,9 +758,12 @@ def _build_hybrid_result(
             "selected_file_count": len(used_files),
             "kb_enabled": bool(include_kb),
             "answer_mode": "hybrid_unified_synthesis",
-            "pdf_answer_mode": str(dict(pdf_result.get("metadata") or {}).get("answer_mode") or ""),
-            "tabular_answer_mode": str(dict(tabular_result.get("metadata") or {}).get("answer_mode") or ""),
-            "synthesis_contract": dict(synthesis_contract),
+            "pdf_answer_mode": str(pdf_metadata.get("answer_mode") or ""),
+            "tabular_answer_mode": str(tabular_metadata.get("answer_mode") or ""),
+            "hybrid_synthesis_backend": hybrid_backend,
+            "hybrid_synthesis_prompt_version": HYBRID_SYNTHESIS_PROMPT_VERSION,
+            "hybrid_synthesis_context_chars": _hybrid_synthesis_context_chars(synthesis_contract),
+            "synthesis_contract": _public_hybrid_synthesis_contract(synthesis_contract),
             "steps": [
                 dict(dispatch_step),
                 *[dict(item) for item in list(pdf_result.get("steps") or []) if isinstance(item, dict)],
@@ -641,6 +780,12 @@ def _build_hybrid_result(
         "selected_file_ids": list(contract.selected_file_ids),
         "file_selection": dict(contract.file_selection),
         "kb_enabled": bool(include_kb),
+        "_skip_file_route_cache": bool(skip_cache),
+        **(
+            {"_hybrid_internal_state": {"synthesis_contract": dict(synthesis_contract)}}
+            if include_kb
+            else {}
+        ),
     }
 
 
@@ -671,35 +816,6 @@ def _with_leading_steps(*, result: dict[str, Any], steps: list[dict[str, Any]]) 
     metadata["steps"] = [dict(item) for item in payload["steps"]]
     payload["metadata"] = metadata
     return payload
-
-
-def build_patent_hybrid_synthesis_contract(
-    *,
-    question: str,
-    source_scope: str,
-    pdf_answer: str = "",
-    tabular_answer: str = "",
-    kb_answer: str = "",
-    pdf_evidence_context: str = "",
-    table_execution_context: str = "",
-    include_kb: bool = False,
-    kb_evidence_context: str = "",
-    kb_reference_instruction: str = "",
-) -> dict[str, Any]:
-    return {
-        "question": str(question or "").strip(),
-        "source_scope": str(source_scope or "").strip(),
-        "pdf_answer": str(pdf_answer or "").strip(),
-        "tabular_answer": str(tabular_answer or "").strip(),
-        "kb_answer": str(kb_answer or "").strip(),
-        "pdf_evidence_context": str(pdf_evidence_context or "").strip(),
-        "table_execution_context": str(table_execution_context or "").strip(),
-        "kb_evidence_context": str(kb_evidence_context or "").strip(),
-        "kb_reference_instruction": str(kb_reference_instruction or "").strip(),
-        "include_kb": bool(include_kb),
-        "file_precedence": "file_over_kb",
-    }
-
 
 def _collect_hybrid_points(*values: str, max_items: int = 4) -> list[str]:
     points: list[str] = []

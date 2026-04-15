@@ -612,6 +612,7 @@ def test_create_app_closes_runtime_when_service_bootstrap_fails_after_runtime_cr
 def test_create_app_closes_shared_provider_and_pdf_service_when_service_bootstrap_fails(monkeypatch):
     runtime_instances = []
     pdf_services = []
+    tabular_services = []
 
     class _Runtime:
         def __init__(self):
@@ -644,6 +645,15 @@ def test_create_app_closes_shared_provider_and_pdf_service_when_service_bootstra
         def close(self):
             self.closed = True
 
+    class _TabularService:
+        def __init__(self, *, answer_client=None, **kwargs):
+            self.answer_client = answer_client
+            self.closed = False
+            tabular_services.append(self)
+
+        def close(self):
+            self.closed = True
+
     provider = _SharedProvider()
 
     monkeypatch.setattr(
@@ -658,7 +668,14 @@ def test_create_app_closes_shared_provider_and_pdf_service_when_service_bootstra
         type("_PdfAnswerClientFactory", (), {"from_env": staticmethod(lambda http_client=None: _AnswerClient())}),
         raising=False,
     )
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentTabularAnswerClient",
+        type("_TabularAnswerClientFactory", (), {"from_env": staticmethod(lambda http_client=None: _AnswerClient())}),
+        raising=False,
+    )
     monkeypatch.setattr(patent_fastapi_app, "PatentPdfService", _PdfService, raising=False)
+    monkeypatch.setattr(patent_fastapi_app, "PatentTabularService", _TabularService, raising=False)
     monkeypatch.setattr(patent_fastapi_app, "build_default_patent_runtime", lambda **kwargs: _Runtime())
     monkeypatch.setattr(patent_fastapi_app, "OriginalViewService", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
 
@@ -668,12 +685,16 @@ def test_create_app_closes_shared_provider_and_pdf_service_when_service_bootstra
     assert provider.closed is True
     assert len(pdf_services) == 1
     assert pdf_services[0].closed is True
+    assert len(tabular_services) == 1
+    assert tabular_services[0].closed is True
     assert len(runtime_instances) == 1
     assert runtime_instances[0].closed is True
 
 
 def test_lifespan_shutdown_closes_app_owned_shared_provider_and_pdf_service(monkeypatch):
     pdf_services = []
+    tabular_services = []
+    hybrid_clients = []
 
     class _SharedProvider:
         def __init__(self):
@@ -698,6 +719,24 @@ def test_lifespan_shutdown_closes_app_owned_shared_provider_and_pdf_service(monk
         def close(self):
             self.closed = True
 
+    class _TabularService:
+        def __init__(self, *, answer_client=None, **kwargs):
+            self.answer_client = answer_client
+            self.closed = False
+            tabular_services.append(self)
+
+        def close(self):
+            self.closed = True
+
+    class _HybridClient:
+        def __init__(self, *, http_client=None):
+            self.http_client = http_client
+            self.closed = False
+            hybrid_clients.append(self)
+
+        def close(self):
+            self.closed = True
+
     provider = _SharedProvider()
 
     monkeypatch.setattr(
@@ -712,7 +751,20 @@ def test_lifespan_shutdown_closes_app_owned_shared_provider_and_pdf_service(monk
         type("_PdfAnswerClientFactory", (), {"from_env": staticmethod(lambda http_client=None: _AnswerClient())}),
         raising=False,
     )
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentTabularAnswerClient",
+        type("_TabularAnswerClientFactory", (), {"from_env": staticmethod(lambda http_client=None: _AnswerClient())}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentHybridSynthesisClient",
+        type("_HybridClientFactory", (), {"from_env": staticmethod(lambda http_client=None: _HybridClient(http_client=http_client))}),
+        raising=False,
+    )
     monkeypatch.setattr(patent_fastapi_app, "PatentPdfService", _PdfService, raising=False)
+    monkeypatch.setattr(patent_fastapi_app, "PatentTabularService", _TabularService, raising=False)
     monkeypatch.setattr(patent_fastapi_app, "build_default_patent_runtime", lambda **kwargs: None)
 
     app = create_app()
@@ -723,6 +775,56 @@ def test_lifespan_shutdown_closes_app_owned_shared_provider_and_pdf_service(monk
     assert provider.closed is True
     assert len(pdf_services) == 1
     assert pdf_services[0].closed is True
+    assert len(tabular_services) == 1
+    assert tabular_services[0].closed is True
+    assert len(hybrid_clients) == 1
+    assert hybrid_clients[0].closed is True
+
+
+def test_create_app_degrades_when_tabular_client_bootstrap_fails(monkeypatch):
+    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda **kwargs: None)
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentTabularAnswerClient",
+        type(
+            "_FailingTabularAnswerClientFactory",
+            (),
+            {
+                "from_env": staticmethod(
+                    lambda http_client=None: (_ for _ in ()).throw(RuntimeError("tabular client boom"))
+                )
+            },
+        ),
+        raising=False,
+    )
+
+    app = create_app()
+
+    assert app.state.component_status["patent_tabular_answer_client"]["ready"] is False
+    assert app.state.component_status["patent_tabular_answer_client"]["status"] == "degraded"
+
+
+def test_create_app_degrades_when_hybrid_client_bootstrap_fails(monkeypatch):
+    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda **kwargs: None)
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentHybridSynthesisClient",
+        type(
+            "_FailingHybridClientFactory",
+            (),
+            {
+                "from_env": staticmethod(
+                    lambda http_client=None: (_ for _ in ()).throw(RuntimeError("hybrid client boom"))
+                )
+            },
+        ),
+        raising=False,
+    )
+
+    app = create_app()
+
+    assert app.state.component_status["patent_hybrid_synthesis_client"]["ready"] is False
+    assert app.state.component_status["patent_hybrid_synthesis_client"]["status"] == "degraded"
 
 
 def test_rebootstrap_failure_closes_reopened_resources(monkeypatch):

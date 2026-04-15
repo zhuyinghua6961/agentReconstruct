@@ -119,6 +119,22 @@ def _debug_preview(value: str, *, limit: int = 160) -> str:
     return _truncate(_collapse_whitespace(value), limit)
 
 
+def build_pdf_synthesis_context(*, prepared_pdf_text: str, pdf_text: str) -> str:
+    prepared = str(prepared_pdf_text or "").strip()
+    raw_text = str(pdf_text or "").strip()
+    if len(prepared) >= len(raw_text):
+        return prepared
+    return raw_text
+
+
+def build_pdf_evidence_context(*, prepared_pdf_text: str, pdf_text: str, limit: int = 1200) -> str:
+    synthesis_context = build_pdf_synthesis_context(prepared_pdf_text=prepared_pdf_text, pdf_text=pdf_text)
+    support_points = _find_markdown_support_points(synthesis_context, max_items=3, min_chars=18)
+    if support_points:
+        return _truncate("\n".join(f"- {point}" for point in support_points), limit)
+    return _truncate(synthesis_context, min(limit, 400))
+
+
 def _find_markdown_support_points(text: str, *, max_items: int = 3, min_chars: int = 18) -> list[str]:
     normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
     raw_items = re.split(r"(?<=[。！？.!?])\s+|\n+", normalized)
@@ -1362,7 +1378,11 @@ class PatentPdfService:
                 "kb_enabled": bool(include_kb),
                 "answer_mode": answer_mode,
                 "pdf_text_chars": len(pdf_text),
-                "pdf_evidence_context": str(prepared_for_generation or pdf_text or "")[:1200],
+                "pdf_evidence_context": build_pdf_evidence_context(
+                    prepared_pdf_text=prepared_for_generation,
+                    pdf_text=pdf_text,
+                    limit=1200,
+                ),
                 "prepared_pdf_text": str(prepared_for_generation or ""),
                 "steps": [dict(item) for item in steps],
             },

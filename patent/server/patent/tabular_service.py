@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import os
 import logging
 import posixpath
 import re
@@ -9,12 +10,15 @@ from pathlib import Path
 from typing import Any, Callable
 from xml.etree import ElementTree as ET
 
+import httpx
+
 from server.patent.pdf_contract import is_summary_question
 from server.patent.file_models import PatentFileContract
 from server.patent.streaming import emit_text_chunks, iter_text_output
+from server.patent.tabular_context import build_tabular_context_bundle
 from server.patent.tabular.executor import execute_tabular_plan
 from server.patent.tabular.planner import plan_tabular_query
-from server.patent.tabular.renderer import build_tabular_result_context, has_usable_tabular_result
+from server.patent.tabular.renderer import has_usable_tabular_result
 from server.patent.tabular.schema_profiler import profile_workbook
 from server.patent.tabular.workbook_loader import load_workbook_cached
 from server.services.mode_profiles import get_patent_mode_profile
@@ -25,6 +29,37 @@ _XML_NS = {
     "pkgrel": "http://schemas.openxmlformats.org/package/2006/relationships",
 }
 _LOGGER = logging.getLogger("patent.tabular_service")
+_TABULAR_QA_SYSTEM_MESSAGE = "You are a patent table QA assistant. Answer strictly from the provided table evidence."
+_PATENT_TABULAR_PROMPT_VERSION = "patent-tabular-answer-v1"
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = str(os.getenv(name) or "").strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "on"}
+
+
+def _first_env(*names: str, default: str = "") -> str:
+    for name in names:
+        value = str(os.getenv(name) or "").strip()
+        if value:
+            return value
+    return str(default or "").strip()
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(str(os.getenv(name) or default).strip())
+    except Exception:
+        return int(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(str(os.getenv(name) or default).strip())
+    except Exception:
+        return float(default)
 
 
 def _collapse_whitespace(value: object) -> str:
@@ -427,22 +462,165 @@ def _build_patent_tabular_prompt(
     ).strip()
 
 
+class PatentTabularAnswerClient:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str,
+        model: str,
+        timeout_seconds: float = 30.0,
+        top_p: float = 0.95,
+        max_tokens: int = 2500,
+        http_client: Any | None = None,
+    ) -> None:
+        self._api_key = str(api_key or "").strip()
+        self._base_url = str(base_url or "").strip()
+        self._model = str(model or "").strip()
+        self._timeout_seconds = float(timeout_seconds)
+        self._top_p = float(top_p)
+        self._max_tokens = max(1, int(max_tokens))
+        self._owns_http_client = http_client is None
+        self._client = http_client or httpx.Client(timeout=self._timeout_seconds)
+
+    @classmethod
+    def from_env(cls, *, http_client: Any | None = None) -> "PatentTabularAnswerClient | None":
+        use_shared_env = _env_flag("PATENT_OPENAI_USE_SHARED_ENV", default=False)
+        api_key = _first_env(
+            "PATENT_OPENAI_API_KEY",
+            default=(os.getenv("OPENAI_API_KEY") or os.getenv("DASHSCOPE_API_KEY")) if use_shared_env else "",
+        )
+        base_url = _first_env(
+            "PATENT_OPENAI_BASE_URL",
+            default=(os.getenv("OPENAI_BASE_URL") or os.getenv("DASHSCOPE_BASE_URL")) if use_shared_env else "",
+        )
+        model = _first_env(
+            "PATENT_OPENAI_MODEL",
+            default=(os.getenv("OPENAI_MODEL") or os.getenv("DASHSCOPE_MODEL")) if use_shared_env else "",
+        )
+        if not api_key or not base_url or not model:
+            return None
+        return cls(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            timeout_seconds=_env_float("PATENT_OPENAI_TIMEOUT_SECONDS", 30.0),
+            top_p=_env_float("PATENT_TABULAR_TOP_P", _env_float("PATENT_OPENAI_TOP_P", 0.95)),
+            max_tokens=max(
+                1024,
+                _env_int(
+                    "PATENT_TABULAR_MAX_TOKENS",
+                    _env_int("PATENT_OPENAI_MAX_TOKENS", 2500),
+                ),
+            ),
+            http_client=http_client,
+        )
+
+    def runtime_signature(self) -> dict[str, Any]:
+        return {
+            "model": self._model,
+            "max_tokens": self._max_tokens,
+            "top_p": self._top_p,
+            "timeout_seconds": self._timeout_seconds,
+        }
+
+    def answer(
+        self,
+        *,
+        question: str,
+        table_text: str,
+        include_kb: bool,
+        route_hint: str,
+        source_scope: str,
+    ) -> str:
+        prompt = _build_patent_tabular_prompt(
+            question=question,
+            table_text=table_text,
+            route_hint=route_hint,
+            source_scope=source_scope,
+            include_kb=include_kb,
+        )
+        response = self._client.post(
+            f"{self._base_url.rstrip('/')}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self._model,
+                "temperature": 0.2,
+                "top_p": self._top_p,
+                "max_tokens": self._max_tokens,
+                "stream": False,
+                "messages": [
+                    {"role": "system", "content": _TABULAR_QA_SYSTEM_MESSAGE},
+                    {"role": "user", "content": prompt},
+                ],
+            },
+            timeout=self._timeout_seconds,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        choices = list(payload.get("choices") or [])
+        message = dict((choices[0] or {}).get("message") or {}) if choices else {}
+        return str(message.get("content") or "").strip()
+
+    def close(self) -> None:
+        if self._owns_http_client:
+            self._client.close()
+
+
 class PatentTabularService:
     def __init__(
         self,
         *,
         extract_table_text_fn: Callable[..., str] | None = None,
         answer_question_fn: Callable[..., str] | None = None,
+        answer_client: PatentTabularAnswerClient | Any | None = None,
+        auto_answer_client: bool = True,
         max_rows_per_sheet: int = 8,
         max_sheets: int = 3,
-        max_table_chars: int = 12000,
+        max_table_chars: int | None = None,
     ) -> None:
         self._extract_table_text_fn = extract_table_text_fn or self._extract_table_text
         self._answer_question_fn = answer_question_fn
+        if answer_question_fn is not None:
+            self._client = None
+        elif answer_client is not None or not auto_answer_client:
+            self._client = answer_client
+        else:
+            self._client = PatentTabularAnswerClient.from_env()
         self._max_rows_per_sheet = max(1, int(max_rows_per_sheet))
         self._max_sheets = max(1, int(max_sheets))
-        self._max_table_chars = max(1000, int(max_table_chars))
+        resolved_max_table_chars = (
+            _env_int("PATENT_TABULAR_MAX_CONTEXT_CHARS", 12000)
+            if max_table_chars is None
+            else int(max_table_chars)
+        )
+        self._max_table_chars = max(1000, int(resolved_max_table_chars))
         self._has_custom_extract_table_text_fn = extract_table_text_fn is not None
+
+    def answer_backend(self) -> str:
+        if callable(self._answer_question_fn) or self._client is not None:
+            return "llm"
+        return "fallback"
+
+    def prompt_version(self) -> str:
+        return _PATENT_TABULAR_PROMPT_VERSION
+
+    def runtime_signature(self) -> dict[str, Any]:
+        client_runtime = getattr(self._client, "runtime_signature", None)
+        return {
+            "answer_backend": self.answer_backend(),
+            "prompt_version": self.prompt_version(),
+            "max_context_chars": self._max_table_chars,
+            "answer_client_runtime_signature": dict(client_runtime() or {}) if callable(client_runtime) else {},
+        }
+
+    def close(self) -> None:
+        close = getattr(self._client, "close", None)
+        if callable(close):
+            close()
 
     def execute(
         self,
@@ -469,26 +647,31 @@ class PatentTabularService:
         )
 
         table_text = self._load_table_text(contract=contract) if self._has_custom_extract_table_text_fn else ""
-        execution_context = (
-            table_text
-            if self._has_custom_extract_table_text_fn
-            else self._load_table_execution_context(contract=contract)
-        )
-        if execution_context:
+        if self._has_custom_extract_table_text_fn:
+            compact_context = _truncate(table_text, min(self._max_table_chars, 1200))
+            answer_context = _truncate(table_text, self._max_table_chars)
+            synthesis_context = _truncate(table_text, min(self._max_table_chars, 6000))
+        else:
+            context_bundle = self._load_table_context_bundle(contract=contract)
+            compact_context = str(context_bundle.get("compact_evidence_context") or "")
+            answer_context = str(context_bundle.get("answer_context") or "")
+            synthesis_context = str(context_bundle.get("synthesis_context") or "")
+
+        if answer_context:
             self._record_step(
                 steps,
                 progress_callback=progress_callback,
                 payload={
                     "step": "tabular_load",
                     "title": "读取表格内容",
-                    "message": f"📊 已完成表格执行上下文构建，文件数 {len(used_files)}，chars={len(execution_context)}",
+                    "message": f"📊 已完成表格执行上下文构建，文件数 {len(used_files)}，chars={len(answer_context)}",
                     "status": "success",
-                    "data": {"count": len(used_files), "chars": len(execution_context)},
+                    "data": {"count": len(used_files), "chars": len(answer_context)},
                 },
             )
-            answer_text = self._build_answer(
+            answer_text, answer_backend = self._build_answer(
                 question=contract.question,
-                table_text=execution_context,
+                table_text=answer_context,
                 include_kb=include_kb,
                 route_hint=contract.route,
                 source_scope=contract.source_scope,
@@ -497,6 +680,7 @@ class PatentTabularService:
             answer_mode = "table_execution_summary"
         else:
             answer_text = "当前未拿到可读的表格原始内容，无法生成基于表格的回答。请稍后重试或检查文件处理状态。"
+            answer_backend = "unavailable"
             self._record_step(
                 steps,
                 progress_callback=progress_callback,
@@ -526,7 +710,7 @@ class PatentTabularService:
             payload={
                 "step": "tabular_answer",
                 "title": "生成文件答案",
-                "message": "✍️ 已基于表格原始内容生成答案" if execution_context else "✍️ 已返回表格不可读的说明",
+                "message": "✍️ 已基于表格原始内容生成答案" if answer_context else "✍️ 已返回表格不可读的说明",
                 "status": "success",
             },
         )
@@ -537,6 +721,8 @@ class PatentTabularService:
             "route": contract.route,
             "query_mode": profile.query_mode,
             "source_scope": contract.source_scope,
+            "_table_synthesis_context": synthesis_context,
+            "_skip_file_route_cache": bool(answer_context and answer_backend == "unavailable"),
             "steps": [dict(item) for item in steps],
             "metadata": {
                 "handler": "tabular",
@@ -544,8 +730,11 @@ class PatentTabularService:
                 "selected_file_count": len(used_files),
                 "kb_enabled": bool(include_kb),
                 "answer_mode": answer_mode,
-                "table_text_chars": len(execution_context),
-                "table_evidence_context": _truncate(execution_context, min(self._max_table_chars, 1200)),
+                "answer_backend": answer_backend,
+                "table_text_chars": len(answer_context),
+                "table_answer_context_chars": len(answer_context),
+                "table_synthesis_context_chars": len(synthesis_context),
+                "table_evidence_context": compact_context,
             },
             "timings": {
                 "patent_tabular_route_ms": 1,
@@ -556,8 +745,10 @@ class PatentTabularService:
             "kb_enabled": bool(include_kb),
         }
 
-    def _load_table_execution_context(self, *, contract: PatentFileContract) -> str:
-        sections: list[str] = []
+    def _load_table_context_bundle(self, *, contract: PatentFileContract) -> dict[str, str]:
+        compact_sections: list[str] = []
+        answer_sections: list[str] = []
+        synthesis_sections: list[str] = []
         for item in contract.selected_execution_files:
             if item.family != "table":
                 continue
@@ -595,14 +786,30 @@ class PatentTabularService:
                 continue
             if not has_usable_tabular_result(result):
                 continue
-            context = build_tabular_result_context(
-                file_name=file_name,
+            bundle = build_tabular_context_bundle(
+                question=contract.question,
+                workbook=workbook,
                 plan=plan,
                 result=result,
+                file_name=file_name,
+                compact_limit=min(self._max_table_chars, 1200),
+                answer_limit=self._max_table_chars,
+                synthesis_limit=min(self._max_table_chars, 6000),
             )
-            if context:
-                sections.append(context)
-        return "\n\n".join(section for section in sections if section).strip()
+            compact_context = str(bundle.get("compact_evidence_context") or "").strip()
+            answer_context = str(bundle.get("answer_context") or "").strip()
+            synthesis_context = str(bundle.get("synthesis_context") or "").strip()
+            if compact_context:
+                compact_sections.append(compact_context)
+            if answer_context:
+                answer_sections.append(answer_context)
+            if synthesis_context:
+                synthesis_sections.append(synthesis_context)
+        return {
+            "compact_evidence_context": "\n\n".join(section for section in compact_sections if section).strip(),
+            "answer_context": "\n\n".join(section for section in answer_sections if section).strip(),
+            "synthesis_context": "\n\n".join(section for section in synthesis_sections if section).strip(),
+        }
 
     @staticmethod
     def _record_step(
@@ -708,7 +915,7 @@ class PatentTabularService:
                         emitted,
                         len(answer),
                     )
-                    return answer
+                    return answer, "llm"
             else:
                 answer_parts: list[str] = []
                 for piece in iter_text_output(output):
@@ -740,7 +947,73 @@ class PatentTabularService:
                         emitted,
                         len(answer),
                     )
-                    return answer
+                    return answer, "llm"
+        elif self._client is not None:
+            try:
+                output = self._client.answer(
+                    question=question,
+                    table_text=table_text,
+                    include_kb=include_kb,
+                    route_hint=route_hint,
+                    source_scope=source_scope,
+                )
+                if isinstance(output, (str, bytes)):
+                    answer = str(output or "").strip()
+                else:
+                    answer = "".join(str(piece or "") for piece in iter_text_output(output)).strip()
+                if answer:
+                    answer = (
+                        _ensure_literature_table_summary_structure(answer=answer, table_text=table_text)
+                        if summary_mode
+                        else _ensure_fastqa_table_summary_structure(
+                            answer=answer,
+                            table_text=table_text,
+                            include_kb=include_kb,
+                            route_hint=route_hint,
+                            source_scope=source_scope,
+                        )
+                    )
+                    emitted = emit_text_chunks(answer, content_callback=content_callback)
+                    _LOGGER.info(
+                        "patent tabular answer route=%s source_scope=%s summary_mode=%s live_stream_possible=%s output_mode=client_text emitted_chunks=%s answer_chars=%s",
+                        route_name,
+                        source_scope,
+                        summary_mode,
+                        live_stream_possible,
+                        emitted,
+                        len(answer),
+                    )
+                    return answer, "llm"
+            except Exception:
+                _LOGGER.warning(
+                    "patent tabular answer client failed; degrading to fallback route=%s source_scope=%s",
+                    route_name,
+                    source_scope,
+                    exc_info=True,
+                )
+                fallback = _table_fallback_answer(question=question, table_text=table_text)
+                answer = (
+                    _ensure_literature_table_summary_structure(answer=fallback, table_text=table_text)
+                    if summary_mode
+                    else _ensure_fastqa_table_summary_structure(
+                        answer=fallback,
+                        table_text=table_text,
+                        include_kb=include_kb,
+                        route_hint=route_hint,
+                        source_scope=source_scope,
+                    )
+                )
+                emitted = emit_text_chunks(answer, content_callback=content_callback)
+                _LOGGER.info(
+                    "patent tabular answer route=%s source_scope=%s summary_mode=%s live_stream_possible=%s output_mode=client_error_fallback emitted_chunks=%s answer_chars=%s",
+                    route_name,
+                    source_scope,
+                    summary_mode,
+                    live_stream_possible,
+                    emitted,
+                    len(answer),
+                )
+                return answer, "unavailable"
         fallback = _table_fallback_answer(question=question, table_text=table_text)
         answer = (
             _ensure_literature_table_summary_structure(answer=fallback, table_text=table_text)
@@ -763,7 +1036,7 @@ class PatentTabularService:
             emitted,
             len(answer),
         )
-        return answer
+        return answer, "fallback"
 
     @staticmethod
     def _extract_table_text(

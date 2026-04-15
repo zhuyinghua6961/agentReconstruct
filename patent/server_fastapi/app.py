@@ -8,9 +8,11 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from config import get_settings
 from server.patent.executor import PatentExecutor
+from server.patent.hybrid_synthesis import PatentHybridSynthesisClient
 from server.patent.original_service import OriginalViewService
 from server.patent.pdf_service import PatentPdfAnswerClient, PatentPdfService
 from server.patent.runtime import build_default_patent_runtime
+from server.patent.tabular_service import PatentTabularAnswerClient, PatentTabularService
 from server.patent.upstream_http import PatentSharedUpstreamHttpProvider
 from server.runtime.ordered_task_dispatcher import OrderedTaskDispatcher
 from server.runtime.request_context import clear_trace_id, generate_trace_id, get_trace_id, set_trace_id
@@ -85,6 +87,8 @@ def _bootstrap_service_state(app: FastAPI) -> None:
     )
     patent_shared_upstream_provider = None
     patent_pdf_service = None
+    patent_tabular_service = None
+    patent_hybrid_synthesis_client = None
     patent_runtime = None
     shared_http_client = None
     try:
@@ -114,6 +118,57 @@ def _bootstrap_service_state(app: FastAPI) -> None:
             else PatentPdfAnswerClient.from_env()
         )
         patent_pdf_service = PatentPdfService(answer_client=pdf_answer_client)
+        component_status = dict(getattr(app.state, "component_status", {}) or {})
+        try:
+            tabular_answer_client = (
+                PatentTabularAnswerClient.from_env(http_client=shared_http_client)
+                if shared_http_client is not None
+                else PatentTabularAnswerClient.from_env()
+            )
+            component_status["patent_tabular_answer_client"] = {
+                "ready": tabular_answer_client is not None,
+                "status": "ready" if tabular_answer_client is not None else "disabled",
+            }
+        except Exception:
+            _LOGGER.warning(
+                "Patent tabular answer client bootstrap failed; degrading to fallback answers",
+                exc_info=True,
+            )
+            tabular_answer_client = None
+            component_status["patent_tabular_answer_client"] = {
+                "ready": False,
+                "status": "degraded",
+                "detail": "patent tabular answer client bootstrap failed",
+            }
+        app.state.component_status = component_status
+        patent_tabular_service = PatentTabularService(
+            answer_client=tabular_answer_client,
+            auto_answer_client=False,
+        )
+        try:
+            patent_hybrid_synthesis_client = (
+                PatentHybridSynthesisClient.from_env(http_client=shared_http_client)
+                if shared_http_client is not None
+                else PatentHybridSynthesisClient.from_env()
+            )
+            component_status = dict(getattr(app.state, "component_status", {}) or {})
+            component_status["patent_hybrid_synthesis_client"] = {
+                "ready": patent_hybrid_synthesis_client is not None,
+                "status": "ready" if patent_hybrid_synthesis_client is not None else "disabled",
+            }
+        except Exception:
+            _LOGGER.warning(
+                "Patent hybrid synthesis client bootstrap failed; degrading to fallback hybrid synthesis",
+                exc_info=True,
+            )
+            patent_hybrid_synthesis_client = None
+            component_status = dict(getattr(app.state, "component_status", {}) or {})
+            component_status["patent_hybrid_synthesis_client"] = {
+                "ready": False,
+                "status": "degraded",
+                "detail": "patent hybrid synthesis client bootstrap failed",
+            }
+        app.state.component_status = component_status
         patent_runtime = build_default_patent_runtime(
             execution_cache=execution_cache,
             http_client=shared_http_client,
@@ -133,6 +188,8 @@ def _bootstrap_service_state(app: FastAPI) -> None:
                 execution_cache=execution_cache,
                 runtime_required=True,
                 pdf_service=patent_pdf_service,
+                tabular_service=patent_tabular_service,
+                hybrid_synthesis_service=patent_hybrid_synthesis_client,
             ),
             persistence_service=chat_persistence_service,
         )
@@ -140,6 +197,18 @@ def _bootstrap_service_state(app: FastAPI) -> None:
             execution_cache=execution_cache,
         )
     except Exception:
+        close = getattr(patent_hybrid_synthesis_client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+        close = getattr(patent_tabular_service, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
         close = getattr(patent_pdf_service, "close", None)
         if callable(close):
             try:
@@ -164,6 +233,8 @@ def _bootstrap_service_state(app: FastAPI) -> None:
     app.state.chat_persistence_service = chat_persistence_service
     app.state.patent_shared_upstream_provider = patent_shared_upstream_provider
     app.state.patent_pdf_service = patent_pdf_service
+    app.state.patent_tabular_service = patent_tabular_service
+    app.state.patent_hybrid_synthesis_client = patent_hybrid_synthesis_client
     app.state.patent_runtime = patent_runtime
     app.state.ask_service = ask_service
     app.state.original_service = original_service
@@ -194,6 +265,8 @@ def _bootstrap_app_state(app: FastAPI) -> None:
     except Exception:
         _close_state_resource(app.state, "authority_client")
         _close_state_resource(app.state, "patent_pdf_service")
+        _close_state_resource(app.state, "patent_tabular_service")
+        _close_state_resource(app.state, "patent_hybrid_synthesis_client")
         _close_state_resource(app.state, "patent_shared_upstream_provider")
         _close_state_resource(app.state, "patent_runtime")
         redis_bindings = getattr(app.state, "redis_bindings", None)
@@ -212,6 +285,8 @@ async def _lifespan(app: FastAPI):
     finally:
         _close_state_resource(app.state, "authority_client")
         _close_state_resource(app.state, "patent_pdf_service")
+        _close_state_resource(app.state, "patent_tabular_service")
+        _close_state_resource(app.state, "patent_hybrid_synthesis_client")
         _close_state_resource(app.state, "patent_shared_upstream_provider")
         _close_state_resource(app.state, "patent_runtime")
         redis_bindings = getattr(app.state, "redis_bindings", None)

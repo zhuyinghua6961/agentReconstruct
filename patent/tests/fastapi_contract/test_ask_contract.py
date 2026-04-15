@@ -2359,6 +2359,151 @@ def test_create_app_bootstraps_app_owned_pdf_service_with_shared_upstream_client
     assert provider.client_calls == 1
 
 
+def test_create_app_bootstraps_app_owned_tabular_service_with_shared_upstream_client(monkeypatch):
+    shared_client = object()
+    captured: dict[str, object] = {}
+
+    class _SharedProvider:
+        def __init__(self) -> None:
+            self.closed = False
+            self.client_calls = 0
+
+        def client(self):
+            self.client_calls += 1
+            return shared_client
+
+        def close(self):
+            self.closed = True
+
+    class _PdfAnswerClient:
+        def close(self):
+            return None
+
+    class _TabularAnswerClient:
+        def __init__(self, *, http_client=None) -> None:
+            self.http_client = http_client
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    provider = _SharedProvider()
+
+    def _build_tabular_answer_client(*, http_client=None):
+        captured["tabular_answer_http_client"] = http_client
+        client = _TabularAnswerClient(http_client=http_client)
+        captured["tabular_answer_client"] = client
+        return client
+
+    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda **kwargs: None)
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentSharedUpstreamHttpProvider",
+        type("_ProviderFactory", (), {"from_env": staticmethod(lambda: provider)}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentPdfAnswerClient",
+        type("_PdfAnswerClientFactory", (), {"from_env": staticmethod(lambda http_client=None: _PdfAnswerClient())}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentTabularAnswerClient",
+        type("_TabularAnswerClientFactory", (), {"from_env": staticmethod(_build_tabular_answer_client)}),
+        raising=False,
+    )
+
+    app = create_app()
+
+    assert app.state.ask_service._patent_executor._tabular_service._client is captured["tabular_answer_client"]
+    assert captured["tabular_answer_http_client"] is shared_client
+    assert provider.client_calls == 1
+
+
+def test_create_app_bootstraps_app_owned_hybrid_service_with_shared_upstream_client(monkeypatch):
+    shared_client = object()
+    captured: dict[str, object] = {}
+
+    class _SharedProvider:
+        def __init__(self) -> None:
+            self.closed = False
+            self.client_calls = 0
+
+        def client(self):
+            self.client_calls += 1
+            return shared_client
+
+        def close(self):
+            self.closed = True
+
+    class _PdfAnswerClient:
+        def close(self):
+            return None
+
+    class _TabularAnswerClient:
+        def close(self):
+            return None
+
+    class _HybridAnswerClient:
+        def __init__(self, *, http_client=None) -> None:
+            self.http_client = http_client
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    provider = _SharedProvider()
+
+    def _build_hybrid_answer_client(*, http_client=None):
+        captured["hybrid_answer_http_client"] = http_client
+        client = _HybridAnswerClient(http_client=http_client)
+        captured["hybrid_answer_client"] = client
+        return client
+
+    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda **kwargs: None)
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentSharedUpstreamHttpProvider",
+        type("_ProviderFactory", (), {"from_env": staticmethod(lambda: provider)}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentPdfAnswerClient",
+        type("_PdfAnswerClientFactory", (), {"from_env": staticmethod(lambda http_client=None: _PdfAnswerClient())}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentTabularAnswerClient",
+        type("_TabularAnswerClientFactory", (), {"from_env": staticmethod(lambda http_client=None: _TabularAnswerClient())}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentHybridSynthesisClient",
+        type("_HybridAnswerClientFactory", (), {"from_env": staticmethod(_build_hybrid_answer_client)}),
+        raising=False,
+    )
+
+    app = create_app()
+
+    assert app.state.ask_service._patent_executor._hybrid_synthesis_service is captured["hybrid_answer_client"]
+    assert captured["hybrid_answer_http_client"] is shared_client
+    assert provider.client_calls == 1
+
+
+def test_create_app_bootstraps_tabular_service_with_env_context_budget(monkeypatch):
+    monkeypatch.setenv("PATENT_TABULAR_MAX_CONTEXT_CHARS", "4096")
+    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda **kwargs: None)
+
+    app = create_app()
+
+    assert app.state.ask_service._patent_executor._tabular_service.runtime_signature()["max_context_chars"] == 4096
+
+
 def test_create_app_falls_back_to_private_pdf_service_when_shared_provider_bootstrap_fails(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -3530,6 +3675,7 @@ def test_http_sync_tabular_route_summarizes_readable_local_table_instead_of_stub
     assert "真实表格总结" in body["final_answer"]
     assert "Patent tabular route answered from selected table content" not in body["final_answer"]
     assert body["metadata"]["answer_mode"] == "table_execution_summary"
+    assert body["metadata"]["answer_backend"] == "llm"
     assert "匹配工作表" in body["metadata"]["table_evidence_context"]
     assert "local_path" not in body["used_files"][0]
 
