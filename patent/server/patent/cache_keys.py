@@ -18,6 +18,15 @@ _VOLATILE_METADATA_KEYS = {
     "cache_key",
     "stage_cache_hits",
 }
+_TABLE_SCOPED_FILE_ROUTE_SIGNATURE_KEYS = {
+    "tabular_service_type",
+    "tabular_answer_backend",
+    "tabular_prompt_version",
+    "tabular_runtime_signature",
+    "tabular_max_context_chars",
+    "hybrid_table_context_chars",
+    "table_parity_signature",
+}
 
 
 def _normalize(value: object) -> str:
@@ -61,6 +70,30 @@ def _normalize_payload_for_cache(value: object) -> object:
 
 def _normalize_retrieval_results_for_cache(value: object) -> object:
     return _normalize_payload_for_cache(value)
+
+
+def _is_table_scoped_file_route(*, route: str, source_scope: str) -> bool:
+    normalized_route = str(route or "").strip().lower()
+    if normalized_route == "tabular_qa":
+        return True
+    scope_tokens = {item.strip().lower() for item in str(source_scope or "").split("+") if item.strip()}
+    return "table" in scope_tokens
+
+
+def _normalize_file_route_runtime_signature(
+    *,
+    route: str,
+    source_scope: str,
+    runtime_signature: dict[str, object] | None,
+) -> dict[str, object]:
+    normalized = dict(runtime_signature or {})
+    if _is_table_scoped_file_route(route=route, source_scope=source_scope):
+        return normalized
+    return {
+        str(key): value
+        for key, value in normalized.items()
+        if str(key) not in _TABLE_SCOPED_FILE_ROUTE_SIGNATURE_KEYS
+    }
 
 
 def _fingerprint(payload: dict[str, object]) -> str:
@@ -181,7 +214,11 @@ def build_file_route_cache_fingerprint(
             "primary_file_id": primary_file_id,
             "selected_execution_files": _jsonable(list(selected_execution_files or [])),
             "file_selection": _jsonable(dict(file_selection or {})),
-            "runtime_signature": runtime_signature or {},
+            "runtime_signature": _normalize_file_route_runtime_signature(
+                route=str(route or ""),
+                source_scope=str(source_scope or ""),
+                runtime_signature=runtime_signature,
+            ),
         }
     )
 

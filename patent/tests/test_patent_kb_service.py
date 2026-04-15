@@ -129,6 +129,22 @@ def test_kb_service_returns_shell_compatible_execution_result_from_orchestrator(
     ]
 
 
+def test_kb_service_kb_only_result_does_not_expose_table_route_metadata():
+    service = PatentKbService(orchestrator=_FakeOrchestrator())
+
+    execution_result = service.run(
+        request=_make_request(),
+        runtime=_FakeStagedRuntime(),
+        conversation_context={"recent_turns_for_llm": [{"role": "user", "content": "Earlier turn"}]},
+    )
+
+    normalized = str(execution_result)
+    assert execution_result["route"] == "kb_qa"
+    assert "table_evidence_context" not in normalized
+    assert "table_answer_context_chars" not in normalized
+    assert "table_parity_signature" not in normalized
+
+
 def test_kb_service_returns_graph_result_before_staged_runtime():
     class _FailingOrchestrator:
         def run(self, *, question: str, runtime, conversation_context=None) -> PatentQaExecutionResult:

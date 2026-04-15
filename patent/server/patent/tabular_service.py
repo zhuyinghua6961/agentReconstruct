@@ -348,7 +348,7 @@ def _build_patent_tabular_prompt(
 ) -> str:
     normalized_route = str(route_hint or "tabular_qa").strip().lower() or "tabular_qa"
     normalized_scope = str(source_scope or "table").strip() or "table"
-    summary_mode = _is_summary_question(question)
+    summary_mode = _is_summary_question(question) or "全表统计摘要:" in str(table_text or "")
     if normalized_route == "hybrid_qa":
         if summary_mode:
             return "\n".join(
@@ -358,6 +358,7 @@ def _build_patent_tabular_prompt(
                     "表格执行结果来自当前专利/文献文件的真实提取或计算结果，必须作为当前子任务的主依据。",
                     f"当前 source_scope={normalized_scope}",
                     "知识库或其他文件只能用于后续交叉验证，不能覆盖这里的表格结论。",
+                    "对于概览类问题，优先根据全表统计摘要作答，先总结整体分布、差异、异常，再引用少量代表性样例举例。不能把少量样例当成整体结论。",
                     "请先整理这份表格单独能够支持的文献概要，再为后续跨来源综合保留证据边界。",
                     "",
                     "用户问题:",
@@ -413,7 +414,7 @@ def _build_patent_tabular_prompt(
 
     intro = "你是一位专利/文献表格分析助手。表格执行结果来自当前专利/文献文件的真实提取或计算结果，不允许编造。"
     if summary_mode:
-        intro += " 对于概览类问题，请输出章节化的文献总结；若背景或方法在表格里没有证据，明确说明信息不足。"
+        intro += " 对于概览类问题，优先根据全表统计摘要作答，先总结整体分布、差异、异常，再引用少量代表性样例举例。不能把少量样例当成整体结论。若背景或方法在表格里没有证据，明确说明信息不足。"
         return "\n".join(
             [
                 intro,
@@ -432,6 +433,8 @@ def _build_patent_tabular_prompt(
                 "## 结论和意义",
                 f"{_LITERATURE_SUMMARY_NOTE}",
                 "- 只允许使用当前表格中能够直接支持的字段、数值、统计结果和代表性行",
+                "- 先总结整体分布、差异、异常，再用少量代表性样例举例",
+                "- 不能把少量代表性样例当成整体结论",
                 "- 如果表格无法支持某个章节，明确写出表格中未提供足够信息",
                 "- 保留原始字段名、单位和关键术语",
                 "- 不要把字段查询类问题改写成超出表格证据边界的泛化结论",
@@ -877,7 +880,7 @@ class PatentTabularService:
         source_scope: str,
         content_callback: Callable[[str], None] | None = None,
     ) -> str:
-        summary_mode = _is_summary_question(question)
+        summary_mode = _is_summary_question(question) or "全表统计摘要:" in str(table_text or "")
         route_name = str(route_hint or "tabular_qa").strip() or "tabular_qa"
         live_stream_possible = False
         prompt = _build_patent_tabular_prompt(

@@ -142,6 +142,23 @@ def test_hybrid_pdf_prompt_requires_file_side_scope_and_no_kb_override():
     assert "## 限制" in prompt
 
 
+def test_pdf_only_prompt_does_not_reuse_table_summary_contract_terms():
+    prompt = build_patent_pdf_answer_prompt(
+        question="请总结这篇文献",
+        pdf_content="标题: A study\nAbstract text\nResults text",
+        kb_section="",
+        is_summary=True,
+        is_compare=False,
+        selected_file_labels=["paper-a.pdf"],
+        route_hint="pdf_qa",
+        source_scope="pdf",
+    )
+
+    assert "全表统计摘要" not in prompt
+    assert "代表性样例" not in prompt
+    assert "不能把少量样例当成整体结论" not in prompt
+
+
 def test_request_payload_includes_kb_boundary_section_when_include_kb_is_enabled():
     client = PatentPdfAnswerClient(api_key="key", base_url="https://example.com", model="model")
     try:

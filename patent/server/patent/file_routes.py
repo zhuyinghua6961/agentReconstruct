@@ -28,6 +28,8 @@ _HYBRID_SCOPE_TO_PLAN = {
 
 _LOGGER = logging.getLogger("patent.file_routes")
 _LITERATURE_SUMMARY_NOTE = LITERATURE_SUMMARY_NOTE
+_PATENT_TABLE_PLANNER_VERSION = "patent-tabular-planner-v2"
+_PATENT_TABLE_SUMMARY_CONTEXT_VERSION = "patent-tabular-summary-context-v2"
 
 
 def _env_int(name: str, default: int) -> int:
@@ -39,6 +41,10 @@ def _env_int(name: str, default: int) -> int:
 
 def _table_hybrid_context_limit() -> int:
     return max(1000, _env_int("PATENT_HYBRID_TABLE_CONTEXT_CHARS", 6000))
+
+
+def _plan_uses_table(plan: PatentFileRoutePlan) -> bool:
+    return "table" in {str(item or "").strip().lower() for item in tuple(plan.file_families or ())}
 
 
 def _trim_text(value: object, *, limit: int) -> str:
@@ -108,20 +114,35 @@ def _file_route_runtime_signature(
 ) -> dict[str, Any]:
     tabular_runtime_signature = getattr(tabular_service, "runtime_signature", None)
     hybrid_runtime_signature = getattr(hybrid_synthesis_service, "runtime_signature", None)
-    return {
+    runtime_signature = {
         "handler": plan.handler,
         "include_kb": bool(plan.include_kb),
         "pdf_service_type": type(pdf_service).__name__,
-        "tabular_service_type": type(tabular_service).__name__,
-        "tabular_answer_backend": getattr(tabular_service, "answer_backend", lambda: "fallback")(),
-        "tabular_prompt_version": getattr(tabular_service, "prompt_version", lambda: "")(),
-        "tabular_runtime_signature": dict(tabular_runtime_signature() or {}) if callable(tabular_runtime_signature) else {},
-        "tabular_max_context_chars": int(getattr(tabular_service, "_max_table_chars", 0) or 0),
         "hybrid_synthesis_backend": "llm" if hybrid_synthesis_service is not None else "fallback_rules",
         "hybrid_synthesis_prompt_version": HYBRID_SYNTHESIS_PROMPT_VERSION,
         "hybrid_runtime_signature": dict(hybrid_runtime_signature() or {}) if callable(hybrid_runtime_signature) else {},
-        "hybrid_table_context_chars": _table_hybrid_context_limit(),
     }
+    if _plan_uses_table(plan):
+        runtime_signature.update(
+            {
+                "tabular_service_type": type(tabular_service).__name__,
+                "tabular_answer_backend": getattr(tabular_service, "answer_backend", lambda: "fallback")(),
+                "tabular_prompt_version": getattr(tabular_service, "prompt_version", lambda: "")(),
+                "tabular_runtime_signature": dict(tabular_runtime_signature() or {}) if callable(tabular_runtime_signature) else {},
+                "tabular_max_context_chars": int(getattr(tabular_service, "_max_table_chars", 0) or 0),
+                "hybrid_table_context_chars": _table_hybrid_context_limit(),
+                "table_parity_signature": {
+                    "planner_version": _PATENT_TABLE_PLANNER_VERSION,
+                    "summary_context_version": _PATENT_TABLE_SUMMARY_CONTEXT_VERSION,
+                    "prompt_version": getattr(tabular_service, "prompt_version", lambda: "")(),
+                    "table_context_budget": max(
+                        int(getattr(tabular_service, "_max_table_chars", 0) or 0),
+                        _table_hybrid_context_limit(),
+                    ),
+                },
+            }
+        )
+    return runtime_signature
 
 
 def _mark_file_route_cache_metadata(

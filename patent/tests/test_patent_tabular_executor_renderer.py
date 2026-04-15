@@ -3,6 +3,29 @@ from __future__ import annotations
 from server.patent.tabular.executor import execute_tabular_plan
 
 
+def _summary_workbook():
+    return {
+        "file_name": "metrics.csv",
+        "sheet_count": 1,
+        "sheets": [
+            {
+                "sheet_name": "Sheet1",
+                "sheet_index": 0,
+                "headers": ["Material", "Batch", "Capacity", "Retention"],
+                "rows": [
+                    {"Material": "LFP", "Batch": "B1", "Capacity": "100", "Retention": "95"},
+                    {"Material": "LMFP", "Batch": "B1", "Capacity": "120", "Retention": "96"},
+                    {"Material": "LFP", "Batch": "B2", "Capacity": "110", "Retention": "94"},
+                    {"Material": "LMFP", "Batch": "B3", "Capacity": "130", "Retention": "93"},
+                    {"Material": "NCA", "Batch": "B4", "Capacity": "50", "Retention": "90"},
+                    {"Material": "NCM", "Batch": "B5", "Capacity": "280", "Retention": "89"},
+                ],
+                "row_count": 6,
+            }
+        ],
+    }
+
+
 def test_execute_tabular_plan_returns_rows_and_summary_stats():
     workbook = {
         "file_name": "metrics.csv",
@@ -130,3 +153,71 @@ def test_execute_tabular_plan_lookup_without_columns_returns_empty_result():
     assert result["row_count"] == 0
     assert result["rows"] == []
     assert result["empty_reason"] == "lookup_columns_missing"
+
+
+def test_execute_tabular_plan_summary_returns_rich_summary_stats():
+    result = execute_tabular_plan(
+        workbook=_summary_workbook(),
+        plan={"operation": "summary", "sheet_name": "Sheet1"},
+    )
+
+    stats = result["summary_stats"]
+
+    assert result["operation"] == "summary"
+    assert result["row_count_before"] == 6
+    assert result["row_count_after"] == 6
+    assert stats["row_count"] == 6
+    assert stats["column_count"] == 4
+    assert stats["columns"] == ["Material", "Batch", "Capacity", "Retention"]
+    assert "numeric_summaries" in stats
+    assert "categorical_summaries" in stats
+    assert "column_profiles" in stats
+
+
+def test_execute_tabular_plan_summary_column_profiles_expose_shape_fields():
+    result = execute_tabular_plan(
+        workbook=_summary_workbook(),
+        plan={"operation": "summary", "sheet_name": "Sheet1"},
+    )
+
+    material_profile = next(
+        item for item in result["summary_stats"]["column_profiles"] if item["name"] == "Material"
+    )
+
+    assert set(material_profile) >= {"name", "kind", "missing_ratio", "unique_count"}
+    assert material_profile["kind"] == "categorical"
+
+
+def test_execute_tabular_plan_summary_numeric_stats_include_median():
+    result = execute_tabular_plan(
+        workbook=_summary_workbook(),
+        plan={"operation": "summary", "sheet_name": "Sheet1"},
+    )
+
+    assert result["summary_stats"]["numeric_summaries"]["Capacity"]["median"] == 115.0
+
+
+def test_execute_tabular_plan_summary_categorical_top_values_are_stably_sorted():
+    result = execute_tabular_plan(
+        workbook=_summary_workbook(),
+        plan={"operation": "summary", "sheet_name": "Sheet1"},
+    )
+
+    top_values = result["summary_stats"]["categorical_summaries"]["Material"]["top_values"]
+
+    assert top_values[0]["value"] == "LFP"
+    assert top_values[1]["value"] == "LMFP"
+    assert top_values[0]["count"] == 2
+    assert top_values[1]["count"] == 2
+
+
+def test_execute_tabular_plan_summary_uses_representative_rows_not_head_only():
+    result = execute_tabular_plan(
+        workbook=_summary_workbook(),
+        plan={"operation": "summary", "sheet_name": "Sheet1"},
+    )
+
+    capacities = {row["Capacity"] for row in result["rows"]}
+
+    assert "50" in capacities or 50 in capacities
+    assert "280" in capacities or 280 in capacities

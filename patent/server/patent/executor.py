@@ -98,6 +98,10 @@ def _merge_source_list(*values: list[str] | tuple[str, ...]) -> list[str]:
     return merged
 
 
+def _source_scope_tokens(source_scope: str) -> set[str]:
+    return {item.strip().lower() for item in str(source_scope or "").split("+") if item.strip()}
+
+
 class PatentExecutor:
     def __init__(
         self,
@@ -375,8 +379,28 @@ class PatentExecutor:
         kb_answer = str(kb_payload.get("answer_text") or "").strip()
         file_metadata = dict(merged.get("metadata") or {})
         kb_metadata = dict(kb_payload.get("metadata") or {})
+        includes_table = "table" in _source_scope_tokens(source_scope)
         internal_state = dict(merged.get("_hybrid_internal_state") or {})
         synthesis_contract = dict(internal_state.get("synthesis_contract") or {})
+        table_execution_context = (
+            str(
+                file_metadata.get("table_evidence_context")
+                or synthesis_contract.get("table_execution_context")
+                or ""
+            )
+            if includes_table
+            else ""
+        )
+        table_synthesis_context = (
+            str(
+                merged.get("_table_synthesis_context")
+                or synthesis_contract.get("table_synthesis_context")
+                or file_metadata.get("table_evidence_context")
+                or ""
+            )
+            if includes_table
+            else ""
+        )
         if not synthesis_contract:
             synthesis_contract = build_patent_hybrid_synthesis_contract(
                 question=question,
@@ -384,21 +408,23 @@ class PatentExecutor:
                 pdf_answer="" if merged.get("handler") == "tabular" else file_answer,
                 tabular_answer=file_answer if merged.get("handler") in {"tabular", "hybrid"} else "",
                 pdf_evidence_context=str(file_metadata.get("pdf_evidence_context") or ""),
-                table_execution_context=str(file_metadata.get("table_evidence_context") or ""),
+                table_execution_context=table_execution_context,
                 pdf_synthesis_context=build_pdf_synthesis_context(
                     prepared_pdf_text=str(file_metadata.get("prepared_pdf_text") or ""),
                     pdf_text="",
                 ),
-                table_synthesis_context=str(merged.get("_table_synthesis_context") or file_metadata.get("table_evidence_context") or ""),
+                table_synthesis_context=table_synthesis_context,
                 include_kb=True,
                 available_sources=(
                     ["table"]
-                    if merged.get("handler") == "tabular"
+                    if includes_table and merged.get("handler") == "tabular"
+                    else ["pdf", "table"]
+                    if includes_table and merged.get("handler") == "hybrid"
                     else ["pdf"]
                 ),
                 source_answer_modes={
                     "pdf": str(file_metadata.get("answer_mode") or "") if merged.get("handler") != "tabular" else "",
-                    "table": str(file_metadata.get("answer_mode") or "") if merged.get("handler") == "tabular" else "",
+                    "table": str(file_metadata.get("answer_mode") or "") if includes_table and merged.get("handler") in {"tabular", "hybrid"} else "",
                 },
             )
         source_answer_modes = {
@@ -406,6 +432,8 @@ class PatentExecutor:
             for key, value in dict(synthesis_contract.get("source_answer_modes") or {}).items()
             if str(key).strip() and str(value or "").strip()
         }
+        if not includes_table:
+            source_answer_modes.pop("table", None)
         source_answer_modes["kb"] = str(kb_metadata.get("answer_mode") or kb_payload.get("query_mode") or "kb_qa").strip()
         synthesis_contract.update(
             {
@@ -417,13 +445,15 @@ class PatentExecutor:
                 "kb_reference_instruction": str(kb_metadata.get("kb_reference_instruction") or ""),
                 "kb_synthesis_context": str(kb_metadata.get("kb_evidence_context") or kb_answer or ""),
                 "available_sources": _merge_source_list(
-                    list(synthesis_contract.get("available_sources") or []),
+                    [item for item in list(synthesis_contract.get("available_sources") or []) if includes_table or str(item).strip() != "table"],
                     ["kb"] if str(kb_metadata.get("kb_evidence_context") or kb_answer or "").strip() else [],
                 ),
                 "source_answer_modes": source_answer_modes,
                 "synthesis_prompt_version": str(
                     synthesis_contract.get("synthesis_prompt_version") or HYBRID_SYNTHESIS_PROMPT_VERSION
                 ),
+                "table_execution_context": table_execution_context,
+                "table_synthesis_context": table_synthesis_context,
             }
         )
         hybrid_backend = "fallback_rules"

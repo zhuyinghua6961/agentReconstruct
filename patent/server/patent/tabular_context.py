@@ -143,10 +143,43 @@ def build_tabular_context_bundle(
         compact_limit,
     )
 
+    summary_mode = str(result.get("operation") or plan.get("operation") or "").strip().lower() == "summary" or is_summary_question(question)
+    if summary_mode:
+        answer_context = _truncate(
+            build_tabular_result_context(
+                file_name=file_name,
+                plan=plan,
+                result=result,
+                question=question,
+                rich_summary=True,
+                profile_limit=12,
+                numeric_limit=8,
+                categorical_limit=6,
+            ),
+            answer_limit,
+        )
+        synthesis_context = _truncate(
+            build_tabular_result_context(
+                file_name=file_name,
+                plan=plan,
+                result=result,
+                question=question,
+                rich_summary=True,
+                profile_limit=20,
+                numeric_limit=12,
+                categorical_limit=10,
+            ),
+            synthesis_limit,
+        )
+        return {
+            "compact_evidence_context": compact_context,
+            "answer_context": answer_context,
+            "synthesis_context": synthesis_context,
+        }
+
     sheet = _find_sheet(workbook, str(result.get("sheet_name") or plan.get("sheet_name") or ""))
     sheet_rows = [dict(item) for item in (sheet.get("rows") or []) if isinstance(item, dict)]
     result_rows = [dict(item) for item in (result.get("rows") or []) if isinstance(item, dict)]
-    summary_mode = is_summary_question(question)
     representative_limit = 5 if summary_mode else 3
     matched_limit = 5 if summary_mode else 3
 

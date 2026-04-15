@@ -4950,6 +4950,47 @@ def test_hybrid_route_with_kb_stashes_internal_state_and_public_contract_stays_c
     assert "table_synthesis_context" not in result["metadata"]["synthesis_contract"]
 
 
+def test_hybrid_route_passes_richer_table_synthesis_context_to_llm_contract(tmp_path):
+    pdf_path = tmp_path / "battery-paper.pdf"
+    csv_path = tmp_path / "cells.csv"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    _write_csv(csv_path)
+    contract = build_patent_file_contract(
+        question="请总结 PDF 和表格的研究结论",
+        route="hybrid_qa",
+        source_scope="pdf+table",
+        selected_file_ids=[11, 33],
+        primary_file_id=11,
+        execution_files=[
+            {**PDF_FILE, "local_path": str(pdf_path)},
+            {"file_id": 33, "file_type": "csv", "file_name": "cells.csv", "local_path": str(csv_path)},
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 33], "source_scope": "pdf+table"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    service = _FakeHybridSynthesisService()
+
+    dispatch_patent_file_route(
+        contract=contract,
+        pdf_service=PatentPdfService(
+            extract_pdf_text_fn=lambda path, max_pages=10: "LMFP/LFP 复配改善充电安全，并报告循环稳定性提升。",
+            answer_question_fn=lambda **kwargs: "真实 PDF 总结：LMFP/LFP 复配改善充电安全性。",
+        ),
+        tabular_service=PatentTabularService(
+            answer_question_fn=lambda **kwargs: "真实表格总结：LMFP 120mAh，LFP 115mAh，NCM 140mAh。",
+        ),
+        hybrid_synthesis_service=service,
+    )
+
+    assert service.calls
+    synthesis_contract = service.calls[0]
+    assert "全表统计摘要:" not in synthesis_contract["table_execution_context"]
+    assert "全表统计摘要:" in synthesis_contract["table_synthesis_context"]
+    assert len(synthesis_contract["table_synthesis_context"]) > len(synthesis_contract["table_execution_context"])
+    assert synthesis_contract["available_sources"] == ["pdf", "table"]
+
+
 def test_hybrid_synthesis_failure_falls_back_to_rule_synthesis(tmp_path):
     pdf_path = tmp_path / "battery-paper.pdf"
     csv_path = tmp_path / "cells.csv"
@@ -5086,6 +5127,99 @@ def test_file_route_cache_fingerprint_changes_when_tabular_runtime_signature_cha
     )
 
     assert left != right
+
+
+def test_file_route_runtime_signature_exposes_table_parity_versions_for_table_scopes():
+    contract = build_patent_file_contract(
+        question="请结合 PDF 和表格回答结论",
+        route="hybrid_qa",
+        source_scope="pdf+table",
+        selected_file_ids=[11, 33],
+        primary_file_id=11,
+        execution_files=[PDF_FILE, TABLE_FILE],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11, 33], "source_scope": "pdf+table"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    plan = plan_patent_file_route(contract)
+
+    runtime_signature = _file_route_runtime_signature(
+        plan=plan,
+        pdf_service=PatentPdfService(),
+        tabular_service=PatentTabularService(auto_answer_client=False),
+        hybrid_synthesis_service=None,
+    )
+
+    assert runtime_signature["table_parity_signature"]["planner_version"]
+    assert runtime_signature["table_parity_signature"]["summary_context_version"]
+    assert runtime_signature["table_parity_signature"]["prompt_version"]
+    assert runtime_signature["table_parity_signature"]["table_context_budget"] > 0
+
+
+@pytest.mark.parametrize(
+    ("route", "source_scope", "selected_file_ids", "primary_file_id", "execution_files", "kb_enabled"),
+    [
+        ("pdf_qa", "pdf", [11], 11, [PDF_FILE], False),
+        ("hybrid_qa", "pdf+kb", [11], 11, [PDF_FILE], True),
+    ],
+)
+def test_file_route_cache_fingerprint_ignores_table_runtime_changes_for_non_table_scopes(
+    route,
+    source_scope,
+    selected_file_ids,
+    primary_file_id,
+    execution_files,
+    kb_enabled,
+):
+    contract = build_patent_file_contract(
+        question="请结合当前文件回答结论",
+        route=route,
+        source_scope=source_scope,
+        selected_file_ids=selected_file_ids,
+        primary_file_id=primary_file_id,
+        execution_files=execution_files,
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": selected_file_ids, "source_scope": source_scope},
+        kb_enabled=kb_enabled,
+        allow_kb_verification=kb_enabled,
+    )
+    plan = plan_patent_file_route(contract)
+
+    left = build_file_route_cache_fingerprint(
+        question=contract.question,
+        route=contract.route,
+        source_scope=contract.source_scope,
+        selected_file_ids=list(contract.selected_file_ids),
+        primary_file_id=contract.primary_file_id,
+        selected_execution_files=[item.as_payload() for item in contract.selected_execution_files],
+        file_selection=dict(contract.file_selection),
+        runtime_signature=_file_route_runtime_signature(
+            plan=plan,
+            pdf_service=PatentPdfService(),
+            tabular_service=PatentTabularService(answer_client=_FakeTabularAnswerClient(model="tabular-v1"), auto_answer_client=False),
+            hybrid_synthesis_service=None,
+        ),
+    )
+    right = build_file_route_cache_fingerprint(
+        question=contract.question,
+        route=contract.route,
+        source_scope=contract.source_scope,
+        selected_file_ids=list(contract.selected_file_ids),
+        primary_file_id=contract.primary_file_id,
+        selected_execution_files=[item.as_payload() for item in contract.selected_execution_files],
+        file_selection=dict(contract.file_selection),
+        runtime_signature=_file_route_runtime_signature(
+            plan=plan,
+            pdf_service=PatentPdfService(),
+            tabular_service=PatentTabularService(
+                answer_client=_FakeTabularAnswerClient(model="tabular-v2"),
+                auto_answer_client=False,
+                max_table_chars=16000,
+            ),
+            hybrid_synthesis_service=None,
+        ),
+    )
+
+    assert left == right
 
 
 def test_tabular_client_failure_does_not_seed_file_route_cache(tmp_path):

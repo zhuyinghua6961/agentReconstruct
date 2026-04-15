@@ -140,9 +140,9 @@ def test_tabular_service_passes_rich_answer_context_to_answer_fn_and_keeps_publi
     service = PatentTabularService(answer_question_fn=_answer_question_fn)
     result = service.execute(contract=_make_contract(csv_path), include_kb=False)
 
-    assert "统计摘要:" in captured["table_text"]
-    assert "代表性行:" in captured["table_text"]
-    assert "统计摘要:" not in result["metadata"]["table_evidence_context"]
+    assert "全表统计摘要:" in captured["table_text"]
+    assert "代表性样例:" in captured["table_text"]
+    assert "全表统计摘要:" not in result["metadata"]["table_evidence_context"]
     assert result["metadata"]["table_answer_context_chars"] >= len(result["metadata"]["table_evidence_context"])
     assert result["metadata"]["table_synthesis_context_chars"] >= len(result["metadata"]["table_evidence_context"])
 

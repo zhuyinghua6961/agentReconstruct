@@ -182,6 +182,7 @@ class AskService:
         prepare_cancelled: threading.Event | None = None
         stream_completed = False
         terminal_persisted = False
+        turn_aborted = False
         structured_file_streaming = structured_content_streaming_enabled(
             options=request.options,
             route=request.route,
@@ -190,6 +191,13 @@ class AskService:
         def _mark_telemetry_once(field_name: str) -> None:
             if field_name not in telemetry:
                 telemetry[field_name] = _epoch_ms()
+
+        def _abort_turn_once() -> None:
+            nonlocal turn_aborted
+            if turn_aborted or not prepared:
+                return
+            self._abort_turn(prepared)
+            turn_aborted = True
 
         try:
             if request.is_gateway_owned_persistence and request.is_durable:
@@ -425,7 +433,7 @@ class AskService:
             self._logger.exception("stream_ask failed trace_id=%s error=%s", trace_id, exc)
             self._persist_terminal_failure(request=request, prepared_turn=prepared, exc=exc)
             terminal_persisted = True
-            self._abort_turn(prepared)
+            _abort_turn_once()
             yield self._build_error_event(trace_id=trace_id, seq=seq, exc=exc)
         finally:
             if not stream_completed:
@@ -433,7 +441,7 @@ class AskService:
                     prepare_cancelled.set()
                 if not terminal_persisted:
                     self._persist_terminal_cancellation(request=request, prepared_turn=prepared)
-                self._abort_turn(prepared)
+                _abort_turn_once()
             clear_trace_id(trace_token)
 
     def _prepare_turn(self, *, request: PatentAskRequest, user_id: int | None) -> dict[str, Any]:

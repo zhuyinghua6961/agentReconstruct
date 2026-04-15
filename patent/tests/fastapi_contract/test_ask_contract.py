@@ -2569,6 +2569,24 @@ def test_ephemeral_sync_ask_returns_success_without_authority_calls():
     assert body["actual_mode"] == "patent"
 
 
+def test_ephemeral_sync_kb_route_does_not_expose_table_route_metadata():
+    app = create_app()
+    payload = _base_payload()
+    payload["conversation_id"] = None
+    payload["kb_enabled"] = True
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    normalized = str(body)
+    assert body["route"] == "kb_qa"
+    assert "table_evidence_context" not in normalized
+    assert "table_answer_context_chars" not in normalized
+    assert "table_parity_signature" not in normalized
+
+
 def test_ephemeral_sync_ask_returns_service_not_ready_when_runtime_bootstrap_missing(monkeypatch):
     monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda **kwargs: None)
     app = create_app()
@@ -2846,6 +2864,30 @@ def test_http_sync_pdf_route_summarizes_readable_local_pdf_instead_of_stub(monke
     assert "Patent PDF route answered from selected PDF content" not in body["final_answer"]
     assert body["metadata"]["answer_mode"] == "pdf_text_summary"
     assert "local_path" not in body["used_files"][0]
+
+
+def test_http_sync_pdf_route_does_not_expose_table_route_metadata(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    pdf_path = tmp_path / "spec.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
+    app.state.ask_service._patent_executor._pdf_service = PatentPdfService(
+        extract_pdf_text_fn=lambda path, max_pages=10: "This paper proposes a silicon anode coating method and reports improved cycle life.",
+        answer_question_fn=lambda **kwargs: "真实总结：本文提出硅负极包覆方法，并报告循环寿命改善。",
+    )
+    payload = _pdf_payload()
+    payload["execution_files"][0]["local_path"] = str(pdf_path)
+    payload["used_files"][0]["local_path"] = str(pdf_path)
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    normalized = str(body)
+    assert "table_evidence_context" not in normalized
+    assert "table_answer_context_chars" not in normalized
+    assert "table_parity_signature" not in normalized
 
 
 def test_http_stream_pdf_route_uses_real_patent_pdf_handler_when_gate_is_enabled(monkeypatch):
@@ -3678,6 +3720,31 @@ def test_http_sync_tabular_route_summarizes_readable_local_table_instead_of_stub
     assert body["metadata"]["answer_backend"] == "llm"
     assert "匹配工作表" in body["metadata"]["table_evidence_context"]
     assert "local_path" not in body["used_files"][0]
+
+
+def test_http_sync_tabular_summary_route_returns_literature_sections(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    csv_path = tmp_path / "claims.csv"
+    _write_csv(csv_path)
+    app.state.ask_service._patent_executor._tabular_service = PatentTabularService(
+        answer_question_fn=lambda **kwargs: "真实表格总结：LMFP 120mAh，LFP 更安全，NCM 能量更高。",
+    )
+    payload = _tabular_payload()
+    payload["question"] = "请总结这个表格的重点"
+    payload["execution_files"][0].update({"file_type": "csv", "file_name": "claims.csv", "local_path": str(csv_path)})
+    payload["used_files"][0].update({"file_type": "csv", "file_name": "claims.csv", "local_path": str(csv_path)})
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "## 研究目的和背景" in body["final_answer"]
+    assert "## 研究方法/实验设计" in body["final_answer"]
+    assert "## 主要发现和结果" in body["final_answer"]
+    assert "## 结论和意义" in body["final_answer"]
+    assert "注*" in body["final_answer"]
 
 
 def test_http_stream_tabular_route_with_stream_capability_emits_only_final_table_content(monkeypatch, tmp_path):
