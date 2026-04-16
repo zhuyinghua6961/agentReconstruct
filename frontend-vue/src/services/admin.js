@@ -21,6 +21,39 @@ async function safeJson(response) {
   }
 }
 
+async function uploadFile(url, file, token) {
+  const formData = new FormData()
+  formData.append('file', file)
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}` },
+    body: formData
+  })
+  const data = await safeJson(response)
+  return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
+}
+
+async function downloadFile(url, token, filename) {
+  const response = await fetch(url, {
+    headers: { 'Authorization': `Bearer ${token}` }
+  })
+
+  if (!response.ok) {
+    throw new Error('下载模板失败')
+  }
+
+  const blob = await response.blob()
+  const objectUrl = window.URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = objectUrl
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  window.URL.revokeObjectURL(objectUrl)
+}
+
 // 全局错误处理函数
 function handleAdminError(error, response) {
   // 检查是否是账号停用错误
@@ -170,37 +203,12 @@ export const adminApi = {
 
   async batchImportUsers(file) {
     const token = readStoredToken()
-    const formData = new FormData()
-    formData.append('file', file)
-    
-    const response = await fetch(`${API_BASE}/users/batch-import`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${token}` },
-      body: formData
-    })
-    const data = await safeJson(response)
-    return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
+    return uploadFile(`${API_BASE}/users/batch-import`, file, token)
   },
 
   async downloadImportTemplate(format = 'xlsx') {
     const token = readStoredToken()
-    const response = await fetch(`${API_BASE}/users/import-template?format=${format}`, {
-      headers: { 'Authorization': `Bearer ${token}` }
-    })
-    
-    if (!response.ok) {
-      throw new Error('下载模板失败')
-    }
-    
-    const blob = await response.blob()
-    const url = window.URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `user_import_template.${format}`
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    window.URL.revokeObjectURL(url)
+    await downloadFile(`${API_BASE}/users/import-template?format=${format}`, token, `user_import_template.${format}`)
   },
 
   async getDepartmentTree() {
@@ -274,5 +282,19 @@ export const adminApi = {
     })
     const data = await safeJson(response)
     return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
+  },
+
+  async batchImportDepartments(file) {
+    const token = readStoredToken()
+    return uploadFile(`${API_BASE}/departments/batch-import`, file, token)
+  },
+
+  async downloadDepartmentImportTemplate(format = 'xlsx') {
+    const token = readStoredToken()
+    await downloadFile(
+      `${API_BASE}/departments/import-template?format=${format}`,
+      token,
+      `department_import_template.${format}`
+    )
   },
 }

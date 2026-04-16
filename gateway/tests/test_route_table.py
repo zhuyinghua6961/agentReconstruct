@@ -25,6 +25,8 @@ def test_route_table_patterns_include_department_routes():
         "/api/admin/departments/secondary",
         "/api/admin/departments/secondary/{secondary_id}",
         "/api/admin/departments/secondary/{secondary_id}/status",
+        "/api/admin/departments/batch-import",
+        "/api/admin/departments/import-template",
     }
 
     assert expected.issubset(set(PUBLIC_ROUTE_PATTERNS))

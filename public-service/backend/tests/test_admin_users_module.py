@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 
+from app.core.spreadsheet import build_xlsx
 from app.core.deps import AuthContext
 from app.main import app
 from app.modules.admin_users import api as admin_users_api_module
@@ -383,6 +384,53 @@ def test_admin_import_resolves_department_names_and_persists_ids(monkeypatch):
         b"user1,Pass123!,common,\xe8\xae\xa1\xe7\xae\x97\xe6\x9c\xba\xe5\xad\xa6\xe9\x99\xa2,\xe8\xbd\xaf\xe4\xbb\xb6\xe5\xb7\xa5\xe7\xa8\x8b\xe7\xb3\xbb\n"
     )
     result = admin_users_import_service.import_users(file_bytes=csv_bytes, filename="users.csv", actor_user_id=1)
+
+    assert result["success"] is True
+    assert result["data"]["summary"]["success"] == 1
+    assert created[0]["primary_department_id"] == 1
+    assert created[0]["secondary_department_id"] == 11
+
+
+def test_admin_import_accepts_xlsx_and_persists_department_ids(monkeypatch):
+    created = []
+
+    monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
+    monkeypatch.setattr(admin_users_import_service, "_finalize_excel_upload_quota", lambda **kwargs: None)
+    monkeypatch.setattr(admin_users_service.users, "get_by_username", lambda username: None)
+    monkeypatch.setattr(
+        admin_import_service_module.department_service,
+        "resolve_by_names",
+        lambda **kwargs: {
+            "success": True,
+            "data": {
+                "primary_department_id": 1,
+                "secondary_department_id": 11,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        admin_users_service.users,
+        "create_user",
+        lambda **kwargs: created.append(kwargs),
+    )
+
+    payload = build_xlsx(
+        headers=[
+            "username",
+            "password",
+            "user_type",
+            "primary_department_name",
+            "secondary_department_name",
+        ],
+        rows=[["user1", "Pass123!", "common", "计算机学院", "软件工程系"]],
+        sheet_name="用户导入",
+    )
+
+    result = admin_users_import_service.import_users(
+        file_bytes=payload,
+        filename="users.xlsx",
+        actor_user_id=1,
+    )
 
     assert result["success"] is True
     assert result["data"]["summary"]["success"] == 1

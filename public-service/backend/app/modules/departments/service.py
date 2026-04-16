@@ -35,6 +35,10 @@ class DepartmentService:
             "DEPARTMENT_DISABLED",
             "PRIMARY_DEPARTMENT_NAME_EXISTS",
             "SECONDARY_DEPARTMENT_NAME_EXISTS",
+            "FILE_MISSING",
+            "FILENAME_EMPTY",
+            "INVALID_FILE_TYPE",
+            "INVALID_FORMAT",
         }:
             return 400
         if code in {"PRIMARY_DEPARTMENT_NOT_FOUND", "SECONDARY_DEPARTMENT_NOT_FOUND"}:

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
+from app.core.spreadsheet import build_xlsx
 from app.core.deps import AuthContext
 from app.main import app
 from app.modules.departments import api as department_api_module
+from app.modules.departments import import_service as department_import_service_module
 from app.modules.auth.repository import AuthRepository
 from app.modules.departments import service as department_service
+from app.modules.departments.import_service import DepartmentImportService, department_import_service
 from app.modules.departments.repository import DepartmentRepository
 from app.modules.departments.service import DepartmentService
 
@@ -20,6 +24,15 @@ def load_migration_sql(filename: str) -> str:
 
 def _decode(response) -> dict:
     return json.loads(response.body.decode("utf-8"))
+
+
+class _FakeRequest:
+    def __init__(self, *, body: bytes, content_type: str) -> None:
+        self._body = body
+        self.headers = {"content-type": content_type}
+
+    async def body(self) -> bytes:
+        return self._body
 
 
 def test_department_repository_reads_primary_and_secondary_rows():
@@ -98,6 +111,8 @@ def test_department_routes_registered():
     assert "/api/admin/departments/tree" in paths
     assert "/api/admin/departments/primary" in paths
     assert "/api/admin/departments/secondary/{secondary_id}/status" in paths
+    assert "/api/admin/departments/batch-import" in paths
+    assert "/api/admin/departments/import-template" in paths
 
 
 def test_admin_department_tree_contract(monkeypatch):
@@ -211,6 +226,260 @@ def test_department_effective_status_follows_disabled_primary(monkeypatch):
 
     assert response.status_code == 200
     assert _decode(response)["data"]["items"][0]["secondary_items"][0]["effective_status"] == "disabled"
+
+
+def test_department_import_template_contains_status_columns():
+    response = department_import_service.template_response(fmt="csv")
+
+    assert b"primary_status" in response.body
+    assert b"secondary_status" in response.body
+
+
+def test_department_batch_import_route_contract(monkeypatch):
+    monkeypatch.setattr(
+        department_import_service_module.department_import_service,
+        "import_departments",
+        lambda **kwargs: {"success": True, "message": "导入完成", "data": kwargs},
+    )
+
+    request = _FakeRequest(
+        body=(
+            b"--boundary\r\n"
+            b'Content-Disposition: form-data; name="file"; filename="departments.csv"\r\n'
+            b"Content-Type: text/csv\r\n\r\n"
+            b"primary_department_name,primary_status,secondary_department_name,secondary_status\n"
+            b"\xe8\xae\xa1\xe7\xae\x97\xe6\x9c\xba\xe5\xad\xa6\xe9\x99\xa2,active,\xe8\xbd\xaf\xe4\xbb\xb6\xe5\xb7\xa5\xe7\xa8\x8b\xe7\xb3\xbb,active\n\r\n"
+            b"--boundary--\r\n"
+        ),
+        content_type="multipart/form-data; boundary=boundary",
+    )
+
+    response = asyncio.run(
+        department_api_module.batch_import_departments(
+            request,
+            AuthContext(user_id=1, role="admin", username="admin"),
+        )
+    )
+
+    assert response.status_code == 200
+    assert _decode(response)["data"]["filename"] == "departments.csv"
+
+
+def test_department_import_updates_existing_statuses_and_preserves_omitted_rows():
+    class FakeRepository:
+        def __init__(self) -> None:
+            self.primary_by_id = {
+                1: {"id": 1, "name": "计算机学院", "status": "disabled"},
+                2: {"id": 2, "name": "化学学院", "status": "active"},
+            }
+            self.primary_by_name = {item["name"]: item for item in self.primary_by_id.values()}
+            self.secondary_by_id = {
+                11: {"id": 11, "primary_department_id": 1, "name": "软件工程系", "status": "disabled"},
+                21: {"id": 21, "primary_department_id": 2, "name": "材料系", "status": "active"},
+            }
+            self.secondary_by_key = {
+                (item["primary_department_id"], item["name"]): item
+                for item in self.secondary_by_id.values()
+            }
+            self.next_primary_id = 3
+            self.next_secondary_id = 22
+
+        def get_primary_by_name(self, name: str):
+            return self.primary_by_name.get(name)
+
+        def get_primary_by_id(self, primary_id: int):
+            return self.primary_by_id.get(primary_id)
+
+        def create_primary(self, *, name: str):
+            primary_id = self.next_primary_id
+            self.next_primary_id += 1
+            item = {"id": primary_id, "name": name, "status": "active"}
+            self.primary_by_id[primary_id] = item
+            self.primary_by_name[name] = item
+            return primary_id
+
+        def update_primary_status(self, *, primary_id: int, status: str):
+            self.primary_by_id[primary_id]["status"] = status
+            return 1
+
+        def get_secondary_by_name(self, *, primary_department_id: int, name: str):
+            return self.secondary_by_key.get((primary_department_id, name))
+
+        def get_secondary_by_id(self, secondary_id: int):
+            return self.secondary_by_id.get(secondary_id)
+
+        def create_secondary(self, *, primary_department_id: int, name: str):
+            secondary_id = self.next_secondary_id
+            self.next_secondary_id += 1
+            item = {
+                "id": secondary_id,
+                "primary_department_id": primary_department_id,
+                "name": name,
+                "status": "active",
+            }
+            self.secondary_by_id[secondary_id] = item
+            self.secondary_by_key[(primary_department_id, name)] = item
+            return secondary_id
+
+        def update_secondary_status(self, *, secondary_id: int, status: str):
+            self.secondary_by_id[secondary_id]["status"] = status
+            return 1
+
+    service = DepartmentImportService(repository=FakeRepository())
+    result = service.import_departments(
+        file_bytes=(
+            b"primary_department_name,primary_status,secondary_department_name,secondary_status\n"
+            b"\xe8\xae\xa1\xe7\xae\x97\xe6\x9c\xba\xe5\xad\xa6\xe9\x99\xa2,active,\xe8\xbd\xaf\xe4\xbb\xb6\xe5\xb7\xa5\xe7\xa8\x8b\xe7\xb3\xbb,active\n"
+        ),
+        filename="departments.csv",
+    )
+
+    assert result["success"] is True
+    assert service._repository.primary_by_name["计算机学院"]["status"] == "active"
+    assert service._repository.secondary_by_key[(2, "材料系")]["status"] == "active"
+
+
+def test_department_import_accepts_xlsx_upload():
+    class FakeRepository:
+        def __init__(self) -> None:
+            self.primary_by_id = {
+                1: {"id": 1, "name": "计算机学院", "status": "disabled"},
+            }
+            self.primary_by_name = {item["name"]: item for item in self.primary_by_id.values()}
+            self.secondary_by_id = {
+                11: {"id": 11, "primary_department_id": 1, "name": "软件工程系", "status": "disabled"},
+            }
+            self.secondary_by_key = {
+                (item["primary_department_id"], item["name"]): item
+                for item in self.secondary_by_id.values()
+            }
+            self.next_primary_id = 2
+            self.next_secondary_id = 12
+
+        def get_primary_by_name(self, name: str):
+            return self.primary_by_name.get(name)
+
+        def get_primary_by_id(self, primary_id: int):
+            return self.primary_by_id.get(primary_id)
+
+        def create_primary(self, *, name: str):
+            primary_id = self.next_primary_id
+            self.next_primary_id += 1
+            item = {"id": primary_id, "name": name, "status": "active"}
+            self.primary_by_id[primary_id] = item
+            self.primary_by_name[name] = item
+            return primary_id
+
+        def update_primary_status(self, *, primary_id: int, status: str):
+            self.primary_by_id[primary_id]["status"] = status
+            return 1
+
+        def get_secondary_by_name(self, *, primary_department_id: int, name: str):
+            return self.secondary_by_key.get((primary_department_id, name))
+
+        def get_secondary_by_id(self, secondary_id: int):
+            return self.secondary_by_id.get(secondary_id)
+
+        def create_secondary(self, *, primary_department_id: int, name: str):
+            secondary_id = self.next_secondary_id
+            self.next_secondary_id += 1
+            item = {
+                "id": secondary_id,
+                "primary_department_id": primary_department_id,
+                "name": name,
+                "status": "active",
+            }
+            self.secondary_by_id[secondary_id] = item
+            self.secondary_by_key[(primary_department_id, name)] = item
+            return secondary_id
+
+        def update_secondary_status(self, *, secondary_id: int, status: str):
+            self.secondary_by_id[secondary_id]["status"] = status
+            return 1
+
+    payload = build_xlsx(
+        headers=[
+            "primary_department_name",
+            "primary_status",
+            "secondary_department_name",
+            "secondary_status",
+        ],
+        rows=[["计算机学院", "active", "软件工程系", "active"]],
+        sheet_name="部门导入",
+    )
+    service = DepartmentImportService(repository=FakeRepository())
+
+    result = service.import_departments(file_bytes=payload, filename="departments.xlsx")
+
+    assert result["success"] is True
+    assert service._repository.primary_by_name["计算机学院"]["status"] == "active"
+    assert service._repository.secondary_by_key[(1, "软件工程系")]["status"] == "active"
+
+
+def test_department_import_rejects_conflicting_primary_status_in_same_file():
+    class FakeRepository:
+        def __init__(self) -> None:
+            self.primary_by_id: dict[int, dict] = {}
+            self.primary_by_name: dict[str, dict] = {}
+            self.secondary_by_id: dict[int, dict] = {}
+            self.secondary_by_key: dict[tuple[int, str], dict] = {}
+            self.next_primary_id = 1
+            self.next_secondary_id = 1
+
+        def get_primary_by_name(self, name: str):
+            return self.primary_by_name.get(name)
+
+        def get_primary_by_id(self, primary_id: int):
+            return self.primary_by_id.get(primary_id)
+
+        def create_primary(self, *, name: str):
+            primary_id = self.next_primary_id
+            self.next_primary_id += 1
+            item = {"id": primary_id, "name": name, "status": "active"}
+            self.primary_by_id[primary_id] = item
+            self.primary_by_name[name] = item
+            return primary_id
+
+        def update_primary_status(self, *, primary_id: int, status: str):
+            self.primary_by_id[primary_id]["status"] = status
+            return 1
+
+        def get_secondary_by_name(self, *, primary_department_id: int, name: str):
+            return self.secondary_by_key.get((primary_department_id, name))
+
+        def get_secondary_by_id(self, secondary_id: int):
+            return self.secondary_by_id.get(secondary_id)
+
+        def create_secondary(self, *, primary_department_id: int, name: str):
+            secondary_id = self.next_secondary_id
+            self.next_secondary_id += 1
+            item = {
+                "id": secondary_id,
+                "primary_department_id": primary_department_id,
+                "name": name,
+                "status": "active",
+            }
+            self.secondary_by_id[secondary_id] = item
+            self.secondary_by_key[(primary_department_id, name)] = item
+            return secondary_id
+
+        def update_secondary_status(self, *, secondary_id: int, status: str):
+            self.secondary_by_id[secondary_id]["status"] = status
+            return 1
+
+    service = DepartmentImportService(repository=FakeRepository())
+    result = service.import_departments(
+        file_bytes=(
+            b"primary_department_name,primary_status,secondary_department_name,secondary_status\n"
+            b"\xe8\xae\xa1\xe7\xae\x97\xe6\x9c\xba\xe5\xad\xa6\xe9\x99\xa2,active,\xe8\xbd\xaf\xe4\xbb\xb6\xe5\xb7\xa5\xe7\xa8\x8b\xe7\xb3\xbb,active\n"
+            b"\xe8\xae\xa1\xe7\xae\x97\xe6\x9c\xba\xe5\xad\xa6\xe9\x99\xa2,disabled,\xe4\xba\xba\xe5\xb7\xa5\xe6\x99\xba\xe8\x83\xbd\xe7\xb3\xbb,active\n"
+        ),
+        filename="departments.csv",
+    )
+
+    assert result["success"] is True
+    assert result["data"]["summary"]["failed"] == 1
+    assert "一级部门状态不一致" in result["data"]["details"][1]["reason"]
 
 
 def test_department_service_create_and_mutate_primary_and_secondary():

@@ -570,6 +570,20 @@ def test_public_proxy_accepts_x_request_id_and_forwards_canonical_trace_header()
             {"status": "disabled"},
             b"",
         ),
+        (
+            "POST",
+            "/api/admin/departments/batch-import",
+            "/api/admin/departments/batch-import",
+            None,
+            b"",
+        ),
+        (
+            "GET",
+            "/api/admin/departments/import-template",
+            "/api/admin/departments/import-template",
+            None,
+            b"",
+        ),
     ],
 )
 def test_public_proxy_forwards_extended_route_surface(method, path, expected_path, json_body, expected_query):

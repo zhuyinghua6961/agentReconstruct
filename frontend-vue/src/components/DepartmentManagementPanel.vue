@@ -1,6 +1,8 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import { adminApi } from '../services/admin'
+import DepartmentBatchImportDialog from './DepartmentBatchImportDialog.vue'
+import DepartmentImportResultDialog from './DepartmentImportResultDialog.vue'
 
 const emit = defineEmits(['updated'])
 
@@ -10,6 +12,9 @@ const success = ref('')
 const departmentTree = ref([])
 const newPrimaryName = ref('')
 const secondaryDrafts = ref({})
+const showDepartmentImportDialog = ref(false)
+const showDepartmentImportResultDialog = ref(false)
+const departmentImportResult = ref(null)
 
 function setSuccess(message) {
   success.value = message
@@ -130,6 +135,17 @@ async function handleToggleSecondaryStatus(secondary) {
   error.value = result.error || `二级部门${actionText}失败`
 }
 
+async function handleDepartmentImportSuccess(result) {
+  const summary = result?.summary || {}
+  departmentImportResult.value = result
+  showDepartmentImportResultDialog.value = true
+  setSuccess(
+    `部门导入完成：成功 ${summary.success || 0} 条，失败 ${summary.failed || 0} 条，跳过 ${summary.skipped || 0} 条`
+  )
+  await fetchDepartmentTree()
+  emit('updated')
+}
+
 onMounted(() => {
   fetchDepartmentTree()
 })
@@ -142,7 +158,10 @@ onMounted(() => {
         <h2>部门管理</h2>
         <p>维护一级、二级部门字典。停用后不会清空已绑定用户，只会禁止后续新选择。</p>
       </div>
-      <button class="refresh-btn" @click="fetchDepartmentTree">刷新</button>
+      <div class="panel-actions">
+        <button class="refresh-btn" @click="fetchDepartmentTree">刷新</button>
+        <button class="import-btn" @click="showDepartmentImportDialog = true">批量导入部门</button>
+      </div>
     </div>
 
     <div v-if="success" class="alert alert-success">{{ success }}</div>
@@ -214,6 +233,17 @@ onMounted(() => {
         <p v-else class="empty-secondary">暂无二级部门</p>
       </div>
     </div>
+
+    <DepartmentBatchImportDialog
+      :show="showDepartmentImportDialog"
+      @close="showDepartmentImportDialog = false"
+      @import-success="handleDepartmentImportSuccess"
+    />
+    <DepartmentImportResultDialog
+      :show="showDepartmentImportResultDialog"
+      :result="departmentImportResult"
+      @close="showDepartmentImportResultDialog = false"
+    />
   </section>
 </template>
 
@@ -233,6 +263,12 @@ onMounted(() => {
   margin-bottom: 20px;
 }
 
+.panel-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .panel-header h2 {
   margin: 0 0 8px 0;
   color: #1f2937;
@@ -246,6 +282,7 @@ onMounted(() => {
 
 .refresh-btn,
 .primary-btn,
+.import-btn,
 .secondary-btn,
 .action-btn {
   border: 1px solid #d1d5db;
@@ -260,6 +297,12 @@ onMounted(() => {
 .secondary-btn {
   background: #667eea;
   border-color: #667eea;
+  color: white;
+}
+
+.import-btn {
+  background: #0f766e;
+  border-color: #0f766e;
   color: white;
 }
 
@@ -377,6 +420,7 @@ onMounted(() => {
 
 @media (max-width: 768px) {
   .panel-header,
+  .panel-actions,
   .create-primary,
   .create-secondary,
   .primary-header,

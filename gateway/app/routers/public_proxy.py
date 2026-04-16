@@ -274,6 +274,8 @@ _ROUTE_SPECS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (_paths("/api/admin/departments/secondary", include_v1=False), ("POST",)),
     (_paths("/api/admin/departments/secondary/{secondary_id}", include_v1=False), ("PUT",)),
     (_paths("/api/admin/departments/secondary/{secondary_id}/status", include_v1=False), ("PUT",)),
+    (_paths("/api/admin/departments/batch-import", include_v1=False), ("POST",)),
+    (_paths("/api/admin/departments/import-template", include_v1=False), ("GET",)),
 )
 
 for paths, methods in _ROUTE_SPECS:
