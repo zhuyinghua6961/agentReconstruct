@@ -15,8 +15,8 @@ import httpx
 from server.patent.pdf_contract import is_summary_question
 from server.patent.file_models import PatentFileContract
 from server.patent.streaming import emit_text_chunks, iter_text_output
-from server.patent.tabular_context import build_tabular_context_bundle
-from server.patent.tabular.executor import execute_tabular_plan
+from server.patent.tabular_context import build_compare_tabular_context_bundle, build_tabular_context_bundle
+from server.patent.tabular.executor import execute_compare_plan, execute_tabular_plan
 from server.patent.tabular.planner import plan_tabular_query
 from server.patent.tabular.renderer import has_usable_tabular_result
 from server.patent.tabular.schema_profiler import profile_workbook
@@ -345,10 +345,14 @@ def _build_patent_tabular_prompt(
     route_hint: str,
     source_scope: str,
     include_kb: bool,
+    operation_hint: str = "",
 ) -> str:
     normalized_route = str(route_hint or "tabular_qa").strip().lower() or "tabular_qa"
     normalized_scope = str(source_scope or "table").strip() or "table"
-    summary_mode = _is_summary_question(question) or "全表统计摘要:" in str(table_text or "")
+    compare_mode = str(operation_hint or "").strip().lower() == "compare_tables"
+    summary_mode = (not compare_mode) and (
+        _is_summary_question(question) or "全表统计摘要:" in str(table_text or "")
+    )
     if normalized_route == "hybrid_qa":
         if summary_mode:
             return "\n".join(
@@ -381,15 +385,19 @@ def _build_patent_tabular_prompt(
             ).strip()
         return "\n".join(
             [
-                "你是一位专利/文献表格证据分析助手。",
-                "当前任务属于 patent 混合文件问答中的表格证据分析环节。",
-                "表格执行结果来自当前专利/文献文件的真实提取或计算结果，必须作为当前子任务的主依据。",
-                f"当前 source_scope={normalized_scope}",
-                "知识库或其他文件只能用于后续交叉验证，不能覆盖这里的表格结论。",
-                "请先给出这份表格单独能够支持的判断，再指出可供后续跨来源比较的指标或差异。",
-                "",
-                "用户问题:",
-                str(question or ""),
+                    "你是一位专利/文献表格证据分析助手。",
+                    "当前任务属于 patent 混合文件问答中的表格证据分析环节。",
+                    "表格执行结果来自当前专利/文献文件的真实提取或计算结果，必须作为当前子任务的主依据。",
+                    f"当前 source_scope={normalized_scope}",
+                    "知识库或其他文件只能用于后续交叉验证，不能覆盖这里的表格结论。",
+                    (
+                        "当前证据是多表对比执行结果，优先总结不同表格之间的差异、相同点和异常，不要把对比结果写成单文件总结。"
+                        if compare_mode
+                        else "请先给出这份表格单独能够支持的判断，再指出可供后续跨来源比较的指标或差异。"
+                    ),
+                    "",
+                    "用户问题:",
+                    str(question or ""),
                 "",
                 "表格证据:",
                 str(table_text or ""),
@@ -405,6 +413,11 @@ def _build_patent_tabular_prompt(
                 "- 限制说明字段缺失、抽取范围限制或仍待其他来源验证的部分",
                 "- 不要编造表格中不存在的列、数值或结论",
                 (
+                    "- 当前为多表对比执行结果，结论必须优先概括文件间差异和对照关系，不要退回单文件描述"
+                    if compare_mode
+                    else "- 对比段优先说明当前表格证据后续可与 PDF/知识库对照的点"
+                ),
+                (
                     "- 即使当前允许知识库参与，也只能在后续总结合成里交叉验证，不能把知识库结论写成当前表格事实"
                     if include_kb
                     else "- 当前未引入知识库补充，本轮回答仍需明确边界"
@@ -413,6 +426,8 @@ def _build_patent_tabular_prompt(
         ).strip()
 
     intro = "你是一位专利/文献表格分析助手。表格执行结果来自当前专利/文献文件的真实提取或计算结果，不允许编造。"
+    if compare_mode:
+        intro += " 当前证据是多表对比执行结果，回答必须优先总结不同文件之间的差异、共同点和异常，不要把多表对比改写成单文件总结。"
     if summary_mode:
         intro += " 对于概览类问题，优先根据全表统计摘要作答，先总结整体分布、差异、异常，再引用少量代表性样例举例。不能把少量样例当成整体结论。若背景或方法在表格里没有证据，明确说明信息不足。"
         return "\n".join(
@@ -459,7 +474,11 @@ def _build_patent_tabular_prompt(
             "## 限制",
             "- 结论需要先回答用户最关心的判断",
             "- 证据列出关键字段、数值、样例行或统计摘要",
-            "- 对比说明当前是否缺少第二份表格或其他来源可用于对照",
+            (
+                "- 对比优先总结不同表格之间的差异、数量级和异常点"
+                if compare_mode
+                else "- 对比说明当前是否缺少第二份表格或其他来源可用于对照"
+            ),
             "- 限制说明抽取范围、字段缺失或原表未提及的部分",
         ]
     ).strip()
@@ -535,6 +554,7 @@ class PatentTabularAnswerClient:
         include_kb: bool,
         route_hint: str,
         source_scope: str,
+        operation_hint: str = "",
     ) -> str:
         prompt = _build_patent_tabular_prompt(
             question=question,
@@ -542,6 +562,7 @@ class PatentTabularAnswerClient:
             route_hint=route_hint,
             source_scope=source_scope,
             include_kb=include_kb,
+            operation_hint=operation_hint,
         )
         response = self._client.post(
             f"{self._base_url.rstrip('/')}/chat/completions",
@@ -625,6 +646,87 @@ class PatentTabularService:
         if callable(close):
             close()
 
+    @staticmethod
+    def _structured_context_bundle(
+        *,
+        status: str,
+        compact_evidence_context: str = "",
+        answer_context: str = "",
+        synthesis_context: str = "",
+        user_message: str = "",
+        answer_mode: str = "",
+        skip_file_route_cache: bool = False,
+        log_fields: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "status": str(status or "unreadable"),
+            "compact_evidence_context": str(compact_evidence_context or "").strip(),
+            "answer_context": str(answer_context or "").strip(),
+            "synthesis_context": str(synthesis_context or "").strip(),
+            "user_message": str(user_message or "").strip(),
+            "answer_mode": str(answer_mode or "table_execution_unavailable").strip(),
+            "_skip_file_route_cache": bool(skip_file_route_cache),
+            "log_fields": dict(log_fields or {}),
+        }
+
+    @staticmethod
+    def _is_compare_question(question: str) -> bool:
+        text = str(question or "")
+        return any(keyword in text for keyword in ("对比", "比较", "差异", "区别"))
+
+    def _load_table_descriptors(self, *, contract: PatentFileContract) -> tuple[list[dict[str, Any]], bool]:
+        descriptors: list[dict[str, Any]] = []
+        skip_file_route_cache = False
+        for item in contract.selected_execution_files:
+            if item.family != "table":
+                continue
+            local_path = str(item.payload.get("local_path") or "").strip()
+            if not local_path:
+                continue
+            resolved = Path(local_path)
+            if not resolved.exists() or not resolved.is_file():
+                continue
+            file_name = str(item.file_name or resolved.name or f"file:{item.file_id}")
+            try:
+                workbook = load_workbook_cached(
+                    path=str(resolved),
+                    file_name=file_name,
+                    file_type=str(item.file_type or resolved.suffix.lstrip(".")).lower(),
+                    max_sheets=self._max_sheets,
+                )
+                profile = profile_workbook(workbook)
+            except Exception:
+                skip_file_route_cache = True
+                continue
+            descriptors.append(
+                {
+                    "item": item,
+                    "resolved_path": resolved,
+                    "file_name": file_name,
+                    "workbook": workbook,
+                    "profile": profile,
+                }
+            )
+        return descriptors, skip_file_route_cache
+
+    @staticmethod
+    def _build_compare_descriptor(descriptor: dict[str, Any]) -> dict[str, Any]:
+        item = descriptor.get("item")
+        file_id = int(getattr(item, "file_id", 0) or 0)
+        file_name = str(descriptor.get("file_name") or getattr(item, "file_name", "") or f"file:{file_id}")
+        workbook = dict(descriptor.get("workbook") or {})
+        profile = dict(descriptor.get("profile") or {})
+        workbook["file_id"] = file_id
+        workbook["file_name"] = file_name
+        profile["file_id"] = file_id
+        profile["file_name"] = file_name
+        return {
+            "file_id": file_id,
+            "file_name": file_name,
+            "workbook": workbook,
+            "profile": profile,
+        }
+
     def execute(
         self,
         *,
@@ -655,14 +757,22 @@ class PatentTabularService:
             answer_context = _truncate(table_text, self._max_table_chars)
             synthesis_context = _truncate(table_text, min(self._max_table_chars, 6000))
             skip_file_route_cache = False
+            context_status = "ok" if answer_context else "unreadable"
+            context_answer_mode = "table_execution_summary"
+            context_user_message = ""
+            operation_hint = ""
         else:
             context_bundle = self._load_table_context_bundle(contract=contract)
+            context_status = str(context_bundle.get("status") or "unreadable")
             compact_context = str(context_bundle.get("compact_evidence_context") or "")
             answer_context = str(context_bundle.get("answer_context") or "")
             synthesis_context = str(context_bundle.get("synthesis_context") or "")
+            context_user_message = str(context_bundle.get("user_message") or "")
+            context_answer_mode = str(context_bundle.get("answer_mode") or "table_execution_unavailable")
             skip_file_route_cache = bool(context_bundle.get("_skip_file_route_cache"))
+            operation_hint = str((context_bundle.get("log_fields") or {}).get("operation") or "")
 
-        if answer_context:
+        if context_status == "ok" and answer_context:
             self._record_step(
                 steps,
                 progress_callback=progress_callback,
@@ -680,11 +790,42 @@ class PatentTabularService:
                 include_kb=include_kb,
                 route_hint=contract.route,
                 source_scope=contract.source_scope,
+                operation_hint=operation_hint,
                 content_callback=content_callback,
             )
-            answer_mode = "table_execution_summary"
+            answer_mode = context_answer_mode or "table_execution_summary"
+        elif context_status == "clarification":
+            answer_text = context_user_message or "请进一步明确要分析的工作表、列名或对比维度。"
+            answer_backend = "unavailable"
+            self._record_step(
+                steps,
+                progress_callback=progress_callback,
+                payload={
+                    "step": "tabular_load",
+                    "title": "读取表格内容",
+                    "message": f"📊 已读取表格文件，但还需要用户补充信息后才能执行，文件数 {len(used_files)}",
+                    "status": "success",
+                    "data": {"count": len(used_files), "chars": 0},
+                },
+            )
+            answer_mode = context_answer_mode or "table_execution_clarification"
+        elif context_status == "execution_unavailable":
+            answer_text = context_user_message or "当前已读取到表格文件，但未能生成可用的表格执行结果，请补充更明确的问题或筛选条件。"
+            answer_backend = "unavailable"
+            self._record_step(
+                steps,
+                progress_callback=progress_callback,
+                payload={
+                    "step": "tabular_load",
+                    "title": "读取表格内容",
+                    "message": f"📊 已读取表格文件，但当前未能生成可用执行结果，文件数 {len(used_files)}",
+                    "status": "success",
+                    "data": {"count": len(used_files), "chars": 0},
+                },
+            )
+            answer_mode = context_answer_mode or "table_execution_unavailable"
         else:
-            answer_text = "当前未拿到可读的表格原始内容，无法生成基于表格的回答。请稍后重试或检查文件处理状态。"
+            answer_text = context_user_message or "当前未拿到可读的表格原始内容，无法生成基于表格的回答。请稍后重试或检查文件处理状态。"
             answer_backend = "unavailable"
             self._record_step(
                 steps,
@@ -697,7 +838,7 @@ class PatentTabularService:
                     "data": {"count": len(used_files), "chars": 0},
                 },
             )
-            answer_mode = "table_execution_unavailable"
+            answer_mode = context_answer_mode or "table_execution_unavailable"
 
         self._record_step(
             steps,
@@ -727,7 +868,7 @@ class PatentTabularService:
             "query_mode": profile.query_mode,
             "source_scope": contract.source_scope,
             "_table_synthesis_context": synthesis_context,
-            "_skip_file_route_cache": bool(skip_file_route_cache or (answer_context and answer_backend == "unavailable")),
+            "_skip_file_route_cache": bool(skip_file_route_cache or (context_status == "ok" and answer_context and answer_backend == "unavailable")),
             "steps": [dict(item) for item in steps],
             "metadata": {
                 "handler": "tabular",
@@ -750,48 +891,97 @@ class PatentTabularService:
             "kb_enabled": bool(include_kb),
         }
 
-    def _load_table_context_bundle(self, *, contract: PatentFileContract) -> dict[str, str]:
+    def _load_table_context_bundle(self, *, contract: PatentFileContract) -> dict[str, Any]:
         compact_sections: list[str] = []
         answer_sections: list[str] = []
         synthesis_sections: list[str] = []
-        skip_file_route_cache = False
-        for item in contract.selected_execution_files:
-            if item.family != "table":
-                continue
-            local_path = str(item.payload.get("local_path") or "").strip()
-            if not local_path:
-                continue
-            resolved = Path(local_path)
-            if not resolved.exists() or not resolved.is_file():
-                continue
-            file_name = str(item.file_name or resolved.name or f"file:{item.file_id}")
-            try:
-                workbook = load_workbook_cached(
-                    path=str(resolved),
-                    file_name=file_name,
-                    file_type=str(item.file_type or resolved.suffix.lstrip(".")).lower(),
-                    max_sheets=self._max_sheets,
+        selected_table_items = [item for item in contract.selected_execution_files if item.family == "table"]
+        descriptors, skip_file_route_cache = self._load_table_descriptors(contract=contract)
+        if len(selected_table_items) >= 2 and self._is_compare_question(contract.question) and len(descriptors) < len(selected_table_items):
+            return self._structured_context_bundle(
+                status="unreadable",
+                user_message="当前对比请求缺少足够的可读表格文件，无法生成完整对比结果。请检查所选表格是否都已处理完成。",
+                answer_mode="table_execution_unavailable",
+                skip_file_route_cache=skip_file_route_cache,
+                log_fields={"operation": "compare_tables", "selected_table_count": len(selected_table_items), "readable_table_count": len(descriptors)},
+            )
+
+        if len(descriptors) >= 2:
+            compare_descriptors = [self._build_compare_descriptor(descriptor) for descriptor in descriptors]
+            compare_profiles = [dict(item.get("profile") or {}) for item in compare_descriptors]
+            compare_plan = plan_tabular_query(
+                question=contract.question,
+                profile=compare_profiles[0],
+                profiles=compare_profiles,
+                workbook_count=len(compare_profiles),
+            )
+            clarification_reason = str(compare_plan.get("clarification_reason") or "")
+            is_compare_flow = (
+                str(compare_plan.get("operation") or "") == "compare_tables"
+                or clarification_reason == "sheet_compare_ambiguous"
+                or clarification_reason.startswith("compare_")
+            )
+            if is_compare_flow:
+                if bool(compare_plan.get("needs_clarification")):
+                    return self._structured_context_bundle(
+                        status="clarification",
+                        user_message=str(compare_plan.get("clarification_message") or "请进一步明确多表对比条件。"),
+                        answer_mode="table_execution_clarification",
+                        skip_file_route_cache=skip_file_route_cache,
+                        log_fields={"operation": "compare_tables", "clarification_reason": clarification_reason},
+                    )
+                compare_result = execute_compare_plan(
+                    workbooks=[dict(item.get("workbook") or {}) for item in compare_descriptors],
+                    plan=compare_plan,
                 )
-                profile = profile_workbook(workbook)
-                plan = plan_tabular_query(question=contract.question, profile=profile)
-                if bool(plan.get("needs_clarification")):
-                    result = {
-                        "sheet_name": str(plan.get("sheet_name") or ""),
-                        "operation": str(plan.get("operation") or "clarification"),
-                        "rows": [],
-                        "row_count": 0,
-                        "empty_reason": str(plan.get("clarification_reason") or "clarification_required"),
-                        "summary_stats": {
-                            "aggregate": str(plan.get("aggregate") or ""),
-                            "source_row_count": 0,
-                        },
-                    }
-                else:
-                    result = execute_tabular_plan(workbook=workbook, plan=plan)
+                if not has_usable_tabular_result(compare_result):
+                    return self._structured_context_bundle(
+                        status="execution_unavailable",
+                        user_message="当前已读取到表格文件，但未能生成可用的表格对比结果，请补充更明确的对比维度或检查目标工作表/列名。",
+                        answer_mode="table_execution_compare_unavailable",
+                        skip_file_route_cache=skip_file_route_cache,
+                        log_fields={"operation": "compare_tables", "empty_reason": str(compare_result.get("empty_reason") or "")},
+                    )
+                compare_bundle = build_compare_tabular_context_bundle(
+                    question=contract.question,
+                    workbooks=[dict(item.get("workbook") or {}) for item in compare_descriptors],
+                    plan=compare_plan,
+                    result=compare_result,
+                    compact_limit=min(self._max_table_chars, 1200),
+                    answer_limit=self._max_table_chars,
+                    synthesis_limit=min(self._max_table_chars, 6000),
+                )
+                return self._structured_context_bundle(
+                    status="ok",
+                    compact_evidence_context=str(compare_bundle.get("compact_evidence_context") or ""),
+                    answer_context=str(compare_bundle.get("answer_context") or ""),
+                    synthesis_context=str(compare_bundle.get("synthesis_context") or ""),
+                    answer_mode="table_execution_compare",
+                    skip_file_route_cache=skip_file_route_cache,
+                    log_fields={"operation": "compare_tables"},
+                )
+
+        first_clarification_message = ""
+        first_clarification_reason = ""
+        saw_execution_unavailable = False
+        for descriptor in descriptors:
+            file_name = str(descriptor.get("file_name") or "")
+            workbook = dict(descriptor.get("workbook") or {})
+            profile = dict(descriptor.get("profile") or {})
+            plan = plan_tabular_query(question=contract.question, profile=profile)
+            if bool(plan.get("needs_clarification")):
+                if not first_clarification_message:
+                    first_clarification_message = str(plan.get("clarification_message") or "")
+                    first_clarification_reason = str(plan.get("clarification_reason") or "")
+                continue
+            try:
+                result = execute_tabular_plan(workbook=workbook, plan=plan)
             except Exception:
                 skip_file_route_cache = True
+                saw_execution_unavailable = True
                 continue
             if not has_usable_tabular_result(result):
+                saw_execution_unavailable = True
                 continue
             bundle = build_tabular_context_bundle(
                 question=contract.question,
@@ -812,12 +1002,43 @@ class PatentTabularService:
                 answer_sections.append(answer_context)
             if synthesis_context:
                 synthesis_sections.append(synthesis_context)
-        return {
-            "compact_evidence_context": "\n\n".join(section for section in compact_sections if section).strip(),
-            "answer_context": "\n\n".join(section for section in answer_sections if section).strip(),
-            "synthesis_context": "\n\n".join(section for section in synthesis_sections if section).strip(),
-            "_skip_file_route_cache": bool(skip_file_route_cache),
-        }
+
+        compact_context = "\n\n".join(section for section in compact_sections if section).strip()
+        answer_context = "\n\n".join(section for section in answer_sections if section).strip()
+        synthesis_context = "\n\n".join(section for section in synthesis_sections if section).strip()
+        if answer_context:
+            return self._structured_context_bundle(
+                status="ok",
+                compact_evidence_context=compact_context,
+                answer_context=answer_context,
+                synthesis_context=synthesis_context,
+                answer_mode="table_execution_summary",
+                skip_file_route_cache=skip_file_route_cache,
+                log_fields={"operation": "single_table"},
+            )
+        if first_clarification_message:
+            return self._structured_context_bundle(
+                status="clarification",
+                user_message=first_clarification_message,
+                answer_mode="table_execution_clarification",
+                skip_file_route_cache=skip_file_route_cache,
+                log_fields={"clarification_reason": first_clarification_reason},
+            )
+        if descriptors and saw_execution_unavailable:
+            return self._structured_context_bundle(
+                status="execution_unavailable",
+                user_message="当前已读取到表格文件，但未能生成可用的表格执行结果，请补充更明确的问题、筛选条件或目标列名。",
+                answer_mode="table_execution_unavailable",
+                skip_file_route_cache=skip_file_route_cache,
+                log_fields={"operation": "single_table"},
+            )
+        return self._structured_context_bundle(
+            status="unreadable",
+            user_message="当前未拿到可读的表格原始内容，无法生成基于表格的回答。请稍后重试或检查文件处理状态。",
+            answer_mode="table_execution_unavailable",
+            skip_file_route_cache=skip_file_route_cache,
+            log_fields={"operation": "none"},
+        )
 
     @staticmethod
     def _record_step(
@@ -878,9 +1099,13 @@ class PatentTabularService:
         include_kb: bool,
         route_hint: str,
         source_scope: str,
+        operation_hint: str = "",
         content_callback: Callable[[str], None] | None = None,
     ) -> str:
-        summary_mode = _is_summary_question(question) or "全表统计摘要:" in str(table_text or "")
+        compare_mode = str(operation_hint or "").strip().lower() == "compare_tables"
+        summary_mode = (not compare_mode) and (
+            _is_summary_question(question) or "全表统计摘要:" in str(table_text or "")
+        )
         route_name = str(route_hint or "tabular_qa").strip() or "tabular_qa"
         live_stream_possible = False
         prompt = _build_patent_tabular_prompt(
@@ -889,6 +1114,7 @@ class PatentTabularService:
             route_hint=route_hint,
             source_scope=source_scope,
             include_kb=include_kb,
+            operation_hint=operation_hint,
         )
         if callable(self._answer_question_fn):
             output = self._answer_question_fn(
@@ -898,6 +1124,7 @@ class PatentTabularService:
                 prompt=prompt,
                 route_hint=route_hint,
                 source_scope=source_scope,
+                operation_hint=operation_hint,
             )
             if isinstance(output, (str, bytes)):
                 answer = str(output or "").strip()
@@ -964,6 +1191,7 @@ class PatentTabularService:
                     include_kb=include_kb,
                     route_hint=route_hint,
                     source_scope=source_scope,
+                    operation_hint=operation_hint,
                 )
                 if isinstance(output, (str, bytes)):
                     answer = str(output or "").strip()

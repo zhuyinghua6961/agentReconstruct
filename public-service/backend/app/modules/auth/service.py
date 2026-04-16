@@ -10,6 +10,8 @@ from typing import Any, Protocol
 from itsdangerous import URLSafeTimedSerializer
 from itsdangerous.exc import BadSignature, BadTimeSignature, SignatureExpired
 
+from app.modules.departments.service import department_service as shared_department_service
+
 
 class DatabaseUnavailableError(Exception):
     """Raised when the migrated auth module has no repository wiring yet."""
@@ -39,6 +41,33 @@ class AuthRepositoryProtocol(Protocol):
     def list_security_questions(self, *, user_id: int) -> list[dict[str, Any]]: ...
     def replace_security_questions(self, *, user_id: int, items: list[dict[str, Any]]) -> int: ...
     def has_security_questions(self, *, user_id: int) -> bool: ...
+    def update_user_department(
+        self,
+        *,
+        user_id: int,
+        primary_department_id: int | None,
+        secondary_department_id: int | None,
+    ) -> int: ...
+
+
+class DepartmentServiceProtocol(Protocol):
+    def describe_user_department(
+        self,
+        *,
+        primary_department_id: int | None,
+        secondary_department_id: int | None,
+    ) -> dict[str, Any]: ...
+
+    def get_selectable_tree(self) -> dict[str, Any]: ...
+
+    def validate_department_selection(
+        self,
+        *,
+        primary_department_id: int | None,
+        secondary_department_id: int | None,
+        require_active: bool,
+        allow_empty: bool,
+    ) -> dict[str, Any]: ...
 
 
 class UnavailableAuthRepository:
@@ -137,9 +166,16 @@ class TokenService:
 
 
 class AuthService:
-    def __init__(self, *, repo: AuthRepositoryProtocol | None = None, token_service: TokenService | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        repo: AuthRepositoryProtocol | None = None,
+        token_service: TokenService | None = None,
+        department_service: DepartmentServiceProtocol | None = None,
+    ) -> None:
         self._repo = repo or UnavailableAuthRepository()
         self._tokens = token_service or TokenService()
+        self._departments = department_service or shared_department_service
         self._password_expire_days = max(1, int(os.getenv("PASSWORD_EXPIRE_DAYS", "180") or "180"))
         self._lock_threshold = max(2, int(os.getenv("LOGIN_FAILURE_LOCK_THRESHOLD", "5") or "5"))
         self._lock_minutes = max(1, int(os.getenv("LOGIN_FAILURE_LOCK_MINUTES", "5") or "5"))
@@ -161,11 +197,14 @@ class AuthService:
             "INVALID_PASSWORD",
             "WRONG_ANSWERS",
             "NO_SECURITY_QUESTIONS",
+            "DEPARTMENT_REQUIRED",
+            "DEPARTMENT_RELATION_INVALID",
+            "DEPARTMENT_DISABLED",
         }:
             return 400
         if code in {"INVALID_CREDENTIALS", "TOKEN_MISSING", "TOKEN_INVALID"}:
             return 401
-        if code in {"USER_NOT_FOUND"}:
+        if code in {"USER_NOT_FOUND", "PRIMARY_DEPARTMENT_NOT_FOUND", "SECONDARY_DEPARTMENT_NOT_FOUND"}:
             return 404
         if code in {"ACCOUNT_DISABLED"}:
             return 403
@@ -196,6 +235,21 @@ class AuthService:
         if role == "super":
             return 2
         return 3
+
+    @classmethod
+    def _is_admin_user(cls, user: dict[str, Any] | None) -> bool:
+        return cls._resolve_user_type(user) == 1
+
+    @staticmethod
+    def _department_pair_from_mapping(data: dict[str, Any] | None) -> tuple[int | None, int | None]:
+        if not data:
+            return (None, None)
+        primary_id = data.get("primary_department_id")
+        secondary_id = data.get("secondary_department_id")
+        return (
+            int(primary_id) if primary_id is not None else None,
+            int(secondary_id) if secondary_id is not None else None,
+        )
 
     @staticmethod
     def _to_datetime(value: Any) -> datetime | None:
@@ -289,18 +343,28 @@ class AuthService:
 
     def _build_user_payload(self, user: dict[str, Any]) -> dict[str, Any]:
         user_id = int(user["id"])
+        user_type = self._resolve_user_type(user)
         has_security_questions = self._repo.has_security_questions(user_id=user_id)
         require_security_questions_setup = bool(user.get("must_set_security_questions", False)) and not has_security_questions
         created_at = self._to_datetime(user.get("created_at"))
+        department_payload = dict(
+            self._departments.describe_user_department(
+                primary_department_id=user.get("primary_department_id"),
+                secondary_department_id=user.get("secondary_department_id"),
+            )
+        )
+        if self._is_admin_user(user):
+            department_payload["require_department_setup"] = False
         return {
             "id": user_id,
             "username": user["username"],
             "role": user["role"],
-            "user_type": self._resolve_user_type(user),
+            "user_type": user_type,
             "status": user["status"],
             "is_first_login": bool(user.get("is_first_login", False)),
             "has_security_questions": has_security_questions,
             "require_security_questions_setup": require_security_questions_setup,
+            **department_payload,
             "created_at": created_at.isoformat() if created_at else None,
         }
 
@@ -317,6 +381,76 @@ class AuthService:
             if _is_db_unavailable_error(exc):
                 return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
             return {"success": False, "error": str(exc), "code": "FETCH_ERROR"}
+
+    def get_selectable_department_tree(self, *, user_id: int | None = None) -> dict[str, Any]:
+        del user_id
+        try:
+            return self._departments.get_selectable_tree()
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
+            return {"success": False, "error": str(exc), "code": "FETCH_ERROR"}
+
+    def update_department(
+        self,
+        *,
+        user_id: int,
+        primary_department_id: int | None,
+        secondary_department_id: int | None,
+    ) -> dict[str, Any]:
+        try:
+            user = self._repo.get_by_id(user_id)
+            if not user:
+                return {"success": False, "error": "user_not_found", "code": "USER_NOT_FOUND"}
+
+            current_department = self._departments.describe_user_department(
+                primary_department_id=user.get("primary_department_id"),
+                secondary_department_id=user.get("secondary_department_id"),
+            )
+            if (
+                self._department_pair_from_mapping(user)
+                == self._department_pair_from_mapping(
+                    {
+                        "primary_department_id": primary_department_id,
+                        "secondary_department_id": secondary_department_id,
+                    }
+                )
+                and not bool(current_department.get("require_department_setup"))
+            ):
+                return {"success": True, "message": "department_updated", "data": self._build_user_payload(user)}
+
+            validation = self._departments.validate_department_selection(
+                primary_department_id=primary_department_id,
+                secondary_department_id=secondary_department_id,
+                require_active=True,
+                allow_empty=False,
+            )
+            if not validation.get("success"):
+                return validation
+
+            department_data = validation.get("data") if isinstance(validation.get("data"), dict) else {}
+            updated_count = self._repo.update_user_department(
+                user_id=user_id,
+                primary_department_id=department_data.get("primary_department_id"),
+                secondary_department_id=department_data.get("secondary_department_id"),
+            )
+            refreshed_user = self._repo.get_by_id(user_id) or user
+            if (
+                updated_count <= 0
+                and self._department_pair_from_mapping(refreshed_user)
+                != self._department_pair_from_mapping(department_data)
+            ):
+                return {"success": False, "error": "department_update_failed", "code": "UPDATE_ERROR"}
+            updated_user = {
+                **refreshed_user,
+                "primary_department_id": department_data.get("primary_department_id"),
+                "secondary_department_id": department_data.get("secondary_department_id"),
+            }
+            return {"success": True, "message": "department_updated", "data": self._build_user_payload(updated_user)}
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
+            return {"success": False, "error": str(exc), "code": "UPDATE_ERROR"}
 
     def register(self, username: str, password: str) -> dict[str, Any]:
         username = (username or "").strip()
@@ -420,11 +554,17 @@ class AuthService:
                         "username": user_payload["username"],
                         "role": user_payload["role"],
                         "user_type": user_payload["user_type"],
+                        "primary_department_id": user_payload.get("primary_department_id"),
+                        "primary_department_name": user_payload.get("primary_department_name"),
+                        "secondary_department_id": user_payload.get("secondary_department_id"),
+                        "secondary_department_name": user_payload.get("secondary_department_name"),
                     },
                     "is_first_login": bool(user_payload.get("is_first_login")),
                     "has_security_questions": bool(user_payload.get("has_security_questions")),
                     "require_security_questions_setup": bool(user_payload.get("require_security_questions_setup")),
+                    "require_department_setup": bool(user_payload.get("require_department_setup")),
                 },
+                "require_department_setup": bool(user_payload.get("require_department_setup")),
             }
             if bool(user_payload.get("is_first_login")):
                 result["require_password_change"] = True

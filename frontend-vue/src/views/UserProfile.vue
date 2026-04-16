@@ -1,14 +1,19 @@
 <script setup>
-import { ref, onMounted } from 'vue'
-import { authApi } from '../services/auth'
+import { computed, ref, onMounted } from 'vue'
+import DepartmentSelector from '../components/DepartmentSelector.vue'
+import { authApi, clearStoredAuth, persistStoredUser, readStoredUser } from '../services/auth'
+import { departmentApi, mergePreservedDepartmentTree } from '../services/departments'
 import { quotaApi } from '../services/quota'
 
 const currentUser = ref(null)
 const loading = ref(false)
 const error = ref('')
 const success = ref('')
+const departmentError = ref('')
+const departmentSuccess = ref('')
 const forcePasswordChange = ref(false)
 const forceSecurityQuestionSetup = ref(false)
+const forceDepartmentSetup = ref(false)
 
 // 配额信息
 const quotas = ref(null)
@@ -18,6 +23,16 @@ const quotaLoading = ref(false)
 const showPasswordForm = ref(false)
 const oldPassword = ref('')
 const newPassword = ref('')
+
+// 部门信息
+const showDepartmentForm = ref(false)
+const departmentTree = ref([])
+const departmentLoading = ref(false)
+const selectedPrimaryDepartmentId = ref(null)
+const selectedSecondaryDepartmentId = ref(null)
+const departmentSelectorTree = computed(() => (
+  mergePreservedDepartmentTree(departmentTree.value, currentUser.value)
+))
 
 // 安全问题表单
 const showSecurityForm = ref(false)
@@ -80,22 +95,67 @@ async function fetchCurrentUser() {
       currentUser.value = result.data
       forcePasswordChange.value = Boolean(result.data?.is_first_login)
       forceSecurityQuestionSetup.value = Boolean(result.data?.require_security_questions_setup)
+      forceDepartmentSetup.value = Boolean(result.data?.require_department_setup)
+      selectedPrimaryDepartmentId.value = result.data?.primary_department_id ?? null
+      selectedSecondaryDepartmentId.value = result.data?.secondary_department_id ?? null
       if (forcePasswordChange.value) {
         showPasswordForm.value = true
       }
       if (forceSecurityQuestionSetup.value) {
         showSecurityForm.value = true
       }
+      if (forceDepartmentSetup.value) {
+        showDepartmentForm.value = true
+      }
       // 获取已设置的安全问题
-      await fetchSecurityQuestions()
+      await Promise.all([
+        fetchSecurityQuestions(),
+        fetchDepartmentTree(),
+      ])
     } else {
-      error.value = result.error
+      error.value = result.error || '获取用户信息失败'
     }
   } catch (e) {
     error.value = '获取用户信息失败'
   } finally {
     loading.value = false
   }
+}
+
+async function fetchDepartmentTree() {
+  departmentLoading.value = true
+  departmentError.value = ''
+  try {
+    const result = await departmentApi.getSelectableTree()
+    if (result.success) {
+      departmentTree.value = Array.isArray(result.data?.items) ? result.data.items : []
+      return
+    }
+    departmentTree.value = []
+    departmentError.value = result.error || '获取部门选项失败'
+  } catch (e) {
+    departmentTree.value = []
+    departmentError.value = '获取部门选项失败'
+  } finally {
+    departmentLoading.value = false
+  }
+}
+
+function syncStoredUser(patch) {
+  const latestUser = {
+    ...(readStoredUser() || {}),
+    ...(currentUser.value || {}),
+    ...patch,
+  }
+  persistStoredUser(latestUser)
+}
+
+function hasPendingForcedSetup() {
+  return forcePasswordChange.value || forceSecurityQuestionSetup.value || forceDepartmentSetup.value
+}
+
+function redirectAfterProfileCompletion() {
+  window.location.href = currentUser.value?.role === 'admin' ? '/admin' : '/'
 }
 
 async function fetchSecurityQuestions() {
@@ -164,15 +224,14 @@ async function submitPasswordChange() {
     oldPassword.value = ''
     newPassword.value = ''
     forcePasswordChange.value = false
-    
-    // 更新localStorage中的用户信息，标记为非首次登录
-    const user = localStorage.getItem('user')
-    if (user) {
-      const userData = JSON.parse(user)
-      userData.is_first_login = false
-      userData.require_security_questions_setup = forceSecurityQuestionSetup.value
-      localStorage.setItem('user', JSON.stringify(userData))
+    if (currentUser.value) {
+      currentUser.value.is_first_login = false
     }
+    syncStoredUser({
+      is_first_login: false,
+      require_security_questions_setup: forceSecurityQuestionSetup.value,
+      require_department_setup: forceDepartmentSetup.value,
+    })
     
     setTimeout(() => {
       success.value = ''
@@ -181,9 +240,12 @@ async function submitPasswordChange() {
         showSecurityForm.value = true
         return
       }
-      // 如果不是强制流程，修改成功后跳转到首页
-      if (forcePasswordChange.value === false) {
-        window.location.href = '/'
+      if (forceDepartmentSetup.value) {
+        showDepartmentForm.value = true
+        return
+      }
+      if (!hasPendingForcedSetup()) {
+        redirectAfterProfileCompletion()
       }
     }, 2000)
   } else {
@@ -238,17 +300,19 @@ async function saveSecurityQuestions() {
         currentUser.value.require_security_questions_setup = false
         currentUser.value.has_security_questions = true
       }
-      const user = localStorage.getItem('user')
-      if (user) {
-        const userData = JSON.parse(user)
-        userData.require_security_questions_setup = false
-        userData.has_security_questions = true
-        localStorage.setItem('user', JSON.stringify(userData))
-      }
+      syncStoredUser({
+        require_security_questions_setup: false,
+        has_security_questions: true,
+        require_department_setup: forceDepartmentSetup.value,
+      })
       setTimeout(() => {
         success.value = ''
-        if (!forcePasswordChange.value) {
-          window.location.href = '/'
+        if (forceDepartmentSetup.value) {
+          showDepartmentForm.value = true
+          return
+        }
+        if (!hasPendingForcedSetup()) {
+          redirectAfterProfileCompletion()
         }
       }, 1500)
       return
@@ -259,11 +323,48 @@ async function saveSecurityQuestions() {
   }
 }
 
+async function saveDepartment() {
+  departmentError.value = ''
+  departmentSuccess.value = ''
+
+  if (!selectedPrimaryDepartmentId.value || !selectedSecondaryDepartmentId.value) {
+    departmentError.value = '请选择一级和二级部门'
+    return
+  }
+
+  const result = await departmentApi.updateMyDepartment(
+    selectedPrimaryDepartmentId.value,
+    selectedSecondaryDepartmentId.value,
+  )
+
+  if (result.success) {
+    currentUser.value = {
+      ...(currentUser.value || {}),
+      ...(result.data || {}),
+    }
+    selectedPrimaryDepartmentId.value = result.data?.primary_department_id ?? null
+    selectedSecondaryDepartmentId.value = result.data?.secondary_department_id ?? null
+    forceDepartmentSetup.value = Boolean(result.data?.require_department_setup)
+    showDepartmentForm.value = false
+    syncStoredUser({
+      ...(result.data || {}),
+      require_department_setup: Boolean(result.data?.require_department_setup),
+    })
+    departmentSuccess.value = '部门信息保存成功'
+    setTimeout(() => {
+      departmentSuccess.value = ''
+      if (!hasPendingForcedSetup()) {
+        redirectAfterProfileCompletion()
+      }
+    }, 1500)
+    return
+  }
+
+  departmentError.value = result.error || '保存部门信息失败'
+}
+
 async function logout() {
-  localStorage.removeItem('token')
-  localStorage.removeItem('user')
-  localStorage.removeItem('agentcode.auth.token.v1')
-  localStorage.removeItem('agentcode.auth.user.v1')
+  clearStoredAuth()
   window.location.href = '/login'
 }
 
@@ -278,6 +379,10 @@ function checkForcePasswordChange() {
   if (urlParams.get('security_questions') === 'required') {
     forceSecurityQuestionSetup.value = true
     showSecurityForm.value = true
+  }
+  if (urlParams.get('department') === 'required') {
+    forceDepartmentSetup.value = true
+    showDepartmentForm.value = true
   }
 }
 
@@ -386,6 +491,53 @@ onMounted(() => {
           <div class="info-row">
             <span class="label">创建时间</span>
             <span class="value">{{ currentUser.created_at }}</span>
+          </div>
+        </div>
+
+        <!-- 部门信息 -->
+        <div class="action-card">
+          <h2>部门信息</h2>
+          <p class="hint">请选择您的一级、二级部门。未填写部门信息时会被强制拦截到个人中心补全。</p>
+
+          <div v-if="forceDepartmentSetup" class="alert alert-warning">
+            <strong>⚠️ 部门信息必填</strong><br>
+            请先补全部门信息后再继续使用系统。
+          </div>
+
+          <div v-if="departmentSuccess" class="alert alert-success">{{ departmentSuccess }}</div>
+          <div v-if="departmentError" class="alert alert-error">{{ departmentError }}</div>
+
+          <div v-if="!showDepartmentForm" class="department-summary">
+            <div class="info-row">
+              <span class="label">当前部门</span>
+              <span
+                class="value"
+                :class="{ 'department-disabled': currentUser.department_effective_status === 'disabled' }"
+              >
+                {{ currentUser.department_display || '未填写' }}
+              </span>
+            </div>
+            <button class="action-btn" @click="showDepartmentForm = true">
+              {{ currentUser.primary_department_id && currentUser.secondary_department_id ? '修改部门' : '填写部门' }}
+            </button>
+          </div>
+
+          <div v-else class="department-form">
+            <div v-if="departmentLoading" class="loading-small">加载部门选项中...</div>
+            <template v-else>
+              <DepartmentSelector
+                :tree="departmentSelectorTree"
+                :primary-id="selectedPrimaryDepartmentId"
+                :secondary-id="selectedSecondaryDepartmentId"
+                :allow-empty="false"
+                @update:primary-id="selectedPrimaryDepartmentId = $event"
+                @update:secondary-id="selectedSecondaryDepartmentId = $event"
+              />
+              <div class="form-actions">
+                <button class="btn-secondary" @click="showDepartmentForm = false" :disabled="forceDepartmentSetup">取消</button>
+                <button class="btn-primary" @click="saveDepartment" :disabled="departmentLoading || !departmentTree.length">保存部门</button>
+              </div>
+            </template>
           </div>
         </div>
 
@@ -637,6 +789,18 @@ onMounted(() => {
   color: #666;
   font-size: 14px;
   margin-bottom: 15px;
+}
+
+.department-summary,
+.department-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.department-disabled {
+  color: #b45309;
+  font-weight: 600;
 }
 
 /* 配额卡片样式 */

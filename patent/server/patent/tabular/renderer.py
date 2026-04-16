@@ -193,6 +193,31 @@ def build_tabular_result_context(
                     categorical_limit=categorical_limit,
                 )
             )
+        elif operation == "compare_tables":
+            aggregate = str(summary_stats.get("aggregate") or plan.get("aggregate") or "").strip()
+            group_by = str(summary_stats.get("group_by") or plan.get("group_by") or "").strip()
+            metric_columns = [
+                str(item)
+                for item in (summary_stats.get("metric_columns") or plan.get("metric_columns") or [])
+                if str(item)
+            ]
+            lines.append("多表对比摘要:")
+            table_count = summary_stats.get("table_count")
+            if table_count is not None:
+                lines.append(f"- 表格数: {table_count}")
+            source_row_count = summary_stats.get("source_row_count")
+            if source_row_count is not None:
+                lines.append(f"- 命中行数: {source_row_count}")
+            returned_count = summary_stats.get("returned_count")
+            if returned_count is not None:
+                lines.append(f"- 返回结果行数: {returned_count}")
+            lines.append(f"- 分组对比: {'是' if int(summary_stats.get('grouped_compare') or 0) else '否'}")
+            if aggregate:
+                lines.append(f"- 聚合方式: {aggregate}")
+            if group_by:
+                lines.append(f"- 分组列: {group_by}")
+            if metric_columns:
+                lines.append("指标列: " + ", ".join(metric_columns))
         else:
             aggregate = str(summary_stats.get("aggregate") or plan.get("aggregate") or "").strip()
             if aggregate:
@@ -222,7 +247,7 @@ def build_tabular_result_context(
         lines.append("代表性样例:")
         lines.append(_render_rows(rows, limit=5, columns=focus_columns if focus_columns else None))
     elif rows:
-        lines.append("结果样例:")
+        lines.append("对比结果:" if operation == "compare_tables" else "结果样例:")
         lines.append(_render_rows(rows, limit=5))
 
     empty_reason = str(result.get("empty_reason") or "").strip()

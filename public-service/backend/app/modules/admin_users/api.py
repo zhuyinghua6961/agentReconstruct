@@ -13,6 +13,7 @@ from app.modules.admin_users.schemas import (
     BatchChangeUserTypeRequest,
     BatchDeleteUsersRequest,
     UserCreateRequest,
+    UserDepartmentUpdateRequest,
     UserPasswordResetRequest,
     UserStatusUpdateRequest,
     UserTypeUpdateRequest,
@@ -75,8 +76,26 @@ def create_user(payload: UserCreateRequest, _context: AuthContext = Depends(requ
             username=payload.username,
             password=payload.password,
             user_type=str(payload.user_type),
+            primary_department_id=payload.primary_department_id,
+            secondary_department_id=payload.secondary_department_id,
         ),
         ok_status=201,
+    )
+
+
+@router.put("/users/{user_id}/department")
+def update_user_department(
+    user_id: int,
+    payload: UserDepartmentUpdateRequest,
+    _context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(
+        admin_users_service.update_department(
+            target_user_id=user_id,
+            primary_department_id=payload.primary_department_id,
+            secondary_department_id=payload.secondary_department_id,
+        ),
+        ok_status=200,
     )
 
 

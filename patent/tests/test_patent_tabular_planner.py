@@ -55,6 +55,77 @@ def _profile_zh():
     }
 
 
+def _profile_zh_with_file(file_id: int, file_name: str, *, capacity_column: str = "容量"):
+    return {
+        "file_id": file_id,
+        "file_name": file_name,
+        "sheet_count": 1,
+        "sheets": [
+            {
+                "sheet_name": "Sheet1",
+                "normalized_sheet_name": "sheet1",
+                "row_count": 4,
+                "column_count": 4,
+                "column_names": ["批次", capacity_column, "温度", "备注"],
+                "numeric_columns": [capacity_column, "温度"],
+                "date_like_columns": [],
+                "text_columns": ["批次", "备注"],
+                "columns": [
+                    {"name": "批次", "normalized_name": "批次", "is_numeric": False, "is_date_like": False},
+                    {
+                        "name": capacity_column,
+                        "normalized_name": capacity_column,
+                        "is_numeric": True,
+                        "is_date_like": False,
+                    },
+                    {"name": "温度", "normalized_name": "温度", "is_numeric": True, "is_date_like": False},
+                    {"name": "备注", "normalized_name": "备注", "is_numeric": False, "is_date_like": False},
+                ],
+            }
+        ],
+    }
+
+
+def _multi_sheet_profile(file_id: int, file_name: str, first_sheet: str, second_sheet: str):
+    return {
+        "file_id": file_id,
+        "file_name": file_name,
+        "sheet_count": 2,
+        "sheets": [
+            {
+                "sheet_name": first_sheet,
+                "normalized_sheet_name": first_sheet.lower(),
+                "row_count": 4,
+                "column_count": 3,
+                "column_names": ["批次", "容量", "温度"],
+                "numeric_columns": ["容量", "温度"],
+                "date_like_columns": [],
+                "text_columns": ["批次"],
+                "columns": [
+                    {"name": "批次", "normalized_name": "批次", "is_numeric": False, "is_date_like": False},
+                    {"name": "容量", "normalized_name": "容量", "is_numeric": True, "is_date_like": False},
+                    {"name": "温度", "normalized_name": "温度", "is_numeric": True, "is_date_like": False},
+                ],
+            },
+            {
+                "sheet_name": second_sheet,
+                "normalized_sheet_name": second_sheet.lower(),
+                "row_count": 4,
+                "column_count": 3,
+                "column_names": ["批次", "容量", "温度"],
+                "numeric_columns": ["容量", "温度"],
+                "date_like_columns": [],
+                "text_columns": ["批次"],
+                "columns": [
+                    {"name": "批次", "normalized_name": "批次", "is_numeric": False, "is_date_like": False},
+                    {"name": "容量", "normalized_name": "容量", "is_numeric": True, "is_date_like": False},
+                    {"name": "温度", "normalized_name": "温度", "is_numeric": True, "is_date_like": False},
+                ],
+            },
+        ],
+    }
+
+
 def test_plan_tabular_query_prefers_metric_and_group_columns_from_profile():
     profile = _profile()
 
@@ -98,6 +169,13 @@ def test_plan_tabular_query_keeps_explicit_mean_aggregate():
     assert plan["aggregate"] == "mean"
 
 
+def test_plan_tabular_query_keeps_explicit_max_aggregate():
+    plan = plan_tabular_query(question="最大容量是多少", profile=_profile_zh())
+
+    assert plan["operation"] == "aggregate"
+    assert plan["aggregate"] == "max"
+
+
 def test_plan_tabular_query_keeps_explicit_mean_aggregate_even_with_summary_keywords():
     plan = plan_tabular_query(question="总结一下平均容量是多少", profile=_profile_zh())
 
@@ -131,3 +209,89 @@ def test_plan_tabular_query_general_summary_does_not_fallback_to_first_numeric_f
 
     assert plan["operation"] == "summary"
     assert plan["focus_columns"] == []
+
+
+def test_plan_tabular_query_uses_compare_tables_for_multi_table_compare_intent():
+    profiles = [
+        _profile_zh_with_file(101, "a.csv"),
+        _profile_zh_with_file(102, "b.csv", capacity_column="容量_Ah"),
+    ]
+
+    plan = plan_tabular_query(
+        question="对比一下这两个表格",
+        profile=profiles[0],
+        profiles=profiles,
+        workbook_count=2,
+    )
+
+    assert plan["operation"] == "compare_tables"
+    assert plan["aggregate"] == "count"
+    assert plan["sheet_map"] == {101: "Sheet1", 102: "Sheet1"}
+
+
+def test_plan_tabular_query_supports_multi_table_grouped_compare():
+    profiles = [
+        _profile_zh_with_file(101, "a.csv"),
+        _profile_zh_with_file(102, "b.csv", capacity_column="容量_Ah"),
+    ]
+
+    plan = plan_tabular_query(
+        question="按批次对比这两个表格的平均容量",
+        profile=profiles[0],
+        profiles=profiles,
+        workbook_count=2,
+    )
+
+    assert plan["operation"] == "compare_tables"
+    assert plan["group_column_map"] == {101: "批次", 102: "批次"}
+    assert plan["metric_column_map"] == {101: "容量", 102: "容量_Ah"}
+
+
+def test_plan_tabular_query_returns_clarification_when_compare_sheet_is_ambiguous():
+    profiles = [
+        _multi_sheet_profile(101, "a.xlsx", "实验数据", "附表A"),
+        _multi_sheet_profile(102, "b.xlsx", "测试结果", "附表B"),
+    ]
+
+    plan = plan_tabular_query(
+        question="对比这两个表格",
+        profile=profiles[0],
+        profiles=profiles,
+        workbook_count=2,
+    )
+
+    assert plan["needs_clarification"] is True
+    assert plan["clarification_reason"] == "sheet_compare_ambiguous"
+
+
+def test_plan_tabular_query_builds_filter_map_for_multi_table_compare():
+    profiles = [
+        _profile_zh_with_file(101, "a.csv"),
+        _profile_zh_with_file(102, "b.csv", capacity_column="容量_Ah"),
+    ]
+
+    plan = plan_tabular_query(
+        question="对比温度=25时这两个表格的平均容量",
+        profile=profiles[0],
+        profiles=profiles,
+        workbook_count=2,
+    )
+
+    assert plan["operation"] == "compare_tables"
+    assert plan["filter_map"] == {
+        101: [{"column": "温度", "value": "25"}],
+        102: [{"column": "温度", "value": "25"}],
+    }
+
+
+def test_plan_tabular_query_keeps_single_table_compare_path_for_one_workbook():
+    profile = _profile_zh_with_file(101, "a.csv")
+
+    plan = plan_tabular_query(
+        question="比较不同批次的平均容量",
+        profile=profile,
+        profiles=[profile],
+        workbook_count=1,
+    )
+
+    assert plan["operation"] == "compare"

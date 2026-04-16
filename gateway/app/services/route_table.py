@@ -21,6 +21,8 @@ _PUBLIC_ROUTE_GROUPS = (
     _paths("/api/auth/login"),
     _paths("/api/auth/register"),
     _paths("/api/auth/me"),
+    _paths("/api/auth/departments/tree"),
+    _paths("/api/auth/department"),
     _paths("/api/auth/password"),
     _paths("/api/auth/forgot-password/initiate"),
     _paths("/api/auth/forgot-password/verify"),
@@ -63,6 +65,13 @@ _PUBLIC_ROUTE_GROUPS = (
     _paths("/api/admin/users/batch-type", include_v1=False),
     _paths("/api/admin/users/batch-import", include_v1=False),
     _paths("/api/admin/users/import-template", include_v1=False),
+    _paths("/api/admin/departments/tree", include_v1=False),
+    _paths("/api/admin/departments/primary", include_v1=False),
+    _paths("/api/admin/departments/primary/{primary_id}", include_v1=False),
+    _paths("/api/admin/departments/primary/{primary_id}/status", include_v1=False),
+    _paths("/api/admin/departments/secondary", include_v1=False),
+    _paths("/api/admin/departments/secondary/{secondary_id}", include_v1=False),
+    _paths("/api/admin/departments/secondary/{secondary_id}/status", include_v1=False),
 )
 
 PUBLIC_ROUTE_PATTERNS = tuple(path for group in _PUBLIC_ROUTE_GROUPS for path in group)

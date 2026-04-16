@@ -71,6 +71,10 @@ class AuthRepository:
             fields.append("is_first_login")
         if self.has_column("must_set_security_questions"):
             fields.append("must_set_security_questions")
+        if self.has_column("primary_department_id"):
+            fields.append("primary_department_id")
+        if self.has_column("secondary_department_id"):
+            fields.append("secondary_department_id")
         if self.has_column("password_updated_at"):
             fields.append("password_updated_at")
         if self.has_column("failed_login_attempts"):
@@ -115,6 +119,8 @@ class AuthRepository:
         user_type: int | None = None,
         is_first_login: bool | None = None,
         must_set_security_questions: bool | None = None,
+        primary_department_id: int | None = None,
+        secondary_department_id: int | None = None,
     ) -> int:
         columns = ["username", "password_hash", "role", "status"]
         values: list[Any] = [username, password_hash, role, "active"]
@@ -127,6 +133,12 @@ class AuthRepository:
         if must_set_security_questions is not None and self.has_column("must_set_security_questions"):
             columns.append("must_set_security_questions")
             values.append(1 if must_set_security_questions else 0)
+        if self.has_column("primary_department_id"):
+            columns.append("primary_department_id")
+            values.append(primary_department_id)
+        if self.has_column("secondary_department_id"):
+            columns.append("secondary_department_id")
+            values.append(secondary_department_id)
         if self.has_column("password_updated_at"):
             columns.append("password_updated_at")
             values.append("NOW_FUNC_PLACEHOLDER")
@@ -165,6 +177,25 @@ class AuthRepository:
             (password_hash, user_id),
         )
 
+    def update_user_department(
+        self,
+        *,
+        user_id: int,
+        primary_department_id: int | None,
+        secondary_department_id: int | None,
+    ) -> int:
+        if not self.has_column("primary_department_id") or not self.has_column("secondary_department_id"):
+            return 0
+        return self._execute_update(
+            """
+            UPDATE users
+            SET primary_department_id = %s,
+                secondary_department_id = %s
+            WHERE id = %s
+            """,
+            (primary_department_id, secondary_department_id, user_id),
+        )
+
     def count_users(self) -> int:
         rows = self._execute_query("SELECT COUNT(*) AS total FROM users")
         if not rows:
@@ -172,19 +203,17 @@ class AuthRepository:
         return int(rows[0].get("total", 0) or 0)
 
     def list_users(self, *, offset: int, limit: int) -> list[dict[str, Any]]:
+        fields = ["id", "username", "role", "status"]
         if self.has_column("user_type"):
-            return self._execute_query(
-                """
-                SELECT id, username, role, status, user_type, created_at, updated_at
-                FROM users
-                ORDER BY id ASC
-                LIMIT %s OFFSET %s
-                """,
-                (limit, offset),
-            )
+            fields.append("user_type")
+        if self.has_column("primary_department_id"):
+            fields.append("primary_department_id")
+        if self.has_column("secondary_department_id"):
+            fields.append("secondary_department_id")
+        fields.extend(["created_at", "updated_at"])
         return self._execute_query(
-            """
-            SELECT id, username, role, status, created_at, updated_at
+            f"""
+            SELECT {", ".join(fields)}
             FROM users
             ORDER BY id ASC
             LIMIT %s OFFSET %s

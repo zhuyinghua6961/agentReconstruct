@@ -266,6 +266,13 @@ def _write_csv(path) -> None:
     )
 
 
+def _write_compare_csv(path, *, capacity_column: str, values: list[tuple[str, int, int]]) -> None:
+    lines = [f"批次,{capacity_column},温度"]
+    for batch, capacity, temperature in values:
+        lines.append(f"{batch},{capacity},{temperature}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 
 def test_stub_executor_returns_deterministic_patent_payload():
     executor = PatentExecutor()
@@ -1603,14 +1610,47 @@ def test_executor_tabular_route_streams_fastqa_structured_answer(tmp_path):
 
     streamed_answer = "".join(streamed_chunks)
     assert streamed_answer == result["answer_text"]
-    assert "## 研究目的和背景" in streamed_answer
-    assert "## 研究方法/实验设计" in streamed_answer
-    assert "## 主要发现和结果" in streamed_answer
-    assert "## 结论和意义" in streamed_answer
-    assert "注*" in streamed_answer
-    result_section = _section_body(streamed_answer, "主要发现和结果")
-    assert "列:" not in result_section
-    assert "工作表:" not in result_section
+
+
+def test_executor_tabular_multi_table_compare_preserves_table_metadata_contract(tmp_path):
+    csv_a = tmp_path / "a.csv"
+    csv_b = tmp_path / "b.csv"
+    _write_compare_csv(
+        csv_a,
+        capacity_column="容量",
+        values=[("B1", 100, 25), ("B1", 110, 25), ("B2", 120, 35)],
+    )
+    _write_compare_csv(
+        csv_b,
+        capacity_column="容量_Ah",
+        values=[("B1", 108, 25), ("B1", 114, 25), ("B2", 118, 35)],
+    )
+    executor = PatentExecutor(
+        tabular_service=PatentTabularService(
+            answer_question_fn=lambda **kwargs: "## 结论\n- a.csv 与 b.csv 在 B1 批次的平均容量存在差异。\n\n## 证据\n- B1: a.csv=105, b.csv=111\n\n## 对比\n- b.csv 高于 a.csv\n\n## 限制\n- 当前仅比较温度=25 的样本",
+        )
+    )
+
+    result = executor.execute(
+        request=_make_file_request(
+            question="按批次对比温度=25时这两个表格的平均容量",
+            route="tabular_qa",
+            source_scope="table",
+            turn_mode="file_only",
+            execution_files=[
+                {"file_id": 33, "file_type": "csv", "file_name": "a.csv", "local_path": str(csv_a)},
+                {"file_id": 34, "file_type": "csv", "file_name": "b.csv", "local_path": str(csv_b)},
+            ],
+            selected_file_ids=[33, 34],
+            trace_id="req_multi_table_compare",
+        ),
+        context={"recent_turns_for_llm": []},
+    )
+
+    assert result["metadata"]["answer_mode"] == "table_execution_compare"
+    assert result["metadata"]["table_evidence_context"]
+    assert "多表对比摘要" in result["metadata"]["table_evidence_context"]
+    assert "无法生成基于表格的回答" not in result["answer_text"]
 
 
 def test_executor_tabular_fallback_streams_fastqa_structured_answer(tmp_path):

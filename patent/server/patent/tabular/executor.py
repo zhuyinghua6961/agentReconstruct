@@ -33,6 +33,26 @@ def _round_number(value: float) -> float:
     return round(float(value), 4)
 
 
+def _resolved_metric_columns(plan: dict[str, Any]) -> list[str]:
+    metric_columns = [str(item) for item in (plan.get("metric_columns") or []) if str(item)]
+    if metric_columns:
+        return metric_columns
+    metric_column = str(plan.get("metric_column") or "")
+    return [metric_column] if metric_column else []
+
+
+def _aggregate_numeric_values(values: list[float], aggregate: str) -> float | None:
+    if not values:
+        return None
+    if aggregate == "sum":
+        return _round_number(sum(values))
+    if aggregate == "max":
+        return _round_number(max(values))
+    if aggregate == "min":
+        return _round_number(min(values))
+    return _round_number(sum(values) / len(values))
+
+
 def _median(values: list[float]) -> float:
     ordered = sorted(values)
     count = len(ordered)
@@ -209,6 +229,138 @@ def _build_representative_summary_rows(
     return [dict(rows[position]) for position in picked_positions]
 
 
+def execute_compare_plan(*, workbooks: list[dict[str, Any]], plan: dict[str, Any]) -> dict[str, Any]:
+    aggregate = str(plan.get("aggregate") or "count")
+    metric_columns = _resolved_metric_columns(plan)
+    metric_column = metric_columns[0] if metric_columns else ""
+    sheet_map = plan.get("sheet_map") if isinstance(plan.get("sheet_map"), dict) else {}
+    metric_column_map = plan.get("metric_column_map") if isinstance(plan.get("metric_column_map"), dict) else {}
+    metric_column_maps = plan.get("metric_column_maps") if isinstance(plan.get("metric_column_maps"), dict) else {}
+    group_by = str(plan.get("group_by") or plan.get("group_column") or "")
+    group_column_map = plan.get("group_column_map") if isinstance(plan.get("group_column_map"), dict) else {}
+    filter_map = plan.get("filter_map") if isinstance(plan.get("filter_map"), dict) else {}
+    warnings: list[str] = []
+    rows: list[dict[str, Any]] = []
+    grouped_rows: dict[str, dict[str, Any]] = {}
+    grouped_output_keys: list[str] = []
+    grouped_compare = bool(group_column_map)
+    source_row_count = 0
+
+    for workbook in workbooks:
+        file_id = int(workbook.get("file_id") or 0)
+        file_name = str(workbook.get("file_name") or "")
+        target_sheet = str(sheet_map.get(file_id) or plan.get("sheet_name") or "")
+        sheet = _find_sheet(workbook, target_sheet)
+        if sheet is None:
+            warnings.append(f"文件 {file_name} 缺少工作表 {target_sheet}")
+            continue
+
+        source_rows = [dict(row) for row in (sheet.get("rows") or []) if isinstance(row, dict)]
+        effective_filters = filter_map.get(file_id) if file_id in filter_map else (plan.get("filters") or [])
+        filtered_rows = _apply_filters(source_rows, [dict(item) for item in effective_filters if isinstance(item, dict)])
+        source_row_count += len(filtered_rows)
+        columns = set(_column_names(sheet=sheet, rows=source_rows))
+
+        if grouped_compare:
+            if aggregate == "count":
+                grouped_output_keys.append(file_name)
+            elif len(metric_columns) == 1:
+                grouped_output_keys.append(file_name)
+            else:
+                for base_metric_column in metric_columns:
+                    grouped_output_keys.append(f"{file_name}:{base_metric_column}_{aggregate}")
+            current_group_by = str(group_column_map.get(file_id) or group_by)
+            if not current_group_by or current_group_by not in columns:
+                warnings.append(f"文件 {file_name} 缺少分组列 {current_group_by or group_by}")
+                continue
+            grouped: dict[str, list[dict[str, Any]]] = {}
+            for row in filtered_rows:
+                group_value = str(row.get(current_group_by) or "")
+                grouped.setdefault(group_value, []).append(row)
+
+            output_group_key = group_by or current_group_by or "group"
+            for group_value, group_rows in sorted(grouped.items(), key=lambda item: item[0]):
+                row = grouped_rows.setdefault(group_value, {output_group_key: group_value})
+                if aggregate == "count":
+                    row[file_name] = len(group_rows)
+                    continue
+                for base_metric_column in metric_columns:
+                    current_metric_column = str(
+                        (metric_column_maps.get(file_id) or {}).get(base_metric_column)
+                        or metric_column_map.get(file_id)
+                        or base_metric_column
+                    )
+                    if current_metric_column not in columns:
+                        warnings.append(f"文件 {file_name} 缺少列 {current_metric_column}")
+                        continue
+                    numeric_values = [_to_float(item.get(current_metric_column)) for item in group_rows]
+                    clean_values = [value for value in numeric_values if value is not None]
+                    value = _aggregate_numeric_values(clean_values, aggregate)
+                    output_key = file_name if len(metric_columns) == 1 else f"{file_name}:{base_metric_column}_{aggregate}"
+                    row[output_key] = value
+            continue
+
+        row: dict[str, Any] = {
+            "file_name": file_name,
+            "sheet_name": target_sheet,
+            "matched_count": len(filtered_rows),
+        }
+        if aggregate == "count":
+            row["value"] = len(filtered_rows)
+            rows.append(row)
+            continue
+
+        for base_metric_column in metric_columns:
+            current_metric_column = str(
+                (metric_column_maps.get(file_id) or {}).get(base_metric_column)
+                or metric_column_map.get(file_id)
+                or base_metric_column
+            )
+            if current_metric_column not in columns:
+                warnings.append(f"文件 {file_name} 缺少列 {current_metric_column}")
+                continue
+            numeric_values = [_to_float(item.get(current_metric_column)) for item in filtered_rows]
+            clean_values = [value for value in numeric_values if value is not None]
+            value = _aggregate_numeric_values(clean_values, aggregate)
+            if len(metric_columns) == 1:
+                row["value"] = value
+            row[f"{base_metric_column}_{aggregate}"] = value
+        rows.append(row)
+
+    if grouped_compare:
+        rows = [grouped_rows[group_value] for group_value in sorted(grouped_rows.keys())]
+        for row in rows:
+            for output_key in grouped_output_keys:
+                row.setdefault(output_key, "")
+
+    total_rows = len(rows)
+    if total_rows > 20:
+        rows = rows[:20]
+        warnings.append(f"对比结果较多，仅展示前 {len(rows)} 条。")
+
+    return {
+        "sheet_name": str(plan.get("sheet_name") or ""),
+        "operation": "compare_tables",
+        "rows": rows,
+        "row_count": len(rows),
+        "row_count_before": source_row_count,
+        "row_count_after": len(rows),
+        "empty_reason": "" if rows else "no_compare_rows",
+        "warnings": warnings,
+        "summary_stats": {
+            "aggregate": aggregate,
+            "metric_column": metric_column,
+            "metric_columns": metric_columns,
+            "group_by": group_by,
+            "grouped_compare": int(grouped_compare),
+            "table_count": len(workbooks),
+            "returned_count": len(rows),
+            "truncated_count": max(0, total_rows - len(rows)),
+            "source_row_count": source_row_count,
+        },
+    }
+
+
 def execute_tabular_plan(*, workbook: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
     operation = str(plan.get("operation") or "summary")
     aggregate = str(plan.get("aggregate") or "mean")
@@ -257,13 +409,11 @@ def execute_tabular_plan(*, workbook: dict[str, Any], plan: dict[str, Any]) -> d
                 if aggregate == "count":
                     rendered[metric_column or "count"] = len(group_rows)
                     continue
-                if not numeric_values:
+                value = _aggregate_numeric_values(numeric_values, aggregate)
+                if value is None:
                     rendered[metric_column] = ""
                     continue
-                if aggregate == "sum":
-                    rendered[metric_column] = round(sum(numeric_values), 4)
-                else:
-                    rendered[metric_column] = round(sum(numeric_values) / len(numeric_values), 4)
+                rendered[metric_column] = value
             result_rows.append(rendered)
 
         return {
@@ -352,4 +502,4 @@ def execute_tabular_plan(*, workbook: dict[str, Any], plan: dict[str, Any]) -> d
     }
 
 
-__all__ = ["execute_tabular_plan"]
+__all__ = ["execute_compare_plan", "execute_tabular_plan"]

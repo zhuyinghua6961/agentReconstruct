@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import server.patent.tabular_service as tabular_service_module
 from server.patent.tabular.renderer import infer_tabular_summary_focus_columns
-from server.patent.tabular_context import build_tabular_context_bundle
+from server.patent.tabular_context import build_compare_tabular_context_bundle, build_tabular_context_bundle
 
 
 def _sample_workbook() -> dict:
@@ -172,6 +172,91 @@ def _summary_result() -> dict:
             "numeric_summaries": numeric_summaries,
             "categorical_summaries": categorical_summaries,
             "filters": [],
+        },
+    }
+
+
+def _compare_workbooks() -> list[dict]:
+    return [
+        {
+            "file_id": 101,
+            "file_name": "a.csv",
+            "sheets": [
+                {
+                    "sheet_name": "Sheet1",
+                    "column_names": ["批次", "容量", "温度"],
+                    "numeric_columns": ["容量", "温度"],
+                    "row_count": 3,
+                    "rows": [
+                        {"批次": "B1", "容量": "100", "温度": "25"},
+                        {"批次": "B1", "容量": "110", "温度": "25"},
+                        {"批次": "B2", "容量": "120", "温度": "35"},
+                    ],
+                }
+            ],
+        },
+        {
+            "file_id": 102,
+            "file_name": "b.csv",
+            "sheets": [
+                {
+                    "sheet_name": "Sheet1",
+                    "column_names": ["批次", "容量_Ah", "温度"],
+                    "numeric_columns": ["容量_Ah", "温度"],
+                    "row_count": 3,
+                    "rows": [
+                        {"批次": "B1", "容量_Ah": "108", "温度": "25"},
+                        {"批次": "B1", "容量_Ah": "114", "温度": "25"},
+                        {"批次": "B2", "容量_Ah": "118", "温度": "35"},
+                    ],
+                }
+            ],
+        },
+    ]
+
+
+def _compare_plan() -> dict:
+    return {
+        "sheet_name": "Sheet1",
+        "operation": "compare_tables",
+        "aggregate": "mean",
+        "metric_columns": ["容量"],
+        "metric_column_map": {101: "容量", 102: "容量_Ah"},
+        "group_by": "批次",
+        "group_column": "批次",
+        "group_column_map": {101: "批次", 102: "批次"},
+        "sheet_map": {101: "Sheet1", 102: "Sheet1"},
+        "filters": [{"column": "温度", "value": "25"}],
+        "filter_map": {
+            101: [{"column": "温度", "value": "25"}],
+            102: [{"column": "温度", "value": "25"}],
+        },
+    }
+
+
+def _compare_result() -> dict:
+    return {
+        "sheet_name": "Sheet1",
+        "operation": "compare_tables",
+        "rows": [
+            {"批次": "B1", "a.csv": 105.0, "b.csv": 111.0},
+            {"批次": "B2", "a.csv": 120.0, "b.csv": 118.0},
+        ],
+        "row_count": 2,
+        "row_count_before": 6,
+        "row_count_after": 2,
+        "warnings": [],
+        "empty_reason": "",
+        "summary_stats": {
+            "aggregate": "mean",
+            "metric_column": "容量",
+            "metric_columns": ["容量"],
+            "group_by": "批次",
+            "grouped_compare": 1,
+            "table_count": 2,
+            "returned_count": 2,
+            "truncated_count": 0,
+            "source_row_count": 6,
         },
     }
 
@@ -411,3 +496,39 @@ def test_build_patent_tabular_prompt_hybrid_table_summary_preserves_table_fact_b
     assert "优先根据全表统计摘要作答" in prompt
     assert "先总结整体分布、差异、异常" in prompt
     assert "不能把少量样例当成整体结论" in prompt
+
+
+def test_build_compare_tabular_context_bundle_returns_non_empty_contexts():
+    bundle = build_compare_tabular_context_bundle(
+        question="对比温度=25时这两个表格的平均容量",
+        workbooks=_compare_workbooks(),
+        plan=_compare_plan(),
+        result=_compare_result(),
+        compact_limit=1200,
+        answer_limit=12000,
+        synthesis_limit=6000,
+    )
+
+    assert bundle["compact_evidence_context"]
+    assert bundle["answer_context"]
+    assert bundle["synthesis_context"]
+
+
+def test_build_compare_tabular_context_bundle_includes_compare_summary_and_rows():
+    bundle = build_compare_tabular_context_bundle(
+        question="按批次对比温度=25时这两个表格的平均容量",
+        workbooks=_compare_workbooks(),
+        plan=_compare_plan(),
+        result=_compare_result(),
+        compact_limit=1200,
+        answer_limit=12000,
+        synthesis_limit=6000,
+    )
+
+    assert "多表对比摘要:" in bundle["compact_evidence_context"]
+    assert "多表工作簿概览:" in bundle["answer_context"]
+    assert "多表对比摘要:" in bundle["answer_context"]
+    assert "对比结果:" in bundle["answer_context"]
+    assert "a.csv" in bundle["answer_context"]
+    assert "b.csv" in bundle["answer_context"]
+    assert "批次=B1" in bundle["answer_context"]

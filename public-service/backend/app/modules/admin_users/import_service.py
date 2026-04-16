@@ -9,6 +9,7 @@ from xml.etree import ElementTree as ET
 
 from fastapi.responses import Response
 
+from app.modules.departments.service import department_service
 from app.modules.admin_users.service import admin_users_service
 from app.modules.quota.deps import finalize_quota, precheck_quota
 from app.modules.quota.service import QuotaGrant
@@ -59,6 +60,8 @@ class AdminUsersImportService:
             username_col = normalized["username"]
             password_col = normalized["password"]
             user_type_col = normalized.get("user_type")
+            primary_department_name_col = normalized.get("primary_department_name")
+            secondary_department_name_col = normalized.get("secondary_department_name")
 
             details: list[dict[str, Any]] = []
             success_count = 0
@@ -72,6 +75,12 @@ class AdminUsersImportService:
                 user_type = admin_users_service.clean_text(
                     row.get(user_type_col) if user_type_col else "common"
                 ).lower() or "common"
+                primary_department_name = admin_users_service.clean_text(
+                    row.get(primary_department_name_col) if primary_department_name_col else ""
+                )
+                secondary_department_name = admin_users_service.clean_text(
+                    row.get(secondary_department_name_col) if secondary_department_name_col else ""
+                )
 
                 if not username:
                     failed_count += 1
@@ -98,11 +107,47 @@ class AdminUsersImportService:
                     details.append({"row": line_no, "username": username, "status": "skipped", "reason": "用户名已存在"})
                     continue
 
+                primary_department_id = None
+                secondary_department_id = None
+                if bool(primary_department_name) ^ bool(secondary_department_name):
+                    failed_count += 1
+                    details.append(
+                        {
+                            "row": line_no,
+                            "username": username,
+                            "status": "failed",
+                            "reason": "部门信息必须同时填写一级和二级",
+                        }
+                    )
+                    continue
+                if primary_department_name and secondary_department_name:
+                    resolved = department_service.resolve_by_names(
+                        primary_name=primary_department_name,
+                        secondary_name=secondary_department_name,
+                        active_only=True,
+                    )
+                    if not resolved.get("success"):
+                        failed_count += 1
+                        details.append(
+                            {
+                                "row": line_no,
+                                "username": username,
+                                "status": "failed",
+                                "reason": str(resolved.get("error") or resolved.get("code") or "部门解析失败"),
+                            }
+                        )
+                        continue
+                    resolved_data = resolved.get("data") if isinstance(resolved.get("data"), dict) else {}
+                    primary_department_id = resolved_data.get("primary_department_id")
+                    secondary_department_id = resolved_data.get("secondary_department_id")
+
                 admin_users_service.users.create_user(
                     username=username,
                     password_hash=admin_users_service.hash_password(password),
                     role="user",
                     user_type=2 if user_type == "super" else 3,
+                    primary_department_id=primary_department_id,
+                    secondary_department_id=secondary_department_id,
                 )
                 success_count += 1
                 details.append({"row": line_no, "username": username, "status": "success"})
@@ -132,11 +177,11 @@ class AdminUsersImportService:
         if fmt not in {"xlsx", "csv"}:
             return {"success": False, "error": "不支持的格式，只支持xlsx和csv", "code": "INVALID_FORMAT"}
 
-        headers = ["username", "password", "user_type"]
+        headers = ["username", "password", "user_type", "primary_department_name", "secondary_department_name"]
         rows = [
-            ["user001", "Pass123!", "common"],
-            ["user002", "Test456@", "super"],
-            ["user003", "Demo789#", "common"],
+            ["user001", "Pass123!", "common", "计算机学院", "软件工程系"],
+            ["user002", "Test456@", "super", "化学学院", "材料系"],
+            ["user003", "Demo789#", "common", "", ""],
         ]
 
         if fmt == "csv":

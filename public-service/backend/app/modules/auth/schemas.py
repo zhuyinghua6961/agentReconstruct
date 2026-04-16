@@ -37,3 +37,8 @@ class SecurityQuestionItem(BaseModel):
 
 class SetSecurityQuestionsRequest(BaseModel):
     questions: list[SecurityQuestionItem] = Field(default_factory=list)
+
+
+class DepartmentUpdateRequest(BaseModel):
+    primary_department_id: int | None = Field(default=None)
+    secondary_department_id: int | None = Field(default=None)

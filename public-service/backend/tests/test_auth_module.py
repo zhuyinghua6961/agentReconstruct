@@ -2,7 +2,6 @@ import json
 import os
 
 import pytest
-from fastapi.testclient import TestClient
 
 from app.core.deps import AuthContext
 from app.core.errors import DatabaseUnavailableError
@@ -33,13 +32,21 @@ def test_auth_routes_registered():
     assert "/api/auth/login" in paths
     assert "/api/v1/auth/me" in paths
     assert "/api/auth/me" in paths
+    assert "/api/v1/auth/departments/tree" in paths
+    assert "/api/auth/departments/tree" in paths
+    assert "/api/v1/auth/department" in paths
+    assert "/api/auth/department" in paths
     assert "/api/v1/auth/security-questions" in paths
     assert "/api/auth/security-questions" in paths
 
     me_route = _route_for("/api/v1/auth/me", "GET")
+    department_tree_route = _route_for("/api/v1/auth/departments/tree", "GET")
+    department_update_route = _route_for("/api/v1/auth/department", "PUT")
     security_route = _route_for("/api/v1/auth/security-questions", "PUT")
     password_route = _route_for("/api/v1/auth/password", "PUT")
     assert require_auth_context in {dep.call for dep in me_route.dependant.dependencies}
+    assert require_auth_context in {dep.call for dep in department_tree_route.dependant.dependencies}
+    assert require_auth_context in {dep.call for dep in department_update_route.dependant.dependencies}
     assert require_auth_context in {dep.call for dep in security_route.dependant.dependencies}
     assert require_auth_context in {dep.call for dep in password_route.dependant.dependencies}
 
@@ -94,6 +101,42 @@ def test_login_route_exposes_first_login_flags(monkeypatch):
     assert body["data"]["has_security_questions"] is False
     assert body["require_password_change"] is True
     assert body["require_security_questions_setup"] is True
+
+
+def test_login_route_exposes_department_flags(monkeypatch):
+    def fake_login(username: str, password: str):
+        assert username == "alice"
+        assert password == "Secret123!"
+        return {
+            "success": True,
+            "message": "login_success",
+            "data": {
+                "token": "token-1",
+                "user": {
+                    "id": 1,
+                    "username": "alice",
+                    "role": "user",
+                    "user_type": 3,
+                    "primary_department_id": None,
+                    "primary_department_name": None,
+                    "secondary_department_id": None,
+                    "secondary_department_name": None,
+                },
+                "is_first_login": False,
+                "has_security_questions": True,
+                "require_security_questions_setup": False,
+                "require_department_setup": True,
+            },
+            "require_department_setup": True,
+        }
+
+    monkeypatch.setattr(auth_service_module.auth_service, "login", fake_login)
+    response = auth_api_module.login(LoginRequest(username="alice", password="Secret123!"))
+    body = _decode(response)
+    assert response.status_code == 200
+    assert body["data"]["user"]["primary_department_id"] is None
+    assert body["data"]["require_department_setup"] is True
+    assert body["require_department_setup"] is True
 
 
 def test_register_route_first_login_contract(monkeypatch):
@@ -154,6 +197,34 @@ def test_me_requires_valid_token_contract(monkeypatch):
     assert _decode(response)["data"]["id"] == 7
 
 
+def test_me_route_exposes_department_fields(monkeypatch):
+    monkeypatch.setattr(
+        auth_service_module.auth_service,
+        "get_user_info",
+        lambda user_id: {
+            "success": True,
+            "data": {
+                "id": user_id,
+                "username": "alice",
+                "role": "user",
+                "user_type": 3,
+                "primary_department_id": 1,
+                "primary_department_name": "计算机学院",
+                "secondary_department_id": 11,
+                "secondary_department_name": "软件工程系",
+                "require_department_setup": False,
+            },
+        },
+    )
+
+    response = auth_api_module.me(AuthContext(user_id=7, role="user", username="alice"))
+    body = _decode(response)
+    assert response.status_code == 200
+    assert body["data"]["primary_department_name"] == "计算机学院"
+    assert body["data"]["secondary_department_name"] == "软件工程系"
+    assert body["data"]["require_department_setup"] is False
+
+
 def test_security_questions_write_contract(monkeypatch):
     captured = {}
 
@@ -194,6 +265,41 @@ def test_get_security_questions_contract(monkeypatch):
     assert body["data"]["questions"][0] == "我最喜欢的水果是什么？"
 
 
+def test_auth_department_tree_contract(monkeypatch):
+    monkeypatch.setattr(
+        auth_service_module.auth_service,
+        "get_selectable_department_tree",
+        lambda **kwargs: {
+            "success": True,
+            "data": {"items": [{"id": 1, "name": "计算机学院", "secondary_items": []}]},
+        },
+    )
+
+    response = auth_api_module.get_department_tree(AuthContext(user_id=9, role="user", username="bob"))
+    assert response.status_code == 200
+    assert _decode(response)["data"]["items"][0]["name"] == "计算机学院"
+
+
+def test_auth_department_update_contract(monkeypatch):
+    captured = {}
+
+    def fake_update_department(*, user_id: int, primary_department_id: int | None, secondary_department_id: int | None):
+        captured["user_id"] = user_id
+        captured["primary_department_id"] = primary_department_id
+        captured["secondary_department_id"] = secondary_department_id
+        return {"success": True, "data": {"require_department_setup": False}}
+
+    monkeypatch.setattr(auth_service_module.auth_service, "update_department", fake_update_department)
+
+    response = auth_api_module.update_department(
+        auth_api_module.DepartmentUpdateRequest(primary_department_id=1, secondary_department_id=11),
+        AuthContext(user_id=9, role="user", username="bob"),
+    )
+    assert response.status_code == 200
+    assert captured == {"user_id": 9, "primary_department_id": 1, "secondary_department_id": 11}
+    assert _decode(response)["data"]["require_department_setup"] is False
+
+
 def test_get_bearer_token_supports_header_and_query():
     assert get_bearer_token("Bearer abc", None) == "abc"
     assert get_bearer_token(None, "xyz") == "xyz"
@@ -222,6 +328,21 @@ def test_optional_auth_context_surfaces_db_unavailable(monkeypatch):
 
     with pytest.raises(AppError) as exc_info:
         get_optional_auth_context("token-1")
+
+    assert exc_info.value.code == "DB_UNAVAILABLE"
+    assert exc_info.value.status_code == 503
+
+
+def test_require_auth_context_surfaces_db_unavailable(monkeypatch):
+    monkeypatch.setattr(auth_service_module.auth_service, "decode_token", lambda token: {"user_id": 7, "role": "user"})
+
+    def _fail_lookup(_user_id: int):
+        raise DatabaseUnavailableError("db_unavailable")
+
+    monkeypatch.setattr(auth_service_module.auth_service, "get_user_by_id", _fail_lookup)
+
+    with pytest.raises(AppError) as exc_info:
+        require_auth_context("token-1")
 
     assert exc_info.value.code == "DB_UNAVAILABLE"
     assert exc_info.value.status_code == 503
@@ -279,33 +400,294 @@ def test_auth_service_change_password_rejects_password_history_reuse():
     assert result["code"] == "PASSWORD_REUSED"
 
 
+def test_auth_service_login_includes_department_payload_and_flags():
+    class FakeRepo:
+        def __init__(self):
+            self.password_hash = _hash_password("Secret123!")
+
+        def get_by_username(self, username):
+            if username != "alice":
+                return None
+            return {
+                "id": 1,
+                "username": "alice",
+                "password_hash": self.password_hash,
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+                "is_first_login": 0,
+                "must_set_security_questions": 0,
+                "primary_department_id": None,
+                "secondary_department_id": None,
+            }
+
+        def reset_login_attempts(self, *, user_id: int):
+            return 1
+
+        def has_security_questions(self, *, user_id: int):
+            return True
+
+    class FakeDepartments:
+        def describe_user_department(self, *, primary_department_id: int | None, secondary_department_id: int | None):
+            assert primary_department_id is None
+            assert secondary_department_id is None
+            return {
+                "primary_department_id": None,
+                "primary_department_name": None,
+                "secondary_department_id": None,
+                "secondary_department_name": None,
+                "require_department_setup": True,
+            }
+
+    service = AuthService(repo=FakeRepo(), token_service=TokenService(), department_service=FakeDepartments())
+    result = service.login("alice", "Secret123!")
+
+    assert result["success"] is True
+    assert result["data"]["user"]["primary_department_id"] is None
+    assert result["data"]["user"]["secondary_department_id"] is None
+    assert result["data"]["require_department_setup"] is True
+    assert result["require_department_setup"] is True
+
+
+def test_auth_service_update_department_persists_selected_departments():
+    class FakeRepo:
+        def __init__(self):
+            self.updated = None
+
+        def get_by_id(self, user_id):
+            if user_id != 9:
+                return None
+            return {
+                "id": 9,
+                "username": "bob",
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+                "is_first_login": 0,
+                "must_set_security_questions": 0,
+                "primary_department_id": None,
+                "secondary_department_id": None,
+            }
+
+        def update_user_department(self, *, user_id: int, primary_department_id: int | None, secondary_department_id: int | None):
+            self.updated = (user_id, primary_department_id, secondary_department_id)
+            return 1
+
+        def has_security_questions(self, *, user_id: int):
+            return True
+
+    class FakeDepartments:
+        def validate_department_selection(
+            self,
+            *,
+            primary_department_id: int | None,
+            secondary_department_id: int | None,
+            require_active: bool,
+            allow_empty: bool,
+        ):
+            assert primary_department_id == 1
+            assert secondary_department_id == 11
+            assert require_active is True
+            assert allow_empty is False
+            return {
+                "success": True,
+                "data": {
+                    "primary_department_id": 1,
+                    "primary_department_name": "计算机学院",
+                    "secondary_department_id": 11,
+                    "secondary_department_name": "软件工程系",
+                    "require_department_setup": False,
+                },
+            }
+
+        def describe_user_department(self, *, primary_department_id: int | None, secondary_department_id: int | None):
+            return {
+                "primary_department_id": primary_department_id,
+                "primary_department_name": "计算机学院",
+                "secondary_department_id": secondary_department_id,
+                "secondary_department_name": "软件工程系",
+                "require_department_setup": False,
+            }
+
+    repo = FakeRepo()
+    service = AuthService(repo=repo, token_service=TokenService(), department_service=FakeDepartments())
+    result = service.update_department(user_id=9, primary_department_id=1, secondary_department_id=11)
+
+    assert result["success"] is True
+    assert repo.updated == (9, 1, 11)
+    assert result["data"]["primary_department_name"] == "计算机学院"
+    assert result["data"]["require_department_setup"] is False
+
+
+def test_auth_service_update_department_allows_unchanged_disabled_binding():
+    class FakeRepo:
+        def __init__(self):
+            self.update_called = False
+
+        def get_by_id(self, user_id):
+            if user_id != 9:
+                return None
+            return {
+                "id": 9,
+                "username": "bob",
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+                "is_first_login": 0,
+                "must_set_security_questions": 0,
+                "primary_department_id": 1,
+                "secondary_department_id": 11,
+            }
+
+        def update_user_department(self, **kwargs):
+            self.update_called = True
+            raise AssertionError(f"unexpected update: {kwargs}")
+
+        def has_security_questions(self, *, user_id: int):
+            return True
+
+    class FakeDepartments:
+        def describe_user_department(self, *, primary_department_id: int | None, secondary_department_id: int | None):
+            return {
+                "primary_department_id": primary_department_id,
+                "primary_department_name": "计算机学院",
+                "secondary_department_id": secondary_department_id,
+                "secondary_department_name": "软件工程系",
+                "department_effective_status": "disabled",
+                "department_display": "计算机学院 / 软件工程系（已停用）",
+                "require_department_setup": False,
+            }
+
+        def validate_department_selection(self, **kwargs):
+            raise AssertionError(f"unexpected validation: {kwargs}")
+
+    repo = FakeRepo()
+    service = AuthService(repo=repo, token_service=TokenService(), department_service=FakeDepartments())
+    result = service.update_department(user_id=9, primary_department_id=1, secondary_department_id=11)
+
+    assert result["success"] is True
+    assert repo.update_called is False
+    assert result["data"]["department_effective_status"] == "disabled"
+    assert result["data"]["department_display"] == "计算机学院 / 软件工程系（已停用）"
+
+
+def test_auth_service_update_department_fails_when_write_does_not_persist():
+    class FakeRepo:
+        def __init__(self):
+            self.read_count = 0
+
+        def get_by_id(self, user_id):
+            if user_id != 9:
+                return None
+            self.read_count += 1
+            return {
+                "id": 9,
+                "username": "bob",
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+                "is_first_login": 0,
+                "must_set_security_questions": 0,
+                "primary_department_id": None,
+                "secondary_department_id": None,
+            }
+
+        def update_user_department(self, *, user_id: int, primary_department_id: int | None, secondary_department_id: int | None):
+            return 0
+
+        def has_security_questions(self, *, user_id: int):
+            return True
+
+    class FakeDepartments:
+        def describe_user_department(self, *, primary_department_id: int | None, secondary_department_id: int | None):
+            return {
+                "primary_department_id": primary_department_id,
+                "primary_department_name": "计算机学院" if primary_department_id else None,
+                "secondary_department_id": secondary_department_id,
+                "secondary_department_name": "软件工程系" if secondary_department_id else None,
+                "require_department_setup": primary_department_id is None or secondary_department_id is None,
+            }
+
+        def validate_department_selection(
+            self,
+            *,
+            primary_department_id: int | None,
+            secondary_department_id: int | None,
+            require_active: bool,
+            allow_empty: bool,
+        ):
+            assert primary_department_id == 1
+            assert secondary_department_id == 11
+            assert require_active is True
+            assert allow_empty is False
+            return {
+                "success": True,
+                "data": {
+                    "primary_department_id": 1,
+                    "primary_department_name": "计算机学院",
+                    "secondary_department_id": 11,
+                    "secondary_department_name": "软件工程系",
+                    "require_department_setup": False,
+                },
+            }
+
+    service = AuthService(repo=FakeRepo(), token_service=TokenService(), department_service=FakeDepartments())
+    result = service.update_department(user_id=9, primary_department_id=1, secondary_department_id=11)
+
+    assert result["success"] is False
+    assert result["code"] == "UPDATE_ERROR"
+
+
+def test_auth_service_admin_without_department_is_not_forced_to_complete_department():
+    class FakeRepo:
+        def get_by_id(self, user_id):
+            if user_id != 1:
+                return None
+            return {
+                "id": 1,
+                "username": "admin",
+                "role": "admin",
+                "user_type": 1,
+                "status": "active",
+                "is_first_login": 0,
+                "must_set_security_questions": 0,
+                "primary_department_id": None,
+                "secondary_department_id": None,
+            }
+
+        def has_security_questions(self, *, user_id: int):
+            return True
+
+    class FakeDepartments:
+        def describe_user_department(self, *, primary_department_id: int | None, secondary_department_id: int | None):
+            return {
+                "primary_department_id": primary_department_id,
+                "primary_department_name": None,
+                "secondary_department_id": secondary_department_id,
+                "secondary_department_name": None,
+                "department_display": "未填写",
+                "require_department_setup": True,
+            }
+
+    service = AuthService(repo=FakeRepo(), token_service=TokenService(), department_service=FakeDepartments())
+    result = service.get_user_info(1)
+
+    assert result["success"] is True
+    assert result["data"]["role"] == "admin"
+    assert result["data"]["require_department_setup"] is False
+
+
 def test_auth_default_service_reports_db_unavailable():
     result = auth_service_module.auth_service.login("alice", "Secret123!")
     assert result["success"] is False
     assert result["code"] == "DB_UNAVAILABLE"
 
 
-def test_protected_auth_route_returns_503_when_repo_unavailable(monkeypatch):
-    class FailingRepo:
-        def get_by_id(self, user_id):
-            raise DatabaseUnavailableError("db_unavailable")
-
-    failing_service = AuthService(repo=FailingRepo(), token_service=TokenService())
-    token = failing_service._tokens.issue_access_token(user_id=7, role="user")
-    monkeypatch.setattr(auth_service_module, "auth_service", failing_service)
-
-    with TestClient(app) as client:
-        response = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
-
-    assert response.status_code == 503
-    assert response.json()["code"] == "DB_UNAVAILABLE"
-
-
-def test_auth_runtime_service_is_bound_to_live_http_route():
-    with TestClient(app) as client:
-        assert client.app.state.auth_service is auth_service_module.auth_service
-
-        client.app.state.auth_service.login = lambda username, password: {  # type: ignore[method-assign]
+def test_auth_login_route_uses_live_service_object(monkeypatch):
+    monkeypatch.setattr(
+        auth_service_module.auth_service,
+        "login",
+        lambda username, password: {
             "success": True,
             "message": "login_success",
             "data": {
@@ -315,8 +697,10 @@ def test_auth_runtime_service_is_bound_to_live_http_route():
                 "has_security_questions": False,
                 "require_security_questions_setup": False,
             },
-        }
-        response = client.post("/api/v1/auth/login", json={"username": "alice", "password": "Secret123!"})
+        },
+    )
+
+    response = auth_api_module.login(LoginRequest(username="alice", password="Secret123!"))
 
     assert response.status_code == 200
-    assert response.json()["data"]["token"] == "live-token"
+    assert _decode(response)["data"]["token"] == "live-token"

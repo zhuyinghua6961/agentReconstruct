@@ -72,12 +72,32 @@ export const adminApi = {
     })
   },
 
-  async createUser(username, password, userType = 'common') {
+  async createUser(username, password, userType = 'common', department = {}) {
     const token = readStoredToken()
     const response = await fetch(`${API_BASE}/users`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify({ username, password, user_type: userType })
+      body: JSON.stringify({
+        username,
+        password,
+        user_type: userType,
+        primary_department_id: department.primary_department_id ?? null,
+        secondary_department_id: department.secondary_department_id ?? null,
+      })
+    })
+    const data = await safeJson(response)
+    return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
+  },
+
+  async updateUserDepartment(userId, department = {}) {
+    const token = readStoredToken()
+    const response = await fetch(`${API_BASE}/users/${userId}/department`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({
+        primary_department_id: department.primary_department_id ?? null,
+        secondary_department_id: department.secondary_department_id ?? null,
+      })
     })
     const data = await safeJson(response)
     return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
@@ -181,5 +201,78 @@ export const adminApi = {
     a.click()
     document.body.removeChild(a)
     window.URL.revokeObjectURL(url)
-  }
+  },
+
+  async getDepartmentTree() {
+    const token = readStoredToken()
+    return fetchWithErrorHandling(`${API_BASE}/departments/tree`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+  },
+
+  async createPrimaryDepartment(name) {
+    const token = readStoredToken()
+    const response = await fetch(`${API_BASE}/departments/primary`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ name })
+    })
+    const data = await safeJson(response)
+    return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
+  },
+
+  async renamePrimaryDepartment(primaryId, name) {
+    const token = readStoredToken()
+    const response = await fetch(`${API_BASE}/departments/primary/${primaryId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ name })
+    })
+    const data = await safeJson(response)
+    return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
+  },
+
+  async updatePrimaryDepartmentStatus(primaryId, status) {
+    const token = readStoredToken()
+    const response = await fetch(`${API_BASE}/departments/primary/${primaryId}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ status })
+    })
+    const data = await safeJson(response)
+    return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
+  },
+
+  async createSecondaryDepartment(primaryDepartmentId, name) {
+    const token = readStoredToken()
+    const response = await fetch(`${API_BASE}/departments/secondary`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ primary_department_id: primaryDepartmentId, name })
+    })
+    const data = await safeJson(response)
+    return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
+  },
+
+  async renameSecondaryDepartment(secondaryId, name) {
+    const token = readStoredToken()
+    const response = await fetch(`${API_BASE}/departments/secondary/${secondaryId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ name })
+    })
+    const data = await safeJson(response)
+    return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
+  },
+
+  async updateSecondaryDepartmentStatus(secondaryId, status) {
+    const token = readStoredToken()
+    const response = await fetch(`${API_BASE}/departments/secondary/${secondaryId}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ status })
+    })
+    const data = await safeJson(response)
+    return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
+  },
 }

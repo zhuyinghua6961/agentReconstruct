@@ -16,6 +16,8 @@ def test_public_route_surface_contains_key_modules():
         "/api/patent/original/{canonical_patent_id}",
         "/api/quota/my",
         "/api/admin/users",
+        "/api/admin/departments/tree",
+        "/api/admin/departments/primary",
         "/api/kb_info",
     }
     assert expected.issubset(paths)

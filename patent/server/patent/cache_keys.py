@@ -25,6 +25,8 @@ _TABLE_SCOPED_FILE_ROUTE_SIGNATURE_KEYS = {
     "tabular_runtime_signature",
     "tabular_max_context_chars",
     "hybrid_table_context_chars",
+    "tabular_compare_tables_version",
+    "tabular_compare_status_version",
     "table_parity_signature",
 }
 

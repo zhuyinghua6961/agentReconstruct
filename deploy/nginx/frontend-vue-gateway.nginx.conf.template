@@ -1,0 +1,75 @@
+worker_processes 1;
+pid nginx.pid;
+error_log __NGINX_LOG_ROOT__/error.log info;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    access_log __NGINX_LOG_ROOT__/access.log;
+    sendfile on;
+    tcp_nopush on;
+    keepalive_timeout 65;
+    send_timeout 3600s;
+    gzip off;
+
+    client_body_temp_path __NGINX_RUNTIME_ROOT__/client_body_temp;
+    proxy_temp_path __NGINX_RUNTIME_ROOT__/proxy_temp;
+
+    server {
+        listen __FRONTEND_NGINX_PORT__;
+        listen [::]:__FRONTEND_NGINX_PORT__;
+        server_name _;
+        client_max_body_size 128m;
+
+        root __FRONTEND_DIST_DIR__;
+        index index.html;
+
+        location /assets/ {
+            try_files $uri =404;
+            expires 1y;
+            add_header Cache-Control "public, immutable";
+        }
+
+        location /api/ {
+            proxy_pass __GATEWAY_UPSTREAM_URL__;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header Connection "";
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_buffering off;
+            proxy_request_buffering off;
+            proxy_connect_timeout 5s;
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+            add_header X-Accel-Buffering no always;
+        }
+
+        location /health {
+            proxy_pass __GATEWAY_UPSTREAM_URL__/healthz;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header Connection "";
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_buffering off;
+            proxy_request_buffering off;
+            proxy_connect_timeout 5s;
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+            add_header X-Accel-Buffering no always;
+        }
+
+        location / {
+            add_header Cache-Control "no-store";
+            try_files $uri $uri/ /index.html;
+        }
+    }
+}

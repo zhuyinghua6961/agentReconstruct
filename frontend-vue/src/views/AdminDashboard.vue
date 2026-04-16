@@ -2,7 +2,10 @@
 import { computed, ref, onMounted } from 'vue'
 import { authApi } from '../services/auth'
 import { adminApi } from '../services/admin'
+import { departmentApi, mergePreservedDepartmentTree } from '../services/departments'
 import BatchImportDialog from '../components/BatchImportDialog.vue'
+import DepartmentManagementPanel from '../components/DepartmentManagementPanel.vue'
+import DepartmentSelector from '../components/DepartmentSelector.vue'
 import ImportResultDialog from '../components/ImportResultDialog.vue'
 
 const currentUser = ref(null)
@@ -19,6 +22,7 @@ const showCreateModal = ref(false)
 const showResetPasswordModal = ref(false)
 const showBatchImportDialog = ref(false)
 const showImportResultDialog = ref(false)
+const showDepartmentModal = ref(false)
 const importResult = ref(null)
 const operationResultTitle = ref('操作结果')
 const selectedUserIds = ref([])
@@ -32,12 +36,21 @@ const newUserType = ref('common')  // 默认为普通用户
 const showPassword = ref(false)
 const showCreatePassword = ref(false)
 const resetPasswordValue = ref('')
+const departmentOptionsLoading = ref(false)
+const selectableDepartmentTree = ref([])
+const newPrimaryDepartmentId = ref(null)
+const newSecondaryDepartmentId = ref(null)
+const editPrimaryDepartmentId = ref(null)
+const editSecondaryDepartmentId = ref(null)
 
 const currentPageUserIds = computed(() => users.value.map(user => user.id))
 const hasSelectedUsers = computed(() => selectedUserIds.value.length > 0)
 const allCurrentPageSelected = computed(() => (
   currentPageUserIds.value.length > 0
   && currentPageUserIds.value.every(id => selectedUserIds.value.includes(id))
+))
+const editDepartmentTree = computed(() => (
+  mergePreservedDepartmentTree(selectableDepartmentTree.value, selectedUser.value)
 ))
 
 function generateTemporaryPassword(length = 14) {
@@ -120,6 +133,18 @@ async function fetchUsers() {
   } finally {
     loading.value = false
   }
+}
+
+async function fetchDepartmentOptions() {
+  departmentOptionsLoading.value = true
+  const result = await departmentApi.getSelectableTree()
+  if (result.success) {
+    selectableDepartmentTree.value = Array.isArray(result.data?.items) ? result.data.items : []
+  } else {
+    selectableDepartmentTree.value = []
+    error.value = result.error || '获取部门选项失败'
+  }
+  departmentOptionsLoading.value = false
 }
 
 function toggleUserSelection(userId) {
@@ -291,8 +316,18 @@ function openCreateModal() {
   newUsername.value = ''
   newUserPassword.value = ''
   newUserType.value = 'common'  // 重置为默认值
+  newPrimaryDepartmentId.value = null
+  newSecondaryDepartmentId.value = null
   error.value = ''
   showCreateModal.value = true
+}
+
+function openDepartmentModal(user) {
+  selectedUser.value = user
+  editPrimaryDepartmentId.value = user?.primary_department_id ?? null
+  editSecondaryDepartmentId.value = user?.secondary_department_id ?? null
+  error.value = ''
+  showDepartmentModal.value = true
 }
 
 async function openResetPasswordModal(user) {
@@ -375,7 +410,15 @@ async function submitCreateUser() {
     return
   }
   
-  const result = await adminApi.createUser(newUsername.value, newUserPassword.value, newUserType.value)
+  const result = await adminApi.createUser(
+    newUsername.value,
+    newUserPassword.value,
+    newUserType.value,
+    {
+      primary_department_id: newPrimaryDepartmentId.value,
+      secondary_department_id: newSecondaryDepartmentId.value,
+    },
+  )
   
   if (result.success) {
     success.value = `用户 ${newUsername.value} 创建成功`
@@ -385,6 +428,28 @@ async function submitCreateUser() {
   } else {
     error.value = result.error
   }
+}
+
+async function submitUserDepartment() {
+  error.value = ''
+  if (!selectedUser.value) {
+    error.value = '未选择要编辑的用户'
+    return
+  }
+
+  const result = await adminApi.updateUserDepartment(selectedUser.value.id, {
+    primary_department_id: editPrimaryDepartmentId.value,
+    secondary_department_id: editSecondaryDepartmentId.value,
+  })
+
+  if (result.success) {
+    success.value = `用户 ${selectedUser.value.username} 的部门已更新`
+    showDepartmentModal.value = false
+    await fetchUsers()
+    setTimeout(() => success.value = '', 3000)
+    return
+  }
+  error.value = result.error || '修改用户部门失败'
 }
 
 function openBatchImportDialog() {
@@ -403,9 +468,19 @@ function handleImportSuccess(result) {
   fetchUsers()
 }
 
+async function handleDepartmentDictionaryUpdated() {
+  await Promise.all([
+    fetchDepartmentOptions(),
+    fetchUsers(),
+  ])
+}
+
 onMounted(async () => {
   await fetchCurrentUser()
-  await fetchUsers()
+  await Promise.all([
+    fetchUsers(),
+    fetchDepartmentOptions(),
+  ])
 })
 </script>
 
@@ -426,6 +501,10 @@ onMounted(async () => {
     <main class="admin-main">
       <div v-if="success" class="alert alert-success">{{ success }}</div>
       <div v-if="error" class="alert alert-error">{{ error }}</div>
+
+      <section class="department-management-shell" aria-label="部门管理">
+        <DepartmentManagementPanel @updated="handleDepartmentDictionaryUpdated" />
+      </section>
 
       <div class="user-section">
         <div class="section-header">
@@ -464,6 +543,7 @@ onMounted(async () => {
               <th>ID</th>
               <th>用户名</th>
               <th>角色</th>
+              <th>部门</th>
               <th>状态</th>
               <th>创建时间</th>
               <th>操作</th>
@@ -481,9 +561,15 @@ onMounted(async () => {
               <td>{{ user.id }}</td>
               <td>{{ user.username }}</td>
               <td><span class="role-badge" :class="getRoleClass(user)">{{ getRoleText(user) }}</span></td>
+              <td>
+                <span :class="{ 'department-disabled': user.department_effective_status === 'disabled' }">
+                  {{ user.department_display || '未填写' }}
+                </span>
+              </td>
               <td><span class="status-badge" :class="user.status">{{ user.status === 'active' ? '正常' : '停用' }}</span></td>
               <td>{{ user.created_at }}</td>
               <td class="actions">
+                <button class="action-btn" @click="openDepartmentModal(user)">设置部门</button>
                 <button class="action-btn" @click="openResetPasswordModal(user)">重置密码</button>
                 <button class="action-btn" @click="openPasswordModal(user)">修改密码</button>
                 <button
@@ -602,6 +688,18 @@ onMounted(async () => {
               </label>
             </div>
           </div>
+          <div class="form-group">
+            <label>部门信息（可留空）</label>
+            <DepartmentSelector
+              :tree="selectableDepartmentTree"
+              :primary-id="newPrimaryDepartmentId"
+              :secondary-id="newSecondaryDepartmentId"
+              :allow-empty="true"
+              :disabled="departmentOptionsLoading"
+              @update:primary-id="newPrimaryDepartmentId = $event"
+              @update:secondary-id="newSecondaryDepartmentId = $event"
+            />
+          </div>
         </div>
         <div class="modal-footer">
           <button class="btn-secondary" @click="showCreateModal = false">取消</button>
@@ -623,6 +721,32 @@ onMounted(async () => {
         <div class="modal-footer">
           <button class="btn-secondary" @click="showResetPasswordModal = false">关闭</button>
           <button class="btn-primary" @click="copyResetPassword">复制密码</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="showDepartmentModal" class="modal-overlay" @click.self="showDepartmentModal = false">
+      <div class="modal modal-wide">
+        <h3>设置部门 - {{ selectedUser?.username }}</h3>
+        <div class="modal-body">
+          <p class="hint-text">
+            当前部门：<strong :class="{ 'department-disabled': selectedUser?.department_effective_status === 'disabled' }">
+              {{ selectedUser?.department_display || '未填写' }}
+            </strong>
+          </p>
+          <DepartmentSelector
+            :tree="editDepartmentTree"
+            :primary-id="editPrimaryDepartmentId"
+            :secondary-id="editSecondaryDepartmentId"
+            :allow-empty="true"
+            :disabled="departmentOptionsLoading"
+            @update:primary-id="editPrimaryDepartmentId = $event"
+            @update:secondary-id="editSecondaryDepartmentId = $event"
+          />
+        </div>
+        <div class="modal-footer">
+          <button class="btn-secondary" @click="showDepartmentModal = false">取消</button>
+          <button class="btn-primary" @click="submitUserDepartment">保存部门</button>
         </div>
       </div>
     </div>
@@ -700,6 +824,7 @@ onMounted(async () => {
 .status-badge { padding: 4px 8px; border-radius: 4px; font-size: 12px; }
 .status-badge.active { background: #dcfce7; color: #166534; }
 .status-badge.disabled { background: #fee2e2; color: #dc2626; }
+.department-disabled { color: #b45309; font-weight: 600; }
 .actions { display: flex; gap: 8px; }
 .action-btn { padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; border: 1px solid #d1d5db; background: white; }
 .action-btn:hover { background: #f9fafb; }
@@ -712,6 +837,7 @@ onMounted(async () => {
 .pagination button:disabled { opacity: 0.5; cursor: not-allowed; }
 .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; }
 .modal { background: white; border-radius: 12px; padding: 24px; width: 100%; max-width: 400px; }
+.modal.modal-wide { max-width: 680px; }
 .modal h3 { font-size: 18px; color: #1f2937; margin: 0 0 16px 0; }
 .modal-body { margin-bottom: 24px; }
 .modal-body .form-group { display: flex; flex-direction: column; gap: 8px; }

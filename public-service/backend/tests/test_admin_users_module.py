@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-from fastapi.testclient import TestClient
+import asyncio
+import json
 
 from app.core.deps import AuthContext
 from app.main import app
+from app.modules.admin_users import api as admin_users_api_module
 from app.modules.admin_users import import_service as admin_import_service_module
 from app.modules.admin_users.import_service import admin_users_import_service
 from app.modules.admin_users.service import admin_users_service
-from app.modules.quota import deps as quota_deps
 from app.modules.auth.deps import require_admin_context
 from app.integrations.redis import RedisService
+from app.modules.quota import deps as quota_deps
 
 
 class _FakeRedis:
@@ -44,9 +46,23 @@ class _FakeRedis:
         return True
 
 
+class _FakeRequest:
+    def __init__(self, *, body: bytes, content_type: str) -> None:
+        self._body = body
+        self.headers = {"content-type": content_type}
+
+    async def body(self) -> bytes:
+        return self._body
+
+
+def _decode(response) -> dict:
+    return json.loads(response.body.decode("utf-8"))
+
+
 def test_admin_user_routes_registered():
     paths = {route.path for route in app.routes if hasattr(route, "path")}
     assert "/api/admin/users" in paths
+    assert "/api/admin/users/{user_id}/department" in paths
     assert "/api/admin/users/batch-delete" in paths
     assert "/api/admin/users/batch-type" in paths
     assert "/api/admin/users/batch-import" in paths
@@ -54,136 +70,324 @@ def test_admin_user_routes_registered():
 
 
 def test_admin_user_list_and_create_routes(monkeypatch):
-    with TestClient(app) as client:
-        client.app.dependency_overrides[require_admin_context] = lambda: AuthContext(
-            user_id=1,
-            role="admin",
-            username="admin",
-        )
-        monkeypatch.setattr(
-            admin_users_service,
-            "list_users",
-            lambda **kwargs: {"success": True, "data": [{"id": 7, "username": "alice"}], "pagination": kwargs},
-        )
-        monkeypatch.setattr(
-            admin_users_service,
-            "create_user",
-            lambda **kwargs: {"success": True, "message": "ok", "data": {"id": 9, **kwargs}},
-        )
+    monkeypatch.setattr(
+        admin_users_service,
+        "list_users",
+        lambda **kwargs: {"success": True, "data": [{"id": 7, "username": "alice"}], "pagination": kwargs},
+    )
+    monkeypatch.setattr(
+        admin_users_service,
+        "create_user",
+        lambda **kwargs: {"success": True, "message": "ok", "data": {"id": 9, **kwargs}},
+    )
 
-        list_resp = client.get("/api/admin/users?page=2&page_size=20")
-        create_resp = client.post(
-            "/api/admin/users",
-            json={"username": "bob", "password": "Pass123!", "user_type": "common"},
-        )
-        client.app.dependency_overrides.clear()
+    context = AuthContext(user_id=1, role="admin", username="admin")
+    list_resp = admin_users_api_module.list_users(page=2, page_size=20, _context=context)
+    create_resp = admin_users_api_module.create_user(
+        admin_users_api_module.UserCreateRequest(username="bob", password="Pass123!", user_type="common"),
+        context,
+    )
 
     assert list_resp.status_code == 200
-    assert list_resp.json()["pagination"] == {"page": 2, "page_size": 20}
+    assert _decode(list_resp)["pagination"] == {"page": 2, "page_size": 20}
     assert create_resp.status_code == 201
-    assert create_resp.json()["data"]["username"] == "bob"
+    assert _decode(create_resp)["data"]["username"] == "bob"
+
+
+def test_admin_create_user_accepts_department_ids(monkeypatch):
+    captured = {}
+
+    def fake_create_user(**kwargs):
+        captured.update(kwargs)
+        return {"success": True, "data": kwargs}
+
+    monkeypatch.setattr(admin_users_service, "create_user", fake_create_user)
+
+    response = admin_users_api_module.create_user(
+        admin_users_api_module.UserCreateRequest(
+            username="bob",
+            password="Pass123!",
+            user_type="common",
+            primary_department_id=1,
+            secondary_department_id=11,
+        ),
+        AuthContext(user_id=1, role="admin", username="admin"),
+    )
+
+    assert response.status_code == 201
+    assert captured["primary_department_id"] == 1
+    assert captured["secondary_department_id"] == 11
 
 
 def test_admin_user_mutation_routes_contract(monkeypatch):
-    with TestClient(app) as client:
-        client.app.dependency_overrides[require_admin_context] = lambda: AuthContext(
-            user_id=1,
-            role="admin",
-            username="admin",
-        )
-        monkeypatch.setattr(
-            admin_users_service,
-            "reset_password",
-            lambda **kwargs: {"success": True, "message": "password_reset_ok", "data": kwargs},
-        )
-        monkeypatch.setattr(
-            admin_users_service,
-            "update_status",
-            lambda **kwargs: {"success": True, "message": "status_update_ok", "data": kwargs},
-        )
-        monkeypatch.setattr(
-            admin_users_service,
-            "update_type",
-            lambda **kwargs: {"success": True, "message": "type_update_ok", "data": kwargs},
-        )
-        monkeypatch.setattr(
-            admin_users_service,
-            "delete_user",
-            lambda **kwargs: {"success": True, "message": "delete_ok", "data": kwargs},
-        )
-        monkeypatch.setattr(
-            admin_users_service,
-            "batch_delete_users",
-            lambda **kwargs: {"success": True, "message": "batch_delete_ok", "data": kwargs},
-        )
-        monkeypatch.setattr(
-            admin_users_service,
-            "batch_change_user_type",
-            lambda **kwargs: {"success": True, "message": "batch_type_ok", "data": kwargs},
-        )
+    monkeypatch.setattr(
+        admin_users_service,
+        "reset_password",
+        lambda **kwargs: {"success": True, "message": "password_reset_ok", "data": kwargs},
+    )
+    monkeypatch.setattr(
+        admin_users_service,
+        "update_status",
+        lambda **kwargs: {"success": True, "message": "status_update_ok", "data": kwargs},
+    )
+    monkeypatch.setattr(
+        admin_users_service,
+        "update_type",
+        lambda **kwargs: {"success": True, "message": "type_update_ok", "data": kwargs},
+    )
+    monkeypatch.setattr(
+        admin_users_service,
+        "delete_user",
+        lambda **kwargs: {"success": True, "message": "delete_ok", "data": kwargs},
+    )
+    monkeypatch.setattr(
+        admin_users_service,
+        "batch_delete_users",
+        lambda **kwargs: {"success": True, "message": "batch_delete_ok", "data": kwargs},
+    )
+    monkeypatch.setattr(
+        admin_users_service,
+        "batch_change_user_type",
+        lambda **kwargs: {"success": True, "message": "batch_type_ok", "data": kwargs},
+    )
 
-        password_resp = client.put(
-            "/api/admin/users/7/password",
-            json={"new_password": "Pass123!"},
-        )
-        status_resp = client.put(
-            "/api/admin/users/7/status",
-            json={"status": "disabled"},
-        )
-        type_resp = client.put(
-            "/api/admin/users/7/type",
-            json={"user_type": "super"},
-        )
-        delete_resp = client.delete("/api/admin/users/7")
-        batch_delete_resp = client.post(
-            "/api/admin/users/batch-delete",
-            json={"user_ids": [7, 8]},
-        )
-        batch_type_resp = client.post(
-            "/api/admin/users/batch-type",
-            json={"user_ids": [7, 8], "user_type": "super"},
-        )
-        client.app.dependency_overrides.clear()
+    context = AuthContext(user_id=1, role="admin", username="admin")
+    password_resp = admin_users_api_module.reset_user_password(
+        7,
+        admin_users_api_module.UserPasswordResetRequest(new_password="Pass123!"),
+        context,
+    )
+    status_resp = admin_users_api_module.update_user_status(
+        7,
+        admin_users_api_module.UserStatusUpdateRequest(status="disabled"),
+        context,
+    )
+    type_resp = admin_users_api_module.update_user_type(
+        7,
+        admin_users_api_module.UserTypeUpdateRequest(user_type="super"),
+        context,
+    )
+    delete_resp = admin_users_api_module.delete_user(7, context)
+    batch_delete_resp = admin_users_api_module.batch_delete_users(
+        admin_users_api_module.BatchDeleteUsersRequest(user_ids=[7, 8]),
+        context,
+    )
+    batch_type_resp = admin_users_api_module.batch_change_user_type(
+        admin_users_api_module.BatchChangeUserTypeRequest(user_ids=[7, 8], user_type="super"),
+        context,
+    )
 
     assert password_resp.status_code == 200
-    assert password_resp.json()["message"] == "password_reset_ok"
+    assert _decode(password_resp)["message"] == "password_reset_ok"
     assert status_resp.status_code == 200
-    assert status_resp.json()["message"] == "status_update_ok"
+    assert _decode(status_resp)["message"] == "status_update_ok"
     assert type_resp.status_code == 200
-    assert type_resp.json()["message"] == "type_update_ok"
+    assert _decode(type_resp)["message"] == "type_update_ok"
     assert delete_resp.status_code == 200
-    assert delete_resp.json()["message"] == "delete_ok"
+    assert _decode(delete_resp)["message"] == "delete_ok"
     assert batch_delete_resp.status_code == 200
-    assert batch_delete_resp.json()["message"] == "batch_delete_ok"
+    assert _decode(batch_delete_resp)["message"] == "batch_delete_ok"
     assert batch_type_resp.status_code == 200
-    assert batch_type_resp.json()["message"] == "batch_type_ok"
+    assert _decode(batch_type_resp)["message"] == "batch_type_ok"
+
+
+def test_admin_update_user_department_contract(monkeypatch):
+    captured = {}
+
+    def fake_update_department(**kwargs):
+        captured.update(kwargs)
+        return {"success": True, "data": kwargs}
+
+    monkeypatch.setattr(admin_users_service, "update_department", fake_update_department)
+
+    response = admin_users_api_module.update_user_department(
+        7,
+        admin_users_api_module.UserDepartmentUpdateRequest(primary_department_id=1, secondary_department_id=11),
+        AuthContext(user_id=1, role="admin", username="admin"),
+    )
+
+    assert response.status_code == 200
+    assert captured["target_user_id"] == 7
+    assert captured["primary_department_id"] == 1
+    assert captured["secondary_department_id"] == 11
 
 
 def test_admin_batch_import_and_template_routes(monkeypatch):
-    with TestClient(app) as client:
-        client.app.dependency_overrides[require_admin_context] = lambda: AuthContext(
-            user_id=1,
-            role="admin",
-            username="admin",
-        )
-        monkeypatch.setattr(
-            admin_users_import_service,
-            "import_users",
-            lambda **kwargs: {"success": True, "message": "导入完成", "data": kwargs},
-        )
+    monkeypatch.setattr(
+        admin_users_import_service,
+        "import_users",
+        lambda **kwargs: {"success": True, "message": "导入完成", "data": kwargs},
+    )
 
-        import_resp = client.post(
-            "/api/admin/users/batch-import",
-            files={"file": ("users.csv", b"username,password\nalice,Pass123!\n", "text/csv")},
+    request = _FakeRequest(
+        body=(
+            b'--boundary\r\n'
+            b'Content-Disposition: form-data; name="file"; filename="users.csv"\r\n'
+            b"Content-Type: text/csv\r\n\r\n"
+            b"username,password\nalice,Pass123!\n\r\n"
+            b"--boundary--\r\n"
+        ),
+        content_type="multipart/form-data; boundary=boundary",
+    )
+    import_resp = asyncio.run(
+        admin_users_api_module.batch_import_users(
+            request,
+            AuthContext(user_id=1, role="admin", username="admin"),
         )
-        template_resp = client.get("/api/admin/users/import-template?format=csv")
-        client.app.dependency_overrides.clear()
+    )
+    template_resp = admin_users_api_module.download_import_template(
+        format="csv",
+        _context=AuthContext(user_id=1, role="admin", username="admin"),
+    )
 
     assert import_resp.status_code == 200
-    assert import_resp.json()["success"] is True
-    assert import_resp.json()["data"]["filename"] == "users.csv"
+    assert _decode(import_resp)["success"] is True
+    assert _decode(import_resp)["data"]["filename"] == "users.csv"
     assert template_resp.status_code == 200
     assert "attachment; filename=\"user_import_template.csv\"" == template_resp.headers["content-disposition"]
+
+
+def test_admin_import_template_contains_department_columns():
+    response = admin_users_import_service.template_response(fmt="csv")
+
+    assert b"primary_department_name" in response.body
+    assert b"secondary_department_name" in response.body
+
+
+def test_admin_import_rejects_half_filled_department_columns(monkeypatch):
+    monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
+    monkeypatch.setattr(admin_users_import_service, "_finalize_excel_upload_quota", lambda **kwargs: None)
+    monkeypatch.setattr(admin_users_service.users, "get_by_username", lambda username: None)
+
+    csv_bytes = (
+        b"username,password,user_type,primary_department_name,secondary_department_name\n"
+        b"user1,Pass123!,common,\xe8\xae\xa1\xe7\xae\x97\xe6\x9c\xba\xe5\xad\xa6\xe9\x99\xa2,\n"
+    )
+    result = admin_users_import_service.import_users(file_bytes=csv_bytes, filename="users.csv", actor_user_id=1)
+
+    assert result["success"] is True
+    assert result["data"]["summary"]["failed"] == 1
+    assert "部门信息必须同时填写一级和二级" in result["data"]["details"][0]["reason"]
+
+
+def test_admin_import_rejects_unknown_primary_department(monkeypatch):
+    monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
+    monkeypatch.setattr(admin_users_import_service, "_finalize_excel_upload_quota", lambda **kwargs: None)
+    monkeypatch.setattr(admin_users_service.users, "get_by_username", lambda username: None)
+    monkeypatch.setattr(
+        admin_import_service_module.department_service,
+        "resolve_by_names",
+        lambda **kwargs: {"success": False, "code": "PRIMARY_DEPARTMENT_NOT_FOUND", "error": "一级部门不存在"},
+    )
+
+    csv_bytes = (
+        b"username,password,user_type,primary_department_name,secondary_department_name\n"
+        b"user1,Pass123!,common,\xe4\xb8\x8d\xe5\xad\x98\xe5\x9c\xa8\xe5\xad\xa6\xe9\x99\xa2,\xe8\xbd\xaf\xe4\xbb\xb6\xe5\xb7\xa5\xe7\xa8\x8b\xe7\xb3\xbb\n"
+    )
+    result = admin_users_import_service.import_users(file_bytes=csv_bytes, filename="users.csv", actor_user_id=1)
+
+    assert result["success"] is True
+    assert result["data"]["summary"]["failed"] == 1
+    assert "一级部门不存在" in result["data"]["details"][0]["reason"]
+
+
+def test_admin_import_rejects_unknown_secondary_department(monkeypatch):
+    monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
+    monkeypatch.setattr(admin_users_import_service, "_finalize_excel_upload_quota", lambda **kwargs: None)
+    monkeypatch.setattr(admin_users_service.users, "get_by_username", lambda username: None)
+    monkeypatch.setattr(
+        admin_import_service_module.department_service,
+        "resolve_by_names",
+        lambda **kwargs: {"success": False, "code": "SECONDARY_DEPARTMENT_NOT_FOUND", "error": "二级部门不存在"},
+    )
+
+    csv_bytes = (
+        b"username,password,user_type,primary_department_name,secondary_department_name\n"
+        b"user1,Pass123!,common,\xe8\xae\xa1\xe7\xae\x97\xe6\x9c\xba\xe5\xad\xa6\xe9\x99\xa2,\xe4\xb8\x8d\xe5\xad\x98\xe5\x9c\xa8\xe7\xb3\xbb\n"
+    )
+    result = admin_users_import_service.import_users(file_bytes=csv_bytes, filename="users.csv", actor_user_id=1)
+
+    assert result["success"] is True
+    assert result["data"]["summary"]["failed"] == 1
+    assert "二级部门不存在" in result["data"]["details"][0]["reason"]
+
+
+def test_admin_import_rejects_invalid_primary_secondary_relation(monkeypatch):
+    monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
+    monkeypatch.setattr(admin_users_import_service, "_finalize_excel_upload_quota", lambda **kwargs: None)
+    monkeypatch.setattr(admin_users_service.users, "get_by_username", lambda username: None)
+    monkeypatch.setattr(
+        admin_import_service_module.department_service,
+        "resolve_by_names",
+        lambda **kwargs: {"success": False, "code": "DEPARTMENT_RELATION_INVALID", "error": "二级部门不属于所选一级部门"},
+    )
+
+    csv_bytes = (
+        b"username,password,user_type,primary_department_name,secondary_department_name\n"
+        b"user1,Pass123!,common,\xe8\xae\xa1\xe7\xae\x97\xe6\x9c\xba\xe5\xad\xa6\xe9\x99\xa2,\xe6\x9d\x90\xe6\x96\x99\xe7\xb3\xbb\n"
+    )
+    result = admin_users_import_service.import_users(file_bytes=csv_bytes, filename="users.csv", actor_user_id=1)
+
+    assert result["success"] is True
+    assert result["data"]["summary"]["failed"] == 1
+    assert "二级部门不属于所选一级部门" in result["data"]["details"][0]["reason"]
+
+
+def test_admin_import_rejects_disabled_department(monkeypatch):
+    monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
+    monkeypatch.setattr(admin_users_import_service, "_finalize_excel_upload_quota", lambda **kwargs: None)
+    monkeypatch.setattr(admin_users_service.users, "get_by_username", lambda username: None)
+    monkeypatch.setattr(
+        admin_import_service_module.department_service,
+        "resolve_by_names",
+        lambda **kwargs: {"success": False, "code": "DEPARTMENT_DISABLED", "error": "部门已停用，无法选择"},
+    )
+
+    csv_bytes = (
+        b"username,password,user_type,primary_department_name,secondary_department_name\n"
+        b"user1,Pass123!,common,\xe8\xae\xa1\xe7\xae\x97\xe6\x9c\xba\xe5\xad\xa6\xe9\x99\xa2,\xe8\xbd\xaf\xe4\xbb\xb6\xe5\xb7\xa5\xe7\xa8\x8b\xe7\xb3\xbb\n"
+    )
+    result = admin_users_import_service.import_users(file_bytes=csv_bytes, filename="users.csv", actor_user_id=1)
+
+    assert result["success"] is True
+    assert result["data"]["summary"]["failed"] == 1
+    assert "部门已停用，无法选择" in result["data"]["details"][0]["reason"]
+
+
+def test_admin_import_resolves_department_names_and_persists_ids(monkeypatch):
+    created = []
+
+    monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
+    monkeypatch.setattr(admin_users_import_service, "_finalize_excel_upload_quota", lambda **kwargs: None)
+    monkeypatch.setattr(admin_users_service.users, "get_by_username", lambda username: None)
+    monkeypatch.setattr(
+        admin_import_service_module.department_service,
+        "resolve_by_names",
+        lambda **kwargs: {
+            "success": True,
+            "data": {
+                "primary_department_id": 1,
+                "secondary_department_id": 11,
+            },
+        },
+    )
+    monkeypatch.setattr(admin_users_service, "hash_password", lambda password: "hashed-password")
+    monkeypatch.setattr(
+        admin_users_service.users,
+        "create_user",
+        lambda **kwargs: created.append(kwargs) or 1,
+    )
+
+    csv_bytes = (
+        b"username,password,user_type,primary_department_name,secondary_department_name\n"
+        b"user1,Pass123!,common,\xe8\xae\xa1\xe7\xae\x97\xe6\x9c\xba\xe5\xad\xa6\xe9\x99\xa2,\xe8\xbd\xaf\xe4\xbb\xb6\xe5\xb7\xa5\xe7\xa8\x8b\xe7\xb3\xbb\n"
+    )
+    result = admin_users_import_service.import_users(file_bytes=csv_bytes, filename="users.csv", actor_user_id=1)
+
+    assert result["success"] is True
+    assert result["data"]["summary"]["success"] == 1
+    assert created[0]["primary_department_id"] == 1
+    assert created[0]["secondary_department_id"] == 11
 
 
 def test_admin_import_quota_precheck_returns_db_unavailable_on_actor_lookup_failure(monkeypatch):
@@ -284,3 +488,291 @@ def test_admin_batch_change_user_type_partial_success(monkeypatch):
     assert result["data"]["details"][1]["status"] == "skipped"
     assert result["data"]["details"][2]["status"] == "failed"
     assert result["data"]["details"][3]["status"] == "failed"
+
+
+def test_admin_service_create_user_accepts_department_ids():
+    class FakeUsers:
+        def __init__(self):
+            self.created = None
+            self.password_history = []
+            self.trim_calls = []
+
+        def get_by_username(self, username):
+            return None
+
+        def create_user(self, **kwargs):
+            self.created = kwargs
+            return 9
+
+        def add_password_history(self, *, user_id: int, password_hash: str):
+            self.password_history.append((user_id, password_hash))
+            return 1
+
+        def trim_password_history(self, *, user_id: int, keep_limit: int):
+            self.trim_calls.append((user_id, keep_limit))
+            return 1
+
+    class FakeDepartments:
+        def describe_user_department(self, *, primary_department_id: int | None, secondary_department_id: int | None):
+            return {
+                "primary_department_id": primary_department_id,
+                "primary_department_name": None,
+                "secondary_department_id": secondary_department_id,
+                "secondary_department_name": None,
+                "require_department_setup": True,
+            }
+
+        def validate_department_selection(
+            self,
+            *,
+            primary_department_id: int | None,
+            secondary_department_id: int | None,
+            require_active: bool,
+            allow_empty: bool,
+        ):
+            assert primary_department_id == 1
+            assert secondary_department_id == 11
+            assert require_active is True
+            assert allow_empty is True
+            return {
+                "success": True,
+                "data": {
+                    "primary_department_id": 1,
+                    "primary_department_name": "计算机学院",
+                    "secondary_department_id": 11,
+                    "secondary_department_name": "软件工程系",
+                    "require_department_setup": False,
+                },
+            }
+
+    users = FakeUsers()
+    service = admin_users_service.__class__(users_repo=users, department_service=FakeDepartments())
+    result = service.create_user(
+        username="bob",
+        password="Pass123!",
+        user_type="common",
+        primary_department_id=1,
+        secondary_department_id=11,
+    )
+
+    assert result["success"] is True
+    assert users.created["primary_department_id"] == 1
+    assert users.created["secondary_department_id"] == 11
+    assert result["data"]["primary_department_name"] == "计算机学院"
+    assert result["data"]["secondary_department_name"] == "软件工程系"
+
+
+def test_admin_service_update_department_persists_selected_departments():
+    class FakeUsers:
+        def __init__(self):
+            self.updated = None
+
+        def get_by_id(self, user_id):
+            if user_id != 7:
+                return None
+            return {
+                "id": 7,
+                "username": "alice",
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+                "primary_department_id": None,
+                "secondary_department_id": None,
+            }
+
+        def update_user_department(self, **kwargs):
+            self.updated = kwargs
+            return 1
+
+    class FakeDepartments:
+        def describe_user_department(self, *, primary_department_id: int | None, secondary_department_id: int | None):
+            return {
+                "primary_department_id": primary_department_id,
+                "primary_department_name": None,
+                "secondary_department_id": secondary_department_id,
+                "secondary_department_name": None,
+                "require_department_setup": True,
+            }
+
+        def validate_department_selection(
+            self,
+            *,
+            primary_department_id: int | None,
+            secondary_department_id: int | None,
+            require_active: bool,
+            allow_empty: bool,
+        ):
+            assert primary_department_id == 1
+            assert secondary_department_id == 11
+            assert require_active is True
+            assert allow_empty is True
+            return {
+                "success": True,
+                "data": {
+                    "primary_department_id": 1,
+                    "primary_department_name": "计算机学院",
+                    "secondary_department_id": 11,
+                    "secondary_department_name": "软件工程系",
+                    "require_department_setup": False,
+                },
+            }
+
+    users = FakeUsers()
+    service = admin_users_service.__class__(users_repo=users, department_service=FakeDepartments())
+    result = service.update_department(
+        target_user_id=7,
+        primary_department_id=1,
+        secondary_department_id=11,
+    )
+
+    assert result["success"] is True
+    assert users.updated["user_id"] == 7
+    assert users.updated["primary_department_id"] == 1
+    assert users.updated["secondary_department_id"] == 11
+    assert result["data"]["require_department_setup"] is False
+
+
+def test_admin_service_update_department_allows_unchanged_disabled_binding():
+    class FakeUsers:
+        def __init__(self):
+            self.update_called = False
+
+        def get_by_id(self, user_id):
+            if user_id != 7:
+                return None
+            return {
+                "id": 7,
+                "username": "alice",
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+                "primary_department_id": 1,
+                "secondary_department_id": 11,
+            }
+
+        def update_user_department(self, **kwargs):
+            self.update_called = True
+            raise AssertionError(f"unexpected update: {kwargs}")
+
+    class FakeDepartments:
+        def describe_user_department(self, *, primary_department_id: int | None, secondary_department_id: int | None):
+            return {
+                "primary_department_id": primary_department_id,
+                "primary_department_name": "计算机学院",
+                "secondary_department_id": secondary_department_id,
+                "secondary_department_name": "软件工程系",
+                "department_effective_status": "disabled",
+                "department_display": "计算机学院 / 软件工程系（已停用）",
+                "require_department_setup": False,
+            }
+
+        def validate_department_selection(self, **kwargs):
+            raise AssertionError(f"unexpected validation: {kwargs}")
+
+    users = FakeUsers()
+    service = admin_users_service.__class__(users_repo=users, department_service=FakeDepartments())
+    result = service.update_department(target_user_id=7, primary_department_id=1, secondary_department_id=11)
+
+    assert result["success"] is True
+    assert users.update_called is False
+    assert result["data"]["department_display"] == "计算机学院 / 软件工程系（已停用）"
+
+
+def test_admin_service_update_department_fails_when_write_does_not_persist():
+    class FakeUsers:
+        def get_by_id(self, user_id):
+            if user_id != 7:
+                return None
+            return {
+                "id": 7,
+                "username": "alice",
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+                "primary_department_id": None,
+                "secondary_department_id": None,
+            }
+
+        def update_user_department(self, **kwargs):
+            return 0
+
+    class FakeDepartments:
+        def describe_user_department(self, *, primary_department_id: int | None, secondary_department_id: int | None):
+            return {
+                "primary_department_id": primary_department_id,
+                "primary_department_name": "计算机学院" if primary_department_id else None,
+                "secondary_department_id": secondary_department_id,
+                "secondary_department_name": "软件工程系" if secondary_department_id else None,
+                "require_department_setup": primary_department_id is None or secondary_department_id is None,
+            }
+
+        def validate_department_selection(
+            self,
+            *,
+            primary_department_id: int | None,
+            secondary_department_id: int | None,
+            require_active: bool,
+            allow_empty: bool,
+        ):
+            assert primary_department_id == 1
+            assert secondary_department_id == 11
+            assert require_active is True
+            assert allow_empty is True
+            return {
+                "success": True,
+                "data": {
+                    "primary_department_id": 1,
+                    "primary_department_name": "计算机学院",
+                    "secondary_department_id": 11,
+                    "secondary_department_name": "软件工程系",
+                    "require_department_setup": False,
+                },
+            }
+
+    service = admin_users_service.__class__(users_repo=FakeUsers(), department_service=FakeDepartments())
+    result = service.update_department(target_user_id=7, primary_department_id=1, secondary_department_id=11)
+
+    assert result["success"] is False
+    assert result["code"] == "UPDATE_ERROR"
+
+
+def test_admin_service_list_users_exposes_department_summary():
+    class FakeUsers:
+        def count_users(self):
+            return 1
+
+        def list_users(self, *, offset: int, limit: int):
+            assert offset == 0
+            assert limit == 10
+            return [
+                {
+                    "id": 7,
+                    "username": "alice",
+                    "role": "user",
+                    "user_type": 3,
+                    "status": "active",
+                    "primary_department_id": 1,
+                    "secondary_department_id": 11,
+                    "created_at": None,
+                }
+            ]
+
+    class FakeDepartments:
+        def describe_user_department(self, *, primary_department_id: int | None, secondary_department_id: int | None):
+            assert primary_department_id == 1
+            assert secondary_department_id == 11
+            return {
+                "primary_department_id": 1,
+                "primary_department_name": "计算机学院",
+                "secondary_department_id": 11,
+                "secondary_department_name": "软件工程系",
+                "require_department_setup": False,
+            }
+
+    service = admin_users_service.__class__(users_repo=FakeUsers(), department_service=FakeDepartments())
+    result = service.list_users(page=1, page_size=10)
+
+    assert result["success"] is True
+    assert result["data"][0]["primary_department_name"] == "计算机学院"
+    assert result["data"][0]["secondary_department_name"] == "软件工程系"
+    assert result["data"][0]["department_display"] == "计算机学院 / 软件工程系"

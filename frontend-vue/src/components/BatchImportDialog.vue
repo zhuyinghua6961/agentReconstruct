@@ -1,5 +1,6 @@
 <script setup>
 import { ref, computed } from 'vue'
+import { adminApi } from '../services/admin'
 
 const props = defineProps({
   show: Boolean
@@ -84,26 +85,9 @@ function handleDrop(event) {
 // 下载模板
 async function downloadTemplate(format) {
   try {
-    const token = localStorage.getItem('token')
-    const response = await fetch(`/api/admin/users/import-template?format=${format}`, {
-      headers: { 'Authorization': `Bearer ${token}` }
-    })
-    
-    if (!response.ok) {
-      throw new Error('下载模板失败')
-    }
-    
-    const blob = await response.blob()
-    const url = window.URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `user_import_template.${format}`
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    window.URL.revokeObjectURL(url)
+    await adminApi.downloadImportTemplate(format)
   } catch (err) {
-    error.value = err.message || '下载模板失败'
+    error.value = err?.message || '下载模板失败'
   }
 }
 
@@ -118,18 +102,7 @@ async function startImport() {
   error.value = ''
   
   try {
-    const formData = new FormData()
-    formData.append('file', selectedFile.value)
-    
-    const token = localStorage.getItem('token')
-    const response = await fetch('/api/admin/users/batch-import', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${token}` },
-      body: formData
-    })
-    
-    const result = await response.json()
-    
+    const result = await adminApi.batchImportUsers(selectedFile.value)
     if (result.success) {
       emit('import-success', result.data)
       close()
@@ -220,8 +193,10 @@ function close() {
         <div class="info-section">
           <p class="info-title">📌 导入说明：</p>
           <ul class="info-list">
-            <li>文件必须包含三列：username（用户名）、password（密码）、user_type（用户身份）</li>
+            <li>文件包含五列：username、password、user_type、primary_department_name、secondary_department_name</li>
             <li>用户身份只能是 <code>super</code>（超级用户）或 <code>common</code>（普通用户）</li>
+            <li>部门名称按去除首尾空格后的精确匹配；两个部门列要么都填，要么都留空</li>
+            <li>若部门已停用、二级部门不属于当前一级部门，或者只填了一列，当前行会导入失败</li>
             <li>用户名长度 3-50 字符，不能以 admin 开头</li>
             <li>密码长度不少于 6 位</li>
             <li>单次最多导入 1000 条记录</li>

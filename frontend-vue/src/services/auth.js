@@ -3,13 +3,29 @@
  */
 const API_BASE = '/api/auth'
 
-function readStoredToken() {
+export function readStoredToken() {
   return localStorage.getItem('token')
     || localStorage.getItem('agentcode.auth.token.v1')
     || ''
 }
 
-function clearStoredAuth() {
+export function readStoredUser() {
+  const raw = localStorage.getItem('user') || localStorage.getItem('agentcode.auth.user.v1')
+  if (!raw) return null
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return null
+  }
+}
+
+export function persistStoredUser(user) {
+  const serialized = JSON.stringify(user)
+  localStorage.setItem('user', serialized)
+  localStorage.setItem('agentcode.auth.user.v1', serialized)
+}
+
+export function clearStoredAuth() {
   localStorage.removeItem('token')
   localStorage.removeItem('user')
   localStorage.removeItem('agentcode.auth.token.v1')

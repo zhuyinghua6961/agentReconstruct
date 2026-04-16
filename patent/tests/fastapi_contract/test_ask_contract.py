@@ -178,6 +178,30 @@ def _write_csv(path: Path) -> None:
     )
 
 
+def _tabular_compare_payload() -> dict:
+    payload = _tabular_payload()
+    payload["question"] = "按批次对比温度=25时这两个表格的平均容量"
+    payload["used_files"] = [
+        {"file_id": 33, "file_type": "csv", "file_name": "a.csv"},
+        {"file_id": 34, "file_type": "csv", "file_name": "b.csv"},
+    ]
+    payload["execution_files"] = [
+        {"file_id": 33, "file_type": "csv", "file_name": "a.csv"},
+        {"file_id": 34, "file_type": "csv", "file_name": "b.csv"},
+    ]
+    payload["selected_file_ids"] = [33, 34]
+    payload["primary_file_id"] = 33
+    payload["file_selection"] = {"strategy": "explicit_selection", "selected_file_ids": [33, 34], "source_scope": "table"}
+    return payload
+
+
+def _write_compare_csv(path: Path, *, capacity_column: str, values: list[tuple[str, int, int]]) -> None:
+    lines = [f"批次,{capacity_column},温度"]
+    for batch, capacity, temperature in values:
+        lines.append(f"{batch},{capacity},{temperature}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _hybrid_payload(source_scope: str = "pdf+table+kb") -> dict:
     payload = _base_payload()
     execution_files = [
@@ -3777,6 +3801,77 @@ def test_http_stream_tabular_route_with_stream_capability_emits_only_final_table
     assert all(event["content_phase"] in {"start", "delta", "end", "snapshot"} for event in content_events)
     assert not any(event["content_role"] == "preview" for event in content_events)
     assert "".join(event["content"] for event in content_events) == events[-1]["final_answer"]
+
+
+def test_http_sync_tabular_multi_table_compare_uses_real_compare_flow(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    csv_a = tmp_path / "a.csv"
+    csv_b = tmp_path / "b.csv"
+    _write_compare_csv(
+        csv_a,
+        capacity_column="容量",
+        values=[("B1", 100, 25), ("B1", 110, 25), ("B2", 120, 35)],
+    )
+    _write_compare_csv(
+        csv_b,
+        capacity_column="容量_Ah",
+        values=[("B1", 108, 25), ("B1", 114, 25), ("B2", 118, 35)],
+    )
+    app.state.ask_service._patent_executor._tabular_service = PatentTabularService(
+        answer_question_fn=lambda **kwargs: "## 结论\n- B1 批次下 b.csv 的平均容量高于 a.csv。\n\n## 证据\n- B1: a.csv=105, b.csv=111\n\n## 对比\n- 两个文件在 B1 批次存在 6Ah 差异\n\n## 限制\n- 当前仅比较温度=25 样本",
+    )
+    payload = _tabular_compare_payload()
+    payload["execution_files"][0]["local_path"] = str(csv_a)
+    payload["execution_files"][1]["local_path"] = str(csv_b)
+    payload["used_files"][0]["local_path"] = str(csv_a)
+    payload["used_files"][1]["local_path"] = str(csv_b)
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["route"] == "tabular_qa"
+    assert body["metadata"]["answer_mode"] == "table_execution_compare"
+    assert "无法生成基于表格的回答" not in body["final_answer"]
+    assert "多表对比摘要" in body["metadata"]["table_evidence_context"]
+
+
+def test_http_stream_tabular_multi_table_compare_emits_compare_steps_before_done(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATENT_FILE_ROUTES_ENABLED", "true")
+    app = create_app()
+    csv_a = tmp_path / "a.csv"
+    csv_b = tmp_path / "b.csv"
+    _write_compare_csv(
+        csv_a,
+        capacity_column="容量",
+        values=[("B1", 100, 25), ("B1", 110, 25), ("B2", 120, 35)],
+    )
+    _write_compare_csv(
+        csv_b,
+        capacity_column="容量_Ah",
+        values=[("B1", 108, 25), ("B1", 114, 25), ("B2", 118, 35)],
+    )
+    app.state.ask_service._patent_executor._tabular_service = PatentTabularService(
+        answer_question_fn=lambda **kwargs: "## 结论\n- B1 批次下 b.csv 的平均容量高于 a.csv。\n\n## 证据\n- B1: a.csv=105, b.csv=111\n\n## 对比\n- 两个文件在 B1 批次存在 6Ah 差异\n\n## 限制\n- 当前仅比较温度=25 样本",
+    )
+    payload = _tabular_compare_payload()
+    payload["execution_files"][0]["local_path"] = str(csv_a)
+    payload["execution_files"][1]["local_path"] = str(csv_b)
+    payload["used_files"][0]["local_path"] = str(csv_a)
+    payload["used_files"][1]["local_path"] = str(csv_b)
+
+    with TestClient(app) as client:
+        response = client.post("/api/ask_stream", json=payload)
+
+    assert response.status_code == 200
+    events = _stream_events(response)
+    step_events = [event for event in events if event["type"] == "step"]
+
+    assert any(event.get("step") == "tabular_load" for event in step_events)
+    assert events[-1]["type"] == "done"
+    assert events[-1]["metadata"]["answer_mode"] == "table_execution_compare"
 
 
 @pytest.mark.parametrize(

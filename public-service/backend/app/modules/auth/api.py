@@ -8,6 +8,7 @@ from app.core.deps import AuthContext
 from app.modules.auth.deps import require_auth_context
 from app.modules.auth.schemas import (
     ChangePasswordRequest,
+    DepartmentUpdateRequest,
     ForgotPasswordInitiateRequest,
     ForgotPasswordVerifyRequest,
     LoginRequest,
@@ -43,6 +44,28 @@ def register(payload: RegisterRequest):
 @router.get("/api/auth/me")
 def me(context: AuthContext = Depends(require_auth_context)):
     return _respond(auth_service_module.auth_service.get_user_info(context.user_id), ok_status=200)
+
+
+@router.get("/api/v1/auth/departments/tree")
+@router.get("/api/auth/departments/tree")
+def get_department_tree(context: AuthContext = Depends(require_auth_context)):
+    return _respond(auth_service_module.auth_service.get_selectable_department_tree(user_id=context.user_id), ok_status=200)
+
+
+@router.put("/api/v1/auth/department")
+@router.put("/api/auth/department")
+def update_department(
+    payload: DepartmentUpdateRequest,
+    context: AuthContext = Depends(require_auth_context),
+):
+    return _respond(
+        auth_service_module.auth_service.update_department(
+            user_id=context.user_id,
+            primary_department_id=payload.primary_department_id,
+            secondary_department_id=payload.secondary_department_id,
+        ),
+        ok_status=200,
+    )
 
 
 @router.api_route("/api/v1/auth/password", methods=["PUT", "POST"])

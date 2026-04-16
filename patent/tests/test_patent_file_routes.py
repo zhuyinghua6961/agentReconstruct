@@ -5,6 +5,7 @@ import sys
 import pytest
 from pathlib import Path
 
+import server.patent.file_routes as file_routes_module
 import server.patent.pdf_service as pdf_service_module
 import server.patent.tabular_service as tabular_service_module
 from server.patent.cache_keys import build_file_route_cache_fingerprint
@@ -5154,6 +5155,105 @@ def test_file_route_runtime_signature_exposes_table_parity_versions_for_table_sc
     assert runtime_signature["table_parity_signature"]["summary_context_version"]
     assert runtime_signature["table_parity_signature"]["prompt_version"]
     assert runtime_signature["table_parity_signature"]["table_context_budget"] > 0
+
+
+def test_file_route_runtime_signature_exposes_new_compare_tables_versions_for_table_scopes():
+    contract = build_patent_file_contract(
+        question="对比一下这两个表格",
+        route="tabular_qa",
+        source_scope="table",
+        selected_file_ids=[33],
+        primary_file_id=33,
+        execution_files=[TABLE_FILE],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [33], "source_scope": "table"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    plan = plan_patent_file_route(contract)
+
+    runtime_signature = _file_route_runtime_signature(
+        plan=plan,
+        pdf_service=PatentPdfService(),
+        tabular_service=PatentTabularService(auto_answer_client=False),
+        hybrid_synthesis_service=None,
+    )
+
+    assert runtime_signature["table_parity_signature"]["compare_tables_version"]
+    assert runtime_signature["table_parity_signature"]["compare_status_version"]
+
+
+def test_file_route_cache_fingerprint_changes_when_compare_tables_runtime_signature_changes(monkeypatch):
+    contract = build_patent_file_contract(
+        question="对比一下这两个表格",
+        route="tabular_qa",
+        source_scope="table",
+        selected_file_ids=[33],
+        primary_file_id=33,
+        execution_files=[TABLE_FILE],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [33], "source_scope": "table"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    plan = plan_patent_file_route(contract)
+
+    left = build_file_route_cache_fingerprint(
+        question=contract.question,
+        route=contract.route,
+        source_scope=contract.source_scope,
+        selected_file_ids=list(contract.selected_file_ids),
+        primary_file_id=contract.primary_file_id,
+        selected_execution_files=[item.as_payload() for item in contract.selected_execution_files],
+        file_selection=dict(contract.file_selection),
+        runtime_signature=_file_route_runtime_signature(
+            plan=plan,
+            pdf_service=PatentPdfService(),
+            tabular_service=PatentTabularService(auto_answer_client=False),
+            hybrid_synthesis_service=None,
+        ),
+    )
+
+    monkeypatch.setattr(file_routes_module, "_PATENT_TABLE_COMPARE_TABLES_VERSION", "patent-tabular-compare-v999")
+    right = build_file_route_cache_fingerprint(
+        question=contract.question,
+        route=contract.route,
+        source_scope=contract.source_scope,
+        selected_file_ids=list(contract.selected_file_ids),
+        primary_file_id=contract.primary_file_id,
+        selected_execution_files=[item.as_payload() for item in contract.selected_execution_files],
+        file_selection=dict(contract.file_selection),
+        runtime_signature=_file_route_runtime_signature(
+            plan=plan,
+            pdf_service=PatentPdfService(),
+            tabular_service=PatentTabularService(auto_answer_client=False),
+            hybrid_synthesis_service=None,
+        ),
+    )
+
+    assert left != right
+
+
+def test_non_table_routes_do_not_expose_compare_tables_parity_metadata():
+    contract = build_patent_file_contract(
+        question="请总结 PDF 结论",
+        route="pdf_qa",
+        source_scope="pdf",
+        selected_file_ids=[11],
+        primary_file_id=11,
+        execution_files=[PDF_FILE],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [11], "source_scope": "pdf"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+    )
+    plan = plan_patent_file_route(contract)
+
+    runtime_signature = _file_route_runtime_signature(
+        plan=plan,
+        pdf_service=PatentPdfService(),
+        tabular_service=PatentTabularService(auto_answer_client=False),
+        hybrid_synthesis_service=None,
+    )
+
+    assert "table_parity_signature" not in runtime_signature
 
 
 @pytest.mark.parametrize(

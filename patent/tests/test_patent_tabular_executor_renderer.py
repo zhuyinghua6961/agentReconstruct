@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from server.patent.tabular.executor import execute_tabular_plan
+from server.patent.tabular.executor import execute_compare_plan, execute_tabular_plan
 
 
 def _summary_workbook():
@@ -21,6 +21,48 @@ def _summary_workbook():
                     {"Material": "NCM", "Batch": "B5", "Capacity": "280", "Retention": "89"},
                 ],
                 "row_count": 6,
+            }
+        ],
+    }
+
+
+def _compare_workbook_a():
+    return {
+        "file_id": 101,
+        "file_name": "a.csv",
+        "sheet_count": 1,
+        "sheets": [
+            {
+                "sheet_name": "Sheet1",
+                "sheet_index": 0,
+                "headers": ["批次", "容量", "温度"],
+                "rows": [
+                    {"批次": "B1", "容量": "100", "温度": "25"},
+                    {"批次": "B1", "容量": "110", "温度": "25"},
+                    {"批次": "B2", "容量": "120", "温度": "35"},
+                ],
+                "row_count": 3,
+            }
+        ],
+    }
+
+
+def _compare_workbook_b():
+    return {
+        "file_id": 102,
+        "file_name": "b.csv",
+        "sheet_count": 1,
+        "sheets": [
+            {
+                "sheet_name": "Sheet1",
+                "sheet_index": 0,
+                "headers": ["批次", "容量_Ah", "温度"],
+                "rows": [
+                    {"批次": "B1", "容量_Ah": "108", "温度": "25"},
+                    {"批次": "B1", "容量_Ah": "114", "温度": "25"},
+                    {"批次": "B2", "容量_Ah": "118", "温度": "35"},
+                ],
+                "row_count": 3,
             }
         ],
     }
@@ -221,3 +263,169 @@ def test_execute_tabular_plan_summary_uses_representative_rows_not_head_only():
 
     assert "50" in capacities or 50 in capacities
     assert "280" in capacities or 280 in capacities
+
+
+def test_execute_tabular_plan_supports_single_table_max_aggregate():
+    result = execute_tabular_plan(
+        workbook={
+            "file_name": "metrics.csv",
+            "sheet_count": 1,
+            "sheets": [
+                {
+                    "sheet_name": "Sheet1",
+                    "sheet_index": 0,
+                    "headers": ["Material", "Capacity"],
+                    "rows": [
+                        {"Material": "LMFP", "Capacity": "120"},
+                        {"Material": "LFP", "Capacity": "115"},
+                        {"Material": "LMFP", "Capacity": "122"},
+                    ],
+                    "row_count": 3,
+                }
+            ],
+        },
+        plan={
+            "operation": "aggregate",
+            "sheet_name": "Sheet1",
+            "metric_columns": ["Capacity"],
+            "group_by": "",
+            "aggregate": "max",
+        },
+    )
+
+    assert result["summary_stats"]["aggregate"] == "max"
+    assert result["rows"] == [{"group": "all", "Capacity": 122.0}]
+
+
+def test_execute_compare_plan_returns_rows_for_each_file_on_count_compare():
+    result = execute_compare_plan(
+        workbooks=[_compare_workbook_a(), _compare_workbook_b()],
+        plan={
+            "operation": "compare_tables",
+            "sheet_name": "Sheet1",
+            "sheet_map": {101: "Sheet1", 102: "Sheet1"},
+            "aggregate": "count",
+        },
+    )
+
+    assert result["operation"] == "compare_tables"
+    assert len(result["rows"]) == 2
+    assert {row["file_name"] for row in result["rows"]} == {"a.csv", "b.csv"}
+    assert {row["value"] for row in result["rows"]} == {3}
+
+
+def test_execute_compare_plan_supports_grouped_compare():
+    result = execute_compare_plan(
+        workbooks=[_compare_workbook_a(), _compare_workbook_b()],
+        plan={
+            "operation": "compare_tables",
+            "sheet_name": "Sheet1",
+            "sheet_map": {101: "Sheet1", 102: "Sheet1"},
+            "aggregate": "mean",
+            "metric_columns": ["容量"],
+            "metric_column_map": {101: "容量", 102: "容量_Ah"},
+            "group_by": "批次",
+            "group_column": "批次",
+            "group_column_map": {101: "批次", 102: "批次"},
+        },
+    )
+
+    assert result["summary_stats"]["grouped_compare"] == 1
+    assert result["rows"]
+    b1_row = next(row for row in result["rows"] if row["批次"] == "B1")
+    assert b1_row["a.csv"] == 105.0
+    assert b1_row["b.csv"] == 111.0
+
+
+def test_execute_compare_plan_keeps_patent_rows_contract():
+    result = execute_compare_plan(
+        workbooks=[_compare_workbook_a(), _compare_workbook_b()],
+        plan={
+            "operation": "compare_tables",
+            "sheet_name": "Sheet1",
+            "sheet_map": {101: "Sheet1", 102: "Sheet1"},
+            "aggregate": "count",
+        },
+    )
+
+    assert "rows" in result
+    assert "result_rows" not in result
+
+
+def test_execute_compare_plan_collects_warnings_for_missing_sheet():
+    result = execute_compare_plan(
+        workbooks=[_compare_workbook_a(), _compare_workbook_b()],
+        plan={
+            "operation": "compare_tables",
+            "sheet_name": "Sheet1",
+            "sheet_map": {101: "Sheet1", 102: "MissingSheet"},
+            "aggregate": "count",
+        },
+    )
+
+    assert len(result["rows"]) == 1
+    assert any("MissingSheet" in warning for warning in result["warnings"])
+
+
+def test_execute_compare_plan_source_row_count_follows_filtered_rows():
+    result = execute_compare_plan(
+        workbooks=[_compare_workbook_a(), _compare_workbook_b()],
+        plan={
+            "operation": "compare_tables",
+            "sheet_name": "Sheet1",
+            "sheet_map": {101: "Sheet1", 102: "Sheet1"},
+            "aggregate": "mean",
+            "metric_columns": ["容量"],
+            "metric_column_map": {101: "容量", 102: "容量_Ah"},
+            "group_by": "批次",
+            "group_column": "批次",
+            "group_column_map": {101: "批次", 102: "批次"},
+            "filters": [{"column": "温度", "value": "25"}],
+            "filter_map": {
+                101: [{"column": "温度", "value": "25"}],
+                102: [{"column": "温度", "value": "25"}],
+            },
+        },
+    )
+
+    assert result["summary_stats"]["source_row_count"] == 4
+
+
+def test_execute_compare_plan_pads_missing_group_values_for_other_files():
+    result = execute_compare_plan(
+        workbooks=[
+            _compare_workbook_a(),
+            {
+                "file_id": 102,
+                "file_name": "b.csv",
+                "sheet_count": 1,
+                "sheets": [
+                    {
+                        "sheet_name": "Sheet1",
+                        "sheet_index": 0,
+                        "headers": ["批次", "容量_Ah", "温度"],
+                        "rows": [
+                            {"批次": "B1", "容量_Ah": "108", "温度": "25"},
+                            {"批次": "B1", "容量_Ah": "114", "温度": "25"},
+                        ],
+                        "row_count": 2,
+                    }
+                ],
+            },
+        ],
+        plan={
+            "operation": "compare_tables",
+            "sheet_name": "Sheet1",
+            "sheet_map": {101: "Sheet1", 102: "Sheet1"},
+            "aggregate": "mean",
+            "metric_columns": ["容量"],
+            "metric_column_map": {101: "容量", 102: "容量_Ah"},
+            "group_by": "批次",
+            "group_column": "批次",
+            "group_column_map": {101: "批次", 102: "批次"},
+        },
+    )
+
+    b2_row = next(row for row in result["rows"] if row["批次"] == "B2")
+    assert b2_row["a.csv"] == 120.0
+    assert b2_row["b.csv"] == ""

@@ -28,8 +28,10 @@ _HYBRID_SCOPE_TO_PLAN = {
 
 _LOGGER = logging.getLogger("patent.file_routes")
 _LITERATURE_SUMMARY_NOTE = LITERATURE_SUMMARY_NOTE
-_PATENT_TABLE_PLANNER_VERSION = "patent-tabular-planner-v2"
-_PATENT_TABLE_SUMMARY_CONTEXT_VERSION = "patent-tabular-summary-context-v2"
+_PATENT_TABLE_PLANNER_VERSION = "patent-tabular-planner-v3"
+_PATENT_TABLE_SUMMARY_CONTEXT_VERSION = "patent-tabular-summary-context-v3"
+_PATENT_TABLE_COMPARE_TABLES_VERSION = "patent-tabular-compare-v1"
+_PATENT_TABLE_COMPARE_STATUS_VERSION = "patent-tabular-compare-status-v1"
 
 
 def _env_int(name: str, default: int) -> int:
@@ -131,9 +133,13 @@ def _file_route_runtime_signature(
                 "tabular_runtime_signature": dict(tabular_runtime_signature() or {}) if callable(tabular_runtime_signature) else {},
                 "tabular_max_context_chars": int(getattr(tabular_service, "_max_table_chars", 0) or 0),
                 "hybrid_table_context_chars": _table_hybrid_context_limit(),
+                "tabular_compare_tables_version": _PATENT_TABLE_COMPARE_TABLES_VERSION,
+                "tabular_compare_status_version": _PATENT_TABLE_COMPARE_STATUS_VERSION,
                 "table_parity_signature": {
                     "planner_version": _PATENT_TABLE_PLANNER_VERSION,
                     "summary_context_version": _PATENT_TABLE_SUMMARY_CONTEXT_VERSION,
+                    "compare_tables_version": _PATENT_TABLE_COMPARE_TABLES_VERSION,
+                    "compare_status_version": _PATENT_TABLE_COMPARE_STATUS_VERSION,
                     "prompt_version": getattr(tabular_service, "prompt_version", lambda: "")(),
                     "table_context_budget": max(
                         int(getattr(tabular_service, "_max_table_chars", 0) or 0),

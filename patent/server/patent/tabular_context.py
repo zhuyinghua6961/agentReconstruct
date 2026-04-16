@@ -70,6 +70,31 @@ def _render_sheet_overview(workbook: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _render_compare_workbook_overview(workbooks: list[dict[str, Any]], plan: dict[str, Any]) -> list[str]:
+    sheet_map = plan.get("sheet_map") if isinstance(plan.get("sheet_map"), dict) else {}
+    lines = [f"多表工作簿概览: 共 {len(workbooks)} 个表格文件"]
+    for workbook in workbooks[:6]:
+        file_id = int(workbook.get("file_id") or 0)
+        file_name = str(workbook.get("file_name") or f"file_{file_id}" or "").strip() or f"file_{file_id}"
+        target_sheet = str(sheet_map.get(file_id) or plan.get("sheet_name") or "")
+        sheet = _find_sheet(workbook, target_sheet)
+        column_names = [
+            str(item)
+            for item in (
+                sheet.get("column_names")
+                or sheet.get("headers")
+                or list((sheet.get("rows") or [{}])[0].keys())
+                or []
+            )
+            if str(item)
+        ]
+        row_count = int(sheet.get("row_count") or len(sheet.get("rows") or []))
+        lines.append(
+            f"- {file_name}: 工作表={target_sheet or sheet.get('sheet_name') or 'unknown'}, 行数={row_count}, 列={', '.join(column_names[:8])}"
+        )
+    return lines
+
+
 def _render_plan(plan: dict[str, Any]) -> list[str]:
     lines = [
         "执行计划:",
@@ -84,6 +109,24 @@ def _render_plan(plan: dict[str, Any]) -> list[str]:
     if lookup_columns:
         lines.append("- 返回列: " + ", ".join(lookup_columns))
     group_by = str(plan.get("group_by") or "").strip()
+    if group_by:
+        lines.append(f"- 分组列: {group_by}")
+    filters = [dict(item) for item in (plan.get("filters") or []) if isinstance(item, dict)]
+    for item in filters:
+        lines.append(f"- 过滤: {item.get('column')}={item.get('value')}")
+    return lines
+
+
+def _render_compare_plan(plan: dict[str, Any]) -> list[str]:
+    lines = [
+        "执行计划:",
+        f"- 操作: {str(plan.get('operation') or 'compare_tables')}",
+        f"- 聚合: {str(plan.get('aggregate') or 'count')}",
+    ]
+    metric_columns = [str(item) for item in (plan.get("metric_columns") or []) if str(item)]
+    if metric_columns:
+        lines.append("- 指标列: " + ", ".join(metric_columns))
+    group_by = str(plan.get("group_by") or plan.get("group_column") or "").strip()
     if group_by:
         lines.append(f"- 分组列: {group_by}")
     filters = [dict(item) for item in (plan.get("filters") or []) if isinstance(item, dict)]
@@ -119,6 +162,43 @@ def _render_stats(sheet: dict[str, Any], result: dict[str, Any]) -> list[str]:
             f"- {column}: count={len(values)}, min={min(values):g}, max={max(values):g}, mean={sum(values) / len(values):g}"
         )
     return lines
+
+
+def build_compare_tabular_context_bundle(
+    *,
+    question: str,
+    workbooks: list[dict[str, Any]],
+    plan: dict[str, Any],
+    result: dict[str, Any],
+    compact_limit: int,
+    answer_limit: int,
+    synthesis_limit: int,
+) -> dict[str, str]:
+    file_names = [str(item.get("file_name") or "") for item in workbooks if str(item.get("file_name") or "")]
+    file_label = ", ".join(file_names[:4]) if file_names else "多表对比"
+    rendered_result = build_tabular_result_context(
+        file_name=file_label,
+        plan=plan,
+        result=result,
+        question=question,
+    )
+    compact_context = _truncate(rendered_result, compact_limit)
+
+    lines: list[str] = [
+        f"问题: {str(question or '').strip()}",
+        "",
+        *_render_compare_workbook_overview(workbooks, plan),
+        "",
+        *_render_compare_plan(plan),
+        "",
+        rendered_result,
+    ]
+    full_context = "\n".join(lines).strip()
+    return {
+        "compact_evidence_context": compact_context,
+        "answer_context": _truncate(full_context, answer_limit),
+        "synthesis_context": _truncate(full_context, synthesis_limit),
+    }
 
 
 def _pick_rows(question: str, rows: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
@@ -213,4 +293,4 @@ def build_tabular_context_bundle(
     }
 
 
-__all__ = ["build_tabular_context_bundle"]
+__all__ = ["build_compare_tabular_context_bundle", "build_tabular_context_bundle"]

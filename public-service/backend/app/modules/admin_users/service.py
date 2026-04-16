@@ -4,6 +4,7 @@ import secrets
 from hashlib import pbkdf2_hmac
 from typing import Any
 
+from app.modules.departments.service import department_service as shared_department_service
 from app.modules.auth.repository import AuthRepository
 from app.modules.auth.service import auth_service
 
@@ -13,8 +14,9 @@ def _is_db_unavailable_error(exc: Exception) -> bool:
 
 
 class AdminUsersService:
-    def __init__(self) -> None:
-        self._users = AuthRepository()
+    def __init__(self, *, users_repo: AuthRepository | None = None, department_service: Any | None = None) -> None:
+        self._users = users_repo or AuthRepository()
+        self._departments = department_service or shared_department_service
 
     @property
     def users(self) -> AuthRepository:
@@ -51,6 +53,17 @@ class AdminUsersService:
         return None
 
     @staticmethod
+    def _department_pair_from_mapping(data: dict[str, Any] | None) -> tuple[int | None, int | None]:
+        if not data:
+            return (None, None)
+        primary_id = data.get("primary_department_id")
+        secondary_id = data.get("secondary_department_id")
+        return (
+            int(primary_id) if primary_id is not None else None,
+            int(secondary_id) if secondary_id is not None else None,
+        )
+
+    @staticmethod
     def _db_error(exc: Exception) -> dict[str, Any]:
         return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
 
@@ -75,11 +88,14 @@ class AdminUsersService:
             "PASSWORD_NO_DIGIT",
             "PASSWORD_NO_SYMBOL",
             "PASSWORD_WEAK",
+            "DEPARTMENT_REQUIRED",
+            "DEPARTMENT_RELATION_INVALID",
+            "DEPARTMENT_DISABLED",
         }:
             return 400
         if code in {"QUOTA_EXCEEDED"}:
             return 429
-        if code in {"USER_NOT_FOUND"}:
+        if code in {"USER_NOT_FOUND", "PRIMARY_DEPARTMENT_NOT_FOUND", "SECONDARY_DEPARTMENT_NOT_FOUND"}:
             return 404
         if code in {"DB_UNAVAILABLE"}:
             return 503
@@ -94,17 +110,29 @@ class AdminUsersService:
             offset = (page - 1) * page_size
             total = self._users.count_users()
             rows = self._users.list_users(offset=offset, limit=page_size)
-            data = [
-                {
-                    "id": int(row["id"]),
-                    "username": row["username"],
-                    "role": row["role"],
-                    "user_type": int(row.get("user_type") or self._role_to_user_type(str(row.get("role") or "user"))),
-                    "status": row["status"],
-                    "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
-                }
-                for row in rows
-            ]
+            data = []
+            for row in rows:
+                department_payload = self._departments.describe_user_department(
+                    primary_department_id=row.get("primary_department_id"),
+                    secondary_department_id=row.get("secondary_department_id"),
+                )
+                primary_name = department_payload.get("primary_department_name")
+                secondary_name = department_payload.get("secondary_department_name")
+                department_display = department_payload.get("department_display")
+                if not department_display:
+                    department_display = f"{primary_name} / {secondary_name}" if primary_name and secondary_name else "未填写"
+                data.append(
+                    {
+                        "id": int(row["id"]),
+                        "username": row["username"],
+                        "role": row["role"],
+                        "user_type": int(row.get("user_type") or self._role_to_user_type(str(row.get("role") or "user"))),
+                        "status": row["status"],
+                        **department_payload,
+                        "department_display": department_display,
+                        "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
+                    }
+                )
             return {
                 "success": True,
                 "data": data,
@@ -115,7 +143,15 @@ class AdminUsersService:
                 return self._db_error(exc)
             return {"success": False, "error": "获取用户列表失败", "code": "FETCH_ERROR"}
 
-    def create_user(self, *, username: str, password: str, user_type: str) -> dict[str, Any]:
+    def create_user(
+        self,
+        *,
+        username: str,
+        password: str,
+        user_type: str,
+        primary_department_id: int | None = None,
+        secondary_department_id: int | None = None,
+    ) -> dict[str, Any]:
         try:
             username = self.clean_text(username)
             password = str(password or "")
@@ -130,6 +166,15 @@ class AdminUsersService:
                 return {"success": False, "error": "不能创建以 admin 为前缀的用户名", "code": "USERNAME_INVALID"}
             if self._users.get_by_username(username):
                 return {"success": False, "error": "用户名已存在", "code": "USERNAME_EXISTS"}
+            department_validation = self._departments.validate_department_selection(
+                primary_department_id=primary_department_id,
+                secondary_department_id=secondary_department_id,
+                require_active=True,
+                allow_empty=True,
+            )
+            if not department_validation.get("success"):
+                return department_validation
+            department_data = department_validation.get("data") if isinstance(department_validation.get("data"), dict) else {}
             user_type_code = 2 if user_type == "super" else 3
             password_hash = self.hash_password(password)
             created_id = self._users.create_user(
@@ -139,6 +184,8 @@ class AdminUsersService:
                 user_type=user_type_code,
                 is_first_login=True,
                 must_set_security_questions=True,
+                primary_department_id=department_data.get("primary_department_id"),
+                secondary_department_id=department_data.get("secondary_department_id"),
             )
             self._users.add_password_history(user_id=created_id, password_hash=password_hash)
             self._users.trim_password_history(user_id=created_id, keep_limit=self._password_history_limit("user"))
@@ -151,12 +198,82 @@ class AdminUsersService:
                     "role": "user",
                     "user_type": user_type_code,
                     "status": "active",
+                    **department_data,
                 },
             }
         except Exception as exc:
             if _is_db_unavailable_error(exc):
                 return self._db_error(exc)
             return {"success": False, "error": "创建用户失败", "code": "CREATE_ERROR"}
+
+    def update_department(
+        self,
+        *,
+        target_user_id: int,
+        primary_department_id: int | None,
+        secondary_department_id: int | None,
+    ) -> dict[str, Any]:
+        try:
+            user = self._users.get_by_id(target_user_id)
+            if not user:
+                return {"success": False, "error": "用户不存在", "code": "USER_NOT_FOUND"}
+            current_department = self._departments.describe_user_department(
+                primary_department_id=user.get("primary_department_id"),
+                secondary_department_id=user.get("secondary_department_id"),
+            )
+            if (
+                self._department_pair_from_mapping(user)
+                == self._department_pair_from_mapping(
+                    {
+                        "primary_department_id": primary_department_id,
+                        "secondary_department_id": secondary_department_id,
+                    }
+                )
+                and not bool(current_department.get("require_department_setup"))
+            ):
+                return {
+                    "success": True,
+                    "message": "用户部门已更新",
+                    "data": {
+                        "id": int(user["id"]),
+                        "username": user["username"],
+                        **current_department,
+                    },
+                }
+            department_validation = self._departments.validate_department_selection(
+                primary_department_id=primary_department_id,
+                secondary_department_id=secondary_department_id,
+                require_active=True,
+                allow_empty=True,
+            )
+            if not department_validation.get("success"):
+                return department_validation
+            department_data = department_validation.get("data") if isinstance(department_validation.get("data"), dict) else {}
+            updated_count = self._users.update_user_department(
+                user_id=target_user_id,
+                primary_department_id=department_data.get("primary_department_id"),
+                secondary_department_id=department_data.get("secondary_department_id"),
+            )
+            refreshed_user = self._users.get_by_id(target_user_id) or user
+            if (
+                updated_count <= 0
+                and self._department_pair_from_mapping(refreshed_user)
+                != self._department_pair_from_mapping(department_data)
+            ):
+                return {"success": False, "error": "修改用户部门失败", "code": "UPDATE_ERROR"}
+            return {
+                "success": True,
+                "message": "用户部门已更新",
+                "data": {
+                    "id": int(user["id"]),
+                    "username": user["username"],
+                    **department_data,
+                },
+            }
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "修改用户部门失败", "code": "UPDATE_ERROR"}
 
     def reset_password(self, *, target_user_id: int, actor_user_id: int, new_password: str) -> dict[str, Any]:
         try:

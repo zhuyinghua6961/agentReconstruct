@@ -1,0 +1,447 @@
+from __future__ import annotations
+
+from typing import Any
+
+from app.modules.departments.repository import DepartmentRepository
+
+
+def _is_db_unavailable_error(exc: Exception) -> bool:
+    return exc.__class__.__name__ in {"DatabaseConfigError", "DatabaseConnectionError", "DatabaseUnavailableError"}
+
+
+class DepartmentService:
+    def __init__(self, *, repository: DepartmentRepository | None = None) -> None:
+        self._repository = repository or DepartmentRepository()
+
+    @staticmethod
+    def clean_text(value: object) -> str:
+        return str(value or "").strip()
+
+    @staticmethod
+    def _db_error(exc: Exception) -> dict[str, Any]:
+        return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
+
+    @staticmethod
+    def status_code_for(result: dict[str, Any], *, ok_status: int) -> int:
+        if result.get("success"):
+            return ok_status
+        code = str(result.get("code") or "")
+        if code in {
+            "VALIDATION_ERROR",
+            "DEPARTMENT_NAME_REQUIRED",
+            "PRIMARY_DEPARTMENT_REQUIRED",
+            "DEPARTMENT_REQUIRED",
+            "DEPARTMENT_RELATION_INVALID",
+            "DEPARTMENT_DISABLED",
+            "PRIMARY_DEPARTMENT_NAME_EXISTS",
+            "SECONDARY_DEPARTMENT_NAME_EXISTS",
+        }:
+            return 400
+        if code in {"PRIMARY_DEPARTMENT_NOT_FOUND", "SECONDARY_DEPARTMENT_NOT_FOUND"}:
+            return 404
+        if code in {"DB_UNAVAILABLE"}:
+            return 503
+        return 500
+
+    @staticmethod
+    def _optional_int(value: object) -> int | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return int(text)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _normalize_status(value: object) -> str:
+        return "disabled" if str(value or "").strip().lower() == "disabled" else "active"
+
+    @staticmethod
+    def _valid_status(value: object) -> bool:
+        return str(value or "").strip().lower() in {"active", "disabled"}
+
+    @staticmethod
+    def _duplicate_error(exc: Exception) -> bool:
+        message = str(exc or "").lower()
+        return "duplicate" in message or "uq_" in message or "unique" in message
+
+    @staticmethod
+    def _effective_status(*, primary_status: str | None, secondary_status: str | None) -> str | None:
+        if primary_status is None or secondary_status is None:
+            return None
+        if primary_status == "active" and secondary_status == "active":
+            return "active"
+        return "disabled"
+
+    @staticmethod
+    def _department_display(
+        *,
+        primary_name: str | None,
+        secondary_name: str | None,
+        effective_status: str | None,
+    ) -> str:
+        if primary_name and secondary_name:
+            label = f"{primary_name} / {secondary_name}"
+            if effective_status == "disabled":
+                return f"{label}（已停用）"
+            return label
+        return "未填写"
+
+    def _build_primary_payload(self, primary: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": int(primary["id"]),
+            "name": primary["name"],
+            "status": self._normalize_status(primary.get("status")),
+            "secondary_items": [],
+        }
+
+    def _build_secondary_payload(self, secondary: dict[str, Any], *, primary_status: str | None) -> dict[str, Any]:
+        secondary_status = self._normalize_status(secondary.get("status"))
+        return {
+            "id": int(secondary["id"]),
+            "primary_department_id": int(secondary["primary_department_id"]),
+            "name": secondary["name"],
+            "status": secondary_status,
+            "effective_status": self._effective_status(
+                primary_status=primary_status,
+                secondary_status=secondary_status,
+            ),
+        }
+
+    def get_admin_tree(self) -> dict[str, Any]:
+        try:
+            rows = self._repository.list_department_tree(include_disabled=True)
+            items = []
+            for row in rows:
+                primary_status = str(row.get("primary_status") or "active")
+                secondary_items = []
+                for secondary in row.get("secondary_items") or []:
+                    child_status = str(secondary.get("status") or "active")
+                    effective_status = "disabled" if primary_status == "disabled" else child_status
+                    secondary_items.append(
+                        {
+                            "id": int(secondary["id"]),
+                            "name": secondary["name"],
+                            "status": child_status,
+                            "effective_status": effective_status,
+                        }
+                    )
+                items.append(
+                    {
+                        "id": int(row["primary_id"]),
+                        "name": row["primary_name"],
+                        "status": primary_status,
+                        "secondary_items": secondary_items,
+                    }
+                )
+            return {"success": True, "data": {"items": items}}
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "获取部门列表失败", "code": "FETCH_ERROR"}
+
+    def get_selectable_tree(self) -> dict[str, Any]:
+        try:
+            rows = self._repository.list_department_tree(include_disabled=False)
+            return {
+                "success": True,
+                "data": {
+                    "items": [
+                        {
+                            "id": int(row["primary_id"]),
+                            "name": row["primary_name"],
+                            "secondary_items": [
+                                {
+                                    "id": int(secondary["id"]),
+                                    "name": secondary["name"],
+                                }
+                                for secondary in row.get("secondary_items") or []
+                            ],
+                        }
+                        for row in rows
+                    ]
+                },
+            }
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "获取部门选项失败", "code": "FETCH_ERROR"}
+
+    def describe_user_department(
+        self,
+        *,
+        primary_department_id: int | None,
+        secondary_department_id: int | None,
+    ) -> dict[str, Any]:
+        primary_id = self._optional_int(primary_department_id)
+        secondary_id = self._optional_int(secondary_department_id)
+        primary = self._repository.get_primary_by_id(primary_id) if primary_id is not None else None
+        secondary = self._repository.get_secondary_by_id(secondary_id) if secondary_id is not None else None
+        primary_status = self._normalize_status((primary or {}).get("status")) if primary else None
+        secondary_status = self._normalize_status((secondary or {}).get("status")) if secondary else None
+
+        relation_valid = (
+            primary_id is not None
+            and secondary_id is not None
+            and primary is not None
+            and secondary is not None
+            and int(secondary.get("primary_department_id") or 0) == int(primary.get("id") or 0)
+        )
+        effective_status = self._effective_status(
+            primary_status=primary_status,
+            secondary_status=secondary_status,
+        )
+        primary_name = primary.get("name") if primary else None
+        secondary_name = secondary.get("name") if secondary else None
+
+        return {
+            "primary_department_id": primary_id,
+            "primary_department_name": primary_name,
+            "primary_department_status": primary_status,
+            "secondary_department_id": secondary_id,
+            "secondary_department_name": secondary_name,
+            "secondary_department_status": secondary_status,
+            "department_effective_status": effective_status,
+            "department_display": self._department_display(
+                primary_name=primary_name,
+                secondary_name=secondary_name,
+                effective_status=effective_status,
+            ),
+            "require_department_setup": not relation_valid,
+        }
+
+    def validate_department_selection(
+        self,
+        *,
+        primary_department_id: int | None,
+        secondary_department_id: int | None,
+        require_active: bool,
+        allow_empty: bool,
+    ) -> dict[str, Any]:
+        primary_id = self._optional_int(primary_department_id)
+        secondary_id = self._optional_int(secondary_department_id)
+
+        if primary_id is None and secondary_id is None:
+            if allow_empty:
+                return {
+                    "success": True,
+                    "data": {
+                        "primary_department_id": None,
+                        "primary_department_name": None,
+                        "primary_department_status": None,
+                        "secondary_department_id": None,
+                        "secondary_department_name": None,
+                        "secondary_department_status": None,
+                        "department_effective_status": None,
+                        "department_display": "未填写",
+                        "require_department_setup": True,
+                    },
+                }
+            return {"success": False, "error": "请选择一级和二级部门", "code": "DEPARTMENT_REQUIRED"}
+
+        if primary_id is None or secondary_id is None:
+            return {"success": False, "error": "一级和二级部门必须同时填写", "code": "DEPARTMENT_REQUIRED"}
+
+        primary = self._repository.get_primary_by_id(primary_id)
+        if not primary:
+            return {"success": False, "error": "一级部门不存在", "code": "PRIMARY_DEPARTMENT_NOT_FOUND"}
+
+        secondary = self._repository.get_secondary_by_id(secondary_id)
+        if not secondary:
+            return {"success": False, "error": "二级部门不存在", "code": "SECONDARY_DEPARTMENT_NOT_FOUND"}
+
+        if int(secondary.get("primary_department_id") or 0) != primary_id:
+            return {"success": False, "error": "二级部门不属于所选一级部门", "code": "DEPARTMENT_RELATION_INVALID"}
+
+        if require_active and (
+            str(primary.get("status") or "").strip().lower() != "active"
+            or str(secondary.get("status") or "").strip().lower() != "active"
+        ):
+            return {"success": False, "error": "部门已停用，无法选择", "code": "DEPARTMENT_DISABLED"}
+
+        return {"success": True, "data": self.describe_user_department(
+            primary_department_id=primary_id,
+            secondary_department_id=secondary_id,
+        )}
+
+    def resolve_by_names(self, *, primary_name: str, secondary_name: str, active_only: bool) -> dict[str, Any]:
+        primary_text = self.clean_text(primary_name)
+        secondary_text = self.clean_text(secondary_name)
+        if not primary_text or not secondary_text:
+            return {"success": False, "error": "一级和二级部门必须同时填写", "code": "DEPARTMENT_REQUIRED"}
+
+        primary = self._repository.get_primary_by_name(primary_text)
+        if not primary:
+            return {"success": False, "error": "一级部门不存在", "code": "PRIMARY_DEPARTMENT_NOT_FOUND"}
+
+        secondary = self._repository.get_secondary_by_name(
+            primary_department_id=int(primary["id"]),
+            name=secondary_text,
+        )
+        if not secondary:
+            return {"success": False, "error": "二级部门不存在", "code": "SECONDARY_DEPARTMENT_NOT_FOUND"}
+
+        if active_only and (
+            str(primary.get("status") or "").strip().lower() != "active"
+            or str(secondary.get("status") or "").strip().lower() != "active"
+        ):
+            return {"success": False, "error": "部门已停用，无法选择", "code": "DEPARTMENT_DISABLED"}
+
+        return {
+            "success": True,
+            "data": self.describe_user_department(
+                primary_department_id=int(primary["id"]),
+                secondary_department_id=int(secondary["id"]),
+            ),
+        }
+
+    def create_primary(self, *, name: str) -> dict[str, Any]:
+        primary_name = self.clean_text(name)
+        if not primary_name:
+            return {"success": False, "error": "部门名称不能为空", "code": "DEPARTMENT_NAME_REQUIRED"}
+        try:
+            if self._repository.get_primary_by_name(primary_name):
+                return {"success": False, "error": "一级部门名称已存在", "code": "PRIMARY_DEPARTMENT_NAME_EXISTS"}
+            primary_id = self._repository.create_primary(name=primary_name)
+            created = self._repository.get_primary_by_id(primary_id)
+            if not created:
+                return {"success": False, "error": "创建一级部门失败", "code": "CREATE_ERROR"}
+            return {"success": True, "message": "一级部门创建成功", "data": self._build_primary_payload(created)}
+        except Exception as exc:
+            if self._duplicate_error(exc):
+                return {"success": False, "error": "一级部门名称已存在", "code": "PRIMARY_DEPARTMENT_NAME_EXISTS"}
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "创建一级部门失败", "code": "CREATE_ERROR"}
+
+    def rename_primary(self, *, primary_id: int, name: str) -> dict[str, Any]:
+        primary_name = self.clean_text(name)
+        if not primary_name:
+            return {"success": False, "error": "部门名称不能为空", "code": "DEPARTMENT_NAME_REQUIRED"}
+        try:
+            primary = self._repository.get_primary_by_id(primary_id)
+            if not primary:
+                return {"success": False, "error": "一级部门不存在", "code": "PRIMARY_DEPARTMENT_NOT_FOUND"}
+            existing = self._repository.get_primary_by_name(primary_name)
+            if existing and int(existing["id"]) != int(primary_id):
+                return {"success": False, "error": "一级部门名称已存在", "code": "PRIMARY_DEPARTMENT_NAME_EXISTS"}
+            self._repository.update_primary_name(primary_id=primary_id, name=primary_name)
+            updated = self._repository.get_primary_by_id(primary_id) or {**primary, "name": primary_name}
+            return {"success": True, "message": "一级部门已更新", "data": self._build_primary_payload(updated)}
+        except Exception as exc:
+            if self._duplicate_error(exc):
+                return {"success": False, "error": "一级部门名称已存在", "code": "PRIMARY_DEPARTMENT_NAME_EXISTS"}
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "更新一级部门失败", "code": "UPDATE_ERROR"}
+
+    def update_primary_status(self, *, primary_id: int, status: str) -> dict[str, Any]:
+        status_value = self.clean_text(status).lower()
+        if not self._valid_status(status_value):
+            return {"success": False, "error": "状态必须是 active 或 disabled", "code": "VALIDATION_ERROR"}
+        try:
+            primary = self._repository.get_primary_by_id(primary_id)
+            if not primary:
+                return {"success": False, "error": "一级部门不存在", "code": "PRIMARY_DEPARTMENT_NOT_FOUND"}
+            self._repository.update_primary_status(primary_id=primary_id, status=status_value)
+            updated = self._repository.get_primary_by_id(primary_id) or {**primary, "status": status_value}
+            return {"success": True, "message": "一级部门状态已更新", "data": self._build_primary_payload(updated)}
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "更新一级部门状态失败", "code": "UPDATE_ERROR"}
+
+    def create_secondary(self, *, primary_department_id: int, name: str) -> dict[str, Any]:
+        secondary_name = self.clean_text(name)
+        primary_id = self._optional_int(primary_department_id)
+        if primary_id is None:
+            return {"success": False, "error": "请选择一级部门", "code": "PRIMARY_DEPARTMENT_REQUIRED"}
+        if not secondary_name:
+            return {"success": False, "error": "部门名称不能为空", "code": "DEPARTMENT_NAME_REQUIRED"}
+        try:
+            primary = self._repository.get_primary_by_id(primary_id)
+            if not primary:
+                return {"success": False, "error": "一级部门不存在", "code": "PRIMARY_DEPARTMENT_NOT_FOUND"}
+            existing = self._repository.get_secondary_by_name(primary_department_id=primary_id, name=secondary_name)
+            if existing:
+                return {"success": False, "error": "二级部门名称已存在", "code": "SECONDARY_DEPARTMENT_NAME_EXISTS"}
+            secondary_id = self._repository.create_secondary(primary_department_id=primary_id, name=secondary_name)
+            created = self._repository.get_secondary_by_id(secondary_id)
+            if not created:
+                return {"success": False, "error": "创建二级部门失败", "code": "CREATE_ERROR"}
+            return {
+                "success": True,
+                "message": "二级部门创建成功",
+                "data": self._build_secondary_payload(
+                    created,
+                    primary_status=self._normalize_status(primary.get("status")),
+                ),
+            }
+        except Exception as exc:
+            if self._duplicate_error(exc):
+                return {"success": False, "error": "二级部门名称已存在", "code": "SECONDARY_DEPARTMENT_NAME_EXISTS"}
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "创建二级部门失败", "code": "CREATE_ERROR"}
+
+    def rename_secondary(self, *, secondary_id: int, name: str) -> dict[str, Any]:
+        secondary_name = self.clean_text(name)
+        if not secondary_name:
+            return {"success": False, "error": "部门名称不能为空", "code": "DEPARTMENT_NAME_REQUIRED"}
+        try:
+            secondary = self._repository.get_secondary_by_id(secondary_id)
+            if not secondary:
+                return {"success": False, "error": "二级部门不存在", "code": "SECONDARY_DEPARTMENT_NOT_FOUND"}
+            existing = self._repository.get_secondary_by_name(
+                primary_department_id=int(secondary["primary_department_id"]),
+                name=secondary_name,
+            )
+            if existing and int(existing["id"]) != int(secondary_id):
+                return {"success": False, "error": "二级部门名称已存在", "code": "SECONDARY_DEPARTMENT_NAME_EXISTS"}
+            self._repository.update_secondary_name(secondary_id=secondary_id, name=secondary_name)
+            updated = self._repository.get_secondary_by_id(secondary_id) or {**secondary, "name": secondary_name}
+            primary = self._repository.get_primary_by_id(int(updated["primary_department_id"]))
+            return {
+                "success": True,
+                "message": "二级部门已更新",
+                "data": self._build_secondary_payload(
+                    updated,
+                    primary_status=self._normalize_status((primary or {}).get("status")),
+                ),
+            }
+        except Exception as exc:
+            if self._duplicate_error(exc):
+                return {"success": False, "error": "二级部门名称已存在", "code": "SECONDARY_DEPARTMENT_NAME_EXISTS"}
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "更新二级部门失败", "code": "UPDATE_ERROR"}
+
+    def update_secondary_status(self, *, secondary_id: int, status: str) -> dict[str, Any]:
+        status_value = self.clean_text(status).lower()
+        if not self._valid_status(status_value):
+            return {"success": False, "error": "状态必须是 active 或 disabled", "code": "VALIDATION_ERROR"}
+        try:
+            secondary = self._repository.get_secondary_by_id(secondary_id)
+            if not secondary:
+                return {"success": False, "error": "二级部门不存在", "code": "SECONDARY_DEPARTMENT_NOT_FOUND"}
+            self._repository.update_secondary_status(secondary_id=secondary_id, status=status_value)
+            updated = self._repository.get_secondary_by_id(secondary_id) or {**secondary, "status": status_value}
+            primary = self._repository.get_primary_by_id(int(updated["primary_department_id"]))
+            return {
+                "success": True,
+                "message": "二级部门状态已更新",
+                "data": self._build_secondary_payload(
+                    updated,
+                    primary_status=self._normalize_status((primary or {}).get("status")),
+                ),
+            }
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "更新二级部门状态失败", "code": "UPDATE_ERROR"}
+
+
+department_service = DepartmentService()

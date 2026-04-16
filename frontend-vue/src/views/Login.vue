@@ -1,6 +1,6 @@
 <script setup>
 import { ref } from 'vue'
-import { authApi } from '../services/auth'
+import { authApi, persistStoredUser } from '../services/auth'
 
 const username = ref('')
 const password = ref('')
@@ -11,14 +11,15 @@ const passwordWarningMessage = ref('')
 const showAccountLocked = ref(false)
 const lockedMessage = ref('')
 const remainingSeconds = ref(0)
-const showFirstLoginWarning = ref(false)
-const firstLoginWarningText = ref('为了您的账号安全，请立即修改密码')
+const showSetupWarning = ref(false)
+const setupWarningTitle = ref('首次登录')
+const setupWarningText = ref('为了您的账号安全，请立即修改密码')
 
 async function handleLogin() {
   error.value = ''
   showPasswordWarning.value = false
   showAccountLocked.value = false
-  showFirstLoginWarning.value = false
+  showSetupWarning.value = false
   
   if (!username.value || !password.value) {
     error.value = '请输入用户名和密码'
@@ -40,23 +41,26 @@ async function handleLogin() {
         ...result.data.user,
         is_first_login: result.data.is_first_login || false,
         require_security_questions_setup: Boolean(result.require_security_questions_setup),
+        require_department_setup: Boolean(result.require_department_setup || result.data?.require_department_setup),
         has_security_questions: Boolean(result.data?.has_security_questions),
       }
-      localStorage.setItem('user', JSON.stringify(userData))
-      localStorage.setItem('agentcode.auth.user.v1', JSON.stringify(userData))
+      persistStoredUser(userData)
       
-      // 检查是否需要进入首次安全设置流程（改密码 + 设置安全问题）
-      if (result.require_password_change || result.require_security_questions_setup) {
+      // 检查是否需要进入强制补全流程（改密码 + 安全问题 + 部门信息）
+      const requireDepartmentSetup = Boolean(result.require_department_setup || result.data?.require_department_setup)
+      if (result.require_password_change || result.require_security_questions_setup || requireDepartmentSetup) {
         const hints = []
         if (result.require_password_change) hints.push('修改密码')
         if (result.require_security_questions_setup) hints.push('设置至少一个安全问题')
-        firstLoginWarningText.value = `为了您的账号安全，请立即${hints.join('并')}。`
-        showFirstLoginWarning.value = true
-        // 3秒后跳转到修改密码页面
+        if (requireDepartmentSetup) hints.push('补全部门信息')
+        setupWarningTitle.value = (result.require_password_change || result.require_security_questions_setup) ? '首次登录' : '信息补全'
+        setupWarningText.value = `为了继续使用系统，请立即${hints.join('并')}。`
+        showSetupWarning.value = true
         setTimeout(() => {
           const params = new URLSearchParams()
           if (result.require_password_change) params.set('change_password', 'required')
           if (result.require_security_questions_setup) params.set('security_questions', 'required')
+          if (requireDepartmentSetup) params.set('department', 'required')
           const query = params.toString()
           window.location.href = query ? `/profile?${query}` : '/profile'
         }, 3000)
@@ -156,12 +160,12 @@ function goToChangePassword() {
           </div>
         </div>
         
-        <div v-if="showFirstLoginWarning" class="first-login-message">
+        <div v-if="showSetupWarning" class="first-login-message">
           <div class="first-login-icon">🔑</div>
           <div class="first-login-content">
-            <p class="first-login-title">首次登录</p>
-            <p class="first-login-text">{{ firstLoginWarningText }}</p>
-            <p class="first-login-hint">3秒后自动跳转到修改密码页面...</p>
+            <p class="first-login-title">{{ setupWarningTitle }}</p>
+            <p class="first-login-text">{{ setupWarningText }}</p>
+            <p class="first-login-hint">3秒后自动跳转到个人中心...</p>
           </div>
         </div>
         
