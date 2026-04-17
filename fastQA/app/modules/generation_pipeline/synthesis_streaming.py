@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any, Callable, Dict, List, Set, Tuple
 
 from app.modules.generation_pipeline.feature_flags import env_bool, env_int
@@ -482,6 +483,14 @@ def iter_stage4_synthesis_with_pdf_chunks(
         if summary_instruction:
             system_prompt = f"{system_prompt}{summary_instruction}"
 
+        stream_started = time.perf_counter()
+        logger.info(
+            "stage4 llm request start model=%s prompt_mode=%s prompt_chars=%s top_reference_list_chars=%s",
+            model,
+            prompt_mode,
+            len(prompt),
+            len(top5_reference_list),
+        )
         stream = client.chat.completions.create(
             model=model,
             messages=[
@@ -493,6 +502,7 @@ def iter_stage4_synthesis_with_pdf_chunks(
             stream=True,
         )
         final_chunks: list[str] = []
+        first_chunk_logged = False
         for chunk in stream:
             if _cancelled():
                 yield {"success": False, "cancelled": True, "error": "cancelled"}
@@ -506,13 +516,21 @@ def iter_stage4_synthesis_with_pdf_chunks(
                 continue
             text = str(content)
             final_chunks.append(text)
+            if not first_chunk_logged:
+                first_chunk_logged = True
+                logger.info(
+                    "stage4 llm first chunk received chunk_chars=%s elapsed_ms=%.3f",
+                    len(text),
+                    (time.perf_counter() - stream_started) * 1000,
+                )
             yield text
 
         final_answer = "".join(final_chunks).strip()
         logger.info(
-            "stage4 llm stream completed chunk_count=%s answer_chars=%s",
+            "stage4 llm stream completed chunk_count=%s answer_chars=%s elapsed_ms=%.3f",
             len(final_chunks),
             len(final_answer),
+            (time.perf_counter() - stream_started) * 1000,
         )
 
         def _refresh_cited_dois(answer: str) -> tuple[list[str], set[str]]:

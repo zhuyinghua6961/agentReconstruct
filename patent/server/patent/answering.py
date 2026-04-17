@@ -4,6 +4,8 @@ import json
 import logging
 import os
 import re
+import time
+from contextlib import closing
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
@@ -520,6 +522,13 @@ class PatentAnswerBuilder:
             retrieval_outcome=retrieval_outcome,
             context=context,
         )
+        _LOGGER.info(
+            "patent answer builder prompt prepared prompt_chars=%s evidence_count=%s evidence_chars=%s allowed_patent_ids=%s",
+            len(prompt),
+            int(prompt_metadata.get("evidence_item_count", 0)),
+            int(prompt_metadata.get("evidence_chars", 0)),
+            allowed_patent_ids,
+        )
         min_distinct_citations = _resolve_min_distinct_citations(context=context, allowed_patent_ids=allowed_patent_ids)
         _LOGGER.info(
             "patent answer builder request start model=%s base_url=%s timeout_seconds=%s client_owner=%s shared_client_id=%s allowed_patent_ids=%s evidence_count=%s evidence_chars=%s prompt_chars=%s",
@@ -534,27 +543,88 @@ class PatentAnswerBuilder:
             len(prompt),
         )
         try:
-            response = self._client.post(
-                f"{self.base_url.rstrip('/')}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=self._build_request_payload(
-                    prompt=prompt,
-                    allowed_patent_ids=allowed_patent_ids,
-                    stream=False,
-                    min_distinct_citations=min_distinct_citations,
-                ),
-                timeout=self.timeout_seconds,
+            request_url = f"{self.base_url.rstrip('/')}/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            }
+            payload = self._build_request_payload(
+                prompt=prompt,
+                allowed_patent_ids=allowed_patent_ids,
+                stream=False,
+                min_distinct_citations=min_distinct_citations,
+            )
+            _LOGGER.info(
+                "patent answer builder request payload ready model=%s stream=%s message_count=%s payload_chars=%s allowed_patent_ids=%s",
+                self.model,
+                False,
+                len(payload.get("messages") or []),
+                len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"))),
+                allowed_patent_ids,
+            )
+            request_started = time.perf_counter()
+            request = None
+            if hasattr(self._client, "build_request"):
+                request = self._client.build_request(
+                    "POST",
+                    request_url,
+                    headers=headers,
+                    json=payload,
+                )
+                _LOGGER.info(
+                    "patent answer builder request object built method=%s url=%s elapsed_ms=%.3f content_length=%s",
+                    getattr(request, "method", "POST"),
+                    str(getattr(request, "url", request_url)),
+                    (time.perf_counter() - request_started) * 1000,
+                    str(getattr(request, "headers", {}).get("content-length") or ""),
+                )
+            _LOGGER.info(
+                "patent answer builder request dispatch start timeout_seconds=%s elapsed_ms=%.3f transport=%s",
+                self.timeout_seconds,
+                (time.perf_counter() - request_started) * 1000,
+                "send" if request is not None and hasattr(self._client, "send") else "post",
+            )
+            if request is not None and hasattr(self._client, "send"):
+                try:
+                    response = self._client.send(request, stream=False, timeout=self.timeout_seconds)
+                except TypeError as exc:
+                    if "timeout" not in str(exc):
+                        raise
+                    response = self._client.send(request, stream=False)
+            else:
+                response = self._client.post(
+                    request_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=self.timeout_seconds,
+                )
+            _LOGGER.info(
+                "patent answer builder request dispatch returned status_code=%s elapsed_ms=%.3f",
+                getattr(response, "status_code", ""),
+                (time.perf_counter() - request_started) * 1000,
+            )
+            _LOGGER.info(
+                "patent answer builder llm response headers received status_code=%s elapsed_ms=%.3f content_length=%s",
+                getattr(response, "status_code", ""),
+                (time.perf_counter() - request_started) * 1000,
+                str(response.headers.get("content-length") or ""),
             )
             response.raise_for_status()
             payload = response.json()
             choices = list(payload.get("choices") or [])
             message = dict((choices[0] or {}).get("message") or {}) if choices else {}
             content = str(message.get("content") or "").strip()
+            _LOGGER.info(
+                "patent answer builder llm response body parsed response_chars=%s elapsed_ms=%.3f",
+                len(content),
+                (time.perf_counter() - request_started) * 1000,
+            )
             if content:
-                _LOGGER.info("patent answer builder llm response received chars=%s", len(content))
+                _LOGGER.info(
+                    "patent answer builder llm response received chars=%s elapsed_ms=%.3f",
+                    len(content),
+                    (time.perf_counter() - request_started) * 1000,
+                )
                 return sanitize_patent_id_citations(content, allowed_patent_ids=allowed_patent_ids)[0]
             _LOGGER.warning("patent answer builder returned empty content; using fallback answer")
             return self._build_sanitized_fallback_answer(
@@ -604,6 +674,13 @@ class PatentAnswerBuilder:
             retrieval_outcome=retrieval_outcome,
             context=context,
         )
+        _LOGGER.info(
+            "patent answer builder stream prompt prepared prompt_chars=%s evidence_count=%s evidence_chars=%s allowed_patent_ids=%s",
+            len(prompt),
+            int(prompt_metadata.get("evidence_item_count", 0)),
+            int(prompt_metadata.get("evidence_chars", 0)),
+            allowed_patent_ids,
+        )
         min_distinct_citations = _resolve_min_distinct_citations(context=context, allowed_patent_ids=allowed_patent_ids)
         _LOGGER.info(
             "patent answer builder stream start model=%s base_url=%s timeout_seconds=%s client_owner=%s shared_client_id=%s allowed_patent_ids=%s evidence_count=%s evidence_chars=%s prompt_chars=%s",
@@ -618,23 +695,83 @@ class PatentAnswerBuilder:
             len(prompt),
         )
         streamed_any = False
+        stream_started = time.perf_counter()
+        first_chunk_logged = False
+        first_payload_logged = False
+        first_line_logged = False
+        chunk_count = 0
+        answer_chars = 0
+        request_url = f"{self.base_url.rstrip('/')}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = self._build_request_payload(
+            prompt=prompt,
+            allowed_patent_ids=allowed_patent_ids,
+            stream=True,
+            min_distinct_citations=min_distinct_citations,
+        )
+        _LOGGER.info(
+            "patent answer builder stream request payload ready model=%s stream=%s message_count=%s payload_chars=%s allowed_patent_ids=%s",
+            self.model,
+            True,
+            len(payload.get("messages") or []),
+            len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"))),
+            allowed_patent_ids,
+        )
         try:
-            with self._client.stream(
-                "POST",
-                f"{self.base_url.rstrip('/')}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=self._build_request_payload(
-                    prompt=prompt,
-                    allowed_patent_ids=allowed_patent_ids,
-                    stream=True,
-                    min_distinct_citations=min_distinct_citations,
-                ),
-                timeout=self.timeout_seconds,
-            ) as response:
+            request = None
+            if hasattr(self._client, "build_request"):
+                request = self._client.build_request(
+                    "POST",
+                    request_url,
+                    headers=headers,
+                    json=payload,
+                )
+                _LOGGER.info(
+                    "patent answer builder stream request object built method=%s url=%s elapsed_ms=%.3f content_length=%s",
+                    getattr(request, "method", "POST"),
+                    str(getattr(request, "url", request_url)),
+                    (time.perf_counter() - stream_started) * 1000,
+                    str(getattr(request, "headers", {}).get("content-length") or ""),
+                )
+            _LOGGER.info(
+                "patent answer builder stream request dispatch start timeout_seconds=%s elapsed_ms=%.3f transport=%s",
+                self.timeout_seconds,
+                (time.perf_counter() - stream_started) * 1000,
+                "send" if request is not None and hasattr(self._client, "send") else "stream",
+            )
+            if request is not None and hasattr(self._client, "send"):
+                try:
+                    response_cm = self._client.send(request, stream=True, timeout=self.timeout_seconds)
+                except TypeError as exc:
+                    if "timeout" not in str(exc):
+                        raise
+                    response_cm = self._client.send(request, stream=True)
+                response_context = closing(response_cm)
+            else:
+                response_cm = self._client.stream(
+                    "POST",
+                    request_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=self.timeout_seconds,
+                )
+                response_context = response_cm
+            with response_context as response:
+                _LOGGER.info(
+                    "patent answer builder stream request dispatch returned status_code=%s elapsed_ms=%.3f",
+                    getattr(response, "status_code", ""),
+                    (time.perf_counter() - stream_started) * 1000,
+                )
                 response.raise_for_status()
+                _LOGGER.info(
+                    "patent answer builder stream response headers received status_code=%s elapsed_ms=%.3f content_type=%s",
+                    getattr(response, "status_code", ""),
+                    (time.perf_counter() - stream_started) * 1000,
+                    str(response.headers.get("content-type") or ""),
+                )
                 for line in response.iter_lines():
                     if line is None:
                         continue
@@ -642,6 +779,13 @@ class PatentAnswerBuilder:
                     stripped = line_text.strip()
                     if not stripped:
                         continue
+                    if not first_line_logged:
+                        first_line_logged = True
+                        _LOGGER.info(
+                            "patent answer builder stream first response line received line_chars=%s elapsed_ms=%.3f",
+                            len(stripped),
+                            (time.perf_counter() - stream_started) * 1000,
+                        )
                     if stripped.startswith("data:"):
                         stripped = stripped[5:].strip()
                     if not stripped:
@@ -653,12 +797,34 @@ class PatentAnswerBuilder:
                     except json.JSONDecodeError:
                         _LOGGER.debug("patent answer builder ignored non-json stream line: %s", _truncate(stripped))
                         continue
+                    if not first_payload_logged:
+                        first_payload_logged = True
+                        _LOGGER.info(
+                            "patent answer builder stream first payload received payload_chars=%s elapsed_ms=%.3f",
+                            len(stripped),
+                            (time.perf_counter() - stream_started) * 1000,
+                        )
                     for fragment in _extract_stream_fragments(payload):
                         if not fragment:
                             continue
                         streamed_any = True
+                        chunk_count += 1
+                        answer_chars += len(fragment)
+                        if not first_chunk_logged:
+                            first_chunk_logged = True
+                            _LOGGER.info(
+                                "patent answer builder stream first chunk chunk_chars=%s elapsed_ms=%.3f",
+                                len(fragment),
+                                (time.perf_counter() - stream_started) * 1000,
+                            )
                         yield fragment
             if streamed_any:
+                _LOGGER.info(
+                    "patent answer builder stream completed chunk_count=%s answer_chars=%s elapsed_ms=%.3f",
+                    chunk_count,
+                    answer_chars,
+                    (time.perf_counter() - stream_started) * 1000,
+                )
                 return
             _LOGGER.warning("patent answer builder stream returned no content; using fallback answer")
         except Exception as exc:

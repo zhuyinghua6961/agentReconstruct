@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, Iterable, Iterator, Mapping
+
+from app.core.logging import beijing_now_iso
 
 
 def _coerce_text_content(content: Any) -> str:
@@ -125,7 +126,7 @@ class _TimingMixin:
         suffix = f" {extras}" if extras else ""
         self._logger.info(
             "[LLM_TRANSPORT] ts=%s stage=%s elapsed_ms=%.2f%s",
-            datetime.now().isoformat(timespec="milliseconds"),
+            beijing_now_iso(),
             stage,
             elapsed_ms,
             suffix,

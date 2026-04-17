@@ -319,10 +319,26 @@ def test_create_task_logs_task_correlation_id(caplog):
     assert response.status_code == 200
     payload = response.json()
     assert any(
-        f"task_id={payload['task_id']}" in record.getMessage()
+        "gateway task queued" in record.getMessage()
+        and f"task_id={payload['task_id']}" in record.getMessage()
         and "client_request_id=client_req_001" in record.getMessage()
         for record in caplog.records
     )
+
+
+def test_create_task_logs_gateway_task_create_milestones(caplog):
+    _set_health_transport()
+    client = TestClient(app)
+
+    with caplog.at_level(logging.INFO):
+        response = client.post("/api/v1/tasks", json=_request_body(client_request_id="client_req_002"))
+
+    assert response.status_code == 200
+    text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "gateway task create accepted" in text
+    assert "gateway task create quota precheck completed" in text
+    assert "gateway task create authority turn persisted" in text
+    assert "gateway task queued" in text
 
 
 def test_create_task_rejects_client_request_id_with_control_chars():
@@ -3752,6 +3768,80 @@ def test_admission_worker_executes_task_stream_updates_progress_and_finalizes_qu
     assert backend_headers[0]["x-internal-service-token"] == "authority-test-token"
     assert calls[-1][0] == "/internal/quota/grants/grant-worker-stream/finalize"
     assert calls[-1][1]["success"] is True
+
+
+def test_admission_worker_logs_dispatch_and_stream_milestones(monkeypatch, caplog):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    queue_store = app.state.execution_queue_status_store
+    relay_store = app.state.execution_event_relay_store
+    slot_store = app.state.execution_slot_lease_store
+    queue_store.put_request(
+        _queued_task_record(
+            request_id="req_worker_stream_log",
+            conversation_id=92,
+            assistant_message_id="msg_worker_stream_log",
+            quota_grant_id="grant-worker-stream-log",
+            execution_snapshot={
+                "question": "stream this task with logs",
+                "conversation_id": 92,
+                "user_id": 42,
+                "chat_history": [],
+                "requested_mode": "fast",
+                "actual_mode": "fast",
+                "route": "kb_qa",
+                "trace_id": "req_worker_stream_log",
+                "options": {},
+            },
+        ),
+        ttl_seconds=900,
+    )
+    relay_store.append_frame("req_worker_stream_log", {"type": "state", "status": "queued"}, ttl_seconds=900)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        payload = _json_request_body(request)
+        if path == "/api/fast/ask_stream":
+            return httpx.Response(
+                200,
+                content=(
+                    b'data: {"type":"metadata","query_mode":"fast","route":"kb_qa","trace_id":"req_worker_stream_log"}\n\n'
+                    b'data: {"type":"step","step":"stage1","status":"processing","message":"stage1"}\n\n'
+                    b'data: {"type":"content","content":"hello"}\n\n'
+                    b'data: {"type":"done","final_answer":"hello","query_mode":"fast","route":"kb_qa","trace_id":"req_worker_stream_log"}\n\n'
+                ),
+                headers={"content-type": "text/event-stream"},
+            )
+        if path == "/internal/conversations/92/tasks/req_worker_stream_log/assistant-progress":
+            return httpx.Response(200, json={"success": True, "status": payload.get("status")})
+        if path == "/internal/conversations/92/tasks/req_worker_stream_log/assistant-terminal":
+            return httpx.Response(200, json={"success": True, "status": payload.get("terminal_status")})
+        if path == "/internal/quota/grants/grant-worker-stream-log/finalize":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-worker-stream-log", "counted": payload["success"], "idempotent": False}})
+        raise AssertionError(f"unexpected upstream path: {path}")
+
+    _set_task_transport(handler)
+    dispatcher = ExecutionAdmissionDispatcher(
+        settings=app.state.settings,
+        queue_status_store=queue_store,
+        slot_lease_store=slot_store,
+    )
+    worker = ExecutionAdmissionWorker(
+        dispatcher=dispatcher,
+        owner_id="worker-task-api-log",
+        executor=qa_task_module.GatewayTaskExecutor(app).execute,
+        timestamp_factory=lambda: "2026-04-06T10:00:05+00:00",
+    )
+
+    with caplog.at_level(logging.INFO):
+        result = worker.run_dispatch_cycle()
+
+    assert result.outcome == "completed"
+    text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "gateway admission claim succeeded request_id=req_worker_stream_log" in text
+    assert "gateway task upstream stream opened request_id=req_worker_stream_log" in text
+    assert "gateway task first step request_id=req_worker_stream_log" in text
+    assert "gateway task first content request_id=req_worker_stream_log" in text
+    assert "gateway admission completed request_id=req_worker_stream_log" in text
 
 
 def test_admission_worker_executes_thinking_task_stream_with_saved_authorization_header(monkeypatch):

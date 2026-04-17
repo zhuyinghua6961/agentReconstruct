@@ -42,3 +42,7 @@ class SetSecurityQuestionsRequest(BaseModel):
 class DepartmentUpdateRequest(BaseModel):
     primary_department_id: int | None = Field(default=None)
     secondary_department_id: int | None = Field(default=None)
+
+
+class UsernameUpdateRequest(BaseModel):
+    username: str = Field(default="")

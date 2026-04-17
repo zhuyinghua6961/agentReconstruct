@@ -84,7 +84,15 @@ function handleAdminError(error, response) {
 
 // 封装 fetch 请求，添加错误处理
 async function fetchWithErrorHandling(url, options = {}) {
-  const response = await fetch(url, options)
+  let response
+  try {
+    response = await fetch(url, options)
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error && error.message ? error.message : '网络请求失败'
+    }
+  }
   const data = await safeJson(response)
   
   // 如果响应不成功，处理错误
@@ -134,6 +142,15 @@ export const adminApi = {
     })
     const data = await safeJson(response)
     return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
+  },
+
+  async updateUserUsername(userId, username) {
+    const token = readStoredToken()
+    return fetchWithErrorHandling(`${API_BASE}/users/${userId}/username`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ username })
+    })
   },
 
   async changeUserPassword(userId, newPassword) {
@@ -282,6 +299,13 @@ export const adminApi = {
     })
     const data = await safeJson(response)
     return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
+  },
+
+  async getSecondaryDepartmentUsers(secondaryId) {
+    const token = readStoredToken()
+    return fetchWithErrorHandling(`${API_BASE}/departments/secondary/${secondaryId}/users`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
   },
 
   async batchImportDepartments(file) {

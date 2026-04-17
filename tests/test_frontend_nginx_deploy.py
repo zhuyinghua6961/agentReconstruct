@@ -10,6 +10,7 @@ START_SCRIPT = ROOT / "scripts/start_nginx_frontend.sh"
 STOP_SCRIPT = ROOT / "scripts/stop_nginx_frontend.sh"
 STATUS_SCRIPT = ROOT / "scripts/status_nginx_frontend.sh"
 TEST_SCRIPT = ROOT / "scripts/test_nginx_frontend.sh"
+SYNC_ALIYUN_SCRIPT = ROOT / "scripts/sync_frontend_to_aliyun.sh"
 
 
 def _read(path: Path) -> str:
@@ -24,6 +25,7 @@ def test_frontend_nginx_scripts_and_template_exist() -> None:
         STOP_SCRIPT,
         STATUS_SCRIPT,
         TEST_SCRIPT,
+        SYNC_ALIYUN_SCRIPT,
     ]
     missing = [str(path) for path in expected if not path.exists()]
     assert not missing, f"missing expected deploy assets: {missing}"
@@ -78,3 +80,22 @@ def test_frontend_nginx_test_script_checks_static_proxy_stream_and_task_recovery
     assert "after_seq" in content
     assert "AUTH_BEARER_TOKEN" in content
     assert "REDIS" in content
+
+
+def test_frontend_sync_to_aliyun_script_syncs_source_builds_remotely_and_switches_dist_atomically() -> None:
+    content = _read(SYNC_ALIYUN_SCRIPT)
+    assert "SSH_KEY_PATH" in content
+    assert "REMOTE_USER_HOST" in content
+    assert "REMOTE_HOME" in content
+    assert "REMOTE_SOURCE_DIR" in content
+    assert "REMOTE_NGINX_ROOT" in content
+    assert 'printf %s "$HOME"' in content
+    assert "normalize_remote_path" in content
+    assert "rsync" in content
+    assert "--delete" in content
+    assert "package-lock.json" in content
+    assert "npm ci --no-audit --no-fund" in content
+    assert "npm run build" in content
+    assert "releases" in content
+    assert "ln -sfn" in content or "mv -Tf" in content
+    assert "/health" in content

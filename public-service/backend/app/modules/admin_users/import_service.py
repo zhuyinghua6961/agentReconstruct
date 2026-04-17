@@ -78,14 +78,6 @@ class AdminUsersImportService:
                     failed_count += 1
                     details.append({"row": line_no, "username": "", "status": "failed", "reason": "用户名为空"})
                     continue
-                if username.lower().startswith("admin"):
-                    failed_count += 1
-                    details.append({"row": line_no, "username": username, "status": "failed", "reason": "不能以 admin 开头"})
-                    continue
-                if len(username) < 3 or len(username) > 50:
-                    failed_count += 1
-                    details.append({"row": line_no, "username": username, "status": "failed", "reason": "用户名长度需在3-50之间"})
-                    continue
                 if len(password) < 6:
                     failed_count += 1
                     details.append({"row": line_no, "username": username, "status": "failed", "reason": "密码长度不能少于6位"})
@@ -93,10 +85,6 @@ class AdminUsersImportService:
                 if user_type not in {"common", "super"}:
                     failed_count += 1
                     details.append({"row": line_no, "username": username, "status": "failed", "reason": "user_type必须是common或super"})
-                    continue
-                if admin_users_service.users.get_by_username(username):
-                    skipped_count += 1
-                    details.append({"row": line_no, "username": username, "status": "skipped", "reason": "用户名已存在"})
                     continue
 
                 primary_department_id = None
@@ -133,16 +121,38 @@ class AdminUsersImportService:
                     primary_department_id = resolved_data.get("primary_department_id")
                     secondary_department_id = resolved_data.get("secondary_department_id")
 
-                admin_users_service.users.create_user(
+                create_result = admin_users_service.create_user(
                     username=username,
-                    password_hash=admin_users_service.hash_password(password),
-                    role="user",
-                    user_type=2 if user_type == "super" else 3,
+                    password=password,
+                    user_type=user_type,
                     primary_department_id=primary_department_id,
                     secondary_department_id=secondary_department_id,
                 )
-                success_count += 1
-                details.append({"row": line_no, "username": username, "status": "success"})
+                if create_result.get("success"):
+                    normalized_username = str((create_result.get("data") or {}).get("username") or username)
+                    success_count += 1
+                    details.append({"row": line_no, "username": normalized_username, "status": "success"})
+                    continue
+                if str(create_result.get("code") or "") == "USERNAME_EXISTS":
+                    skipped_count += 1
+                    details.append(
+                        {
+                            "row": line_no,
+                            "username": username,
+                            "status": "skipped",
+                            "reason": str(create_result.get("error") or "用户名已存在"),
+                        }
+                    )
+                    continue
+                failed_count += 1
+                details.append(
+                    {
+                        "row": line_no,
+                        "username": username,
+                        "status": "failed",
+                        "reason": str(create_result.get("error") or create_result.get("code") or "创建失败"),
+                    }
+                )
 
             total = success_count + failed_count + skipped_count
             duration = round(time.monotonic() - started, 2)

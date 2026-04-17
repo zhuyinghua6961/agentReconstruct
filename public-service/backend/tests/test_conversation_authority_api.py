@@ -273,7 +273,12 @@ def test_internal_task_progress_logs_task_id(monkeypatch, caplog):
             )
 
     assert response.status_code == 200
-    assert any("task_id=task_progress_log_001" in record.getMessage() for record in caplog.records)
+    assert any(
+        "task_id=task_progress_log_001" in record.getMessage()
+        and "content_chars=5" in record.getMessage()
+        and "step_count=0" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_internal_task_progress_skips_info_log_for_midstream_running_updates(monkeypatch, caplog):
@@ -346,7 +351,56 @@ def test_internal_task_terminal_logs_task_id(monkeypatch, caplog):
             )
 
     assert response.status_code == 200
-    assert any("task_id=task_terminal_log_001" in record.getMessage() for record in caplog.records)
+    assert any(
+        "task_id=task_terminal_log_001" in record.getMessage()
+        and "answer_chars=4" in record.getMessage()
+        and "step_count=0" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_internal_task_create_turn_logs_route_and_trace(monkeypatch, caplog):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="task create-turn logs")
+        conversation_id = int(created["data"]["conversation_id"])
+        with caplog.at_level(logging.INFO, logger="app.modules.conversation.internal_api"):
+            response = client.post(
+                f"/internal/conversations/{conversation_id}/tasks/task_gateway_create_log/create-turn",
+                json={
+                    "conversation_id": conversation_id,
+                    "user_id": 7,
+                    "trace_id": "task-gateway-create-log-trace",
+                    "source_service": "fastQA",
+                    "route": "kb_qa",
+                    "requested_mode": "fast",
+                    "actual_mode": "fast",
+                    "task_id": "task_gateway_create_log",
+                    "message": {
+                        "role": "user",
+                        "content": "atomic gateway hello",
+                    },
+                    "context_hints": {
+                        "selected_file_ids": [3],
+                        "last_turn_route_hint": "kb_qa",
+                    },
+                    "status": "queued",
+                    "last_seq": 0,
+                },
+                headers=_internal_headers("gateway"),
+            )
+
+    assert response.status_code == 200
+    assert any(
+        "authority task create-turn" in record.getMessage()
+        and "task_id=task_gateway_create_log" in record.getMessage()
+        and "trace_id=task-gateway-create-log-trace" in record.getMessage()
+        and "route=kb_qa" in record.getMessage()
+        and "requested_mode=fast" in record.getMessage()
+        and "actual_mode=fast" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_internal_task_terminal_rejects_wrong_source_service(monkeypatch):

@@ -30,6 +30,10 @@ class UserDepartmentUpdateRequest(BaseModel):
     secondary_department_id: int | None = Field(default=None)
 
 
+class UserUsernameUpdateRequest(BaseModel):
+    username: str = Field(default="")
+
+
 class BatchDeleteUsersRequest(BaseModel):
     user_ids: list[int] = Field(default_factory=list)
 

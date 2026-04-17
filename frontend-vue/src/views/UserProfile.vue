@@ -9,6 +9,8 @@ const currentUser = ref(null)
 const loading = ref(false)
 const error = ref('')
 const success = ref('')
+const usernameError = ref('')
+const usernameSuccess = ref('')
 const departmentError = ref('')
 const departmentSuccess = ref('')
 const forcePasswordChange = ref(false)
@@ -23,6 +25,10 @@ const quotaLoading = ref(false)
 const showPasswordForm = ref(false)
 const oldPassword = ref('')
 const newPassword = ref('')
+
+// 用户名表单
+const showUsernameForm = ref(false)
+const usernameInput = ref('')
 
 // 部门信息
 const showDepartmentForm = ref(false)
@@ -87,12 +93,35 @@ function getRoleClass(user) {
   return 'user'
 }
 
+function isAdminIdentity(user) {
+  return user?.user_type === 1 || user?.role === 'admin'
+}
+
+function syncUsernameInputFromCurrentUser() {
+  usernameInput.value = currentUser.value?.username || ''
+}
+
+function openUsernameForm() {
+  syncUsernameInputFromCurrentUser()
+  usernameError.value = ''
+  usernameSuccess.value = ''
+  showUsernameForm.value = true
+}
+
+function cancelUsernameEdit() {
+  syncUsernameInputFromCurrentUser()
+  usernameError.value = ''
+  usernameSuccess.value = ''
+  showUsernameForm.value = false
+}
+
 async function fetchCurrentUser() {
   loading.value = true
   try {
     const result = await authApi.getMe()
     if (result.success) {
       currentUser.value = result.data
+      syncUsernameInputFromCurrentUser()
       forcePasswordChange.value = Boolean(result.data?.is_first_login)
       forceSecurityQuestionSetup.value = Boolean(result.data?.require_security_questions_setup)
       forceDepartmentSetup.value = Boolean(result.data?.require_department_setup)
@@ -119,6 +148,47 @@ async function fetchCurrentUser() {
     error.value = '获取用户信息失败'
   } finally {
     loading.value = false
+  }
+}
+
+async function saveUsername() {
+  usernameError.value = ''
+  usernameSuccess.value = ''
+
+  const normalizedUsername = String(usernameInput.value || '').trim()
+  if (!normalizedUsername) {
+    usernameError.value = '用户名不能为空'
+    return
+  }
+  if (normalizedUsername.length < 3 || normalizedUsername.length > 50) {
+    usernameError.value = '用户名长度必须在3-50之间'
+    return
+  }
+  if (normalizedUsername.toLowerCase().startsWith('admin')) {
+    usernameError.value = '不能以 admin 开头'
+    return
+  }
+
+  try {
+    const result = await authApi.updateUsername(normalizedUsername)
+    if (result.success) {
+      currentUser.value = {
+        ...(currentUser.value || {}),
+        ...(result.data || {}),
+      }
+      syncUsernameInputFromCurrentUser()
+      syncStoredUser(result.data || {})
+      showUsernameForm.value = false
+      usernameSuccess.value = '用户名修改成功'
+      setTimeout(() => {
+        usernameSuccess.value = ''
+      }, 3000)
+      return
+    }
+
+    usernameError.value = result.error || '修改用户名失败'
+  } catch (e) {
+    usernameError.value = e instanceof Error && e.message ? e.message : '修改用户名失败'
   }
 }
 
@@ -491,6 +561,35 @@ onMounted(() => {
           <div class="info-row">
             <span class="label">创建时间</span>
             <span class="value">{{ currentUser.created_at }}</span>
+          </div>
+        </div>
+
+        <div v-if="!isAdminIdentity(currentUser)" class="action-card">
+          <h2>用户名</h2>
+          <p class="hint">修改后会立即同步到当前账号信息，不需要重新登录。</p>
+
+          <div v-if="usernameSuccess" class="alert alert-success">{{ usernameSuccess }}</div>
+          <div v-if="usernameError" class="alert alert-error">{{ usernameError }}</div>
+
+          <div v-if="!showUsernameForm" class="department-summary">
+            <div class="info-row">
+              <span class="label">当前用户名</span>
+              <span class="value">{{ currentUser.username }}</span>
+            </div>
+            <button class="action-btn" @click="openUsernameForm">
+              修改用户名
+            </button>
+          </div>
+
+          <div v-else class="password-form">
+            <div class="form-group">
+              <label>新用户名</label>
+              <input type="text" v-model="usernameInput" placeholder="请输入新用户名（3-50字符）">
+            </div>
+            <div class="form-actions">
+              <button class="btn-secondary" @click="cancelUsernameEdit">取消</button>
+              <button class="btn-primary" @click="saveUsername">保存用户名</button>
+            </div>
           </div>
         </div>
 

@@ -5,6 +5,8 @@ def test_public_route_surface_contains_key_modules():
     paths = {route.path for route in app.routes if hasattr(route, "path")}
     expected = {
         "/api/auth/login",
+        "/api/auth/username",
+        "/api/v1/auth/username",
         "/api/conversations",
         "/internal/conversations/{conversation_id}/messages/user",
         "/internal/conversations/{conversation_id}/context-snapshot",
@@ -18,6 +20,7 @@ def test_public_route_surface_contains_key_modules():
         "/api/admin/users",
         "/api/admin/departments/tree",
         "/api/admin/departments/primary",
+        "/api/admin/departments/secondary/{secondary_id}/users",
         "/api/kb_info",
     }
     assert expected.issubset(paths)

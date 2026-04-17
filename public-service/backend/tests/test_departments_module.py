@@ -37,6 +37,7 @@ class _FakeRequest:
 
 def test_department_repository_reads_primary_and_secondary_rows():
     repo = DepartmentRepository(database=object())
+    repo.has_user_column = lambda column_name: column_name == "secondary_department_id"
     rows = [
         {
             "primary_id": 1,
@@ -45,6 +46,7 @@ def test_department_repository_reads_primary_and_secondary_rows():
             "secondary_id": 11,
             "secondary_name": "软件工程系",
             "secondary_status": "active",
+            "secondary_user_count": 7,
         },
         {
             "primary_id": 1,
@@ -53,6 +55,7 @@ def test_department_repository_reads_primary_and_secondary_rows():
             "secondary_id": 12,
             "secondary_name": "人工智能系",
             "secondary_status": "disabled",
+            "secondary_user_count": 0,
         },
         {
             "primary_id": 2,
@@ -61,6 +64,7 @@ def test_department_repository_reads_primary_and_secondary_rows():
             "secondary_id": 21,
             "secondary_name": "化工系",
             "secondary_status": "active",
+            "secondary_user_count": 2,
         },
     ]
     repo._execute_query = lambda query, params=(): rows
@@ -69,8 +73,62 @@ def test_department_repository_reads_primary_and_secondary_rows():
 
     assert tree[0]["primary_name"] == "计算机学院"
     assert tree[0]["secondary_items"][0]["name"] == "软件工程系"
+    assert tree[0]["secondary_items"][0]["user_count"] == 7
     assert tree[0]["secondary_items"][1]["status"] == "disabled"
     assert tree[1]["primary_name"] == "化学学院"
+    assert tree[1]["secondary_items"][0]["user_count"] == 2
+
+
+def test_department_repository_defaults_user_count_when_secondary_department_column_missing():
+    repo = DepartmentRepository(database=object())
+    repo.has_user_column = lambda column_name: False
+
+    def fake_execute(query, params=()):
+        assert "secondary_department_id" not in query
+        return [
+            {
+                "primary_id": 1,
+                "primary_name": "计算机学院",
+                "primary_status": "active",
+                "secondary_id": 11,
+                "secondary_name": "软件工程系",
+                "secondary_status": "active",
+            }
+        ]
+
+    repo._execute_query = fake_execute
+
+    tree = repo.list_department_tree(include_disabled=True)
+
+    assert tree[0]["secondary_items"][0]["user_count"] == 0
+
+
+def test_department_service_admin_tree_maps_secondary_user_count():
+    class FakeRepository:
+        def list_department_tree(self, *, include_disabled: bool):
+            assert include_disabled is True
+            return [
+                {
+                    "primary_id": 1,
+                    "primary_name": "计算机学院",
+                    "primary_status": "active",
+                    "secondary_items": [
+                        {
+                            "id": 11,
+                            "name": "软件工程系",
+                            "status": "active",
+                            "user_count": 7,
+                        }
+                    ],
+                }
+            ]
+
+    service = DepartmentService(repository=FakeRepository())
+
+    result = service.get_admin_tree()
+
+    assert result["success"] is True
+    assert result["data"]["items"][0]["secondary_items"][0]["user_count"] == 7
 
 
 def test_auth_repository_select_user_fields_include_department_columns_when_present():
@@ -111,6 +169,7 @@ def test_department_routes_registered():
     assert "/api/admin/departments/tree" in paths
     assert "/api/admin/departments/primary" in paths
     assert "/api/admin/departments/secondary/{secondary_id}/status" in paths
+    assert "/api/admin/departments/secondary/{secondary_id}/users" in paths
     assert "/api/admin/departments/batch-import" in paths
     assert "/api/admin/departments/import-template" in paths
 
@@ -125,6 +184,29 @@ def test_admin_department_tree_contract(monkeypatch):
 
     assert response.status_code == 200
     assert _decode(response)["data"]["items"] == []
+
+
+def test_admin_secondary_department_users_route_contract(monkeypatch):
+    monkeypatch.setattr(
+        department_service.department_service,
+        "list_secondary_users",
+        lambda *, secondary_id: {
+            "success": True,
+            "data": {
+                "secondary_department_id": secondary_id,
+                "user_count": 0,
+                "users": [],
+            },
+        },
+    )
+
+    response = department_api_module.get_secondary_users(
+        11,
+        AuthContext(user_id=1, role="admin", username="admin"),
+    )
+
+    assert response.status_code == 200
+    assert _decode(response)["data"]["secondary_department_id"] == 11
 
 
 def test_admin_department_mutation_contracts(monkeypatch):
@@ -337,6 +419,64 @@ def test_department_import_updates_existing_statuses_and_preserves_omitted_rows(
     assert result["success"] is True
     assert service._repository.primary_by_name["计算机学院"]["status"] == "active"
     assert service._repository.secondary_by_key[(2, "材料系")]["status"] == "active"
+
+
+def test_department_repository_lists_users_by_secondary_department():
+    repo = DepartmentRepository(database=object())
+    repo.has_user_column = lambda column_name: True
+    captured: dict[str, object] = {}
+
+    def fake_execute(query, params=()):
+        captured["query"] = query
+        captured["params"] = params
+        return [
+            {
+                "id": 101,
+                "username": "alice",
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+            }
+        ]
+
+    repo._execute_query = fake_execute
+
+    rows = repo.list_users_by_secondary_department(secondary_id=11)
+
+    assert rows[0]["username"] == "alice"
+    assert captured["params"] == (11,)
+
+
+def test_department_repository_skips_user_lookup_when_secondary_department_column_missing():
+    repo = DepartmentRepository(database=object())
+    repo.has_user_column = lambda column_name: column_name != "secondary_department_id"
+    repo._execute_query = lambda query, params=(): (_ for _ in ()).throw(AssertionError("should not query users"))
+
+    rows = repo.list_users_by_secondary_department(secondary_id=11)
+
+    assert rows == []
+
+
+def test_department_repository_user_listing_drops_user_type_select_when_column_missing():
+    repo = DepartmentRepository(database=object())
+    repo.has_user_column = lambda column_name: column_name != "user_type"
+
+    def fake_execute(query, params=()):
+        assert "user_type" not in query
+        return [
+            {
+                "id": 101,
+                "username": "alice",
+                "role": "user",
+                "status": "active",
+            }
+        ]
+
+    repo._execute_query = fake_execute
+
+    rows = repo.list_users_by_secondary_department(secondary_id=11)
+
+    assert rows[0]["username"] == "alice"
 
 
 def test_department_import_accepts_xlsx_upload():
@@ -612,3 +752,131 @@ def test_department_service_describe_user_department_marks_disabled_binding_with
     assert payload["require_department_setup"] is False
     assert payload["department_effective_status"] == "disabled"
     assert payload["department_display"] == "计算机学院 / 软件工程系（已停用）"
+
+
+def test_department_service_lists_all_users_for_secondary_department():
+    class FakeRepository:
+        def get_secondary_by_id(self, secondary_id: int):
+            if secondary_id == 11:
+                return {
+                    "id": 11,
+                    "primary_department_id": 1,
+                    "name": "软件工程系",
+                    "status": "active",
+                }
+            return None
+
+        def get_primary_by_id(self, primary_id: int):
+            if primary_id == 1:
+                return {"id": 1, "name": "计算机学院", "status": "active"}
+            return None
+
+        def list_users_by_secondary_department(self, *, secondary_id: int):
+            assert secondary_id == 11
+            return [
+                {
+                    "id": 101,
+                    "username": "alice",
+                    "role": "user",
+                    "user_type": 3,
+                    "status": "active",
+                },
+                {
+                    "id": 102,
+                    "username": "bob",
+                    "role": "user",
+                    "user_type": 2,
+                    "status": "disabled",
+                },
+            ]
+
+    service = DepartmentService(repository=FakeRepository())
+
+    result = service.list_secondary_users(secondary_id=11)
+
+    assert result["success"] is True
+    assert result["data"]["secondary_department_id"] == 11
+    assert result["data"]["user_count"] == 2
+    assert result["data"]["primary_department_name"] == "计算机学院"
+    assert result["data"]["secondary_department_name"] == "软件工程系"
+    assert result["data"]["users"][0]["username"] == "alice"
+    assert result["data"]["users"][0]["user_type_label"] == "普通用户"
+    assert result["data"]["users"][1]["user_type_label"] == "超级用户"
+    assert result["data"]["users"][1]["status"] == "disabled"
+
+
+def test_department_service_derives_user_type_from_role_when_column_missing():
+    class FakeRepository:
+        def get_secondary_by_id(self, secondary_id: int):
+            return {
+                "id": 11,
+                "primary_department_id": 1,
+                "name": "软件工程系",
+                "status": "active",
+            }
+
+        def get_primary_by_id(self, primary_id: int):
+            return {"id": 1, "name": "计算机学院", "status": "active"}
+
+        def list_users_by_secondary_department(self, *, secondary_id: int):
+            return [
+                {
+                    "id": 201,
+                    "username": "admin_like",
+                    "role": "admin",
+                    "status": "active",
+                }
+            ]
+
+    service = DepartmentService(repository=FakeRepository())
+
+    result = service.list_secondary_users(secondary_id=11)
+
+    assert result["success"] is True
+    assert result["data"]["users"][0]["user_type"] == 1
+    assert result["data"]["users"][0]["user_type_label"] == "管理员"
+
+
+def test_department_service_derives_super_user_type_from_role_when_column_missing():
+    class FakeRepository:
+        def get_secondary_by_id(self, secondary_id: int):
+            return {
+                "id": 11,
+                "primary_department_id": 1,
+                "name": "软件工程系",
+                "status": "active",
+            }
+
+        def get_primary_by_id(self, primary_id: int):
+            return {"id": 1, "name": "计算机学院", "status": "active"}
+
+        def list_users_by_secondary_department(self, *, secondary_id: int):
+            return [
+                {
+                    "id": 202,
+                    "username": "legacy_super",
+                    "role": "super",
+                    "status": "active",
+                }
+            ]
+
+    service = DepartmentService(repository=FakeRepository())
+
+    result = service.list_secondary_users(secondary_id=11)
+
+    assert result["success"] is True
+    assert result["data"]["users"][0]["user_type"] == 2
+    assert result["data"]["users"][0]["user_type_label"] == "超级用户"
+
+
+def test_department_service_returns_not_found_for_missing_secondary_department():
+    class FakeRepository:
+        def get_secondary_by_id(self, secondary_id: int):
+            return None
+
+    service = DepartmentService(repository=FakeRepository())
+
+    result = service.list_secondary_users(secondary_id=999)
+
+    assert result["success"] is False
+    assert result["code"] == "SECONDARY_DEPARTMENT_NOT_FOUND"

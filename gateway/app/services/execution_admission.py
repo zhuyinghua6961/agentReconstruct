@@ -38,6 +38,20 @@ _PUBLIC_TASK_STATUS_MAP = {
 _LIVE_TASK_STATUSES = {"provisioning", "queued", "admitted", "running"}
 
 
+def _format_log_fields(**fields: Any) -> str:
+    parts: list[str] = []
+    for key, value in fields.items():
+        if value is None:
+            continue
+        parts.append(f"{key}={value}")
+    return " ".join(parts)
+
+
+def _log_admission_event(event: str, **fields: Any) -> None:
+    suffix = _format_log_fields(**fields)
+    logger.info("gateway admission %s%s", event, f" {suffix}" if suffix else "")
+
+
 def normalize_public_task_status(status: Any) -> str:
     normalized = str(status or "").strip().lower()
     return _PUBLIC_TASK_STATUS_MAP.get(normalized, normalized)
@@ -324,6 +338,15 @@ class ExecutionAdmissionDispatcher:
             if not stored:
                 self.slot_lease_store.release(request_id, owner_id=owner_id)
                 return AdmissionDispatchResult(outcome="store_write_failed", request_id=request_id, request=record)
+            _log_admission_event(
+                "claim succeeded",
+                request_id=request_id,
+                conversation_id=updated.get("conversation_id"),
+                actual_mode=updated.get("actual_mode"),
+                route=updated.get("route"),
+                owner_id=owner_id,
+                dispatch_attempts=updated.get("dispatch_attempts"),
+            )
             return AdmissionDispatchResult(
                 outcome="claimed",
                 request_id=request_id,
@@ -396,6 +419,15 @@ class ExecutionAdmissionDispatcher:
         ttl_seconds = self._request_ttl_seconds(record)
         if not self.queue_status_store.put_request(updated, ttl_seconds=ttl_seconds):
             return AdmissionDispatchResult(outcome="store_write_failed", request_id=request_id, request=record)
+        _log_admission_event(
+            "running",
+            request_id=request_id,
+            conversation_id=updated.get("conversation_id"),
+            actual_mode=updated.get("actual_mode"),
+            route=updated.get("route"),
+            owner_id=owner_id,
+            started_at=started_at,
+        )
         return AdmissionDispatchResult(outcome="running", request_id=request_id, request=updated, lease=lease)
 
     def complete_request(
@@ -451,6 +483,15 @@ class ExecutionAdmissionDispatcher:
             released = self.slot_lease_store.release(request_id, owner_id=owner_id)
             if not released and self.slot_lease_store.get(request_id) is not None:
                 return AdmissionDispatchResult(outcome="lease_release_failed", request_id=request_id, request=updated)
+        _log_admission_event(
+            normalized_status if normalized_status != "completed" else "completed",
+            request_id=request_id,
+            conversation_id=updated.get("conversation_id"),
+            actual_mode=updated.get("actual_mode"),
+            route=updated.get("route"),
+            owner_id=owner_id,
+            failure_reason=failure_reason if normalized_status == "failed" else None,
+        )
         return AdmissionDispatchResult(
             outcome=normalized_status,
             request_id=request_id,

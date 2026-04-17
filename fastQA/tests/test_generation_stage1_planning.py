@@ -41,6 +41,20 @@ class _Logger:
         return None
 
 
+class _CaptureLogger(_Logger):
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str]] = []
+
+    def info(self, msg, *args, **kwargs):
+        self.records.append(("info", msg % args if args else msg))
+
+    def error(self, msg, *args, **kwargs):
+        self.records.append(("error", msg % args if args else msg))
+
+    def warning(self, msg, *args, **kwargs):
+        self.records.append(("warning", msg % args if args else msg))
+
+
 def test_stage1_planning_parses_json_and_normalizes_claims():
     client = _FakeClient(
         '{"deep_answer":"answer","retrieval_claims":[{"claim":"c1","keywords":["k1"],"preferred_sections":["methods"],"filters":{"must_contains":["LFP"]}},"plain"]}'
@@ -214,3 +228,23 @@ def test_stage1_planning_does_not_retry_without_response_format_for_unrelated_er
     assert result["success"] is False
     assert len(client.calls) == 1
     assert client.calls[0]["response_format"] == {"type": "json_object"}
+
+
+def test_stage1_planning_logs_prompt_and_llm_boundaries():
+    client = _FakeClient('{"deep_answer":"answer","retrieval_claims":[]}')
+    logger = _CaptureLogger()
+
+    result = run_stage1_pre_answer_and_planning(
+        user_question="what is lfp?",
+        stage1_prompt="prompt",
+        vector_db_context="context",
+        client=client,
+        model="gpt-test",
+        logger=logger,
+    )
+
+    assert result["success"] is True
+    messages = [message for _level, message in logger.records]
+    assert any("阶段一提示词拼装完成" in message and "prompt_chars=" in message for message in messages)
+    assert any("阶段一 LLM 请求发起" in message and "model=gpt-test" in message for message in messages)
+    assert any("阶段一 LLM 响应已接收" in message and "response_chars=" in message for message in messages)

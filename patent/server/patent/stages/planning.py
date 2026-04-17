@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any
 
 from server.patent.models import PatentRetrievalClaim, PatentRetrievalPlan
@@ -373,6 +374,7 @@ def run_stage1_pre_answer_and_planning(
 ) -> dict[str, Any]:
     question = str(user_question or "").strip()
     context_block = _format_conversation_context(conversation_context)
+    stage_started = time.perf_counter()
     logger.info(
         "patent stage1 planning start question_chars=%s context_chars=%s planner_ready=%s model=%s",
         len(question),
@@ -396,7 +398,15 @@ def run_stage1_pre_answer_and_planning(
         }
 
     user_content = f"{context_block}\n\n用户问题：{question}" if context_block else f"用户问题：{question}"
+    logger.info(
+        "patent stage1 planning prompt prepared prompt_chars=%s user_content_chars=%s elapsed_ms=%.3f",
+        len(stage1_prompt + "\n\n返回值只能是一个 JSON 对象，不能包含 JSON 以外的解释性文字。"),
+        len(user_content),
+        (time.perf_counter() - stage_started) * 1000,
+    )
     try:
+        llm_started = time.perf_counter()
+        logger.info("patent stage1 planning llm request start model=%s", str(model).strip())
         response = _create_stage1_completion(
             client=client,
             model=str(model).strip(),
@@ -410,7 +420,11 @@ def run_stage1_pre_answer_and_planning(
             logger=logger,
         )
         result_text = str(response.choices[0].message.content or "").strip()
-        logger.info("patent stage1 planning llm response received chars=%s", len(result_text))
+        logger.info(
+            "patent stage1 planning llm response received response_chars=%s elapsed_ms=%.3f",
+            len(result_text),
+            (time.perf_counter() - llm_started) * 1000,
+        )
         payload, cleaned_text = _parse_stage1_json_payload(result_text)
         if payload is None:
             retrieval_plan = _empty_retrieval_plan(question)

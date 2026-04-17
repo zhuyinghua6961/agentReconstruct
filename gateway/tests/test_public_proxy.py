@@ -522,6 +522,13 @@ def test_public_proxy_accepts_x_request_id_and_forwards_canonical_trace_header()
             b"",
         ),
         (
+            "PUT",
+            "/api/auth/username",
+            "/api/auth/username",
+            {"username": "alice-renamed"},
+            b"",
+        ),
+        (
             "GET",
             "/api/admin/departments/tree",
             "/api/admin/departments/tree",
@@ -571,10 +578,24 @@ def test_public_proxy_accepts_x_request_id_and_forwards_canonical_trace_header()
             b"",
         ),
         (
+            "GET",
+            "/api/admin/departments/secondary/11/users",
+            "/api/admin/departments/secondary/11/users",
+            None,
+            b"",
+        ),
+        (
             "POST",
             "/api/admin/departments/batch-import",
             "/api/admin/departments/batch-import",
             None,
+            b"",
+        ),
+        (
+            "PUT",
+            "/api/admin/users/7/username",
+            "/api/admin/users/7/username",
+            {"username": "alice-super"},
             b"",
         ),
         (

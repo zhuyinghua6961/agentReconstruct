@@ -196,6 +196,16 @@ class AuthRepository:
             (primary_department_id, secondary_department_id, user_id),
         )
 
+    def update_username(self, *, user_id: int, username: str) -> int:
+        return self._execute_update(
+            """
+            UPDATE users
+            SET username = %s
+            WHERE id = %s
+            """,
+            (username, user_id),
+        )
+
     def count_users(self) -> int:
         rows = self._execute_query("SELECT COUNT(*) AS total FROM users")
         if not rows:

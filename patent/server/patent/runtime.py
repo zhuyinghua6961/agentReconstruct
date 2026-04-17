@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
+import time
+import json
 from types import SimpleNamespace
 from dataclasses import dataclass
 from pathlib import Path
@@ -113,6 +115,7 @@ class PatentPlanningClient:
         max_tokens: int,
         response_format: dict[str, Any] | None = None,
     ) -> Any:
+        request_url = f"{self._base_url.rstrip('/')}/chat/completions"
         payload: dict[str, Any] = {
             "model": str(model or "").strip(),
             "messages": list(messages or []),
@@ -121,6 +124,14 @@ class PatentPlanningClient:
         }
         if response_format is not None:
             payload["response_format"] = dict(response_format)
+        payload_chars = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        _LOGGER.info(
+            "Patent planning client request payload ready model=%s message_count=%s payload_chars=%s response_format=%s",
+            str(model or "").strip(),
+            len(payload.get("messages") or []),
+            payload_chars,
+            bool(response_format),
+        )
         _LOGGER.info(
             "Patent planning client request start model=%s base_url=%s timeout_seconds=%s client_owner=%s shared_client_id=%s",
             str(model or "").strip(),
@@ -129,19 +140,79 @@ class PatentPlanningClient:
             "private" if self._owns_http_client else "shared",
             hex(id(self._http)),
         )
-        response = self._http.post(
-            f"{self._base_url.rstrip('/')}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=self._timeout_seconds,
+        request_started = time.perf_counter()
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        request = None
+        if hasattr(self._http, "build_request"):
+            request = self._http.build_request(
+                "POST",
+                request_url,
+                headers=headers,
+                json=payload,
+            )
+            _LOGGER.info(
+                "Patent planning client request object built model=%s method=%s url=%s elapsed_ms=%.3f content_length=%s",
+                str(model or "").strip(),
+                getattr(request, "method", "POST"),
+                str(getattr(request, "url", request_url)),
+                (time.perf_counter() - request_started) * 1000,
+                str(getattr(request, "headers", {}).get("content-length") or ""),
+            )
+        _LOGGER.info(
+            "Patent planning client request dispatch start model=%s timeout_seconds=%s elapsed_ms=%.3f transport=%s",
+            str(model or "").strip(),
+            self._timeout_seconds,
+            (time.perf_counter() - request_started) * 1000,
+            "send" if request is not None and hasattr(self._http, "send") else "post",
+        )
+        if request is not None and hasattr(self._http, "send"):
+            try:
+                response = self._http.send(request, stream=False, timeout=self._timeout_seconds)
+            except TypeError as exc:
+                if "timeout" not in str(exc):
+                    raise
+                response = self._http.send(request, stream=False)
+        else:
+            response = self._http.post(
+                request_url,
+                headers=headers,
+                json=payload,
+                timeout=self._timeout_seconds,
+            )
+        _LOGGER.info(
+            "Patent planning client request dispatch returned model=%s status_code=%s elapsed_ms=%.3f",
+            str(model or "").strip(),
+            getattr(response, "status_code", ""),
+            (time.perf_counter() - request_started) * 1000,
+        )
+        _LOGGER.info(
+            "Patent planning client response headers received model=%s status_code=%s elapsed_ms=%.3f content_length=%s",
+            str(model or "").strip(),
+            getattr(response, "status_code", ""),
+            (time.perf_counter() - request_started) * 1000,
+            str(response.headers.get("content-length") or ""),
         )
         response.raise_for_status()
         body = response.json()
         choices = list(body.get("choices") or [])
         message = dict((choices[0] or {}).get("message") or {}) if choices else {}
+        _LOGGER.info(
+            "Patent planning client response body parsed model=%s status_code=%s elapsed_ms=%.3f response_chars=%s",
+            str(model or "").strip(),
+            getattr(response, "status_code", ""),
+            (time.perf_counter() - request_started) * 1000,
+            len(str(message.get("content") or "")),
+        )
+        _LOGGER.info(
+            "Patent planning client response received model=%s status_code=%s elapsed_ms=%.3f response_chars=%s",
+            str(model or "").strip(),
+            getattr(response, "status_code", ""),
+            (time.perf_counter() - request_started) * 1000,
+            len(str(message.get("content") or "")),
+        )
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=str(message.get("content") or "")))]
         )

@@ -44,6 +44,14 @@ class AdminUsersService:
     def clean_text(value: object) -> str:
         return str(value or "").strip()
 
+    def _validate_username_candidate(self, *, username: str, owner_user_id: int | None = None) -> dict[str, Any]:
+        validation_service = auth_service.__class__(
+            repo=self._users,
+            token_service=auth_service._tokens,
+            department_service=self._departments,
+        )
+        return validation_service.validate_username_candidate(username=username, owner_user_id=owner_user_id)
+
     def _parse_user_type_code(self, value: object) -> int | None:
         text = self.clean_text(value).lower()
         if text in {"super", "2"}:
@@ -68,6 +76,11 @@ class AdminUsersService:
         return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
 
     @staticmethod
+    def _duplicate_error(exc: Exception) -> bool:
+        message = str(exc or "").lower()
+        return "duplicate" in message or "unique" in message or "1062" in message
+
+    @staticmethod
     def status_code_for(result: dict[str, Any], *, ok_status: int) -> int:
         if result.get("success"):
             return ok_status
@@ -75,8 +88,6 @@ class AdminUsersService:
         if code in {
             "VALIDATION_ERROR",
             "USERNAME_INVALID",
-            "USERNAME_EXISTS",
-            "PERMISSION_DENIED",
             "NOT_SUPPORTED",
             "INVALID_FILE_TYPE",
             "FILE_MISSING",
@@ -93,6 +104,10 @@ class AdminUsersService:
             "DEPARTMENT_DISABLED",
         }:
             return 400
+        if code in {"PERMISSION_DENIED"}:
+            return 403
+        if code in {"USERNAME_EXISTS"}:
+            return 409
         if code in {"QUOTA_EXCEEDED"}:
             return 429
         if code in {"USER_NOT_FOUND", "PRIMARY_DEPARTMENT_NOT_FOUND", "SECONDARY_DEPARTMENT_NOT_FOUND"}:
@@ -158,14 +173,12 @@ class AdminUsersService:
             user_type = self.clean_text(user_type or "common").lower()
             if not username or not password:
                 return {"success": False, "error": "用户名和密码不能为空", "code": "VALIDATION_ERROR"}
-            if len(username) < 3 or len(username) > 50:
-                return {"success": False, "error": "用户名长度必须在3-50之间", "code": "VALIDATION_ERROR"}
             if user_type not in {"common", "super"}:
                 return {"success": False, "error": "用户类型必须是 super 或 common", "code": "VALIDATION_ERROR"}
-            if username.lower().startswith("admin"):
-                return {"success": False, "error": "不能创建以 admin 为前缀的用户名", "code": "USERNAME_INVALID"}
-            if self._users.get_by_username(username):
-                return {"success": False, "error": "用户名已存在", "code": "USERNAME_EXISTS"}
+            username_validation = self._validate_username_candidate(username=username)
+            if not username_validation.get("success"):
+                return username_validation
+            normalized_username = str(username_validation.get("data", {}).get("username") or "").strip()
             department_validation = self._departments.validate_department_selection(
                 primary_department_id=primary_department_id,
                 secondary_department_id=secondary_department_id,
@@ -178,7 +191,7 @@ class AdminUsersService:
             user_type_code = 2 if user_type == "super" else 3
             password_hash = self.hash_password(password)
             created_id = self._users.create_user(
-                username=username,
+                username=normalized_username,
                 password_hash=password_hash,
                 role="user",
                 user_type=user_type_code,
@@ -191,10 +204,10 @@ class AdminUsersService:
             self._users.trim_password_history(user_id=created_id, keep_limit=self._password_history_limit("user"))
             return {
                 "success": True,
-                "message": f"用户 {username} 创建成功",
+                "message": f"用户 {normalized_username} 创建成功",
                 "data": {
                     "id": created_id,
-                    "username": username,
+                    "username": normalized_username,
                     "role": "user",
                     "user_type": user_type_code,
                     "status": "active",
@@ -204,7 +217,44 @@ class AdminUsersService:
         except Exception as exc:
             if _is_db_unavailable_error(exc):
                 return self._db_error(exc)
+            if self._duplicate_error(exc):
+                return {"success": False, "error": "用户名已存在", "code": "USERNAME_EXISTS"}
             return {"success": False, "error": "创建用户失败", "code": "CREATE_ERROR"}
+
+    def update_username(self, *, target_user_id: int, username: str) -> dict[str, Any]:
+        try:
+            user = self._users.get_by_id(target_user_id)
+            if not user:
+                return {"success": False, "error": "用户不存在", "code": "USER_NOT_FOUND"}
+            role_text = str(user.get("role") or "").strip().lower()
+            if role_text == "admin" or int(user.get("user_type") or 0) == 1:
+                return {"success": False, "error": "不能修改管理员用户名", "code": "PERMISSION_DENIED"}
+            username_validation = self._validate_username_candidate(username=username, owner_user_id=target_user_id)
+            if not username_validation.get("success"):
+                return username_validation
+            normalized_username = str(username_validation.get("data", {}).get("username") or "").strip()
+            updated_count = self._users.update_username(user_id=target_user_id, username=normalized_username)
+            refreshed_user = self._users.get_by_id(target_user_id) or user
+            current_username = str(refreshed_user.get("username") or "").strip()
+            if updated_count <= 0 and current_username != normalized_username:
+                return {"success": False, "error": "修改用户名失败", "code": "UPDATE_ERROR"}
+            return {
+                "success": True,
+                "message": "用户名已更新",
+                "data": {
+                    "id": int(refreshed_user.get("id") or user["id"]),
+                    "username": normalized_username,
+                    "role": str(refreshed_user.get("role") or user.get("role") or "user"),
+                    "user_type": int(refreshed_user.get("user_type") or self._role_to_user_type(role_text or "user")),
+                    "status": str(refreshed_user.get("status") or user.get("status") or "active"),
+                },
+            }
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            if self._duplicate_error(exc):
+                return {"success": False, "error": "用户名已存在", "code": "USERNAME_EXISTS"}
+            return {"success": False, "error": "修改用户名失败", "code": "UPDATE_ERROR"}
 
     def update_department(
         self,

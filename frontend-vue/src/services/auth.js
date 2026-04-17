@@ -32,6 +32,14 @@ export function clearStoredAuth() {
   localStorage.removeItem('agentcode.auth.user.v1')
 }
 
+async function safeJson(response) {
+  try {
+    return await response.json()
+  } catch {
+    return {}
+  }
+}
+
 // 全局错误处理函数
 function handleAuthError(error, response) {
   // 检查是否是账号停用错误
@@ -64,15 +72,25 @@ function handleAuthError(error, response) {
 
 // 封装 fetch 请求，添加错误处理
 async function fetchWithErrorHandling(url, options = {}) {
-  const response = await fetch(url, options)
-  const data = await response.json()
+  let response
+  try {
+    response = await fetch(url, options)
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error && error.message ? error.message : '网络请求失败'
+    }
+  }
+  const data = await safeJson(response)
   
   // 如果响应不成功，处理错误
   if (!response.ok || !data.success) {
     handleAuthError(data, response)
   }
   
-  return data
+  return data?.success !== undefined
+    ? data
+    : { success: response.ok, error: response.ok ? '' : `HTTP ${response.status}` }
 }
 
 export const authApi = {
@@ -113,6 +131,21 @@ export const authApi = {
       headers: {
         'Authorization': `Bearer ${token}`
       }
+    })
+  },
+
+  /**
+   * 修改当前用户用户名
+   */
+  async updateUsername(username) {
+    const token = readStoredToken()
+    return fetchWithErrorHandling(`${API_BASE}/username`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({ username })
     })
   },
 

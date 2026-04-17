@@ -25,8 +25,19 @@ def test_route_table_patterns_include_department_routes():
         "/api/admin/departments/secondary",
         "/api/admin/departments/secondary/{secondary_id}",
         "/api/admin/departments/secondary/{secondary_id}/status",
+        "/api/admin/departments/secondary/{secondary_id}/users",
         "/api/admin/departments/batch-import",
         "/api/admin/departments/import-template",
+    }
+
+    assert expected.issubset(set(PUBLIC_ROUTE_PATTERNS))
+
+
+def test_route_table_patterns_include_username_routes():
+    expected = {
+        "/api/auth/username",
+        "/api/v1/auth/username",
+        "/api/admin/users/{user_id}/username",
     }
 
     assert expected.issubset(set(PUBLIC_ROUTE_PATTERNS))

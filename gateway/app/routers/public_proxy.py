@@ -225,6 +225,7 @@ _ROUTE_SPECS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (_paths("/api/auth/me"), ("GET",)),
     (_paths("/api/auth/departments/tree"), ("GET",)),
     (_paths("/api/auth/department"), ("PUT",)),
+    (_paths("/api/auth/username"), ("PUT",)),
     (_paths("/api/auth/password"), ("POST", "PUT")),
     (_paths("/api/auth/forgot-password/initiate"), ("POST",)),
     (_paths("/api/auth/forgot-password/verify"), ("POST",)),
@@ -260,6 +261,7 @@ _ROUTE_SPECS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (_paths("/api/quota/reset/{user_id}/{quota_type:path}"), ("POST",)),
     (_paths("/api/admin/users", include_v1=False), ("GET", "POST")),
     (_paths("/api/admin/users/{user_id}", include_v1=False), ("DELETE",)),
+    (_paths("/api/admin/users/{user_id}/username", include_v1=False), ("PUT",)),
     (_paths("/api/admin/users/{user_id}/password", include_v1=False), ("GET", "PUT")),
     (_paths("/api/admin/users/{user_id}/status", include_v1=False), ("PUT",)),
     (_paths("/api/admin/users/{user_id}/type", include_v1=False), ("PUT",)),
@@ -274,6 +276,7 @@ _ROUTE_SPECS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (_paths("/api/admin/departments/secondary", include_v1=False), ("POST",)),
     (_paths("/api/admin/departments/secondary/{secondary_id}", include_v1=False), ("PUT",)),
     (_paths("/api/admin/departments/secondary/{secondary_id}/status", include_v1=False), ("PUT",)),
+    (_paths("/api/admin/departments/secondary/{secondary_id}/users", include_v1=False), ("GET",)),
     (_paths("/api/admin/departments/batch-import", include_v1=False), ("POST",)),
     (_paths("/api/admin/departments/import-template", include_v1=False), ("GET",)),
 )

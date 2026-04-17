@@ -90,7 +90,20 @@ fi
 : > "$ERROR_LOG_FILE"
 : > "$FASTQA_APP_LOG_FILE"
 
-nohup conda run --no-capture-output -n agent gunicorn   -k uvicorn.workers.UvicornWorker   app.main:app   --chdir "$PROJECT_ROOT"   --bind "0.0.0.0:${FASTAPI_PORT}"   --workers "${FASTQA_GUNICORN_WORKERS}"   --timeout 600   --pid "$PID_FILE"   --capture-output   --access-logfile "$ACCESS_LOG_FILE"   --error-logfile "$ERROR_LOG_FILE"   >"$STARTUP_LOG_FILE" 2>&1 &
+nohup env PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+  conda run --no-capture-output -n agent gunicorn \
+  -k uvicorn.workers.UvicornWorker \
+  app.main:app \
+  --config "$PROJECT_ROOT/gunicorn.conf.py" \
+  --chdir "$PROJECT_ROOT" \
+  --bind "0.0.0.0:${FASTAPI_PORT}" \
+  --workers "${FASTQA_GUNICORN_WORKERS}" \
+  --timeout 600 \
+  --pid "$PID_FILE" \
+  --capture-output \
+  --access-logfile "$ACCESS_LOG_FILE" \
+  --error-logfile "$ERROR_LOG_FILE" \
+  >"$STARTUP_LOG_FILE" 2>&1 &
 
 LAUNCHER_PID=$!
 for _ in $(seq 1 60); do

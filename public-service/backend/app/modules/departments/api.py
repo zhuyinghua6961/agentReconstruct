@@ -121,6 +121,17 @@ def update_secondary_status(
     )
 
 
+@router.get("/secondary/{secondary_id}/users")
+def get_secondary_users(
+    secondary_id: int,
+    _context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(
+        department_service.list_secondary_users(secondary_id=secondary_id),
+        ok_status=200,
+    )
+
+
 @router.post("/batch-import")
 async def batch_import_departments(
     request: Request,

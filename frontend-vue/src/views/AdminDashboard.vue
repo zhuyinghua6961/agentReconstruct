@@ -1,5 +1,6 @@
 <script setup>
 import { computed, ref, onMounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { authApi } from '../services/auth'
 import { adminApi } from '../services/admin'
 import { departmentApi, mergePreservedDepartmentTree } from '../services/departments'
@@ -7,6 +8,17 @@ import BatchImportDialog from '../components/BatchImportDialog.vue'
 import DepartmentManagementPanel from '../components/DepartmentManagementPanel.vue'
 import DepartmentSelector from '../components/DepartmentSelector.vue'
 import ImportResultDialog from '../components/ImportResultDialog.vue'
+import QuotaManagementPanel from '../components/QuotaManagementPanel.vue'
+
+const route = useRoute()
+const router = useRouter()
+
+const DEFAULT_ADMIN_TAB = 'users'
+const ADMIN_TAB_ITEMS = [
+  { key: 'quota', label: '配额管理' },
+  { key: 'users', label: '用户管理' },
+  { key: 'departments', label: '部门管理' },
+]
 
 const currentUser = ref(null)
 const users = ref([])
@@ -23,6 +35,7 @@ const showResetPasswordModal = ref(false)
 const showBatchImportDialog = ref(false)
 const showImportResultDialog = ref(false)
 const showDepartmentModal = ref(false)
+const showUsernameModal = ref(false)
 const importResult = ref(null)
 const operationResultTitle = ref('操作结果')
 const selectedUserIds = ref([])
@@ -31,6 +44,7 @@ const batchTargetType = ref('super')
 const selectedUser = ref(null)
 const newPassword = ref('')
 const newUsername = ref('')
+const editUsernameValue = ref('')
 const newUserPassword = ref('')
 const newUserType = ref('common')  // 默认为普通用户
 const showPassword = ref(false)
@@ -52,6 +66,39 @@ const allCurrentPageSelected = computed(() => (
 const editDepartmentTree = computed(() => (
   mergePreservedDepartmentTree(selectableDepartmentTree.value, selectedUser.value)
 ))
+const activeAdminTab = computed(() => {
+  const rawTab = Array.isArray(route.query.tab) ? route.query.tab[0] : route.query.tab
+  const normalized = String(rawTab || '').trim().toLowerCase()
+  return ADMIN_TAB_ITEMS.some(item => item.key === normalized) ? normalized : DEFAULT_ADMIN_TAB
+})
+
+async function setAdminTab(tab) {
+  if (!ADMIN_TAB_ITEMS.some(item => item.key === tab) || activeAdminTab.value === tab) {
+    return
+  }
+  await router.replace({
+    path: '/admin',
+    query: {
+      ...route.query,
+      tab,
+    },
+  })
+}
+
+async function ensureAdminTab() {
+  const rawTab = Array.isArray(route.query.tab) ? route.query.tab[0] : route.query.tab
+  const normalized = String(rawTab || '').trim().toLowerCase()
+  if (ADMIN_TAB_ITEMS.some(item => item.key === normalized)) {
+    return
+  }
+  await router.replace({
+    path: '/admin',
+    query: {
+      ...route.query,
+      tab: DEFAULT_ADMIN_TAB,
+    },
+  })
+}
 
 function generateTemporaryPassword(length = 14) {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*'
@@ -178,6 +225,45 @@ function openPasswordModal(user) {
   selectedUser.value = user
   newPassword.value = ''
   showPasswordModal.value = true
+}
+
+function openUsernameModal(user) {
+  selectedUser.value = user
+  editUsernameValue.value = user?.username || ''
+  error.value = ''
+  showUsernameModal.value = true
+}
+
+async function submitUsernameChange() {
+  error.value = ''
+  if (!selectedUser.value) {
+    error.value = '未选择要编辑的用户'
+    return
+  }
+  const normalizedUsername = String(editUsernameValue.value || '').trim()
+  if (!normalizedUsername) {
+    error.value = '用户名不能为空'
+    return
+  }
+  if (normalizedUsername.length < 3 || normalizedUsername.length > 50) {
+    error.value = '用户名长度必须在3-50之间'
+    return
+  }
+  if (normalizedUsername.toLowerCase().startsWith('admin')) {
+    error.value = '不能以 admin 为前缀'
+    return
+  }
+
+  const previousUsername = selectedUser.value.username
+  const result = await adminApi.updateUserUsername(selectedUser.value.id, normalizedUsername)
+  if (result.success) {
+    success.value = `用户 ${previousUsername} 的用户名已更新为 ${normalizedUsername}`
+    showUsernameModal.value = false
+    await fetchUsers()
+    setTimeout(() => success.value = '', 3000)
+    return
+  }
+  error.value = result.error || '修改用户名失败'
 }
 
 async function submitPasswordChange() {
@@ -476,6 +562,7 @@ async function handleDepartmentDictionaryUpdated() {
 }
 
 onMounted(async () => {
+  await ensureAdminTab()
   await fetchCurrentUser()
   await Promise.all([
     fetchUsers(),
@@ -492,8 +579,19 @@ onMounted(async () => {
         <span class="user-info" v-if="currentUser">管理员: {{ currentUser.username }}</span>
       </div>
       <div class="header-actions">
-        <a href="/quota-management" class="quota-btn">配额管理</a>
-        <a href="/profile" class="profile-btn">个人中心</a>
+        <nav class="admin-tabs" aria-label="管理员顶部导航">
+          <a href="/profile" class="admin-tab-btn profile-tab-btn">个人中心</a>
+          <button
+            v-for="item in ADMIN_TAB_ITEMS"
+            :key="item.key"
+            type="button"
+            class="admin-tab-btn"
+            :class="{ active: activeAdminTab === item.key }"
+            @click="setAdminTab(item.key)"
+          >
+            {{ item.label }}
+          </button>
+        </nav>
         <button class="logout-btn" @click="logout">退出登录</button>
       </div>
     </header>
@@ -502,11 +600,23 @@ onMounted(async () => {
       <div v-if="success" class="alert alert-success">{{ success }}</div>
       <div v-if="error" class="alert alert-error">{{ error }}</div>
 
-      <section class="department-management-shell" aria-label="部门管理">
+      <section
+        v-if="activeAdminTab === 'quota'"
+        class="quota-management-shell"
+        aria-label="配额管理"
+      >
+        <QuotaManagementPanel />
+      </section>
+
+      <section
+        v-else-if="activeAdminTab === 'departments'"
+        class="department-management-shell"
+        aria-label="部门管理"
+      >
         <DepartmentManagementPanel @updated="handleDepartmentDictionaryUpdated" />
       </section>
 
-      <div class="user-section">
+      <div v-else class="user-section">
         <div class="section-header">
           <h2>用户管理</h2>
           <div class="header-actions">
@@ -570,6 +680,13 @@ onMounted(async () => {
               <td>{{ user.created_at }}</td>
               <td class="actions">
                 <button class="action-btn" @click="openDepartmentModal(user)">设置部门</button>
+                <button
+                  v-if="!isAdminIdentity(user)"
+                  class="action-btn"
+                  @click="openUsernameModal(user)"
+                >
+                  修改用户名
+                </button>
                 <button class="action-btn" @click="openResetPasswordModal(user)">重置密码</button>
                 <button class="action-btn" @click="openPasswordModal(user)">修改密码</button>
                 <button
@@ -628,6 +745,22 @@ onMounted(async () => {
         <div class="modal-footer">
           <button class="btn-secondary" @click="showPasswordModal = false">取消</button>
           <button class="btn-primary" @click="submitPasswordChange">确认修改</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="showUsernameModal" class="modal-overlay" @click.self="showUsernameModal = false">
+      <div class="modal">
+        <h3>修改用户名 - {{ selectedUser?.username }}</h3>
+        <div class="modal-body">
+          <div class="form-group">
+            <label>新用户名</label>
+            <input type="text" v-model="editUsernameValue" placeholder="请输入新用户名（3-50字符）">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn-secondary" @click="showUsernameModal = false">取消</button>
+          <button class="btn-primary" @click="submitUsernameChange">确认修改</button>
         </div>
       </div>
     </div>
@@ -791,15 +924,18 @@ onMounted(async () => {
 .header-left h1 { font-size: 20px; color: #1f2937; margin: 0; }
 .user-info { color: #6b7280; font-size: 14px; }
 .header-actions { display: flex; align-items: center; gap: 12px; }
-.quota-btn { background: #10b981; color: white; text-decoration: none; padding: 8px 16px; border-radius: 6px; font-size: 14px; }
-.quota-btn:hover { background: #059669; }
-.profile-btn { background: #667eea; color: white; text-decoration: none; padding: 8px 16px; border-radius: 6px; font-size: 14px; }
-.profile-btn:hover { background: #5a67d8; }
+.admin-tabs { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.admin-tab-btn { background: #f3f4f6; color: #374151; text-decoration: none; border: 1px solid #d1d5db; padding: 8px 14px; border-radius: 999px; font-size: 14px; cursor: pointer; transition: all 0.2s; }
+.admin-tab-btn:hover { background: #e5e7eb; }
+.admin-tab-btn.active { background: #1f2937; border-color: #1f2937; color: white; }
+.profile-tab-btn { background: #eef2ff; border-color: #c7d2fe; color: #4338ca; }
+.profile-tab-btn:hover { background: #e0e7ff; }
 .logout-btn { background: #f3f4f6; border: 1px solid #d1d5db; padding: 8px 16px; border-radius: 6px; cursor: pointer; }
 .admin-main { padding: 24px; max-width: 1200px; margin: 0 auto; }
 .alert { padding: 12px 16px; border-radius: 8px; margin-bottom: 20px; }
 .alert-success { background: #dcfce7; color: #166534; }
 .alert-error { background: #fef2f2; color: #dc2626; }
+.quota-management-shell { margin-bottom: 24px; }
 .user-section { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
 .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
 .section-header h2 { font-size: 18px; color: #1f2937; margin: 0; }
@@ -863,4 +999,8 @@ onMounted(async () => {
 .btn-primary { background: #667eea; color: white; }
 .btn-secondary { background: #f3f4f6; color: #374151; border: 1px solid #d1d5db; }
 .btn-danger { background: #dc2626; color: white; }
+@media (max-width: 900px) {
+  .admin-header { flex-direction: column; align-items: stretch; gap: 16px; }
+  .header-actions { justify-content: space-between; flex-wrap: wrap; }
+}
 </style>

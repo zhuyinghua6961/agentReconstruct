@@ -60,14 +60,25 @@ def _decode(response) -> dict:
     return json.loads(response.body.decode("utf-8"))
 
 
+def _route_for(path: str, method: str):
+    for route in app.routes:
+        if getattr(route, "path", None) == path and method in getattr(route, "methods", set()):
+            return route
+    raise AssertionError(f"route not found: {method} {path}")
+
+
 def test_admin_user_routes_registered():
     paths = {route.path for route in app.routes if hasattr(route, "path")}
     assert "/api/admin/users" in paths
+    assert "/api/admin/users/{user_id}/username" in paths
     assert "/api/admin/users/{user_id}/department" in paths
     assert "/api/admin/users/batch-delete" in paths
     assert "/api/admin/users/batch-type" in paths
     assert "/api/admin/users/batch-import" in paths
     assert "/api/admin/users/import-template" in paths
+
+    username_update_route = _route_for("/api/admin/users/{user_id}/username", "PUT")
+    assert require_admin_context in {dep.call for dep in username_update_route.dependant.dependencies}
 
 
 def test_admin_user_list_and_create_routes(monkeypatch):
@@ -192,6 +203,104 @@ def test_admin_user_mutation_routes_contract(monkeypatch):
     assert _decode(batch_type_resp)["message"] == "batch_type_ok"
 
 
+def test_admin_update_user_username_contract(monkeypatch):
+    assert hasattr(admin_users_api_module, "update_user_username")
+    captured = {}
+
+    def fake_update_username(**kwargs):
+        captured.update(kwargs)
+        return {"success": True, "data": {"id": kwargs["target_user_id"], "username": kwargs["username"]}}
+
+    monkeypatch.setattr(admin_users_service, "update_username", fake_update_username)
+
+    payload = type("Payload", (), {"username": "alice-new"})()
+    response = admin_users_api_module.update_user_username(
+        7,
+        payload,
+        AuthContext(user_id=1, role="admin", username="admin"),
+    )
+
+    assert response.status_code == 200
+    assert captured == {"target_user_id": 7, "username": "alice-new"}
+    assert _decode(response)["data"]["username"] == "alice-new"
+
+
+def test_admin_update_user_username_returns_403_for_permission_denied(monkeypatch):
+    assert hasattr(admin_users_api_module, "update_user_username")
+    monkeypatch.setattr(
+        admin_users_service,
+        "update_username",
+        lambda **kwargs: {"success": False, "error": "不能修改管理员用户名", "code": "PERMISSION_DENIED"},
+    )
+
+    payload = type("Payload", (), {"username": "root2"})()
+    response = admin_users_api_module.update_user_username(
+        1,
+        payload,
+        AuthContext(user_id=1, role="admin", username="admin"),
+    )
+
+    assert response.status_code == 403
+    assert _decode(response)["code"] == "PERMISSION_DENIED"
+
+
+def test_admin_update_user_username_returns_409_for_username_exists(monkeypatch):
+    assert hasattr(admin_users_api_module, "update_user_username")
+    monkeypatch.setattr(
+        admin_users_service,
+        "update_username",
+        lambda **kwargs: {"success": False, "error": "用户名已存在", "code": "USERNAME_EXISTS"},
+    )
+
+    payload = type("Payload", (), {"username": "alice"})()
+    response = admin_users_api_module.update_user_username(
+        7,
+        payload,
+        AuthContext(user_id=1, role="admin", username="admin"),
+    )
+
+    assert response.status_code == 409
+    assert _decode(response)["code"] == "USERNAME_EXISTS"
+
+
+def test_admin_update_user_username_returns_400_for_validation_error(monkeypatch):
+    assert hasattr(admin_users_api_module, "update_user_username")
+    monkeypatch.setattr(
+        admin_users_service,
+        "update_username",
+        lambda **kwargs: {"success": False, "error": "用户名长度必须在3-50之间", "code": "VALIDATION_ERROR"},
+    )
+
+    payload = type("Payload", (), {"username": "ab"})()
+    response = admin_users_api_module.update_user_username(
+        7,
+        payload,
+        AuthContext(user_id=1, role="admin", username="admin"),
+    )
+
+    assert response.status_code == 400
+    assert _decode(response)["code"] == "VALIDATION_ERROR"
+
+
+def test_admin_update_user_username_returns_400_for_admin_prefix(monkeypatch):
+    assert hasattr(admin_users_api_module, "update_user_username")
+    monkeypatch.setattr(
+        admin_users_service,
+        "update_username",
+        lambda **kwargs: {"success": False, "error": "不能以 admin 开头", "code": "USERNAME_INVALID"},
+    )
+
+    payload = type("Payload", (), {"username": "AdminFoo"})()
+    response = admin_users_api_module.update_user_username(
+        7,
+        payload,
+        AuthContext(user_id=1, role="admin", username="admin"),
+    )
+
+    assert response.status_code == 400
+    assert _decode(response)["code"] == "USERNAME_INVALID"
+
+
 def test_admin_update_user_department_contract(monkeypatch):
     captured = {}
 
@@ -269,6 +378,34 @@ def test_admin_import_rejects_half_filled_department_columns(monkeypatch):
     assert result["success"] is True
     assert result["data"]["summary"]["failed"] == 1
     assert "部门信息必须同时填写一级和二级" in result["data"]["details"][0]["reason"]
+
+
+def test_admin_import_rejects_case_insensitive_admin_prefix_via_shared_rules(monkeypatch):
+    created = {"called": False}
+
+    monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
+    monkeypatch.setattr(admin_users_import_service, "_finalize_excel_upload_quota", lambda **kwargs: None)
+    monkeypatch.setattr(
+        admin_users_service,
+        "create_user",
+        lambda **kwargs: created.__setitem__("called", True) or {"success": False, "error": "不能创建以 admin 为前缀的用户名", "code": "USERNAME_INVALID"},
+    )
+    monkeypatch.setattr(
+        admin_users_service.users,
+        "create_user",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("import should not call users.create_user directly")),
+    )
+
+    csv_bytes = (
+        b"username,password,user_type,primary_department_name,secondary_department_name\n"
+        b"AdminFoo,Pass123!,common,,\n"
+    )
+    result = admin_users_import_service.import_users(file_bytes=csv_bytes, filename="users.csv", actor_user_id=1)
+
+    assert created["called"] is True
+    assert result["success"] is True
+    assert result["data"]["summary"]["failed"] == 1
+    assert "admin" in result["data"]["details"][0]["reason"].lower()
 
 
 def test_admin_import_rejects_unknown_primary_department(monkeypatch):
@@ -372,11 +509,11 @@ def test_admin_import_resolves_department_names_and_persists_ids(monkeypatch):
             },
         },
     )
-    monkeypatch.setattr(admin_users_service, "hash_password", lambda password: "hashed-password")
     monkeypatch.setattr(
-        admin_users_service.users,
+        admin_users_service,
         "create_user",
-        lambda **kwargs: created.append(kwargs) or 1,
+        lambda **kwargs: created.append(kwargs)
+        or {"success": True, "data": {"id": 1, "username": kwargs["username"], **kwargs}},
     )
 
     csv_bytes = (
@@ -409,9 +546,10 @@ def test_admin_import_accepts_xlsx_and_persists_department_ids(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        admin_users_service.users,
+        admin_users_service,
         "create_user",
-        lambda **kwargs: created.append(kwargs),
+        lambda **kwargs: created.append(kwargs)
+        or {"success": True, "data": {"id": 1, "username": kwargs["username"], **kwargs}},
     )
 
     payload = build_xlsx(
@@ -608,6 +746,197 @@ def test_admin_service_create_user_accepts_department_ids():
     assert users.created["secondary_department_id"] == 11
     assert result["data"]["primary_department_name"] == "计算机学院"
     assert result["data"]["secondary_department_name"] == "软件工程系"
+
+
+def test_admin_service_update_username_rejects_target_admin(monkeypatch):
+    class FakeUsers:
+        def get_by_id(self, user_id):
+            return {
+                "id": user_id,
+                "username": "root",
+                "role": "admin",
+                "user_type": 1,
+                "status": "active",
+            }
+
+    service = admin_users_service.__class__(users_repo=FakeUsers())
+    assert hasattr(service, "update_username")
+    result = service.update_username(target_user_id=1, username="root-2")
+
+    assert result["success"] is False
+    assert result["code"] == "PERMISSION_DENIED"
+    assert service.status_code_for(result, ok_status=200) == 403
+
+
+def test_admin_service_update_username_updates_common_or_super_user(monkeypatch):
+    class FakeUsers:
+        def __init__(self):
+            self.updated = None
+
+        def get_by_id(self, user_id):
+            if user_id != 7:
+                return None
+            if self.updated:
+                return {
+                    "id": 7,
+                    "username": self.updated[1],
+                    "role": "user",
+                    "user_type": 2,
+                    "status": "active",
+                }
+            return {
+                "id": 7,
+                "username": "alice",
+                "role": "user",
+                "user_type": 2,
+                "status": "active",
+            }
+
+        def get_by_username(self, username):
+            return None
+
+        def update_username(self, *, user_id: int, username: str):
+            self.updated = (user_id, username)
+            return 1
+
+    users = FakeUsers()
+    service = admin_users_service.__class__(users_repo=users)
+    assert hasattr(service, "update_username")
+    result = service.update_username(target_user_id=7, username="alice-super")
+
+    assert result["success"] is True
+    assert users.updated == (7, "alice-super")
+    assert result["data"]["username"] == "alice-super"
+
+
+def test_admin_service_update_username_trims_username_before_persisting():
+    class FakeUsers:
+        def __init__(self):
+            self.updated = None
+
+        def get_by_id(self, user_id):
+            if user_id != 7:
+                return None
+            if self.updated:
+                return {
+                    "id": 7,
+                    "username": self.updated[1],
+                    "role": "user",
+                    "user_type": 3,
+                    "status": "active",
+                }
+            return {
+                "id": 7,
+                "username": "alice",
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+            }
+
+        def get_by_username(self, username):
+            return None
+
+        def update_username(self, *, user_id: int, username: str):
+            self.updated = (user_id, username)
+            return 1
+
+    users = FakeUsers()
+    service = admin_users_service.__class__(users_repo=users)
+    result = service.update_username(target_user_id=7, username=" alice-renamed ")
+
+    assert result["success"] is True
+    assert users.updated == (7, "alice-renamed")
+    assert result["data"]["username"] == "alice-renamed"
+
+
+def test_admin_service_update_username_rejects_shorter_than_3():
+    class FakeUsers:
+        def get_by_id(self, user_id):
+            return {
+                "id": user_id,
+                "username": "alice",
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+            }
+
+        def get_by_username(self, username):
+            return None
+
+    service = admin_users_service.__class__(users_repo=FakeUsers())
+    result = service.update_username(target_user_id=7, username="ab")
+
+    assert result["success"] is False
+    assert result["code"] == "VALIDATION_ERROR"
+    assert service.status_code_for(result, ok_status=200) == 400
+
+
+def test_admin_service_update_username_rejects_admin_prefix_case_insensitive():
+    class FakeUsers:
+        def get_by_id(self, user_id):
+            return {
+                "id": user_id,
+                "username": "alice",
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+            }
+
+        def get_by_username(self, username):
+            return None
+
+    service = admin_users_service.__class__(users_repo=FakeUsers())
+    result = service.update_username(target_user_id=7, username="AdminRoot")
+
+    assert result["success"] is False
+    assert result["code"] == "USERNAME_INVALID"
+    assert service.status_code_for(result, ok_status=200) == 400
+
+
+def test_admin_service_update_username_returns_user_not_found():
+    class FakeUsers:
+        def get_by_id(self, user_id):
+            return None
+
+    service = admin_users_service.__class__(users_repo=FakeUsers())
+    assert hasattr(service, "update_username")
+    result = service.update_username(target_user_id=999, username="ghost")
+
+    assert result["success"] is False
+    assert result["code"] == "USER_NOT_FOUND"
+
+
+def test_admin_service_update_username_accepts_same_username_as_noop(monkeypatch):
+    class FakeUsers:
+        def __init__(self):
+            self.update_calls = 0
+
+        def get_by_id(self, user_id):
+            return {
+                "id": user_id,
+                "username": "alice",
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+            }
+
+        def get_by_username(self, username):
+            if str(username) == "alice":
+                return {"id": 7, "username": "alice"}
+            return None
+
+        def update_username(self, *, user_id: int, username: str):
+            self.update_calls += 1
+            return 0
+
+    users = FakeUsers()
+    service = admin_users_service.__class__(users_repo=users)
+    assert hasattr(service, "update_username")
+    result = service.update_username(target_user_id=7, username=" alice ")
+
+    assert result["success"] is True
+    assert users.update_calls == 1
+    assert result["data"]["username"] == "alice"
 
 
 def test_admin_service_update_department_persists_selected_departments():

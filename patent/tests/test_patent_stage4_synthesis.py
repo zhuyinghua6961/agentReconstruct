@@ -1123,6 +1123,30 @@ def test_patent_answer_builder_stream_logs_prompt_and_evidence_chars(caplog):
 
     assert "".join(chunks) == "这是流式答案 (patent_id=P1)。"
     assert any("prompt_chars=" in record.message and "evidence_chars=" in record.message for record in caplog.records)
+    assert any(
+        "patent answer builder stream request payload ready" in record.message and "stream=True" in record.message
+        for record in caplog.records
+    )
+    assert any(
+        "patent answer builder stream request object built" in record.message and "method=POST" in record.message
+        for record in caplog.records
+    )
+    assert any(
+        "patent answer builder stream request dispatch start" in record.message and "timeout_seconds=" in record.message
+        for record in caplog.records
+    )
+    assert any(
+        "patent answer builder stream request dispatch returned" in record.message and "status_code=200" in record.message
+        for record in caplog.records
+    )
+    assert any("patent answer builder stream response headers received" in record.message and "status_code=200" in record.message for record in caplog.records)
+    assert any(
+        "patent answer builder stream first response line received" in record.message and "line_chars=" in record.message
+        for record in caplog.records
+    )
+    assert any("patent answer builder stream first payload received" in record.message and "elapsed_ms=" in record.message for record in caplog.records)
+    assert any("patent answer builder stream first chunk" in record.message and "chunk_chars=" in record.message for record in caplog.records)
+    assert any("patent answer builder stream completed" in record.message and "answer_chars=" in record.message for record in caplog.records)
 
 
 def test_patent_answer_builder_request_logs_prompt_and_evidence_chars(caplog):
@@ -1164,6 +1188,36 @@ def test_patent_answer_builder_request_logs_prompt_and_evidence_chars(caplog):
         "patent answer builder request start" in record.message
         and "prompt_chars=" in record.message
         and "evidence_chars=" in record.message
+        for record in caplog.records
+    )
+    assert any(
+        "patent answer builder request payload ready" in record.message and "stream=False" in record.message
+        for record in caplog.records
+    )
+    assert any(
+        "patent answer builder request object built" in record.message and "method=POST" in record.message
+        for record in caplog.records
+    )
+    assert any(
+        "patent answer builder request dispatch start" in record.message and "timeout_seconds=" in record.message
+        for record in caplog.records
+    )
+    assert any(
+        "patent answer builder request dispatch returned" in record.message and "status_code=200" in record.message
+        for record in caplog.records
+    )
+    assert any(
+        "patent answer builder llm response headers received" in record.message
+        and "status_code=200" in record.message
+        for record in caplog.records
+    )
+    assert any(
+        "patent answer builder llm response body parsed" in record.message and "response_chars=" in record.message
+        for record in caplog.records
+    )
+    assert any(
+        "patent answer builder llm response received" in record.message
+        and "elapsed_ms=" in record.message
         for record in caplog.records
     )
 

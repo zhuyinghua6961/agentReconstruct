@@ -19,6 +19,8 @@ const departmentBatchImportSource = readSource(['..', 'components', 'DepartmentB
 const departmentImportResultSource = readSource(['..', 'components', 'DepartmentImportResultDialog.vue'])
 const panelSource = readSource(['..', 'components', 'DepartmentManagementPanel.vue'])
 const adminServiceSource = readSource(['..', 'services', 'admin.js'])
+const runtimeSource = readSource(['..', 'utils', 'departmentSecondaryUsersRuntime.js'])
+const routerSource = readSource(['..', 'router', 'index.js'])
 
 test('AdminDashboard includes department management entry and user department column', () => {
   assert.match(adminSource, /DepartmentManagementPanel/)
@@ -34,6 +36,12 @@ test('AdminDashboard wires department assignment into user editing flows', () =>
 test('admin service exposes department dictionary and user department APIs', () => {
   assert.match(adminServiceSource, /getDepartmentTree/)
   assert.match(adminServiceSource, /updateUserDepartment/)
+})
+
+test('AdminDashboard wires username editing into user management flows', () => {
+  assert.match(adminSource, /修改用户名/)
+  assert.match(adminSource, /updateUserUsername/)
+  assert.match(adminSource, /!isAdminIdentity\(user\)/)
 })
 
 test('BatchImportDialog documents department name columns in the template', () => {
@@ -77,4 +85,52 @@ test('Department import result dialog shows department columns', () => {
   assert.match(departmentImportResultSource, /一级状态/)
   assert.match(departmentImportResultSource, /二级部门/)
   assert.match(departmentImportResultSource, /二级状态/)
+})
+
+test('DepartmentManagementPanel renders collapsible primary department sections', () => {
+  assert.match(panelSource, /expandedPrimaryIds/)
+  assert.match(panelSource, /togglePrimary/)
+  assert.match(panelSource, /isPrimaryExpanded/)
+  assert.match(panelSource, /collapse-toggle/)
+  assert.match(panelSource, /child-count/)
+  assert.match(panelSource, /isPrimaryExpanded\(primary\.id\)/)
+})
+
+test('admin service exposes secondary department user query api', () => {
+  assert.match(adminServiceSource, /getSecondaryDepartmentUsers/)
+  assert.match(adminServiceSource, /departments\/secondary\/\$\{secondaryId\}\/users/)
+})
+
+test('DepartmentManagementPanel renders collapsible secondary sections with user counts', () => {
+  assert.match(panelSource, /expandedSecondaryIds/)
+  assert.match(panelSource, /toggleSecondary/)
+  assert.match(panelSource, /isSecondaryExpanded/)
+  assert.match(panelSource, /secondary\.user_count/)
+  assert.match(panelSource, /人/)
+})
+
+test('DepartmentManagementPanel lazy loads secondary users with local loading and error states', () => {
+  assert.match(panelSource, /createSecondaryUsersRuntime/)
+  assert.match(panelSource, /loadSecondaryUsers/)
+  assert.match(panelSource, /secondaryUsersById/)
+  assert.match(panelSource, /secondaryUsersLoadingById/)
+  assert.match(panelSource, /secondaryUsersErrorById/)
+  assert.match(runtimeSource, /获取用户列表失败/)
+  assert.match(panelSource, /暂无用户/)
+})
+
+test('AdminDashboard promotes quota, users, and departments into top admin tabs', () => {
+  assert.match(adminSource, /activeAdminTab/)
+  assert.match(adminSource, /setAdminTab/)
+  assert.match(adminSource, /QuotaManagementPanel/)
+  assert.match(adminSource, /个人中心/)
+  assert.match(adminSource, /配额管理/)
+  assert.match(adminSource, /用户管理/)
+  assert.match(adminSource, /部门管理/)
+})
+
+test('quota management route redirects into admin quota tab', () => {
+  assert.match(routerSource, /quota-management/)
+  assert.match(routerSource, /tab:\s*['"]quota['"]/)
+  assert.match(routerSource, /path:\s*['"]\/admin['"]/)
 })

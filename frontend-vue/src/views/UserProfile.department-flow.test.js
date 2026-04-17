@@ -22,3 +22,21 @@ test('UserProfile keeps department fetch errors scoped to the department section
   assert.match(profileSource, /departmentError/)
   assert.match(profileSource, /departmentSuccess/)
 })
+
+test('UserProfile exposes username edit flow for non-admin users', () => {
+  assert.match(profileSource, /修改用户名/)
+  assert.match(profileSource, /authApi\.updateUsername/)
+  assert.match(profileSource, /function isAdminIdentity|const isAdminIdentity/)
+  assert.match(profileSource, /user_type === 1|role === 'admin'/)
+  assert.match(profileSource, /syncStoredUser\(/)
+})
+
+test('UserProfile resets username draft from current user when opening and cancelling edit', () => {
+  assert.match(profileSource, /function openUsernameForm|const openUsernameForm/)
+  assert.match(profileSource, /function cancelUsernameEdit|const cancelUsernameEdit/)
+  assert.match(profileSource, /usernameInput\.value = currentUser\.value\?\.username \|\| ''/)
+  assert.match(profileSource, /usernameError\.value = ''/)
+  assert.match(profileSource, /usernameSuccess\.value = ''/)
+  assert.match(profileSource, /@click="openUsernameForm"/)
+  assert.match(profileSource, /@click="cancelUsernameEdit"/)
+})

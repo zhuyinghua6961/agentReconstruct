@@ -96,6 +96,38 @@ def test_stage4_synthesis_streams_content_and_final_result(monkeypatch):
     assert outputs[-1]["references"][0]["doi"] == "10.1/a"
 
 
+def test_stage4_synthesis_logs_llm_request_first_chunk_and_completion(monkeypatch):
+    monkeypatch.setenv("QA_STAGE4_MIN_CITATIONS", "1")
+    client = _FakeClient([_chunk("结论"), _chunk(" (doi=10.1/a)")])
+    logger = _logger()
+
+    outputs = list(
+        iter_stage4_synthesis_with_pdf_chunks(
+            user_question="what is lfp?",
+            deep_answer="draft",
+            pdf_chunks={"10.1/a": [{"text": "evidence", "page": 1}]},
+            retrieval_results={"claim_to_results": {}},
+            stage2_prompt="prompt {user_question} {deep_answer} {evidence_documents} {top5_references}",
+            client=client,
+            model="m",
+            safe_dict_cls=_SafeDict,
+            escape_braces_fn=_escape_braces,
+            format_pdf_chunks_evidence_fn=_format_pdf_chunks_evidence,
+            build_top5_reference_context_fn=build_top5_reference_context,
+            extract_cited_dois_fn=extract_cited_dois,
+            log_top5_coverage_fn=log_top5_coverage,
+            build_references_from_pdf_chunks_fn=build_references_from_pdf_chunks,
+            logger=logger,
+        )
+    )
+
+    assert outputs[-1]["success"] is True
+    info_messages = [message for level, message in logger.records if level == "info"]
+    assert any("stage4 llm request start" in message and "model=m" in message for message in info_messages)
+    assert any("stage4 llm first chunk received" in message and "chunk_chars=" in message for message in info_messages)
+    assert any("stage4 llm stream completed" in message and "elapsed_ms=" in message for message in info_messages)
+
+
 def test_stage4_synthesis_returns_cancelled_result():
     client = _FakeClient([_chunk("ignored")])
     outputs = list(

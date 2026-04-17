@@ -23,6 +23,7 @@ _PUBLIC_ROUTE_GROUPS = (
     _paths("/api/auth/me"),
     _paths("/api/auth/departments/tree"),
     _paths("/api/auth/department"),
+    _paths("/api/auth/username"),
     _paths("/api/auth/password"),
     _paths("/api/auth/forgot-password/initiate"),
     _paths("/api/auth/forgot-password/verify"),
@@ -58,6 +59,7 @@ _PUBLIC_ROUTE_GROUPS = (
     _paths("/api/quota/reset/{user_id}/{quota_type:path}"),
     _paths("/api/admin/users", include_v1=False),
     _paths("/api/admin/users/{user_id}", include_v1=False),
+    _paths("/api/admin/users/{user_id}/username", include_v1=False),
     _paths("/api/admin/users/{user_id}/password", include_v1=False),
     _paths("/api/admin/users/{user_id}/status", include_v1=False),
     _paths("/api/admin/users/{user_id}/type", include_v1=False),
@@ -72,6 +74,7 @@ _PUBLIC_ROUTE_GROUPS = (
     _paths("/api/admin/departments/secondary", include_v1=False),
     _paths("/api/admin/departments/secondary/{secondary_id}", include_v1=False),
     _paths("/api/admin/departments/secondary/{secondary_id}/status", include_v1=False),
+    _paths("/api/admin/departments/secondary/{secondary_id}/users", include_v1=False),
     _paths("/api/admin/departments/batch-import", include_v1=False),
     _paths("/api/admin/departments/import-template", include_v1=False),
 )

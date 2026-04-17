@@ -17,6 +17,7 @@ from app.modules.admin_users.schemas import (
     UserPasswordResetRequest,
     UserStatusUpdateRequest,
     UserTypeUpdateRequest,
+    UserUsernameUpdateRequest,
 )
 from app.modules.admin_users.service import admin_users_service
 from app.modules.auth.deps import require_admin_context
@@ -94,6 +95,21 @@ def update_user_department(
             target_user_id=user_id,
             primary_department_id=payload.primary_department_id,
             secondary_department_id=payload.secondary_department_id,
+        ),
+        ok_status=200,
+    )
+
+
+@router.put("/users/{user_id}/username")
+def update_user_username(
+    user_id: int,
+    payload: UserUsernameUpdateRequest,
+    _context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(
+        admin_users_service.update_username(
+            target_user_id=user_id,
+            username=payload.username,
         ),
         ok_status=200,
     )

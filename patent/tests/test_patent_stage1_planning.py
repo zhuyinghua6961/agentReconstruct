@@ -38,6 +38,20 @@ class _Logger:
         return None
 
 
+class _CaptureLogger(_Logger):
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str]] = []
+
+    def info(self, msg, *args, **kwargs):
+        self.records.append(("info", msg % args if args else msg))
+
+    def warning(self, msg, *args, **kwargs):
+        self.records.append(("warning", msg % args if args else msg))
+
+    def error(self, msg, *args, **kwargs):
+        self.records.append(("error", msg % args if args else msg))
+
+
 def test_stage1_planning_parses_json_and_normalizes_patent_retrieval_plan():
     client = _FakeClient(
         """{
@@ -212,24 +226,31 @@ def test_patent_runtime_stage1_uses_configured_planning_client():
     assert result["retrieval_claims"][0].claim == "runtime answer"
 
 
-def test_patent_planning_client_uses_injected_http_client_and_request_timeout():
+def test_patent_planning_client_uses_injected_http_client_and_request_timeout(caplog):
     class _FakeHttpClient:
         def __init__(self) -> None:
             self.calls: list[dict[str, object]] = []
             self.closed = False
+            self.requests: list[httpx.Request] = []
 
-        def post(self, url, *, headers=None, json=None, timeout=None):
+        def build_request(self, method, url, *, headers=None, json=None):
+            request = httpx.Request(str(method), str(url), headers=headers, json=json)
+            self.requests.append(request)
+            return request
+
+        def send(self, request, *, stream=False, timeout=None):
             self.calls.append(
                 {
-                    "url": url,
-                    "headers": headers,
-                    "json": json,
+                    "url": str(request.url),
+                    "headers": dict(request.headers),
+                    "json": request.read().decode("utf-8"),
+                    "stream": stream,
                     "timeout": timeout,
                 }
             )
             return httpx.Response(
                 200,
-                request=httpx.Request("POST", str(url)),
+                request=request,
                 json={"choices": [{"message": {"content": "planner response"}}]},
             )
 
@@ -244,16 +265,60 @@ def test_patent_planning_client_uses_injected_http_client_and_request_timeout():
         http_client=http_client,
     )
 
-    response = client.chat.completions.create(
-        model="planner-model",
-        messages=[{"role": "user", "content": "what should we check?"}],
-        temperature=0.2,
-        max_tokens=128,
-        response_format={"type": "json_object"},
-    )
+    with caplog.at_level("INFO", logger="patent.runtime"):
+        response = client.chat.completions.create(
+            model="planner-model",
+            messages=[{"role": "user", "content": "what should we check?"}],
+            temperature=0.2,
+            max_tokens=128,
+            response_format={"type": "json_object"},
+        )
 
     assert response.choices[0].message.content == "planner response"
     assert len(http_client.calls) == 1
     assert http_client.calls[0]["timeout"] == 17.0
+    assert http_client.calls[0]["stream"] is False
+    assert any(
+        "Patent planning client request payload ready" in record.message and "message_count=1" in record.message
+        for record in caplog.records
+    )
+    assert any(
+        "Patent planning client request object built" in record.message and "method=POST" in record.message
+        for record in caplog.records
+    )
+    assert any(
+        "Patent planning client request dispatch start" in record.message and "timeout_seconds=17.0" in record.message
+        for record in caplog.records
+    )
+    assert any(
+        "Patent planning client request dispatch returned" in record.message and "status_code=200" in record.message
+        for record in caplog.records
+    )
+    assert any(
+        "Patent planning client response headers received" in record.message and "status_code=200" in record.message
+        for record in caplog.records
+    )
+    assert any(
+        "Patent planning client response body parsed" in record.message and "response_chars=16" in record.message
+        for record in caplog.records
+    )
     client.close()
     assert http_client.closed is False
+
+
+def test_patent_stage1_planning_logs_prompt_and_llm_boundaries():
+    client = _FakeClient('{"deep_answer":"answer","retrieval_claims":[]}')
+    logger = _CaptureLogger()
+
+    result = run_stage1_pre_answer_and_planning(
+        user_question="请评估 CN115132975B。",
+        client=client,
+        model="gpt-test",
+        logger=logger,
+    )
+
+    assert result["success"] is True
+    messages = [message for _level, message in logger.records]
+    assert any("patent stage1 planning prompt prepared" in message and "prompt_chars=" in message for message in messages)
+    assert any("patent stage1 planning llm request start" in message and "model=gpt-test" in message for message in messages)
+    assert any("patent stage1 planning llm response received" in message and "response_chars=" in message for message in messages)

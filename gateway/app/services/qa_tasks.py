@@ -45,6 +45,20 @@ _PATENT_STREAM_CAPABILITY_OPTION = "patent_stream_capability"
 _PATENT_STREAM_CAPABILITY_PREVIEW_V1 = "preview_v1"
 
 
+def _format_log_fields(**fields: Any) -> str:
+    parts: list[str] = []
+    for key, value in fields.items():
+        if value is None:
+            continue
+        parts.append(f"{key}={value}")
+    return " ".join(parts)
+
+
+def _log_task_event(event: str, **fields: Any) -> None:
+    suffix = _format_log_fields(**fields)
+    logger.info("gateway %s%s", event, f" {suffix}" if suffix else "")
+
+
 def _is_truthy_env_flag(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on", "debug"}
 
@@ -207,11 +221,21 @@ class QATaskService:
         self.slot_lease_store = request.app.state.execution_slot_lease_store
 
     async def create_task(self, payload: AskRequest, *, auth_context: AuthContext) -> dict[str, Any]:
+        started = time.perf_counter()
         bound_payload = self._bind_payload_to_authenticated_user(payload, auth_context=auth_context)
         self._assert_requested_mode_enabled(bound_payload)
         conversation_id = self._require_positive_int(bound_payload.conversation_id, detail="task_conversation_id_required")
         user_id = self._require_positive_int(bound_payload.user_id, detail="task_user_id_required")
         route_decision, file_context = await self._resolve_route(bound_payload)
+        _log_task_event(
+            "task create accepted",
+            conversation_id=conversation_id,
+            user_id=user_id,
+            requested_mode=bound_payload.requested_mode,
+            actual_mode=route_decision.actual_mode,
+            route=route_decision.route,
+            elapsed_ms=round((time.perf_counter() - started) * 1000, 3),
+        )
         self._assert_route_enabled(route_decision)
         lock_manager = getattr(self.app.state, "distributed_lock_manager", None)
         lock_handle = None
@@ -255,6 +279,17 @@ class QATaskService:
                     )
                 grant_data = precheck.payload.get("data") if isinstance(precheck.payload.get("data"), dict) else {}
                 quota_grant_id = str(grant_data.get("grant_id") or "").strip()
+                _log_task_event(
+                    "task create quota precheck completed",
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    requested_mode=bound_payload.requested_mode,
+                    actual_mode=route_decision.actual_mode,
+                    route=route_decision.route,
+                    quota_type=quota_type,
+                    grant_id=quota_grant_id or "-",
+                    elapsed_ms=round((time.perf_counter() - started) * 1000, 3),
+                )
                 record = {
                     "request_id": task_id,
                     "client_request_id": str(bound_payload.client_request_id or "").strip() or None,
@@ -341,6 +376,18 @@ class QATaskService:
                 assistant_message_id = str(created_turn.get("assistant_message_id") or "")
                 if not assistant_message_id:
                     raise HTTPException(status_code=500, detail="task_create_failed")
+                _log_task_event(
+                    "task create authority turn persisted",
+                    task_id=task_id,
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    route=route_decision.route,
+                    requested_mode=bound_payload.requested_mode,
+                    actual_mode=route_decision.actual_mode,
+                    user_message_id=user_message_id,
+                    assistant_message_id=assistant_message_id,
+                    elapsed_ms=round((time.perf_counter() - started) * 1000, 3),
+                )
                 updated_record = dict(record)
                 updated_record["status"] = "queued"
                 updated_record["cancel_allowed"] = True
@@ -353,15 +400,16 @@ class QATaskService:
                 if not stored:
                     raise HTTPException(status_code=500, detail="task_create_failed")
                 self._append_state_frame(task_id, status="queued")
-                logger.info(
-                    "gateway task created task_id=%s client_request_id=%s conversation_id=%s user_id=%s requested_mode=%s actual_mode=%s route=%s",
-                    task_id,
-                    str(bound_payload.client_request_id or "").strip() or "-",
-                    conversation_id,
-                    user_id,
-                    bound_payload.requested_mode,
-                    route_decision.actual_mode,
-                    route_decision.route,
+                _log_task_event(
+                    "task queued",
+                    task_id=task_id,
+                    client_request_id=str(bound_payload.client_request_id or "").strip() or "-",
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    requested_mode=bound_payload.requested_mode,
+                    actual_mode=route_decision.actual_mode,
+                    route=route_decision.route,
+                    elapsed_ms=round((time.perf_counter() - started) * 1000, 3),
                 )
             except httpx.HTTPStatusError as exc:
                 cleanup_error = await self._cleanup_failed_task_create(
@@ -1484,6 +1532,7 @@ class GatewayTaskExecutor:
         request_id = str(request.get("request_id") or "").strip()
         if not request_id:
             return AdmissionExecutionOutcome(outcome="failed", reason="task_request_id_missing", terminal_status="failed")
+        execute_started = time.perf_counter()
         internal_request = self._build_internal_request(
             trace_id=request_id,
             actual_mode=request.get("actual_mode"),
@@ -1543,6 +1592,16 @@ class GatewayTaskExecutor:
                 reason=reason,
             )
             return AdmissionExecutionOutcome(outcome="failed", reason=reason, terminal_status="failed")
+        _log_task_event(
+            "task upstream stream opened",
+            request_id=request_id,
+            conversation_id=request.get("conversation_id"),
+            actual_mode=request.get("actual_mode"),
+            route=request.get("route"),
+            backend=handle.backend,
+            status_code=handle.status_code,
+            elapsed_ms=round((time.perf_counter() - execute_started) * 1000, 3),
+        )
 
         progress_accumulator = self._new_progress_accumulator(
             persisted_last_seq=int(request.get("persisted_last_seq") or 0),
@@ -1583,6 +1642,8 @@ class GatewayTaskExecutor:
         step_order: list[str] = []
         step_map: dict[str, dict[str, Any]] = {}
         thinking_count = 0
+        first_step_logged = False
+        first_content_logged = False
         latest_seq = max(admitted_seq, running_seq)
         self._runtime_observe_progress(
             live_runtime,
@@ -1632,6 +1693,17 @@ class GatewayTaskExecutor:
                     if event_type == "thinking":
                         if _normalized_epoch_ms((request.get("telemetry") or {}).get("first_step_at_ms")) is None:
                             self._persist_request_telemetry(request, first_step_at_ms=_epoch_ms())
+                        if not first_step_logged:
+                            first_step_logged = True
+                            _log_task_event(
+                                "task first step",
+                                request_id=request_id,
+                                conversation_id=request.get("conversation_id"),
+                                actual_mode=request.get("actual_mode"),
+                                route=request.get("route"),
+                                step=f"thinking_{thinking_count + 1}",
+                                elapsed_ms=round((time.perf_counter() - execute_started) * 1000, 3),
+                            )
                         thinking_count += 1
                         step_key = f"thinking_{thinking_count}"
                         self._upsert_step(
@@ -1657,6 +1729,17 @@ class GatewayTaskExecutor:
                     if event_type == "step":
                         if _normalized_epoch_ms((request.get("telemetry") or {}).get("first_step_at_ms")) is None:
                             self._persist_request_telemetry(request, first_step_at_ms=_epoch_ms())
+                        if not first_step_logged:
+                            first_step_logged = True
+                            _log_task_event(
+                                "task first step",
+                                request_id=request_id,
+                                conversation_id=request.get("conversation_id"),
+                                actual_mode=request.get("actual_mode"),
+                                route=request.get("route"),
+                                step=str(payload.get("step") or ""),
+                                elapsed_ms=round((time.perf_counter() - execute_started) * 1000, 3),
+                            )
                         step_key = str(payload.get("step") or f"step_{len(step_order) + 1}").strip() or f"step_{len(step_order) + 1}"
                         self._upsert_step(
                             step_order=step_order,
@@ -1682,6 +1765,17 @@ class GatewayTaskExecutor:
                         if _normalized_epoch_ms((request.get("telemetry") or {}).get("first_content_at_ms")) is None:
                             self._persist_request_telemetry(request, first_content_at_ms=_epoch_ms())
                         delta = str(payload.get("content") or payload.get("delta") or "")
+                        if delta and not first_content_logged:
+                            first_content_logged = True
+                            _log_task_event(
+                                "task first content",
+                                request_id=request_id,
+                                conversation_id=request.get("conversation_id"),
+                                actual_mode=request.get("actual_mode"),
+                                route=request.get("route"),
+                                content_chars=len(delta),
+                                elapsed_ms=round((time.perf_counter() - execute_started) * 1000, 3),
+                            )
                         if _task_content_persists_in_main_body(payload):
                             if delta:
                                 content_parts.append(delta)

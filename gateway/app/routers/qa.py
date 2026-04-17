@@ -6,6 +6,8 @@ import asyncio
 import json
 import logging
 import httpx
+import time
+from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -20,6 +22,20 @@ logger = logging.getLogger(__name__)
 
 _ALLOWED_MODES = {"fast", "thinking", "patent"}
 _FILE_ROUTES = {"pdf_qa", "tabular_qa", "hybrid_qa"}
+
+
+def _format_log_fields(**fields: Any) -> str:
+    parts: list[str] = []
+    for key, value in fields.items():
+        if value is None:
+            continue
+        parts.append(f"{key}={value}")
+    return " ".join(parts)
+
+
+def _log_gateway_event(event: str, **fields: Any) -> None:
+    suffix = _format_log_fields(**fields)
+    logger.info("gateway %s%s", event, f" {suffix}" if suffix else "")
 
 
 async def _resolve(request: Request, payload: AskRequest, mode: str):
@@ -221,9 +237,12 @@ async def _stream_with_quota(
     frame_buffer = SSEFrameBuffer()
     done_payload: dict | None = None
     done_prefix_lines: list[str] = []
+    stream_started = time.perf_counter()
     saw_error_event = False
     finalized = False
     stream_error: Exception | None = None
+    first_step_logged = False
+    first_content_logged = False
     try:
         async for chunk in handle.body_iter():
             outbound_frames: list[str] = []
@@ -233,6 +252,26 @@ async def _stream_with_quota(
                     payload_type = str(payload.get("type") or "").strip().lower()
                     if payload_type == "error":
                         saw_error_event = True
+                    if payload_type == "step" and not first_step_logged:
+                        first_step_logged = True
+                        _log_gateway_event(
+                            "ask_stream first_step",
+                            trace_id=trace_id,
+                            backend=backend,
+                            step=str(payload.get("step") or ""),
+                            elapsed_ms=round((time.perf_counter() - stream_started) * 1000, 3),
+                        )
+                    if payload_type == "content" and not first_content_logged:
+                        content = str(payload.get("content") or payload.get("delta") or "")
+                        if content:
+                            first_content_logged = True
+                            _log_gateway_event(
+                                "ask_stream first_content",
+                                trace_id=trace_id,
+                                backend=backend,
+                                content_chars=len(content),
+                                elapsed_ms=round((time.perf_counter() - stream_started) * 1000, 3),
+                            )
                     if payload_type == "done":
                         done_payload = payload
                         done_prefix_lines = prefix_lines
@@ -298,6 +337,14 @@ async def _stream_with_quota(
         done_payload["quota"] = _quota_payload_from_finalize(
             quota_type=str(quota_type),
             finalize_result=finalize_result,
+        )
+        _log_gateway_event(
+            "ask_stream finalized",
+            trace_id=trace_id,
+            backend=backend,
+            quota_type=quota_type,
+            success=done_payload is not None and not saw_error_event,
+            elapsed_ms=round((time.perf_counter() - stream_started) * 1000, 3),
         )
         yield _encode_sse_payload(done_payload, prefix_lines=done_prefix_lines)
 
@@ -568,12 +615,22 @@ def _upstream_status_error_stream(*, trace_id: str, backend: str, status_code: i
 
 
 async def _proxy_ask(request: Request, payload: AskRequest, mode: str) -> JSONResponse:
+    started = time.perf_counter()
     trace_id = str(getattr(request.state, "trace_id", "") or "")
+    _log_gateway_event("ask start", trace_id=trace_id, requested_mode=mode)
     try:
         route_decision, file_context = await _resolve(request, payload, mode)
     except ConversationFileProviderError as exc:
         return _conversation_files_error_json(trace_id=trace_id, exc=exc)
     _log_route_decision(trace_id=trace_id, route_decision=route_decision)
+    _log_gateway_event(
+        "ask route resolved",
+        trace_id=trace_id,
+        requested_mode=route_decision.requested_mode,
+        actual_mode=route_decision.actual_mode,
+        route=route_decision.route,
+        elapsed_ms=round((time.perf_counter() - started) * 1000, 3),
+    )
     if route_decision.needs_clarification:
         return _clarification_json(trace_id=trace_id, route_decision=route_decision)
     if route_decision.status_code:
@@ -613,6 +670,13 @@ async def _proxy_ask(request: Request, payload: AskRequest, mode: str) -> JSONRe
             return JSONResponse(status_code=precheck.status_code, content=precheck.payload)
         grant_data = precheck.payload.get("data") if isinstance(precheck.payload.get("data"), dict) else {}
         grant_id = str(grant_data.get("grant_id") or "").strip() or None
+        _log_gateway_event(
+            "ask quota precheck completed",
+            trace_id=trace_id,
+            quota_type=quota_type,
+            grant_id=grant_id or "-",
+            elapsed_ms=round((time.perf_counter() - started) * 1000, 3),
+        )
     path = f"/api/{route_decision.actual_mode}/ask"
     response = await proxy_service.forward_json(
         request=request,
@@ -621,6 +685,13 @@ async def _proxy_ask(request: Request, payload: AskRequest, mode: str) -> JSONRe
         payload=upstream_payload,
     )
     if quota_type is None or not grant_id:
+        _log_gateway_event(
+            "ask completed",
+            trace_id=trace_id,
+            backend=route_decision.actual_mode,
+            route=route_decision.route,
+            elapsed_ms=round((time.perf_counter() - started) * 1000, 3),
+        )
         return response
     if not _should_count_sync_response(response):
         await _abort_quota_grant(request=request, quota_proxy=quota_proxy, grant_id=grant_id)
@@ -635,16 +706,33 @@ async def _proxy_ask(request: Request, payload: AskRequest, mode: str) -> JSONRe
             finalize_result.payload.get("code"),
             finalize_result.payload.get("error"),
         )
+    _log_gateway_event(
+        "ask completed",
+        trace_id=trace_id,
+        backend=route_decision.actual_mode,
+        route=route_decision.route,
+        elapsed_ms=round((time.perf_counter() - started) * 1000, 3),
+    )
     return _with_sync_quota_payload(response, quota_type=quota_type, finalize_result=finalize_result)
 
 
 async def _proxy_ask_stream(request: Request, payload: AskRequest, mode: str):
+    started = time.perf_counter()
     trace_id = str(getattr(request.state, "trace_id", "") or "")
+    _log_gateway_event("ask_stream start", trace_id=trace_id, requested_mode=mode)
     try:
         route_decision, file_context = await _resolve(request, payload, mode)
     except ConversationFileProviderError as exc:
         return _conversation_files_error_stream(trace_id=trace_id, exc=exc)
     _log_route_decision(trace_id=trace_id, route_decision=route_decision)
+    _log_gateway_event(
+        "ask_stream route resolved",
+        trace_id=trace_id,
+        requested_mode=route_decision.requested_mode,
+        actual_mode=route_decision.actual_mode,
+        route=route_decision.route,
+        elapsed_ms=round((time.perf_counter() - started) * 1000, 3),
+    )
     if route_decision.needs_clarification:
         return _clarification_stream(trace_id=trace_id, route_decision=route_decision)
     if route_decision.status_code:
@@ -684,6 +772,13 @@ async def _proxy_ask_stream(request: Request, payload: AskRequest, mode: str):
             return _quota_precheck_error_stream(trace_id=trace_id, route_decision=route_decision, result=precheck)
         grant_data = precheck.payload.get("data") if isinstance(precheck.payload.get("data"), dict) else {}
         grant_id = str(grant_data.get("grant_id") or "").strip() or None
+        _log_gateway_event(
+            "ask_stream quota precheck completed",
+            trace_id=trace_id,
+            quota_type=quota_type,
+            grant_id=grant_id or "-",
+            elapsed_ms=round((time.perf_counter() - started) * 1000, 3),
+        )
     path = f"/api/{route_decision.actual_mode}/ask_stream"
     try:
         handle: StreamingProxyHandle = await proxy_service.open_json_stream(
@@ -707,6 +802,14 @@ async def _proxy_ask_stream(request: Request, payload: AskRequest, mode: str):
             status_code=handle.status_code,
             message=body.decode("utf-8", errors="ignore") or "upstream_error",
         )
+    _log_gateway_event(
+        "ask_stream upstream opened",
+        trace_id=trace_id,
+        backend=handle.backend,
+        route=route_decision.route,
+        status_code=handle.status_code,
+        elapsed_ms=round((time.perf_counter() - started) * 1000, 3),
+    )
 
     return StreamingResponse(
         _stream_with_quota(

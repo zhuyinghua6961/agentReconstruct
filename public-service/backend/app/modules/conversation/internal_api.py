@@ -463,12 +463,17 @@ def create_task_turn(
     )
     _raise_service_error(result=result, ok_status=200)
     logger.info(
-        "authority task create-turn task_id=%s conversation_id=%s user_id=%s trace_id=%s status=%s",
+        "authority task create-turn task_id=%s conversation_id=%s user_id=%s trace_id=%s route=%s requested_mode=%s actual_mode=%s status=%s last_seq=%s content_chars=%s",
         payload.task_id,
         payload.conversation_id,
         payload.user_id,
         payload.trace_id,
+        payload.route,
+        payload.requested_mode,
+        payload.actual_mode,
         payload.status,
+        payload.last_seq,
+        len(str(payload.message.content or "")),
     )
     return JSONResponse(status_code=200, content=jsonable_encoder(result))
 
@@ -499,12 +504,14 @@ def progress_task_assistant(
     _raise_service_error(result=result, ok_status=200)
     if _should_log_progress_info(status=payload.status, last_seq=int(payload.last_seq or 0)):
         logger.info(
-            "authority task progress task_id=%s conversation_id=%s user_id=%s status=%s last_seq=%s",
+            "authority task progress task_id=%s conversation_id=%s user_id=%s status=%s last_seq=%s content_chars=%s step_count=%s",
             payload.task_id,
             payload.conversation_id,
             payload.user_id,
             payload.status,
             payload.last_seq,
+            len(str(payload.content_delta or "")),
+            len(list(payload.steps or [])),
         )
     return JSONResponse(status_code=200, content=jsonable_encoder(result))
 
@@ -535,12 +542,15 @@ def terminal_task_assistant(
     )
     _raise_service_error(result=result, ok_status=200)
     logger.info(
-        "authority task terminal task_id=%s conversation_id=%s user_id=%s terminal_status=%s last_seq=%s",
+        "authority task terminal task_id=%s conversation_id=%s user_id=%s terminal_status=%s last_seq=%s answer_chars=%s step_count=%s failure=%s",
         payload.task_id,
         payload.conversation_id,
         payload.user_id,
         payload.terminal_status,
         payload.last_seq,
+        len(str(payload.answer_text or "")),
+        len(list(payload.steps or [])),
+        bool(payload.failure),
     )
     return JSONResponse(status_code=200, content=jsonable_encoder(result))
 

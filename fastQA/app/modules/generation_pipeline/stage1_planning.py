@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any, Dict
 
 
@@ -155,11 +156,24 @@ def run_stage1_pre_answer_and_planning(
 ) -> Dict[str, Any]:
     logger.info("阶段一：LLM预回答与检索规划")
     logger.info("用户问题: %s", user_question)
+    stage_started = time.perf_counter()
 
     try:
         full_system_prompt = stage1_prompt + (("\n\n" + vector_db_context) if vector_db_context else "")
         context_block = _format_conversation_context(conversation_context)
         user_content = f"{context_block}\n\n用户问题：{user_question}" if context_block else f"用户问题：{user_question}"
+        logger.info(
+            "阶段一提示词拼装完成: prompt_chars=%s user_content_chars=%s context_chars=%s elapsed_ms=%.3f",
+            len(
+                full_system_prompt
+                + "\n\n你必须严格按照 JSON 模板输出，返回值只能是一个 JSON 对象，不能包含任何解释性文字。"
+            ),
+            len(user_content),
+            len(context_block),
+            (time.perf_counter() - stage_started) * 1000,
+        )
+        llm_started = time.perf_counter()
+        logger.info("阶段一 LLM 请求发起: model=%s", model)
         response = _create_stage1_completion(
             client=client,
             model=model,
@@ -175,6 +189,12 @@ def run_stage1_pre_answer_and_planning(
         )
 
         result_text = str(response.choices[0].message.content or "").strip()
+        logger.info(
+            "阶段一 LLM 响应已接收: model=%s response_chars=%s elapsed_ms=%.3f",
+            model,
+            len(result_text),
+            (time.perf_counter() - llm_started) * 1000,
+        )
         stage1_result, cleaned_text = _parse_stage1_json_payload(result_text)
         if stage1_result is None or cleaned_text is None:
             preview = result_text[:500].replace("\n", "\\n")

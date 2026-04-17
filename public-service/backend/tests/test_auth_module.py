@@ -36,17 +36,21 @@ def test_auth_routes_registered():
     assert "/api/auth/departments/tree" in paths
     assert "/api/v1/auth/department" in paths
     assert "/api/auth/department" in paths
+    assert "/api/v1/auth/username" in paths
+    assert "/api/auth/username" in paths
     assert "/api/v1/auth/security-questions" in paths
     assert "/api/auth/security-questions" in paths
 
     me_route = _route_for("/api/v1/auth/me", "GET")
     department_tree_route = _route_for("/api/v1/auth/departments/tree", "GET")
     department_update_route = _route_for("/api/v1/auth/department", "PUT")
+    username_update_route = _route_for("/api/v1/auth/username", "PUT")
     security_route = _route_for("/api/v1/auth/security-questions", "PUT")
     password_route = _route_for("/api/v1/auth/password", "PUT")
     assert require_auth_context in {dep.call for dep in me_route.dependant.dependencies}
     assert require_auth_context in {dep.call for dep in department_tree_route.dependant.dependencies}
     assert require_auth_context in {dep.call for dep in department_update_route.dependant.dependencies}
+    assert require_auth_context in {dep.call for dep in username_update_route.dependant.dependencies}
     assert require_auth_context in {dep.call for dep in security_route.dependant.dependencies}
     assert require_auth_context in {dep.call for dep in password_route.dependant.dependencies}
 
@@ -298,6 +302,28 @@ def test_auth_department_update_contract(monkeypatch):
     assert response.status_code == 200
     assert captured == {"user_id": 9, "primary_department_id": 1, "secondary_department_id": 11}
     assert _decode(response)["data"]["require_department_setup"] is False
+
+
+def test_auth_update_username_contract(monkeypatch):
+    assert hasattr(auth_api_module, "update_username")
+    captured = {}
+
+    def fake_update_username(*, user_id: int, username: str):
+        captured["user_id"] = user_id
+        captured["username"] = username
+        return {"success": True, "data": {"id": user_id, "username": username, "role": "user", "user_type": 3}}
+
+    monkeypatch.setattr(auth_service_module.auth_service, "update_username", fake_update_username)
+
+    payload = type("Payload", (), {"username": "alice-renamed"})()
+    response = auth_api_module.update_username(
+        payload,
+        AuthContext(user_id=9, role="user", username="alice"),
+    )
+
+    assert response.status_code == 200
+    assert captured == {"user_id": 9, "username": "alice-renamed"}
+    assert _decode(response)["data"]["username"] == "alice-renamed"
 
 
 def test_get_bearer_token_supports_header_and_query():
@@ -675,6 +701,159 @@ def test_auth_service_admin_without_department_is_not_forced_to_complete_departm
     assert result["success"] is True
     assert result["data"]["role"] == "admin"
     assert result["data"]["require_department_setup"] is False
+
+
+def test_auth_service_rejects_username_shorter_than_3():
+    class FakeRepo:
+        def get_by_username(self, username):
+            return None
+
+    service = AuthService(repo=FakeRepo(), token_service=TokenService())
+    assert hasattr(service, "validate_username_candidate")
+    result = service.validate_username_candidate(username="ab")
+
+    assert result["success"] is False
+    assert result["code"] == "VALIDATION_ERROR"
+
+
+def test_auth_service_rejects_username_with_admin_prefix_case_insensitive():
+    class FakeRepo:
+        def get_by_username(self, username):
+            return None
+
+    service = AuthService(repo=FakeRepo(), token_service=TokenService())
+    assert hasattr(service, "validate_username_candidate")
+    result = service.validate_username_candidate(username="AdminRoot")
+
+    assert result["success"] is False
+    assert result["code"] == "USERNAME_INVALID"
+
+
+def test_auth_service_rejects_duplicate_username_when_owner_differs():
+    class FakeRepo:
+        def get_by_username(self, username):
+            if username == "alice":
+                return {"id": 5, "username": "alice"}
+            return None
+
+    service = AuthService(repo=FakeRepo(), token_service=TokenService())
+    assert hasattr(service, "validate_username_candidate")
+    result = service.validate_username_candidate(username="alice", owner_user_id=9)
+
+    assert result["success"] is False
+    assert result["code"] == "USERNAME_EXISTS"
+
+
+def test_auth_service_accepts_same_username_as_noop_for_same_user():
+    class FakeRepo:
+        def get_by_username(self, username):
+            if username == "alice":
+                return {"id": 9, "username": "alice"}
+            return None
+
+    service = AuthService(repo=FakeRepo(), token_service=TokenService())
+    assert hasattr(service, "validate_username_candidate")
+    result = service.validate_username_candidate(username=" alice ", owner_user_id=9)
+
+    assert result["success"] is True
+    assert result["data"]["username"] == "alice"
+
+
+def test_auth_service_update_username_rejects_admin_self_service():
+    class FakeRepo:
+        def get_by_id(self, user_id):
+            return {
+                "id": user_id,
+                "username": "admin",
+                "role": "admin",
+                "user_type": 1,
+                "status": "active",
+            }
+
+    service = AuthService(repo=FakeRepo(), token_service=TokenService())
+    assert hasattr(service, "update_username")
+    result = service.update_username(user_id=1, username="admin2")
+
+    assert result["success"] is False
+    assert result["code"] == "PERMISSION_DENIED"
+    assert service.status_code_for(result, ok_status=200) == 403
+
+
+def test_auth_service_update_username_updates_non_admin_user():
+    class FakeRepo:
+        def __init__(self):
+            self.updated = None
+
+        def get_by_id(self, user_id):
+            if user_id != 9:
+                return None
+            if self.updated:
+                return {
+                    "id": 9,
+                    "username": self.updated[1],
+                    "role": "user",
+                    "user_type": 3,
+                    "status": "active",
+                    "is_first_login": 0,
+                    "must_set_security_questions": 0,
+                    "primary_department_id": None,
+                    "secondary_department_id": None,
+                    "created_at": None,
+                }
+            return {
+                "id": 9,
+                "username": "alice",
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+                "is_first_login": 0,
+                "must_set_security_questions": 0,
+                "primary_department_id": None,
+                "secondary_department_id": None,
+                "created_at": None,
+            }
+
+        def get_by_username(self, username):
+            return None
+
+        def update_username(self, *, user_id: int, username: str):
+            self.updated = (user_id, username)
+            return 1
+
+        def has_security_questions(self, *, user_id: int):
+            return True
+
+    class FakeDepartments:
+        def describe_user_department(self, *, primary_department_id: int | None, secondary_department_id: int | None):
+            return {
+                "primary_department_id": primary_department_id,
+                "primary_department_name": None,
+                "secondary_department_id": secondary_department_id,
+                "secondary_department_name": None,
+                "require_department_setup": False,
+            }
+
+    repo = FakeRepo()
+    service = AuthService(repo=repo, token_service=TokenService(), department_service=FakeDepartments())
+    assert hasattr(service, "update_username")
+    result = service.update_username(user_id=9, username="alice-renamed")
+
+    assert result["success"] is True
+    assert repo.updated == (9, "alice-renamed")
+    assert result["data"]["username"] == "alice-renamed"
+
+
+def test_auth_service_update_username_returns_user_not_found():
+    class FakeRepo:
+        def get_by_id(self, user_id):
+            return None
+
+    service = AuthService(repo=FakeRepo(), token_service=TokenService())
+    assert hasattr(service, "update_username")
+    result = service.update_username(user_id=999, username="ghost")
+
+    assert result["success"] is False
+    assert result["code"] == "USER_NOT_FOUND"
 
 
 def test_auth_default_service_reports_db_unavailable():

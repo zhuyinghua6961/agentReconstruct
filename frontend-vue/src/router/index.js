@@ -4,7 +4,6 @@ import AdminDashboard from '../views/AdminDashboard.vue'
 import Home from '../views/Home.vue'
 import UserProfile from '../views/UserProfile.vue'
 import ForgotPassword from '../views/ForgotPassword.vue'
-import QuotaManagement from '../views/QuotaManagement.vue'
 import { buildRequiredProfilePath, hasRequiredProfileSetup, mergeValidatedUser } from './profileSetup'
 import {
   authApi,
@@ -20,7 +19,11 @@ const routes = [
   { path: '/forgot-password', component: ForgotPassword },
   { path: '/admin', component: AdminDashboard, meta: { requiresAuth: true, requiresAdmin: true } },
   { path: '/profile', component: UserProfile, meta: { requiresAuth: true } },
-  { path: '/quota-management', component: QuotaManagement, meta: { requiresAuth: true, requiresAdmin: true } }
+  {
+    path: '/quota-management',
+    redirect: { path: '/admin', query: { tab: 'quota' } },
+    meta: { requiresAuth: true, requiresAdmin: true }
+  }
 ]
 
 const router = createRouter({

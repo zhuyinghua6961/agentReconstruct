@@ -48,6 +48,7 @@ class AuthRepositoryProtocol(Protocol):
         primary_department_id: int | None,
         secondary_department_id: int | None,
     ) -> int: ...
+    def update_username(self, *, user_id: int, username: str) -> int: ...
 
 
 class DepartmentServiceProtocol(Protocol):
@@ -114,6 +115,9 @@ class UnavailableAuthRepository:
         self._raise()
 
     def has_security_questions(self, *, user_id: int) -> bool:
+        self._raise()
+
+    def update_username(self, *, user_id: int, username: str) -> int:
         self._raise()
 
 
@@ -184,7 +188,7 @@ class AuthService:
         if result.get("success"):
             return ok_status
         code = str(result.get("code") or "")
-        if code in {"VALIDATION_ERROR"}:
+        if code in {"VALIDATION_ERROR", "USERNAME_INVALID"}:
             return 400
         if code in {
             "PASSWORD_TOO_SHORT",
@@ -207,6 +211,8 @@ class AuthService:
         if code in {"USER_NOT_FOUND", "PRIMARY_DEPARTMENT_NOT_FOUND", "SECONDARY_DEPARTMENT_NOT_FOUND"}:
             return 404
         if code in {"ACCOUNT_DISABLED"}:
+            return 403
+        if code in {"PERMISSION_DENIED"}:
             return 403
         if code in {"ACCOUNT_LOCKED", "ACCOUNT_LOCKED_DUE_TO_FAILURES"}:
             return 423
@@ -288,6 +294,32 @@ class AuthService:
     @staticmethod
     def _has_symbol(password: str) -> bool:
         return any(not ch.isalnum() for ch in password)
+
+    @staticmethod
+    def _duplicate_error(exc: Exception) -> bool:
+        message = str(exc or "").lower()
+        return "duplicate" in message or "unique" in message or "1062" in message
+
+    def validate_username_candidate(
+        self,
+        *,
+        username: str,
+        owner_user_id: int | None = None,
+    ) -> dict[str, Any]:
+        normalized = str(username or "").strip()
+        if len(normalized) < 3 or len(normalized) > 50:
+            return {"success": False, "error": "用户名长度必须在3-50之间", "code": "VALIDATION_ERROR"}
+        if normalized.lower().startswith("admin"):
+            return {"success": False, "error": "不能以 admin 开头", "code": "USERNAME_INVALID"}
+        existing = self._repo.get_by_username(normalized)
+        if existing:
+            try:
+                existing_id = int(existing.get("id") or 0)
+            except Exception:
+                existing_id = 0
+            if owner_user_id is None or existing_id != int(owner_user_id):
+                return {"success": False, "error": "用户名已存在", "code": "USERNAME_EXISTS"}
+        return {"success": True, "data": {"username": normalized}}
 
     def _validate_password_strength(self, *, password: str, role: str) -> dict[str, Any]:
         password = str(password or "")
@@ -452,20 +484,45 @@ class AuthService:
                 return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
             return {"success": False, "error": str(exc), "code": "UPDATE_ERROR"}
 
+    def update_username(self, *, user_id: int, username: str) -> dict[str, Any]:
+        try:
+            user = self._repo.get_by_id(user_id)
+            if not user:
+                return {"success": False, "error": "user_not_found", "code": "USER_NOT_FOUND"}
+            if self._is_admin_user(user):
+                return {"success": False, "error": "管理员不能在个人中心修改用户名", "code": "PERMISSION_DENIED"}
+            validation = self.validate_username_candidate(username=username, owner_user_id=user_id)
+            if not validation.get("success"):
+                return validation
+            normalized_username = str(validation.get("data", {}).get("username") or "").strip()
+            updated_count = self._repo.update_username(user_id=user_id, username=normalized_username)
+            refreshed_user = self._repo.get_by_id(user_id) or user
+            current_username = str(refreshed_user.get("username") or "").strip()
+            if updated_count <= 0 and current_username != normalized_username:
+                return {"success": False, "error": "username_update_failed", "code": "UPDATE_ERROR"}
+            updated_user = {**refreshed_user, "username": normalized_username}
+            return {"success": True, "message": "username_updated", "data": self._build_user_payload(updated_user)}
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
+            if self._duplicate_error(exc):
+                return {"success": False, "error": "用户名已存在", "code": "USERNAME_EXISTS"}
+            return {"success": False, "error": str(exc), "code": "UPDATE_ERROR"}
+
     def register(self, username: str, password: str) -> dict[str, Any]:
         username = (username or "").strip()
         password = password or ""
-        if len(username) < 3 or len(username) > 64:
-            return {"success": False, "error": "invalid_username", "code": "VALIDATION_ERROR"}
         validation = self._validate_password_strength(password=password, role="user")
         if not validation.get("success"):
             return validation
         try:
-            if self._repo.get_by_username(username):
-                return {"success": False, "error": "username_exists", "code": "USERNAME_EXISTS"}
+            username_validation = self.validate_username_candidate(username=username)
+            if not username_validation.get("success"):
+                return username_validation
+            normalized_username = str(username_validation.get("data", {}).get("username") or "").strip()
             password_hash = _hash_password(password)
             user_id = self._repo.create_user(
-                username=username,
+                username=normalized_username,
                 password_hash=password_hash,
                 role="user",
                 user_type=3,
@@ -480,7 +537,7 @@ class AuthService:
                 "message": "register_success",
                 "data": {
                     "token": token,
-                    "user": {"id": user_id, "username": username, "role": "user", "user_type": 3},
+                    "user": {"id": user_id, "username": normalized_username, "role": "user", "user_type": 3},
                     "is_first_login": True,
                     "has_security_questions": False,
                     "require_security_questions_setup": True,
@@ -491,6 +548,8 @@ class AuthService:
         except Exception as exc:
             if _is_db_unavailable_error(exc):
                 return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
+            if self._duplicate_error(exc):
+                return {"success": False, "error": "用户名已存在", "code": "USERNAME_EXISTS"}
             return {"success": False, "error": str(exc), "code": "REGISTER_ERROR"}
 
     def login(self, username: str, password: str) -> dict[str, Any]:

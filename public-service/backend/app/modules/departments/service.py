@@ -94,6 +94,29 @@ class DepartmentService:
             return label
         return "未填写"
 
+    @staticmethod
+    def _user_type_code(*, user_type: object, role: object) -> int:
+        try:
+            user_type_code = int(user_type) if user_type is not None else None
+        except (TypeError, ValueError):
+            user_type_code = None
+
+        role_text = str(role or "").strip().lower()
+        if user_type_code == 1 or role_text == "admin":
+            return 1
+        if user_type_code == 2 or role_text == "super":
+            return 2
+        return 3
+
+    @classmethod
+    def _user_type_label(cls, *, user_type: object, role: object) -> str:
+        user_type_code = cls._user_type_code(user_type=user_type, role=role)
+        if user_type_code == 1:
+            return "管理员"
+        if user_type_code == 2:
+            return "超级用户"
+        return "普通用户"
+
     def _build_primary_payload(self, primary: dict[str, Any]) -> dict[str, Any]:
         return {
             "id": int(primary["id"]),
@@ -131,6 +154,7 @@ class DepartmentService:
                             "name": secondary["name"],
                             "status": child_status,
                             "effective_status": effective_status,
+                            "user_count": int(secondary.get("user_count") or 0),
                         }
                     )
                 items.append(
@@ -146,6 +170,47 @@ class DepartmentService:
             if _is_db_unavailable_error(exc):
                 return self._db_error(exc)
             return {"success": False, "error": "获取部门列表失败", "code": "FETCH_ERROR"}
+
+    def list_secondary_users(self, *, secondary_id: int) -> dict[str, Any]:
+        try:
+            secondary = self._repository.get_secondary_by_id(int(secondary_id))
+            if not secondary:
+                return {"success": False, "error": "二级部门不存在", "code": "SECONDARY_DEPARTMENT_NOT_FOUND"}
+
+            primary_id = int(secondary["primary_department_id"])
+            primary = self._repository.get_primary_by_id(primary_id)
+            rows = self._repository.list_users_by_secondary_department(secondary_id=int(secondary["id"]))
+            users = [
+                {
+                    "id": int(row["id"]),
+                    "username": row["username"],
+                    "user_type": self._user_type_code(
+                        user_type=row.get("user_type"),
+                        role=row.get("role"),
+                    ),
+                    "user_type_label": self._user_type_label(
+                        user_type=row.get("user_type"),
+                        role=row.get("role"),
+                    ),
+                    "status": self._normalize_status(row.get("status")),
+                }
+                for row in rows
+            ]
+            return {
+                "success": True,
+                "data": {
+                    "secondary_department_id": int(secondary["id"]),
+                    "primary_department_id": primary_id,
+                    "primary_department_name": (primary or {}).get("name"),
+                    "secondary_department_name": secondary.get("name"),
+                    "user_count": len(users),
+                    "users": users,
+                },
+            }
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "获取部门用户失败", "code": "FETCH_ERROR"}
 
     def get_selectable_tree(self) -> dict[str, Any]:
         try:

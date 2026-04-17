@@ -14,6 +14,7 @@ from app.modules.auth.schemas import (
     LoginRequest,
     RegisterRequest,
     SetSecurityQuestionsRequest,
+    UsernameUpdateRequest,
 )
 from app.modules.auth import service as auth_service_module
 
@@ -63,6 +64,21 @@ def update_department(
             user_id=context.user_id,
             primary_department_id=payload.primary_department_id,
             secondary_department_id=payload.secondary_department_id,
+        ),
+        ok_status=200,
+    )
+
+
+@router.put("/api/v1/auth/username")
+@router.put("/api/auth/username")
+def update_username(
+    payload: UsernameUpdateRequest,
+    context: AuthContext = Depends(require_auth_context),
+):
+    return _respond(
+        auth_service_module.auth_service.update_username(
+            user_id=context.user_id,
+            username=payload.username,
         ),
         ok_status=200,
     )
