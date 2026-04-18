@@ -61,14 +61,16 @@ class AdminUsersService:
         return None
 
     @staticmethod
-    def _department_pair_from_mapping(data: dict[str, Any] | None) -> tuple[int | None, int | None]:
+    def _department_triplet_from_mapping(data: dict[str, Any] | None) -> tuple[int | None, int | None, int | None]:
         if not data:
-            return (None, None)
+            return (None, None, None)
         primary_id = data.get("primary_department_id")
         secondary_id = data.get("secondary_department_id")
+        tertiary_id = data.get("tertiary_department_id")
         return (
             int(primary_id) if primary_id is not None else None,
             int(secondary_id) if secondary_id is not None else None,
+            int(tertiary_id) if tertiary_id is not None else None,
         )
 
     @staticmethod
@@ -110,7 +112,7 @@ class AdminUsersService:
             return 409
         if code in {"QUOTA_EXCEEDED"}:
             return 429
-        if code in {"USER_NOT_FOUND", "PRIMARY_DEPARTMENT_NOT_FOUND", "SECONDARY_DEPARTMENT_NOT_FOUND"}:
+        if code in {"USER_NOT_FOUND", "PRIMARY_DEPARTMENT_NOT_FOUND", "SECONDARY_DEPARTMENT_NOT_FOUND", "TERTIARY_DEPARTMENT_NOT_FOUND"}:
             return 404
         if code in {"DB_UNAVAILABLE"}:
             return 503
@@ -130,12 +132,15 @@ class AdminUsersService:
                 department_payload = self._departments.describe_user_department(
                     primary_department_id=row.get("primary_department_id"),
                     secondary_department_id=row.get("secondary_department_id"),
+                    tertiary_department_id=row.get("tertiary_department_id"),
                 )
                 primary_name = department_payload.get("primary_department_name")
                 secondary_name = department_payload.get("secondary_department_name")
+                tertiary_name = department_payload.get("tertiary_department_name")
                 department_display = department_payload.get("department_display")
                 if not department_display:
-                    department_display = f"{primary_name} / {secondary_name}" if primary_name and secondary_name else "未填写"
+                    parts = [part for part in (primary_name, secondary_name, tertiary_name) if part]
+                    department_display = " / ".join(parts) if parts else "未填写"
                 data.append(
                     {
                         "id": int(row["id"]),
@@ -166,6 +171,7 @@ class AdminUsersService:
         user_type: str,
         primary_department_id: int | None = None,
         secondary_department_id: int | None = None,
+        tertiary_department_id: int | None = None,
     ) -> dict[str, Any]:
         try:
             username = self.clean_text(username)
@@ -182,8 +188,10 @@ class AdminUsersService:
             department_validation = self._departments.validate_department_selection(
                 primary_department_id=primary_department_id,
                 secondary_department_id=secondary_department_id,
+                tertiary_department_id=tertiary_department_id,
                 require_active=True,
                 allow_empty=True,
+                allow_legacy_two_level=False,
             )
             if not department_validation.get("success"):
                 return department_validation
@@ -199,6 +207,7 @@ class AdminUsersService:
                 must_set_security_questions=True,
                 primary_department_id=department_data.get("primary_department_id"),
                 secondary_department_id=department_data.get("secondary_department_id"),
+                tertiary_department_id=department_data.get("tertiary_department_id"),
             )
             self._users.add_password_history(user_id=created_id, password_hash=password_hash)
             self._users.trim_password_history(user_id=created_id, keep_limit=self._password_history_limit("user"))
@@ -262,6 +271,7 @@ class AdminUsersService:
         target_user_id: int,
         primary_department_id: int | None,
         secondary_department_id: int | None,
+        tertiary_department_id: int | None = None,
     ) -> dict[str, Any]:
         try:
             user = self._users.get_by_id(target_user_id)
@@ -270,13 +280,15 @@ class AdminUsersService:
             current_department = self._departments.describe_user_department(
                 primary_department_id=user.get("primary_department_id"),
                 secondary_department_id=user.get("secondary_department_id"),
+                tertiary_department_id=user.get("tertiary_department_id"),
             )
             if (
-                self._department_pair_from_mapping(user)
-                == self._department_pair_from_mapping(
+                self._department_triplet_from_mapping(user)
+                == self._department_triplet_from_mapping(
                     {
                         "primary_department_id": primary_department_id,
                         "secondary_department_id": secondary_department_id,
+                        "tertiary_department_id": tertiary_department_id,
                     }
                 )
                 and not bool(current_department.get("require_department_setup"))
@@ -293,8 +305,10 @@ class AdminUsersService:
             department_validation = self._departments.validate_department_selection(
                 primary_department_id=primary_department_id,
                 secondary_department_id=secondary_department_id,
+                tertiary_department_id=tertiary_department_id,
                 require_active=True,
                 allow_empty=True,
+                allow_legacy_two_level=False,
             )
             if not department_validation.get("success"):
                 return department_validation
@@ -303,12 +317,13 @@ class AdminUsersService:
                 user_id=target_user_id,
                 primary_department_id=department_data.get("primary_department_id"),
                 secondary_department_id=department_data.get("secondary_department_id"),
+                tertiary_department_id=department_data.get("tertiary_department_id"),
             )
             refreshed_user = self._users.get_by_id(target_user_id) or user
             if (
                 updated_count <= 0
-                and self._department_pair_from_mapping(refreshed_user)
-                != self._department_pair_from_mapping(department_data)
+                and self._department_triplet_from_mapping(refreshed_user)
+                != self._department_triplet_from_mapping(department_data)
             ):
                 return {"success": False, "error": "修改用户部门失败", "code": "UPDATE_ERROR"}
             return {

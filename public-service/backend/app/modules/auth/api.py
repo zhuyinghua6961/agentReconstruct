@@ -64,6 +64,7 @@ def update_department(
             user_id=context.user_id,
             primary_department_id=payload.primary_department_id,
             secondary_department_id=payload.secondary_department_id,
+            tertiary_department_id=payload.tertiary_department_id,
         ),
         ok_status=200,
     )

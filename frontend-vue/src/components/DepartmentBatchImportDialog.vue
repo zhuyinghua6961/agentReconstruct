@@ -148,7 +148,7 @@ function requestClose() {
             <button class="template-btn" @click="downloadTemplate('xlsx')">下载 Excel 模板</button>
             <button class="template-btn" @click="downloadTemplate('csv')">下载 CSV 模板</button>
           </div>
-          <p class="hint">模板列固定为 primary_department_name、primary_status、secondary_department_name、secondary_status。</p>
+          <p class="hint">模板列固定为 primary_department_name、primary_status、secondary_department_name、secondary_status、tertiary_department_name、tertiary_status。</p>
         </div>
 
         <div class="upload-section">
@@ -188,8 +188,10 @@ function requestClose() {
           <p class="info-title">导入说明：</p>
           <ul class="info-list">
             <li>每一行都必须填写 primary_department_name、primary_status、secondary_department_name、secondary_status。</li>
+            <li>如果要导入三级部门，必须同时填写 tertiary_department_name 和 tertiary_status；两列都留空则只维护到二级。</li>
             <li>状态值只能填写 <code>active</code> 或 <code>disabled</code>。</li>
             <li>同名一级部门会按名称更新状态；同名二级部门会在所属一级部门下按名称更新状态。</li>
+            <li>同名三级部门会在所属二级部门下按名称更新状态。</li>
             <li>导入文件里没有出现的已有部门会保留原样，不会被删除，也不会被自动停用。</li>
             <li>同一一级部门在同一文件中的 primary_status 必须保持一致，否则冲突行会失败。</li>
             <li>完全重复的行会被标记为跳过。</li>

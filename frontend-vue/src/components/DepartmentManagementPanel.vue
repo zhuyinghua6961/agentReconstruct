@@ -1,9 +1,10 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { adminApi } from '../services/admin'
 import DepartmentBatchImportDialog from './DepartmentBatchImportDialog.vue'
 import DepartmentImportResultDialog from './DepartmentImportResultDialog.vue'
-import { createSecondaryUsersRuntime } from '../utils/departmentSecondaryUsersRuntime'
+import { createDepartmentUsersRuntime } from '../utils/departmentSecondaryUsersRuntime'
+import { buildDepartmentRenderTree } from '../utils/departmentManagementTreeModel'
 
 const emit = defineEmits(['updated'])
 
@@ -13,17 +14,34 @@ const success = ref('')
 const departmentTree = ref([])
 const newPrimaryName = ref('')
 const secondaryDrafts = ref({})
+const tertiaryDrafts = ref({})
 const showDepartmentImportDialog = ref(false)
 const showDepartmentImportResultDialog = ref(false)
 const departmentImportResult = ref(null)
 const expandedPrimaryIds = ref([])
-const secondaryUsersRuntime = createSecondaryUsersRuntime({
-  requestUsers: (secondaryId) => adminApi.getSecondaryDepartmentUsers(secondaryId),
+const expandedSecondaryIds = ref([])
+const LEGACY_PENDING_NODE_LABEL = '未补全三级部门用户'
+
+const departmentUsersRuntime = createDepartmentUsersRuntime({
+  requestUsers: (nodeKey) => {
+    if (String(nodeKey).startsWith('legacy-secondary-')) {
+      const secondaryId = Number(String(nodeKey).replace('legacy-secondary-', ''))
+      return adminApi.getSecondaryLegacyDepartmentUsers(secondaryId)
+    }
+    return adminApi.getTertiaryDepartmentUsers(Number(nodeKey))
+  },
 })
-const expandedSecondaryIds = secondaryUsersRuntime.expandedIds
-const secondaryUsersById = secondaryUsersRuntime.usersById
-const secondaryUsersLoadingById = secondaryUsersRuntime.loadingById
-const secondaryUsersErrorById = secondaryUsersRuntime.errorById
+const expandedDepartmentNodeIds = departmentUsersRuntime.expandedIds
+const departmentUsersById = departmentUsersRuntime.usersById
+const departmentUsersLoadingById = departmentUsersRuntime.loadingById
+const departmentUsersErrorById = departmentUsersRuntime.errorById
+
+const departmentRenderTree = computed(() => (
+  (Array.isArray(departmentTree.value) ? departmentTree.value : []).map(primary => ({
+    ...primary,
+    renderSecondaryItems: buildDepartmentRenderTree(primary.secondary_items),
+  }))
+))
 
 function setSuccess(message) {
   success.value = message
@@ -39,7 +57,8 @@ async function fetchDepartmentTree() {
   if (result.success) {
     departmentTree.value = Array.isArray(result.data?.items) ? result.data.items : []
     expandedPrimaryIds.value = []
-    secondaryUsersRuntime.reset()
+    expandedSecondaryIds.value = []
+    departmentUsersRuntime.reset()
     error.value = ''
   } else {
     error.value = result.error || '获取部门列表失败'
@@ -54,22 +73,35 @@ function isPrimaryExpanded(primaryId) {
 function togglePrimary(primaryId) {
   const normalizedId = Number(primaryId)
   if (expandedPrimaryIds.value.includes(normalizedId)) {
-    expandedPrimaryIds.value = expandedPrimaryIds.value.filter((item) => item !== normalizedId)
+    expandedPrimaryIds.value = expandedPrimaryIds.value.filter(item => item !== normalizedId)
     return
   }
   expandedPrimaryIds.value = [...expandedPrimaryIds.value, normalizedId]
 }
 
 function isSecondaryExpanded(secondaryId) {
-  return secondaryUsersRuntime.isExpanded(secondaryId)
+  return expandedSecondaryIds.value.includes(Number(secondaryId))
 }
 
-async function toggleSecondary(secondaryId) {
-  await secondaryUsersRuntime.toggle(secondaryId)
+function toggleSecondary(secondaryId) {
+  const normalizedId = Number(secondaryId)
+  if (expandedSecondaryIds.value.includes(normalizedId)) {
+    expandedSecondaryIds.value = expandedSecondaryIds.value.filter(item => item !== normalizedId)
+    return
+  }
+  expandedSecondaryIds.value = [...expandedSecondaryIds.value, normalizedId]
 }
 
-async function loadSecondaryUsers(secondaryId, options = {}) {
-  await secondaryUsersRuntime.load(secondaryId, options)
+function isDepartmentNodeExpanded(nodeKey) {
+  return departmentUsersRuntime.isExpanded(nodeKey)
+}
+
+async function toggleDepartmentUsers(nodeKey) {
+  await departmentUsersRuntime.toggle(nodeKey)
+}
+
+async function loadDepartmentUsers(nodeKey, options = {}) {
+  await departmentUsersRuntime.load(nodeKey, options)
 }
 
 async function handleCreatePrimary() {
@@ -171,6 +203,59 @@ async function handleToggleSecondaryStatus(secondary) {
   error.value = result.error || `二级部门${actionText}失败`
 }
 
+async function handleCreateTertiary(secondary) {
+  const secondaryId = Number(secondary.id)
+  const name = String(tertiaryDrafts.value[secondaryId] || '').trim()
+  if (!name) {
+    error.value = '请输入三级部门名称'
+    return
+  }
+  const result = await adminApi.createTertiaryDepartment(secondaryId, name)
+  if (result.success) {
+    tertiaryDrafts.value = {
+      ...tertiaryDrafts.value,
+      [secondaryId]: '',
+    }
+    setSuccess('三级部门创建成功')
+    await fetchDepartmentTree()
+    emit('updated')
+    return
+  }
+  error.value = result.error || '创建三级部门失败'
+}
+
+async function handleRenameTertiary(tertiary) {
+  const nextName = window.prompt('请输入新的三级部门名称：', tertiary.name)
+  if (!nextName || nextName.trim() === tertiary.name) {
+    return
+  }
+  const result = await adminApi.renameTertiaryDepartment(tertiary.tertiary_id || tertiary.id, nextName.trim())
+  if (result.success) {
+    setSuccess('三级部门已更新')
+    await fetchDepartmentTree()
+    emit('updated')
+    return
+  }
+  error.value = result.error || '更新三级部门失败'
+}
+
+async function handleToggleTertiaryStatus(tertiary) {
+  const currentStatus = tertiary.status || 'active'
+  const targetStatus = currentStatus === 'active' ? 'disabled' : 'active'
+  const actionText = targetStatus === 'disabled' ? '停用' : '启用'
+  if (!window.confirm(`确定要${actionText}三级部门 ${tertiary.name} 吗？`)) {
+    return
+  }
+  const result = await adminApi.updateTertiaryDepartmentStatus(tertiary.tertiary_id || tertiary.id, targetStatus)
+  if (result.success) {
+    setSuccess(`三级部门已${actionText}`)
+    await fetchDepartmentTree()
+    emit('updated')
+    return
+  }
+  error.value = result.error || `三级部门${actionText}失败`
+}
+
 async function handleDepartmentImportSuccess(result) {
   const summary = result?.summary || {}
   departmentImportResult.value = result
@@ -192,7 +277,7 @@ onMounted(() => {
     <div class="panel-header">
       <div>
         <h2>部门管理</h2>
-        <p>维护一级、二级部门字典。停用后不会清空已绑定用户，只会禁止后续新选择。</p>
+        <p>维护一级、二级、三级部门字典。停用后不会清空已绑定用户，只会禁止后续新选择。</p>
       </div>
       <div class="panel-actions">
         <button class="refresh-btn" @click="fetchDepartmentTree">刷新</button>
@@ -212,7 +297,7 @@ onMounted(() => {
 
     <div v-else class="department-tree">
       <div
-        v-for="primary in departmentTree"
+        v-for="primary in departmentRenderTree"
         :key="primary.id"
         class="primary-card"
       >
@@ -261,9 +346,9 @@ onMounted(() => {
             <button class="secondary-btn" @click="handleCreateSecondary(primary)">新增二级部门</button>
           </div>
 
-          <div v-if="primary.secondary_items?.length" class="secondary-list">
+          <div v-if="primary.renderSecondaryItems?.length" class="secondary-list">
             <div
-              v-for="secondary in primary.secondary_items"
+              v-for="secondary in primary.renderSecondaryItems"
               :key="secondary.id"
               class="secondary-item"
             >
@@ -287,53 +372,118 @@ onMounted(() => {
                   >
                     <div class="secondary-title">
                       <span class="secondary-name">{{ secondary.name }}</span>
-                      <span class="status-badge" :class="secondary.effective_status">
-                        {{ secondary.effective_status === 'active' ? '可选' : '已停用' }}
+                      <span class="status-badge" :class="secondary.effectiveStatus">
+                        {{ secondary.effectiveStatus === 'active' ? '可选' : '已停用' }}
                       </span>
                     </div>
-                    <span class="secondary-count">{{ secondary.user_count || 0 }} 人</span>
+                    <span class="secondary-count">
+                      {{ secondary.tertiary_count }} 个三级部门 / {{ secondary.user_count }} 人
+                    </span>
                   </div>
                 </div>
                 <div class="secondary-meta">
-                  <span v-if="secondary.effective_status !== secondary.status" class="meta-text">
-                    子级存储状态 {{ secondary.status === 'active' ? '启用' : '停用' }}，当前随一级部门禁用
+                  <span v-if="secondary.legacy_user_count > 0" class="meta-text">
+                    其中 {{ secondary.legacy_user_count }} 人未补全三级
                   </span>
                   <div class="actions">
-                    <button class="action-btn" @click="handleRenameSecondary(secondary)">改名</button>
-                    <button class="action-btn" @click="handleToggleSecondaryStatus(secondary)">
-                      {{ secondary.status === 'active' ? '停用' : '启用' }}
+                    <button class="action-btn" @click="handleRenameSecondary(secondary.raw)">改名</button>
+                    <button class="action-btn" @click="handleToggleSecondaryStatus(secondary.raw)">
+                      {{ secondary.raw?.status === 'active' ? '停用' : '启用' }}
                     </button>
                   </div>
                 </div>
               </div>
 
               <div v-if="isSecondaryExpanded(secondary.id)" class="secondary-body">
-                <div v-if="secondaryUsersLoadingById[secondary.id]" class="secondary-users-state">
-                  加载用户中...
-                </div>
-                <div v-else-if="secondaryUsersErrorById[secondary.id]" class="secondary-users-state secondary-users-error">
-                  <span>{{ secondaryUsersErrorById[secondary.id] }}</span>
-                  <button class="action-btn" @click="loadSecondaryUsers(secondary.id, { force: true })">重试</button>
-                </div>
-                <div v-else-if="secondaryUsersById[secondary.id]?.length" class="secondary-users">
-                  <div class="secondary-users-head">
-                    <span>用户名</span>
-                    <span>用户类型</span>
-                    <span>状态</span>
-                  </div>
-                  <div
-                    v-for="user in secondaryUsersById[secondary.id]"
-                    :key="user.id"
-                    class="secondary-user-row"
+                <div class="create-tertiary create-secondary">
+                  <input
+                    v-model="tertiaryDrafts[secondary.id]"
+                    type="text"
+                    :placeholder="`在 ${secondary.name} 下新增三级部门`"
                   >
-                    <span>{{ user.username }}</span>
-                    <span>{{ user.user_type_label }}</span>
-                    <span class="status-badge" :class="user.status">
-                      {{ user.status === 'active' ? '启用中' : '已停用' }}
-                    </span>
+                  <button class="secondary-btn" @click="handleCreateTertiary(secondary)">新增三级部门</button>
+                </div>
+
+                <div v-if="secondary.children?.length" class="tertiary-list">
+                  <div
+                    v-for="tertiary in secondary.children"
+                    :key="tertiary.nodeKey"
+                    class="tertiary-item"
+                  >
+                    <div class="secondary-header tertiary-header">
+                      <div class="secondary-main">
+                        <button
+                          type="button"
+                          class="collapse-toggle"
+                          :aria-expanded="isDepartmentNodeExpanded(tertiary.nodeKey)"
+                          @click="toggleDepartmentUsers(tertiary.nodeKey)"
+                        >
+                          {{ isDepartmentNodeExpanded(tertiary.nodeKey) ? 'v' : '>' }}
+                        </button>
+                        <div
+                          class="secondary-summary"
+                          role="button"
+                          tabindex="0"
+                          @click="toggleDepartmentUsers(tertiary.nodeKey)"
+                          @keydown.enter.prevent="toggleDepartmentUsers(tertiary.nodeKey)"
+                          @keydown.space.prevent="toggleDepartmentUsers(tertiary.nodeKey)"
+                        >
+                          <div class="secondary-title">
+                            <span class="secondary-name">
+                              {{ tertiary.nodeType === 'legacy_pending' ? LEGACY_PENDING_NODE_LABEL : tertiary.name }}
+                            </span>
+                            <span
+                              class="status-badge"
+                              :class="tertiary.nodeType === 'legacy_pending' ? 'disabled' : tertiary.effectiveStatus"
+                            >
+                              {{ tertiary.nodeType === 'legacy_pending' ? '待补全' : (tertiary.effectiveStatus === 'active' ? '可选' : '已停用') }}
+                            </span>
+                          </div>
+                          <span class="secondary-count">{{ tertiary.user_count }} 人</span>
+                        </div>
+                      </div>
+                      <div class="actions" v-if="tertiary.nodeType === 'tertiary'">
+                        <button class="action-btn" @click="handleRenameTertiary(tertiary)">改名</button>
+                        <button class="action-btn" @click="handleToggleTertiaryStatus(tertiary)">
+                          {{ tertiary.status === 'active' ? '停用' : '启用' }}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div v-if="isDepartmentNodeExpanded(tertiary.nodeKey)" class="secondary-body">
+                      <div v-if="departmentUsersLoadingById[tertiary.nodeKey]" class="secondary-users-state">
+                        加载用户中...
+                      </div>
+                      <div
+                        v-else-if="departmentUsersErrorById[tertiary.nodeKey]"
+                        class="secondary-users-state secondary-users-error"
+                      >
+                        <span>{{ departmentUsersErrorById[tertiary.nodeKey] }}</span>
+                        <button class="action-btn" @click="loadDepartmentUsers(tertiary.nodeKey, { force: true })">重试</button>
+                      </div>
+                      <div v-else-if="departmentUsersById[tertiary.nodeKey]?.length" class="secondary-users">
+                        <div class="secondary-users-head">
+                          <span>用户名</span>
+                          <span>用户类型</span>
+                          <span>状态</span>
+                        </div>
+                        <div
+                          v-for="user in departmentUsersById[tertiary.nodeKey]"
+                          :key="user.id"
+                          class="secondary-user-row"
+                        >
+                          <span>{{ user.username }}</span>
+                          <span>{{ user.user_type_label }}</span>
+                          <span class="status-badge" :class="user.status">
+                            {{ user.status === 'active' ? '启用中' : '已停用' }}
+                          </span>
+                        </div>
+                      </div>
+                      <p v-else class="secondary-users-state">暂无用户</p>
+                    </div>
                   </div>
                 </div>
-                <p v-else class="secondary-users-state">暂无用户</p>
+                <p v-else class="secondary-users-state">暂无三级部门</p>
               </div>
             </div>
           </div>
@@ -552,12 +702,14 @@ onMounted(() => {
   margin-top: 14px;
 }
 
-.secondary-list {
+.secondary-list,
+.tertiary-list {
   display: grid;
   gap: 10px;
 }
 
-.secondary-item {
+.secondary-item,
+.tertiary-item {
   border: 1px solid #e5e7eb;
   border-radius: 10px;
   padding: 12px;

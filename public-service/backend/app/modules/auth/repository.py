@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from time import monotonic
 from typing import Any
 
 from app.core.config import get_settings
@@ -11,6 +12,10 @@ class AuthRepository:
         self._db = database or Database(settings=get_settings())
         self._columns_cache: set[str] | None = None
         self._tables_cache: set[str] | None = None
+        self._columns_cache_loaded_at = 0.0
+        self._tables_cache_loaded_at = 0.0
+        self._schema_cache_ttl_seconds = 1.0
+        self._now = monotonic
 
     def _execute_query(self, query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
         with self._db.connection() as conn:
@@ -41,14 +46,21 @@ class AuthRepository:
                 names.add(str(values[0] or ""))
         return names
 
+    def _cache_valid(self, loaded_at: float) -> bool:
+        return loaded_at > 0 and (self._now() - loaded_at) < self._schema_cache_ttl_seconds
+
     def _columns(self) -> set[str]:
-        if self._columns_cache is None:
-            self._columns_cache = self._load_columns()
+        if self._cache_valid(self._columns_cache_loaded_at) and self._columns_cache is not None:
+            return self._columns_cache
+        self._columns_cache = self._load_columns()
+        self._columns_cache_loaded_at = self._now()
         return self._columns_cache
 
     def _tables(self) -> set[str]:
-        if self._tables_cache is None:
-            self._tables_cache = self._load_tables()
+        if self._cache_valid(self._tables_cache_loaded_at) and self._tables_cache is not None:
+            return self._tables_cache
+        self._tables_cache = self._load_tables()
+        self._tables_cache_loaded_at = self._now()
         return self._tables_cache
 
     def has_column(self, column_name: str) -> bool:
@@ -75,6 +87,8 @@ class AuthRepository:
             fields.append("primary_department_id")
         if self.has_column("secondary_department_id"):
             fields.append("secondary_department_id")
+        if self.has_column("tertiary_department_id"):
+            fields.append("tertiary_department_id")
         if self.has_column("password_updated_at"):
             fields.append("password_updated_at")
         if self.has_column("failed_login_attempts"):
@@ -121,6 +135,7 @@ class AuthRepository:
         must_set_security_questions: bool | None = None,
         primary_department_id: int | None = None,
         secondary_department_id: int | None = None,
+        tertiary_department_id: int | None = None,
     ) -> int:
         columns = ["username", "password_hash", "role", "status"]
         values: list[Any] = [username, password_hash, role, "active"]
@@ -139,6 +154,9 @@ class AuthRepository:
         if self.has_column("secondary_department_id"):
             columns.append("secondary_department_id")
             values.append(secondary_department_id)
+        if self.has_column("tertiary_department_id"):
+            columns.append("tertiary_department_id")
+            values.append(tertiary_department_id)
         if self.has_column("password_updated_at"):
             columns.append("password_updated_at")
             values.append("NOW_FUNC_PLACEHOLDER")
@@ -183,9 +201,21 @@ class AuthRepository:
         user_id: int,
         primary_department_id: int | None,
         secondary_department_id: int | None,
+        tertiary_department_id: int | None = None,
     ) -> int:
         if not self.has_column("primary_department_id") or not self.has_column("secondary_department_id"):
             return 0
+        if self.has_column("tertiary_department_id"):
+            return self._execute_update(
+                """
+                UPDATE users
+                SET primary_department_id = %s,
+                    secondary_department_id = %s,
+                    tertiary_department_id = %s
+                WHERE id = %s
+                """,
+                (primary_department_id, secondary_department_id, tertiary_department_id, user_id),
+            )
         return self._execute_update(
             """
             UPDATE users
@@ -220,6 +250,8 @@ class AuthRepository:
             fields.append("primary_department_id")
         if self.has_column("secondary_department_id"):
             fields.append("secondary_department_id")
+        if self.has_column("tertiary_department_id"):
+            fields.append("tertiary_department_id")
         fields.extend(["created_at", "updated_at"])
         return self._execute_query(
             f"""

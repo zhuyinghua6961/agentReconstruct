@@ -54,8 +54,10 @@ const departmentOptionsLoading = ref(false)
 const selectableDepartmentTree = ref([])
 const newPrimaryDepartmentId = ref(null)
 const newSecondaryDepartmentId = ref(null)
+const newTertiaryDepartmentId = ref(null)
 const editPrimaryDepartmentId = ref(null)
 const editSecondaryDepartmentId = ref(null)
+const editTertiaryDepartmentId = ref(null)
 
 const currentPageUserIds = computed(() => users.value.map(user => user.id))
 const hasSelectedUsers = computed(() => selectedUserIds.value.length > 0)
@@ -404,6 +406,7 @@ function openCreateModal() {
   newUserType.value = 'common'  // 重置为默认值
   newPrimaryDepartmentId.value = null
   newSecondaryDepartmentId.value = null
+  newTertiaryDepartmentId.value = null
   error.value = ''
   showCreateModal.value = true
 }
@@ -412,6 +415,7 @@ function openDepartmentModal(user) {
   selectedUser.value = user
   editPrimaryDepartmentId.value = user?.primary_department_id ?? null
   editSecondaryDepartmentId.value = user?.secondary_department_id ?? null
+  editTertiaryDepartmentId.value = user?.tertiary_department_id ?? null
   error.value = ''
   showDepartmentModal.value = true
 }
@@ -503,6 +507,7 @@ async function submitCreateUser() {
     {
       primary_department_id: newPrimaryDepartmentId.value,
       secondary_department_id: newSecondaryDepartmentId.value,
+      tertiary_department_id: newTertiaryDepartmentId.value,
     },
   )
   
@@ -526,6 +531,7 @@ async function submitUserDepartment() {
   const result = await adminApi.updateUserDepartment(selectedUser.value.id, {
     primary_department_id: editPrimaryDepartmentId.value,
     secondary_department_id: editSecondaryDepartmentId.value,
+    tertiary_department_id: editTertiaryDepartmentId.value,
   })
 
   if (result.success) {
@@ -827,10 +833,12 @@ onMounted(async () => {
               :tree="selectableDepartmentTree"
               :primary-id="newPrimaryDepartmentId"
               :secondary-id="newSecondaryDepartmentId"
+              :tertiary-id="newTertiaryDepartmentId"
               :allow-empty="true"
               :disabled="departmentOptionsLoading"
               @update:primary-id="newPrimaryDepartmentId = $event"
               @update:secondary-id="newSecondaryDepartmentId = $event"
+              @update:tertiary-id="newTertiaryDepartmentId = $event"
             />
           </div>
         </div>
@@ -871,10 +879,12 @@ onMounted(async () => {
             :tree="editDepartmentTree"
             :primary-id="editPrimaryDepartmentId"
             :secondary-id="editSecondaryDepartmentId"
+            :tertiary-id="editTertiaryDepartmentId"
             :allow-empty="true"
             :disabled="departmentOptionsLoading"
             @update:primary-id="editPrimaryDepartmentId = $event"
             @update:secondary-id="editSecondaryDepartmentId = $event"
+            @update:tertiary-id="editTertiaryDepartmentId = $event"
           />
         </div>
         <div class="modal-footer">

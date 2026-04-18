@@ -1,13 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { createSecondaryUsersRuntime } from './departmentSecondaryUsersRuntime.js'
+import { createDepartmentUsersRuntime } from './departmentSecondaryUsersRuntime.js'
 
-test('secondary users runtime expands once and reuses cached users on reopen', async () => {
+test('department users runtime expands once and reuses cached users on reopen', async () => {
   const calls = []
-  const runtime = createSecondaryUsersRuntime({
-    requestUsers: async (secondaryId) => {
-      calls.push(secondaryId)
+  const runtime = createDepartmentUsersRuntime({
+    requestUsers: async (nodeKey) => {
+      calls.push(nodeKey)
       return {
         success: true,
         data: {
@@ -19,25 +19,38 @@ test('secondary users runtime expands once and reuses cached users on reopen', a
     },
   })
 
-  await runtime.toggle(11)
-  assert.equal(runtime.isExpanded(11), true)
+  await runtime.toggle('111')
+  assert.equal(runtime.isExpanded('111'), true)
   assert.equal(calls.length, 1)
-  assert.equal(runtime.loadingById.value[11], false)
-  assert.equal(runtime.errorById.value[11], '')
-  assert.equal(runtime.usersById.value[11][0].username, 'alice')
+  assert.equal(runtime.loadingById.value['111'], false)
+  assert.equal(runtime.errorById.value['111'], '')
+  assert.equal(runtime.usersById.value['111'][0].username, 'alice')
 
-  await runtime.toggle(11)
-  assert.equal(runtime.isExpanded(11), false)
+  await runtime.toggle('111')
+  assert.equal(runtime.isExpanded('111'), false)
 
-  await runtime.toggle(11)
-  assert.equal(runtime.isExpanded(11), true)
+  await runtime.toggle('111')
+  assert.equal(runtime.isExpanded('111'), true)
   assert.equal(calls.length, 1)
 })
 
-test('secondary users runtime turns transport failures into retryable error state', async () => {
+test('department users runtime supports stable string keys for synthetic legacy nodes', async () => {
+  const calls = []
+  const runtime = createDepartmentUsersRuntime({
+    requestUsers: async (nodeKey) => {
+      calls.push(nodeKey)
+      return { success: true, data: { users: [] } }
+    },
+  })
+
+  await runtime.toggle('legacy-secondary-11')
+  assert.deepEqual(calls, ['legacy-secondary-11'])
+})
+
+test('department users runtime turns transport failures into retryable error state', async () => {
   let shouldFail = true
   let calls = 0
-  const runtime = createSecondaryUsersRuntime({
+  const runtime = createDepartmentUsersRuntime({
     requestUsers: async () => {
       calls += 1
       if (shouldFail) {
@@ -54,16 +67,16 @@ test('secondary users runtime turns transport failures into retryable error stat
     },
   })
 
-  await runtime.toggle(11)
-  assert.equal(runtime.isExpanded(11), true)
-  assert.equal(runtime.loadingById.value[11], false)
-  assert.match(runtime.errorById.value[11], /获取用户列表失败/)
-  assert.equal(runtime.usersById.value[11], undefined)
+  await runtime.toggle('111')
+  assert.equal(runtime.isExpanded('111'), true)
+  assert.equal(runtime.loadingById.value['111'], false)
+  assert.match(runtime.errorById.value['111'], /获取用户列表失败/)
+  assert.equal(runtime.usersById.value['111'], undefined)
 
   shouldFail = false
-  await runtime.load(11, { force: true })
+  await runtime.load('111', { force: true })
   assert.equal(calls, 2)
-  assert.equal(runtime.errorById.value[11], '')
-  assert.equal(runtime.loadingById.value[11], false)
-  assert.equal(runtime.usersById.value[11][0].username, 'bob')
+  assert.equal(runtime.errorById.value['111'], '')
+  assert.equal(runtime.loadingById.value['111'], false)
+  assert.equal(runtime.usersById.value['111'][0].username, 'bob')
 })

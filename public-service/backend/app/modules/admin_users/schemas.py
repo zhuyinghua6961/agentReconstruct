@@ -11,6 +11,7 @@ class UserCreateRequest(BaseModel):
     user_type: Literal["common", "super"] | str = Field(default="common")
     primary_department_id: int | None = Field(default=None)
     secondary_department_id: int | None = Field(default=None)
+    tertiary_department_id: int | None = Field(default=None)
 
 
 class UserPasswordResetRequest(BaseModel):
@@ -28,6 +29,7 @@ class UserTypeUpdateRequest(BaseModel):
 class UserDepartmentUpdateRequest(BaseModel):
     primary_department_id: int | None = Field(default=None)
     secondary_department_id: int | None = Field(default=None)
+    tertiary_department_id: int | None = Field(default=None)
 
 
 class UserUsernameUpdateRequest(BaseModel):

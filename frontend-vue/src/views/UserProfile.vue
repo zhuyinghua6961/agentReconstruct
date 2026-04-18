@@ -36,6 +36,7 @@ const departmentTree = ref([])
 const departmentLoading = ref(false)
 const selectedPrimaryDepartmentId = ref(null)
 const selectedSecondaryDepartmentId = ref(null)
+const selectedTertiaryDepartmentId = ref(null)
 const departmentSelectorTree = computed(() => (
   mergePreservedDepartmentTree(departmentTree.value, currentUser.value)
 ))
@@ -127,6 +128,7 @@ async function fetchCurrentUser() {
       forceDepartmentSetup.value = Boolean(result.data?.require_department_setup)
       selectedPrimaryDepartmentId.value = result.data?.primary_department_id ?? null
       selectedSecondaryDepartmentId.value = result.data?.secondary_department_id ?? null
+      selectedTertiaryDepartmentId.value = result.data?.tertiary_department_id ?? null
       if (forcePasswordChange.value) {
         showPasswordForm.value = true
       }
@@ -397,14 +399,15 @@ async function saveDepartment() {
   departmentError.value = ''
   departmentSuccess.value = ''
 
-  if (!selectedPrimaryDepartmentId.value || !selectedSecondaryDepartmentId.value) {
-    departmentError.value = '请选择一级和二级部门'
+  if (!selectedPrimaryDepartmentId.value || !selectedSecondaryDepartmentId.value || !selectedTertiaryDepartmentId.value) {
+    departmentError.value = '请选择一级、二级和三级部门'
     return
   }
 
   const result = await departmentApi.updateMyDepartment(
     selectedPrimaryDepartmentId.value,
     selectedSecondaryDepartmentId.value,
+    selectedTertiaryDepartmentId.value,
   )
 
   if (result.success) {
@@ -414,6 +417,7 @@ async function saveDepartment() {
     }
     selectedPrimaryDepartmentId.value = result.data?.primary_department_id ?? null
     selectedSecondaryDepartmentId.value = result.data?.secondary_department_id ?? null
+    selectedTertiaryDepartmentId.value = result.data?.tertiary_department_id ?? null
     forceDepartmentSetup.value = Boolean(result.data?.require_department_setup)
     showDepartmentForm.value = false
     syncStoredUser({
@@ -628,9 +632,11 @@ onMounted(() => {
                 :tree="departmentSelectorTree"
                 :primary-id="selectedPrimaryDepartmentId"
                 :secondary-id="selectedSecondaryDepartmentId"
+                :tertiary-id="selectedTertiaryDepartmentId"
                 :allow-empty="false"
                 @update:primary-id="selectedPrimaryDepartmentId = $event"
                 @update:secondary-id="selectedSecondaryDepartmentId = $event"
+                @update:tertiary-id="selectedTertiaryDepartmentId = $event"
               />
               <div class="form-actions">
                 <button class="btn-secondary" @click="showDepartmentForm = false" :disabled="forceDepartmentSetup">取消</button>

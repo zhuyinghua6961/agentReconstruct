@@ -48,13 +48,15 @@ function downloadFailedRecords() {
     return
   }
 
-  const headers = ['行号', '一级部门', '一级状态', '二级部门', '二级状态', '结果', '消息']
+  const headers = ['行号', '一级部门', '一级状态', '二级部门', '二级状态', '三级部门', '三级状态', '结果', '消息']
   const rows = failedRecords.map(record => [
     record.row ?? '',
     record.primary_department_name || '',
     record.primary_status || '',
     record.secondary_department_name || '',
     record.secondary_status || '',
+    record.tertiary_department_name || '',
+    record.tertiary_status || '',
     getStatusText(record.status),
     record.message || record.reason || ''
   ])
@@ -151,6 +153,8 @@ function close() {
                 <th>一级状态</th>
                 <th>二级部门</th>
                 <th>二级状态</th>
+                <th>三级部门</th>
+                <th>三级状态</th>
                 <th>结果</th>
                 <th>消息</th>
               </tr>
@@ -165,6 +169,8 @@ function close() {
                 <td>{{ item.primary_status || '-' }}</td>
                 <td>{{ item.secondary_department_name || '-' }}</td>
                 <td>{{ item.secondary_status || '-' }}</td>
+                <td>{{ item.tertiary_department_name || '-' }}</td>
+                <td>{{ item.tertiary_status || '-' }}</td>
                 <td>
                   <span class="status-badge" :class="getStatusClass(item.status)">
                     {{ getStatusText(item.status) }}

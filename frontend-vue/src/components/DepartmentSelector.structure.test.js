@@ -13,4 +13,6 @@ test('DepartmentSelector provides searchable department selection UI', () => {
   assert.match(selectorSource, /searchKeyword|searchTerm|searchQuery/)
   assert.match(selectorSource, /primary-id|primaryId/)
   assert.match(selectorSource, /secondary-id|secondaryId/)
+  assert.match(selectorSource, /tertiary-id|tertiaryId/)
+  assert.match(selectorSource, /:key="\`\$\{match\.primaryId\}-\$\{match\.secondaryId\}-\$\{match\.tertiaryId\}\`"/)
 })

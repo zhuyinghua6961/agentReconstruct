@@ -277,6 +277,11 @@ _ROUTE_SPECS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (_paths("/api/admin/departments/secondary/{secondary_id}", include_v1=False), ("PUT",)),
     (_paths("/api/admin/departments/secondary/{secondary_id}/status", include_v1=False), ("PUT",)),
     (_paths("/api/admin/departments/secondary/{secondary_id}/users", include_v1=False), ("GET",)),
+    (_paths("/api/admin/departments/secondary/{secondary_id}/legacy-users", include_v1=False), ("GET",)),
+    (_paths("/api/admin/departments/tertiary", include_v1=False), ("POST",)),
+    (_paths("/api/admin/departments/tertiary/{tertiary_id}", include_v1=False), ("PUT",)),
+    (_paths("/api/admin/departments/tertiary/{tertiary_id}/status", include_v1=False), ("PUT",)),
+    (_paths("/api/admin/departments/tertiary/{tertiary_id}/users", include_v1=False), ("GET",)),
     (_paths("/api/admin/departments/batch-import", include_v1=False), ("POST",)),
     (_paths("/api/admin/departments/import-template", include_v1=False), ("GET",)),
 )

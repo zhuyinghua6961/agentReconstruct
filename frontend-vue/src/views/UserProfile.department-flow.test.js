@@ -16,6 +16,8 @@ test('Login persists department completion flags from the auth payload', () => {
 test('UserProfile renders department completion card and selector', () => {
   assert.match(profileSource, /部门信息/)
   assert.match(profileSource, /DepartmentSelector/)
+  assert.match(profileSource, /selectedTertiaryDepartmentId/)
+  assert.match(profileSource, /tertiary-id/)
 })
 
 test('UserProfile keeps department fetch errors scoped to the department section', () => {

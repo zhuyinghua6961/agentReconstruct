@@ -1,21 +1,21 @@
 import { ref } from 'vue'
 
-function normalizeId(value) {
-  return Number(value)
+function normalizeKey(value) {
+  return String(value)
 }
 
-function hasLoaded(usersById, secondaryId) {
-  return Object.prototype.hasOwnProperty.call(usersById, normalizeId(secondaryId))
+function hasLoaded(usersById, nodeKey) {
+  return Object.prototype.hasOwnProperty.call(usersById, normalizeKey(nodeKey))
 }
 
-export function createSecondaryUsersRuntime({ requestUsers }) {
+export function createDepartmentUsersRuntime({ requestUsers }) {
   const expandedIds = ref([])
   const usersById = ref({})
   const loadingById = ref({})
   const errorById = ref({})
 
-  function isExpanded(secondaryId) {
-    return expandedIds.value.includes(normalizeId(secondaryId))
+  function isExpanded(nodeKey) {
+    return expandedIds.value.includes(normalizeKey(nodeKey))
   }
 
   function reset() {
@@ -25,8 +25,8 @@ export function createSecondaryUsersRuntime({ requestUsers }) {
     errorById.value = {}
   }
 
-  async function load(secondaryId, options = {}) {
-    const normalizedId = normalizeId(secondaryId)
+  async function load(nodeKey, options = {}) {
+    const normalizedId = normalizeKey(nodeKey)
     const force = Boolean(options.force)
     if (!force && hasLoaded(usersById.value, normalizedId)) {
       return
@@ -71,8 +71,8 @@ export function createSecondaryUsersRuntime({ requestUsers }) {
     }
   }
 
-  async function toggle(secondaryId) {
-    const normalizedId = normalizeId(secondaryId)
+  async function toggle(nodeKey) {
+    const normalizedId = normalizeKey(nodeKey)
     if (expandedIds.value.includes(normalizedId)) {
       expandedIds.value = expandedIds.value.filter((item) => item !== normalizedId)
       return
@@ -92,4 +92,8 @@ export function createSecondaryUsersRuntime({ requestUsers }) {
     load,
     toggle,
   }
+}
+
+export function createSecondaryUsersRuntime({ requestUsers }) {
+  return createDepartmentUsersRuntime({ requestUsers })
 }

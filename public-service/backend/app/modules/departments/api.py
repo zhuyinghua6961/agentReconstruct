@@ -16,6 +16,8 @@ from app.modules.departments.schemas import (
     PrimaryDepartmentRenameRequest,
     SecondaryDepartmentCreateRequest,
     SecondaryDepartmentRenameRequest,
+    TertiaryDepartmentCreateRequest,
+    TertiaryDepartmentRenameRequest,
 )
 from app.modules.departments.service import department_service
 
@@ -128,6 +130,60 @@ def get_secondary_users(
 ):
     return _respond(
         department_service.list_secondary_users(secondary_id=secondary_id),
+        ok_status=200,
+    )
+
+
+@router.get("/secondary/{secondary_id}/legacy-users")
+def get_secondary_legacy_users(
+    secondary_id: int,
+    _context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(
+        department_service.list_secondary_legacy_users(secondary_id=secondary_id),
+        ok_status=200,
+    )
+
+
+@router.post("/tertiary")
+def create_tertiary(payload: TertiaryDepartmentCreateRequest, _context: AuthContext = Depends(require_admin_context)):
+    return _respond(
+        department_service.create_tertiary(
+            secondary_department_id=payload.secondary_department_id,
+            name=payload.name,
+        ),
+        ok_status=201,
+    )
+
+
+@router.put("/tertiary/{tertiary_id}")
+def rename_tertiary(
+    tertiary_id: int,
+    payload: TertiaryDepartmentRenameRequest,
+    _context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(department_service.rename_tertiary(tertiary_id=tertiary_id, name=payload.name), ok_status=200)
+
+
+@router.put("/tertiary/{tertiary_id}/status")
+def update_tertiary_status(
+    tertiary_id: int,
+    payload: DepartmentStatusUpdateRequest,
+    _context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(
+        department_service.update_tertiary_status(tertiary_id=tertiary_id, status=payload.status),
+        ok_status=200,
+    )
+
+
+@router.get("/tertiary/{tertiary_id}/users")
+def get_tertiary_users(
+    tertiary_id: int,
+    _context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(
+        department_service.list_tertiary_users(tertiary_id=tertiary_id),
         ok_status=200,
     )
 

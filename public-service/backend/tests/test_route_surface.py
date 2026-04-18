@@ -21,6 +21,11 @@ def test_public_route_surface_contains_key_modules():
         "/api/admin/departments/tree",
         "/api/admin/departments/primary",
         "/api/admin/departments/secondary/{secondary_id}/users",
+        "/api/admin/departments/secondary/{secondary_id}/legacy-users",
+        "/api/admin/departments/tertiary",
+        "/api/admin/departments/tertiary/{tertiary_id}",
+        "/api/admin/departments/tertiary/{tertiary_id}/status",
+        "/api/admin/departments/tertiary/{tertiary_id}/users",
         "/api/kb_info",
     }
     assert expected.issubset(paths)

@@ -216,6 +216,9 @@ def test_me_route_exposes_department_fields(monkeypatch):
                 "primary_department_name": "计算机学院",
                 "secondary_department_id": 11,
                 "secondary_department_name": "软件工程系",
+                "tertiary_department_id": 111,
+                "tertiary_department_name": "人工智能实验室",
+                "department_completion_level": "complete",
                 "require_department_setup": False,
             },
         },
@@ -226,6 +229,8 @@ def test_me_route_exposes_department_fields(monkeypatch):
     assert response.status_code == 200
     assert body["data"]["primary_department_name"] == "计算机学院"
     assert body["data"]["secondary_department_name"] == "软件工程系"
+    assert body["data"]["tertiary_department_name"] == "人工智能实验室"
+    assert body["data"]["department_completion_level"] == "complete"
     assert body["data"]["require_department_setup"] is False
 
 
@@ -287,20 +292,36 @@ def test_auth_department_tree_contract(monkeypatch):
 def test_auth_department_update_contract(monkeypatch):
     captured = {}
 
-    def fake_update_department(*, user_id: int, primary_department_id: int | None, secondary_department_id: int | None):
+    def fake_update_department(
+        *,
+        user_id: int,
+        primary_department_id: int | None,
+        secondary_department_id: int | None,
+        tertiary_department_id: int | None,
+    ):
         captured["user_id"] = user_id
         captured["primary_department_id"] = primary_department_id
         captured["secondary_department_id"] = secondary_department_id
+        captured["tertiary_department_id"] = tertiary_department_id
         return {"success": True, "data": {"require_department_setup": False}}
 
     monkeypatch.setattr(auth_service_module.auth_service, "update_department", fake_update_department)
 
     response = auth_api_module.update_department(
-        auth_api_module.DepartmentUpdateRequest(primary_department_id=1, secondary_department_id=11),
+        auth_api_module.DepartmentUpdateRequest(
+            primary_department_id=1,
+            secondary_department_id=11,
+            tertiary_department_id=111,
+        ),
         AuthContext(user_id=9, role="user", username="bob"),
     )
     assert response.status_code == 200
-    assert captured == {"user_id": 9, "primary_department_id": 1, "secondary_department_id": 11}
+    assert captured == {
+        "user_id": 9,
+        "primary_department_id": 1,
+        "secondary_department_id": 11,
+        "tertiary_department_id": 111,
+    }
     assert _decode(response)["data"]["require_department_setup"] is False
 
 
@@ -426,7 +447,7 @@ def test_auth_service_change_password_rejects_password_history_reuse():
     assert result["code"] == "PASSWORD_REUSED"
 
 
-def test_auth_service_login_includes_department_payload_and_flags():
+def test_auth_service_login_includes_tertiary_department_payload_and_flags():
     class FakeRepo:
         def __init__(self):
             self.password_hash = _hash_password("Secret123!")
@@ -443,8 +464,9 @@ def test_auth_service_login_includes_department_payload_and_flags():
                 "status": "active",
                 "is_first_login": 0,
                 "must_set_security_questions": 0,
-                "primary_department_id": None,
-                "secondary_department_id": None,
+                "primary_department_id": 1,
+                "secondary_department_id": 11,
+                "tertiary_department_id": 111,
             }
 
         def reset_login_attempts(self, *, user_id: int):
@@ -454,25 +476,88 @@ def test_auth_service_login_includes_department_payload_and_flags():
             return True
 
     class FakeDepartments:
-        def describe_user_department(self, *, primary_department_id: int | None, secondary_department_id: int | None):
-            assert primary_department_id is None
-            assert secondary_department_id is None
+        def describe_user_department(
+            self,
+            *,
+            primary_department_id: int | None,
+            secondary_department_id: int | None,
+            tertiary_department_id: int | None,
+        ):
+            assert primary_department_id == 1
+            assert secondary_department_id == 11
+            assert tertiary_department_id == 111
             return {
-                "primary_department_id": None,
-                "primary_department_name": None,
-                "secondary_department_id": None,
-                "secondary_department_name": None,
-                "require_department_setup": True,
+                "primary_department_id": 1,
+                "primary_department_name": "计算机学院",
+                "secondary_department_id": 11,
+                "secondary_department_name": "软件工程系",
+                "tertiary_department_id": 111,
+                "tertiary_department_name": "人工智能实验室",
+                "department_completion_level": "complete",
+                "require_department_setup": False,
             }
 
     service = AuthService(repo=FakeRepo(), token_service=TokenService(), department_service=FakeDepartments())
     result = service.login("alice", "Secret123!")
 
     assert result["success"] is True
-    assert result["data"]["user"]["primary_department_id"] is None
-    assert result["data"]["user"]["secondary_department_id"] is None
-    assert result["data"]["require_department_setup"] is True
-    assert result["require_department_setup"] is True
+    assert result["data"]["user"]["primary_department_id"] == 1
+    assert result["data"]["user"]["secondary_department_id"] == 11
+    assert result["data"]["user"]["tertiary_department_id"] == 111
+    assert result["data"]["user"]["department_completion_level"] == "complete"
+    assert result["data"]["require_department_setup"] is False
+    assert result["require_department_setup"] is False
+
+
+def test_auth_service_get_user_info_keeps_legacy_two_level_user_usable():
+    class FakeRepo:
+        def get_by_id(self, user_id):
+            if user_id != 9:
+                return None
+            return {
+                "id": 9,
+                "username": "bob",
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+                "is_first_login": 0,
+                "must_set_security_questions": 0,
+                "primary_department_id": 1,
+                "secondary_department_id": 11,
+                "tertiary_department_id": None,
+            }
+
+        def has_security_questions(self, *, user_id: int):
+            return True
+
+    class FakeDepartments:
+        def describe_user_department(
+            self,
+            *,
+            primary_department_id: int | None,
+            secondary_department_id: int | None,
+            tertiary_department_id: int | None,
+        ):
+            assert primary_department_id == 1
+            assert secondary_department_id == 11
+            assert tertiary_department_id is None
+            return {
+                "primary_department_id": 1,
+                "primary_department_name": "计算机学院",
+                "secondary_department_id": 11,
+                "secondary_department_name": "软件工程系",
+                "tertiary_department_id": None,
+                "tertiary_department_name": None,
+                "department_completion_level": "legacy_two_level_complete",
+                "require_department_setup": False,
+            }
+
+    service = AuthService(repo=FakeRepo(), token_service=TokenService(), department_service=FakeDepartments())
+    result = service.get_user_info(9)
+
+    assert result["success"] is True
+    assert result["data"]["department_completion_level"] == "legacy_two_level_complete"
+    assert result["data"]["require_department_setup"] is False
 
 
 def test_auth_service_update_department_persists_selected_departments():
@@ -493,10 +578,18 @@ def test_auth_service_update_department_persists_selected_departments():
                 "must_set_security_questions": 0,
                 "primary_department_id": None,
                 "secondary_department_id": None,
+                "tertiary_department_id": None,
             }
 
-        def update_user_department(self, *, user_id: int, primary_department_id: int | None, secondary_department_id: int | None):
-            self.updated = (user_id, primary_department_id, secondary_department_id)
+        def update_user_department(
+            self,
+            *,
+            user_id: int,
+            primary_department_id: int | None,
+            secondary_department_id: int | None,
+            tertiary_department_id: int | None,
+        ):
+            self.updated = (user_id, primary_department_id, secondary_department_id, tertiary_department_id)
             return 1
 
         def has_security_questions(self, *, user_id: int):
@@ -508,13 +601,17 @@ def test_auth_service_update_department_persists_selected_departments():
             *,
             primary_department_id: int | None,
             secondary_department_id: int | None,
+            tertiary_department_id: int | None,
             require_active: bool,
             allow_empty: bool,
+            allow_legacy_two_level: bool,
         ):
             assert primary_department_id == 1
             assert secondary_department_id == 11
+            assert tertiary_department_id == 111
             assert require_active is True
-            assert allow_empty is False
+            assert allow_empty is True
+            assert allow_legacy_two_level is False
             return {
                 "success": True,
                 "data": {
@@ -522,27 +619,111 @@ def test_auth_service_update_department_persists_selected_departments():
                     "primary_department_name": "计算机学院",
                     "secondary_department_id": 11,
                     "secondary_department_name": "软件工程系",
+                    "tertiary_department_id": 111,
+                    "tertiary_department_name": "人工智能实验室",
+                    "department_completion_level": "complete",
                     "require_department_setup": False,
                 },
             }
 
-        def describe_user_department(self, *, primary_department_id: int | None, secondary_department_id: int | None):
+        def describe_user_department(
+            self,
+            *,
+            primary_department_id: int | None,
+            secondary_department_id: int | None,
+            tertiary_department_id: int | None,
+        ):
             return {
                 "primary_department_id": primary_department_id,
                 "primary_department_name": "计算机学院",
                 "secondary_department_id": secondary_department_id,
                 "secondary_department_name": "软件工程系",
+                "tertiary_department_id": tertiary_department_id,
+                "tertiary_department_name": "人工智能实验室",
+                "department_completion_level": "complete",
                 "require_department_setup": False,
             }
 
     repo = FakeRepo()
     service = AuthService(repo=repo, token_service=TokenService(), department_service=FakeDepartments())
-    result = service.update_department(user_id=9, primary_department_id=1, secondary_department_id=11)
+    result = service.update_department(
+        user_id=9,
+        primary_department_id=1,
+        secondary_department_id=11,
+        tertiary_department_id=111,
+    )
 
     assert result["success"] is True
-    assert repo.updated == (9, 1, 11)
+    assert repo.updated == (9, 1, 11, 111)
     assert result["data"]["primary_department_name"] == "计算机学院"
+    assert result["data"]["tertiary_department_name"] == "人工智能实验室"
+    assert result["data"]["department_completion_level"] == "complete"
     assert result["data"]["require_department_setup"] is False
+
+
+def test_auth_service_update_department_requires_tertiary_for_non_empty_write():
+    class FakeRepo:
+        def get_by_id(self, user_id):
+            if user_id != 9:
+                return None
+            return {
+                "id": 9,
+                "username": "bob",
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+                "is_first_login": 0,
+                "must_set_security_questions": 0,
+                "primary_department_id": None,
+                "secondary_department_id": None,
+                "tertiary_department_id": None,
+            }
+
+        def has_security_questions(self, *, user_id: int):
+            return True
+
+    class FakeDepartments:
+        def describe_user_department(
+            self,
+            *,
+            primary_department_id: int | None,
+            secondary_department_id: int | None,
+            tertiary_department_id: int | None,
+        ):
+            return {
+                "primary_department_id": primary_department_id,
+                "primary_department_name": None,
+                "secondary_department_id": secondary_department_id,
+                "secondary_department_name": None,
+                "tertiary_department_id": tertiary_department_id,
+                "tertiary_department_name": None,
+                "department_completion_level": "empty",
+                "require_department_setup": True,
+            }
+
+        def validate_department_selection(
+            self,
+            *,
+            primary_department_id: int | None,
+            secondary_department_id: int | None,
+            tertiary_department_id: int | None,
+            require_active: bool,
+            allow_empty: bool,
+            allow_legacy_two_level: bool,
+        ):
+            assert primary_department_id == 1
+            assert secondary_department_id == 11
+            assert tertiary_department_id is None
+            assert require_active is True
+            assert allow_empty is True
+            assert allow_legacy_two_level is False
+            return {"success": False, "error": "一级、二级和三级部门必须同时填写", "code": "DEPARTMENT_REQUIRED"}
+
+    service = AuthService(repo=FakeRepo(), token_service=TokenService(), department_service=FakeDepartments())
+    result = service.update_department(user_id=9, primary_department_id=1, secondary_department_id=11, tertiary_department_id=None)
+
+    assert result["success"] is False
+    assert result["code"] == "DEPARTMENT_REQUIRED"
 
 
 def test_auth_service_update_department_allows_unchanged_disabled_binding():
@@ -563,6 +744,7 @@ def test_auth_service_update_department_allows_unchanged_disabled_binding():
                 "must_set_security_questions": 0,
                 "primary_department_id": 1,
                 "secondary_department_id": 11,
+                "tertiary_department_id": 111,
             }
 
         def update_user_department(self, **kwargs):
@@ -573,14 +755,23 @@ def test_auth_service_update_department_allows_unchanged_disabled_binding():
             return True
 
     class FakeDepartments:
-        def describe_user_department(self, *, primary_department_id: int | None, secondary_department_id: int | None):
+        def describe_user_department(
+            self,
+            *,
+            primary_department_id: int | None,
+            secondary_department_id: int | None,
+            tertiary_department_id: int | None,
+        ):
             return {
                 "primary_department_id": primary_department_id,
                 "primary_department_name": "计算机学院",
                 "secondary_department_id": secondary_department_id,
                 "secondary_department_name": "软件工程系",
+                "tertiary_department_id": tertiary_department_id,
+                "tertiary_department_name": "人工智能实验室",
                 "department_effective_status": "disabled",
-                "department_display": "计算机学院 / 软件工程系（已停用）",
+                "department_display": "计算机学院 / 软件工程系 / 人工智能实验室（已停用）",
+                "department_completion_level": "complete",
                 "require_department_setup": False,
             }
 
@@ -589,12 +780,17 @@ def test_auth_service_update_department_allows_unchanged_disabled_binding():
 
     repo = FakeRepo()
     service = AuthService(repo=repo, token_service=TokenService(), department_service=FakeDepartments())
-    result = service.update_department(user_id=9, primary_department_id=1, secondary_department_id=11)
+    result = service.update_department(
+        user_id=9,
+        primary_department_id=1,
+        secondary_department_id=11,
+        tertiary_department_id=111,
+    )
 
     assert result["success"] is True
     assert repo.update_called is False
     assert result["data"]["department_effective_status"] == "disabled"
-    assert result["data"]["department_display"] == "计算机学院 / 软件工程系（已停用）"
+    assert result["data"]["department_display"] == "计算机学院 / 软件工程系 / 人工智能实验室（已停用）"
 
 
 def test_auth_service_update_department_fails_when_write_does_not_persist():
@@ -616,22 +812,43 @@ def test_auth_service_update_department_fails_when_write_does_not_persist():
                 "must_set_security_questions": 0,
                 "primary_department_id": None,
                 "secondary_department_id": None,
+                "tertiary_department_id": None,
             }
 
-        def update_user_department(self, *, user_id: int, primary_department_id: int | None, secondary_department_id: int | None):
+        def update_user_department(
+            self,
+            *,
+            user_id: int,
+            primary_department_id: int | None,
+            secondary_department_id: int | None,
+            tertiary_department_id: int | None,
+        ):
             return 0
 
         def has_security_questions(self, *, user_id: int):
             return True
 
     class FakeDepartments:
-        def describe_user_department(self, *, primary_department_id: int | None, secondary_department_id: int | None):
+        def describe_user_department(
+            self,
+            *,
+            primary_department_id: int | None,
+            secondary_department_id: int | None,
+            tertiary_department_id: int | None,
+        ):
             return {
                 "primary_department_id": primary_department_id,
                 "primary_department_name": "计算机学院" if primary_department_id else None,
                 "secondary_department_id": secondary_department_id,
                 "secondary_department_name": "软件工程系" if secondary_department_id else None,
-                "require_department_setup": primary_department_id is None or secondary_department_id is None,
+                "tertiary_department_id": tertiary_department_id,
+                "tertiary_department_name": "人工智能实验室" if tertiary_department_id else None,
+                "department_completion_level": (
+                    "complete" if primary_department_id and secondary_department_id and tertiary_department_id else "empty"
+                ),
+                "require_department_setup": (
+                    primary_department_id is None or secondary_department_id is None or tertiary_department_id is None
+                ),
             }
 
         def validate_department_selection(
@@ -639,13 +856,17 @@ def test_auth_service_update_department_fails_when_write_does_not_persist():
             *,
             primary_department_id: int | None,
             secondary_department_id: int | None,
+            tertiary_department_id: int | None,
             require_active: bool,
             allow_empty: bool,
+            allow_legacy_two_level: bool,
         ):
             assert primary_department_id == 1
             assert secondary_department_id == 11
+            assert tertiary_department_id == 111
             assert require_active is True
-            assert allow_empty is False
+            assert allow_empty is True
+            assert allow_legacy_two_level is False
             return {
                 "success": True,
                 "data": {
@@ -653,12 +874,20 @@ def test_auth_service_update_department_fails_when_write_does_not_persist():
                     "primary_department_name": "计算机学院",
                     "secondary_department_id": 11,
                     "secondary_department_name": "软件工程系",
+                    "tertiary_department_id": 111,
+                    "tertiary_department_name": "人工智能实验室",
+                    "department_completion_level": "complete",
                     "require_department_setup": False,
                 },
             }
 
     service = AuthService(repo=FakeRepo(), token_service=TokenService(), department_service=FakeDepartments())
-    result = service.update_department(user_id=9, primary_department_id=1, secondary_department_id=11)
+    result = service.update_department(
+        user_id=9,
+        primary_department_id=1,
+        secondary_department_id=11,
+        tertiary_department_id=111,
+    )
 
     assert result["success"] is False
     assert result["code"] == "UPDATE_ERROR"
@@ -679,19 +908,29 @@ def test_auth_service_admin_without_department_is_not_forced_to_complete_departm
                 "must_set_security_questions": 0,
                 "primary_department_id": None,
                 "secondary_department_id": None,
+                "tertiary_department_id": None,
             }
 
         def has_security_questions(self, *, user_id: int):
             return True
 
     class FakeDepartments:
-        def describe_user_department(self, *, primary_department_id: int | None, secondary_department_id: int | None):
+        def describe_user_department(
+            self,
+            *,
+            primary_department_id: int | None,
+            secondary_department_id: int | None,
+            tertiary_department_id: int | None,
+        ):
             return {
                 "primary_department_id": primary_department_id,
                 "primary_department_name": None,
                 "secondary_department_id": secondary_department_id,
                 "secondary_department_name": None,
+                "tertiary_department_id": tertiary_department_id,
+                "tertiary_department_name": None,
                 "department_display": "未填写",
+                "department_completion_level": "empty",
                 "require_department_setup": True,
             }
 
@@ -824,12 +1063,21 @@ def test_auth_service_update_username_updates_non_admin_user():
             return True
 
     class FakeDepartments:
-        def describe_user_department(self, *, primary_department_id: int | None, secondary_department_id: int | None):
+        def describe_user_department(
+            self,
+            *,
+            primary_department_id: int | None,
+            secondary_department_id: int | None,
+            tertiary_department_id: int | None,
+        ):
             return {
                 "primary_department_id": primary_department_id,
                 "primary_department_name": None,
                 "secondary_department_id": secondary_department_id,
                 "secondary_department_name": None,
+                "tertiary_department_id": tertiary_department_id,
+                "tertiary_department_name": None,
+                "department_completion_level": "empty",
                 "require_department_setup": False,
             }
 

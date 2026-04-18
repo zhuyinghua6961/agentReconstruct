@@ -1,5 +1,15 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
+import {
+  buildFilteredPrimaryItems,
+  buildFilteredSecondaryItems,
+  buildFilteredTertiaryItems,
+  buildSearchMatches,
+  buildSecondarySelectionState,
+  normalizeId,
+  shouldClearTertiarySelection,
+  selectSearchMatch as selectSearchMatchState,
+} from '../utils/departmentSelectorModel'
 
 const props = defineProps({
   tree: {
@@ -11,6 +21,10 @@ const props = defineProps({
     default: null,
   },
   secondaryId: {
+    type: [Number, String, null],
+    default: null,
+  },
+  tertiaryId: {
     type: [Number, String, null],
     default: null,
   },
@@ -30,6 +44,10 @@ const props = defineProps({
     type: String,
     default: '二级部门',
   },
+  tertiaryLabel: {
+    type: String,
+    default: '三级部门',
+  },
   searchPlaceholder: {
     type: String,
     default: '搜索部门',
@@ -40,21 +58,9 @@ const props = defineProps({
   },
 })
 
-const emit = defineEmits(['update:primaryId', 'update:secondaryId'])
+const emit = defineEmits(['update:primaryId', 'update:secondaryId', 'update:tertiaryId'])
 
 const searchKeyword = ref('')
-
-function normalizeId(value) {
-  if (value === null || value === undefined || value === '') {
-    return null
-  }
-  const normalized = Number(value)
-  return Number.isFinite(normalized) ? normalized : null
-}
-
-function matchesSearch(text, keyword) {
-  return String(text || '').toLowerCase().includes(keyword)
-}
 
 const treeItems = computed(() => (
   Array.isArray(props.tree) ? props.tree : []
@@ -62,72 +68,80 @@ const treeItems = computed(() => (
 
 const normalizedPrimaryId = computed(() => normalizeId(props.primaryId))
 const normalizedSecondaryId = computed(() => normalizeId(props.secondaryId))
+const normalizedTertiaryId = computed(() => normalizeId(props.tertiaryId))
 const normalizedKeyword = computed(() => searchKeyword.value.trim().toLowerCase())
 
 const selectedPrimaryItem = computed(() => (
   treeItems.value.find(item => Number(item.id) === normalizedPrimaryId.value) || null
 ))
 
-const filteredPrimaryItems = computed(() => {
-  if (!normalizedKeyword.value) {
-    return treeItems.value
+const selectedSecondaryItem = computed(() => {
+  if (!selectedPrimaryItem.value) {
+    return null
   }
-  return treeItems.value.filter((item) => {
-    if (matchesSearch(item.name, normalizedKeyword.value)) {
-      return true
-    }
-    return Array.isArray(item.secondary_items)
-      && item.secondary_items.some(secondary => matchesSearch(secondary.name, normalizedKeyword.value))
-  })
+  const secondaryItems = Array.isArray(selectedPrimaryItem.value.secondary_items)
+    ? selectedPrimaryItem.value.secondary_items
+    : []
+  return secondaryItems.find(item => Number(item.id) === normalizedSecondaryId.value) || null
+})
+
+const selectedSecondaryState = computed(() => (
+  buildSecondarySelectionState(selectedSecondaryItem.value)
+))
+
+const filteredPrimaryItems = computed(() => {
+  return buildFilteredPrimaryItems(treeItems.value, normalizedKeyword.value)
 })
 
 const searchMatches = computed(() => {
   if (!normalizedKeyword.value || selectedPrimaryItem.value) {
     return []
   }
-  return treeItems.value.flatMap((item) => {
-    const secondaryItems = Array.isArray(item.secondary_items) ? item.secondary_items : []
-    return secondaryItems
-      .filter((secondary) => (
-        matchesSearch(item.name, normalizedKeyword.value)
-        || matchesSearch(secondary.name, normalizedKeyword.value)
-      ))
-      .map(secondary => ({
-        primaryId: Number(item.id),
-        secondaryId: Number(secondary.id),
-        path: `${item.name} / ${secondary.name}`,
-      }))
-  })
+  return buildSearchMatches(treeItems.value, normalizedKeyword.value)
 })
 
 const filteredSecondaryItems = computed(() => {
   if (!selectedPrimaryItem.value) {
     return []
   }
-  const secondaryItems = Array.isArray(selectedPrimaryItem.value.secondary_items)
-    ? selectedPrimaryItem.value.secondary_items
-    : []
-  if (!normalizedKeyword.value) {
-    return secondaryItems
+  return buildFilteredSecondaryItems(selectedPrimaryItem.value, normalizedKeyword.value)
+})
+
+const filteredTertiaryItems = computed(() => {
+  if (!selectedPrimaryItem.value || !selectedSecondaryItem.value) {
+    return []
   }
-  return secondaryItems.filter((secondary) => (
-    matchesSearch(selectedPrimaryItem.value.name, normalizedKeyword.value)
-    || matchesSearch(secondary.name, normalizedKeyword.value)
-  ))
+  return buildFilteredTertiaryItems(
+    selectedPrimaryItem.value,
+    selectedSecondaryItem.value,
+    normalizedKeyword.value,
+  )
 })
 
 watch(selectedPrimaryItem, (primaryItem) => {
-  if (!normalizedSecondaryId.value) {
-    return
-  }
   if (!primaryItem) {
     emit('update:secondaryId', null)
+    emit('update:tertiaryId', null)
+    return
+  }
+  if (!normalizedSecondaryId.value) {
     return
   }
   const secondaryItems = Array.isArray(primaryItem.secondary_items) ? primaryItem.secondary_items : []
   const exists = secondaryItems.some(item => Number(item.id) === normalizedSecondaryId.value)
   if (!exists) {
     emit('update:secondaryId', null)
+    emit('update:tertiaryId', null)
+  }
+})
+
+watch(selectedSecondaryItem, (secondaryItem) => {
+  if (!secondaryItem) {
+    emit('update:tertiaryId', null)
+    return
+  }
+  if (shouldClearTertiarySelection(secondaryItem, normalizedTertiaryId.value)) {
+    emit('update:tertiaryId', null)
   }
 })
 
@@ -138,20 +152,29 @@ function handlePrimaryChange(value) {
   }
   emit('update:primaryId', nextPrimaryId)
   emit('update:secondaryId', null)
+  emit('update:tertiaryId', null)
 }
 
 function handleSecondaryChange(value) {
   emit('update:secondaryId', normalizeId(value))
+  emit('update:tertiaryId', null)
+}
+
+function handleTertiaryChange(value) {
+  emit('update:tertiaryId', normalizeId(value))
 }
 
 function clearSelection() {
   emit('update:primaryId', null)
   emit('update:secondaryId', null)
+  emit('update:tertiaryId', null)
 }
 
 function selectSearchMatch(match) {
-  emit('update:primaryId', match.primaryId)
-  emit('update:secondaryId', match.secondaryId)
+  const selected = selectSearchMatchState(match)
+  emit('update:primaryId', selected.primaryId)
+  emit('update:secondaryId', selected.secondaryId)
+  emit('update:tertiaryId', selected.tertiaryId)
 }
 </script>
 
@@ -177,7 +200,7 @@ function selectSearchMatch(match) {
           清空
         </button>
       </div>
-      <p class="toolbar-hint">支持按一级或二级部门名称搜索，搜索结果会显示完整路径。</p>
+      <p class="toolbar-hint">支持按一级、二级或三级部门名称搜索，搜索结果会显示完整路径。</p>
     </div>
 
     <div v-if="!treeItems.length" class="selector-empty">
@@ -187,7 +210,7 @@ function selectSearchMatch(match) {
     <div v-else-if="searchMatches.length" class="search-match-list">
       <button
         v-for="match in searchMatches"
-        :key="`${match.primaryId}-${match.secondaryId}`"
+        :key="`${match.primaryId}-${match.secondaryId}-${match.tertiaryId}`"
         type="button"
         class="search-match-item"
         :disabled="disabled"
@@ -234,6 +257,46 @@ function selectSearchMatch(match) {
         </select>
         <p v-if="selectedPrimaryItem && !filteredSecondaryItems.length" class="secondary-empty">
           当前一级部门下暂无匹配的二级部门
+        </p>
+        <p
+          v-else-if="selectedSecondaryItem && !selectedSecondaryState.selectable"
+          class="secondary-empty"
+        >
+          {{ selectedSecondaryState.disabledReason }}
+        </p>
+      </div>
+
+      <div class="selector-field">
+        <label>{{ tertiaryLabel }}</label>
+        <select
+          :value="normalizedTertiaryId ?? ''"
+          :disabled="disabled || !selectedSecondaryItem || !selectedSecondaryState.selectable"
+          @change="handleTertiaryChange($event.target.value)"
+        >
+          <option value="">
+            {{
+              !selectedPrimaryItem
+                ? '请先选择一级部门'
+                : !selectedSecondaryItem
+                  ? '请先选择二级部门'
+                  : !selectedSecondaryState.selectable
+                    ? '当前二级部门暂无可选三级部门'
+                    : '请选择三级部门'
+            }}
+          </option>
+          <option
+            v-for="item in filteredTertiaryItems"
+            :key="item.id"
+            :value="item.id"
+          >
+            {{ item.name }}
+          </option>
+        </select>
+        <p
+          v-if="selectedSecondaryItem && selectedSecondaryState.selectable && !filteredTertiaryItems.length"
+          class="secondary-empty"
+        >
+          当前二级部门下暂无匹配的三级部门
         </p>
       </div>
     </div>
@@ -305,7 +368,7 @@ function selectSearchMatch(match) {
 
 .selector-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 16px;
 }
 

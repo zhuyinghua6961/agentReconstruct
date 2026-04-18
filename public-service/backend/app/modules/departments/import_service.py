@@ -18,6 +18,10 @@ REQUIRED_COLUMNS = [
     "secondary_department_name",
     "secondary_status",
 ]
+OPTIONAL_TERTIARY_COLUMNS = [
+    "tertiary_department_name",
+    "tertiary_status",
+]
 VALID_STATUSES = {"active", "disabled"}
 
 
@@ -61,6 +65,8 @@ class DepartmentImportService:
         primary_status_col = normalized["primary_status"]
         secondary_name_col = normalized["secondary_department_name"]
         secondary_status_col = normalized["secondary_status"]
+        tertiary_name_col = normalized.get("tertiary_department_name")
+        tertiary_status_col = normalized.get("tertiary_status")
 
         details: list[dict[str, Any]] = []
         success_count = 0
@@ -68,6 +74,7 @@ class DepartmentImportService:
         skipped_count = 0
         primary_status_seen: dict[str, str] = {}
         pair_status_seen: dict[tuple[str, str], tuple[str, str]] = {}
+        row_status_seen: dict[tuple[str, str, str], tuple[str, str, str]] = {}
 
         try:
             for index, row in enumerate(rows["items"]):
@@ -76,6 +83,8 @@ class DepartmentImportService:
                 primary_status = self._clean_text(row.get(primary_status_col)).lower()
                 secondary_name = self._clean_text(row.get(secondary_name_col))
                 secondary_status = self._clean_text(row.get(secondary_status_col)).lower()
+                tertiary_name = self._clean_text(row.get(tertiary_name_col)) if tertiary_name_col else ""
+                tertiary_status = self._clean_text(row.get(tertiary_status_col)).lower() if tertiary_status_col else ""
 
                 detail = {
                     "row": line_no,
@@ -83,6 +92,8 @@ class DepartmentImportService:
                     "primary_status": primary_status,
                     "secondary_department_name": secondary_name,
                     "secondary_status": secondary_status,
+                    "tertiary_department_name": tertiary_name,
+                    "tertiary_status": tertiary_status,
                 }
 
                 if not primary_name or not secondary_name or not primary_status or not secondary_status:
@@ -96,6 +107,14 @@ class DepartmentImportService:
                 if secondary_status not in VALID_STATUSES:
                     failed_count += 1
                     details.append({**detail, "status": "failed", "reason": "二级部门状态必须是 active 或 disabled"})
+                    continue
+                if bool(tertiary_name) ^ bool(tertiary_status):
+                    failed_count += 1
+                    details.append({**detail, "status": "failed", "reason": "三级部门名称和状态必须同时填写"})
+                    continue
+                if tertiary_status and tertiary_status not in VALID_STATUSES:
+                    failed_count += 1
+                    details.append({**detail, "status": "failed", "reason": "三级部门状态必须是 active 或 disabled"})
                     continue
 
                 previous_primary_status = primary_status_seen.get(primary_name)
@@ -111,7 +130,17 @@ class DepartmentImportService:
                 previous_pair_status = pair_status_seen.get(pair_key)
                 if previous_pair_status is None:
                     pair_status_seen[pair_key] = pair_status_key
-                elif previous_pair_status == pair_status_key:
+                elif previous_pair_status != pair_status_key:
+                    failed_count += 1
+                    details.append({**detail, "status": "failed", "reason": "同一部门组合在文件中存在冲突"})
+                    continue
+
+                row_key = (primary_name, secondary_name, tertiary_name)
+                row_status_key = (primary_status, secondary_status, tertiary_status)
+                previous_row_status = row_status_seen.get(row_key)
+                if previous_row_status is None:
+                    row_status_seen[row_key] = row_status_key
+                elif previous_row_status == row_status_key:
                     skipped_count += 1
                     details.append({**detail, "status": "skipped", "reason": "导入文件中存在重复行"})
                     continue
@@ -126,6 +155,13 @@ class DepartmentImportService:
                     name=secondary_name,
                     status=secondary_status,
                 )
+                tertiary_id = None
+                if tertiary_name and tertiary_status:
+                    tertiary_id = self._upsert_tertiary(
+                        secondary_department_id=secondary_id,
+                        name=tertiary_name,
+                        status=tertiary_status,
+                    )
                 success_count += 1
                 details.append(
                     {
@@ -133,6 +169,7 @@ class DepartmentImportService:
                         "status": "success",
                         "primary_department_id": primary_id,
                         "secondary_department_id": secondary_id,
+                        "tertiary_department_id": tertiary_id,
                     }
                 )
         except Exception as exc:
@@ -161,16 +198,17 @@ class DepartmentImportService:
         if fmt not in {"xlsx", "csv"}:
             return {"success": False, "error": "不支持的格式，只支持xlsx和csv", "code": "INVALID_FORMAT"}
 
+        headers = [*REQUIRED_COLUMNS, *OPTIONAL_TERTIARY_COLUMNS]
         rows = [
-            ["计算机学院", "active", "软件工程系", "active"],
-            ["计算机学院", "active", "人工智能系", "disabled"],
-            ["化学学院", "disabled", "材料系", "active"],
+            ["计算机学院", "active", "软件工程系", "active", "人工智能实验室", "active"],
+            ["计算机学院", "active", "人工智能系", "disabled", "", ""],
+            ["化学学院", "disabled", "材料系", "active", "高分子实验室", "disabled"],
         ]
 
         if fmt == "csv":
             buffer = io.StringIO()
             writer = csv.writer(buffer, lineterminator="\n")
-            writer.writerow(REQUIRED_COLUMNS)
+            writer.writerow(headers)
             writer.writerows(rows)
             return Response(
                 content=buffer.getvalue().encode("utf-8-sig"),
@@ -179,7 +217,7 @@ class DepartmentImportService:
             )
 
         return Response(
-            content=build_xlsx(headers=REQUIRED_COLUMNS, rows=rows, sheet_name="部门导入"),
+            content=build_xlsx(headers=headers, rows=rows, sheet_name="部门导入"),
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": 'attachment; filename="department_import_template.xlsx"'},
         )
@@ -209,6 +247,21 @@ class DepartmentImportService:
         if status != "active":
             self._repository.update_secondary_status(secondary_id=secondary_id, status=status)
         return secondary_id
+
+    def _upsert_tertiary(self, *, secondary_department_id: int, name: str, status: str) -> int:
+        tertiary = self._repository.get_tertiary_by_name(secondary_department_id=secondary_department_id, name=name)
+        if tertiary:
+            tertiary_id = int(tertiary["id"])
+            if self._clean_text(tertiary.get("status")).lower() != status:
+                self._repository.update_tertiary_status(tertiary_id=tertiary_id, status=status)
+            return tertiary_id
+
+        tertiary_id = int(self._repository.create_tertiary(secondary_department_id=secondary_department_id, name=name))
+        if tertiary_id <= 0:
+            raise RuntimeError("三级部门创建失败")
+        if status != "active":
+            self._repository.update_tertiary_status(tertiary_id=tertiary_id, status=status)
+        return tertiary_id
 
 
 department_import_service = DepartmentImportService()

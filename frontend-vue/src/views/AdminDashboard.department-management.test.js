@@ -31,6 +31,12 @@ test('AdminDashboard includes department management entry and user department co
 test('AdminDashboard wires department assignment into user editing flows', () => {
   assert.match(adminSource, /DepartmentSelector/)
   assert.match(adminSource, /updateUserDepartment|getDepartmentTree/)
+  assert.match(adminSource, /newTertiaryDepartmentId/)
+  assert.match(adminSource, /editTertiaryDepartmentId/)
+  assert.match(adminSource, /tertiary-id/)
+  assert.match(adminServiceSource, /tertiary_department_id/)
+  assert.match(adminServiceSource, /getTertiaryDepartmentUsers/)
+  assert.match(adminServiceSource, /getSecondaryLegacyDepartmentUsers/)
 })
 
 test('admin service exposes department dictionary and user department APIs', () => {
@@ -57,6 +63,7 @@ test('admin service exposes department import APIs', () => {
 test('DepartmentBatchImportDialog documents status columns', () => {
   assert.match(departmentBatchImportSource, /primary_status/)
   assert.match(departmentBatchImportSource, /secondary_status/)
+  assert.match(departmentBatchImportSource, /tertiary_status/)
   assert.match(departmentBatchImportSource, /active/)
   assert.match(departmentBatchImportSource, /disabled/)
 })
@@ -85,6 +92,8 @@ test('Department import result dialog shows department columns', () => {
   assert.match(departmentImportResultSource, /一级状态/)
   assert.match(departmentImportResultSource, /二级部门/)
   assert.match(departmentImportResultSource, /二级状态/)
+  assert.match(departmentImportResultSource, /三级部门/)
+  assert.match(departmentImportResultSource, /三级状态/)
 })
 
 test('DepartmentManagementPanel renders collapsible primary department sections', () => {
@@ -96,25 +105,29 @@ test('DepartmentManagementPanel renders collapsible primary department sections'
   assert.match(panelSource, /isPrimaryExpanded\(primary\.id\)/)
 })
 
-test('admin service exposes secondary department user query api', () => {
-  assert.match(adminServiceSource, /getSecondaryDepartmentUsers/)
-  assert.match(adminServiceSource, /departments\/secondary\/\$\{secondaryId\}\/users/)
+test('admin service exposes tertiary and legacy department user query api', () => {
+  assert.match(adminServiceSource, /getTertiaryDepartmentUsers/)
+  assert.match(adminServiceSource, /departments\/tertiary\/\$\{tertiaryId\}\/users/)
+  assert.match(adminServiceSource, /getSecondaryLegacyDepartmentUsers/)
+  assert.match(adminServiceSource, /legacy-users/)
 })
 
-test('DepartmentManagementPanel renders collapsible secondary sections with user counts', () => {
+test('DepartmentManagementPanel renders collapsible secondary and tertiary sections with user counts', () => {
   assert.match(panelSource, /expandedSecondaryIds/)
   assert.match(panelSource, /toggleSecondary/)
   assert.match(panelSource, /isSecondaryExpanded/)
-  assert.match(panelSource, /secondary\.user_count/)
-  assert.match(panelSource, /人/)
+  assert.match(panelSource, /secondary\.tertiary_count/)
+  assert.match(panelSource, /legacy_user_count/)
+  assert.match(panelSource, /未补全三级部门用户/)
+  assert.match(panelSource, /tertiary\.user_count/)
 })
 
-test('DepartmentManagementPanel lazy loads secondary users with local loading and error states', () => {
-  assert.match(panelSource, /createSecondaryUsersRuntime/)
-  assert.match(panelSource, /loadSecondaryUsers/)
-  assert.match(panelSource, /secondaryUsersById/)
-  assert.match(panelSource, /secondaryUsersLoadingById/)
-  assert.match(panelSource, /secondaryUsersErrorById/)
+test('DepartmentManagementPanel lazy loads tertiary and legacy users with local loading and error states', () => {
+  assert.match(panelSource, /createDepartmentUsersRuntime/)
+  assert.match(panelSource, /loadDepartmentUsers/)
+  assert.match(panelSource, /departmentUsersById/)
+  assert.match(panelSource, /departmentUsersLoadingById/)
+  assert.match(panelSource, /departmentUsersErrorById/)
   assert.match(runtimeSource, /获取用户列表失败/)
   assert.match(panelSource, /暂无用户/)
 })

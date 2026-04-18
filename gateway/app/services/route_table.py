@@ -75,6 +75,11 @@ _PUBLIC_ROUTE_GROUPS = (
     _paths("/api/admin/departments/secondary/{secondary_id}", include_v1=False),
     _paths("/api/admin/departments/secondary/{secondary_id}/status", include_v1=False),
     _paths("/api/admin/departments/secondary/{secondary_id}/users", include_v1=False),
+    _paths("/api/admin/departments/secondary/{secondary_id}/legacy-users", include_v1=False),
+    _paths("/api/admin/departments/tertiary", include_v1=False),
+    _paths("/api/admin/departments/tertiary/{tertiary_id}", include_v1=False),
+    _paths("/api/admin/departments/tertiary/{tertiary_id}/status", include_v1=False),
+    _paths("/api/admin/departments/tertiary/{tertiary_id}/users", include_v1=False),
     _paths("/api/admin/departments/batch-import", include_v1=False),
     _paths("/api/admin/departments/import-template", include_v1=False),
 )

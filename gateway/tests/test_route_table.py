@@ -26,6 +26,11 @@ def test_route_table_patterns_include_department_routes():
         "/api/admin/departments/secondary/{secondary_id}",
         "/api/admin/departments/secondary/{secondary_id}/status",
         "/api/admin/departments/secondary/{secondary_id}/users",
+        "/api/admin/departments/secondary/{secondary_id}/legacy-users",
+        "/api/admin/departments/tertiary",
+        "/api/admin/departments/tertiary/{tertiary_id}",
+        "/api/admin/departments/tertiary/{tertiary_id}/status",
+        "/api/admin/departments/tertiary/{tertiary_id}/users",
         "/api/admin/departments/batch-import",
         "/api/admin/departments/import-template",
     }

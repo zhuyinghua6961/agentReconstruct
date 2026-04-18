@@ -47,6 +47,7 @@ class AuthRepositoryProtocol(Protocol):
         user_id: int,
         primary_department_id: int | None,
         secondary_department_id: int | None,
+        tertiary_department_id: int | None = None,
     ) -> int: ...
     def update_username(self, *, user_id: int, username: str) -> int: ...
 
@@ -57,6 +58,7 @@ class DepartmentServiceProtocol(Protocol):
         *,
         primary_department_id: int | None,
         secondary_department_id: int | None,
+        tertiary_department_id: int | None = None,
     ) -> dict[str, Any]: ...
 
     def get_selectable_tree(self) -> dict[str, Any]: ...
@@ -66,8 +68,10 @@ class DepartmentServiceProtocol(Protocol):
         *,
         primary_department_id: int | None,
         secondary_department_id: int | None,
+        tertiary_department_id: int | None = None,
         require_active: bool,
         allow_empty: bool,
+        allow_legacy_two_level: bool = True,
     ) -> dict[str, Any]: ...
 
 
@@ -115,6 +119,16 @@ class UnavailableAuthRepository:
         self._raise()
 
     def has_security_questions(self, *, user_id: int) -> bool:
+        self._raise()
+
+    def update_user_department(
+        self,
+        *,
+        user_id: int,
+        primary_department_id: int | None,
+        secondary_department_id: int | None,
+        tertiary_department_id: int | None = None,
+    ) -> int:
         self._raise()
 
     def update_username(self, *, user_id: int, username: str) -> int:
@@ -208,7 +222,7 @@ class AuthService:
             return 400
         if code in {"INVALID_CREDENTIALS", "TOKEN_MISSING", "TOKEN_INVALID"}:
             return 401
-        if code in {"USER_NOT_FOUND", "PRIMARY_DEPARTMENT_NOT_FOUND", "SECONDARY_DEPARTMENT_NOT_FOUND"}:
+        if code in {"USER_NOT_FOUND", "PRIMARY_DEPARTMENT_NOT_FOUND", "SECONDARY_DEPARTMENT_NOT_FOUND", "TERTIARY_DEPARTMENT_NOT_FOUND"}:
             return 404
         if code in {"ACCOUNT_DISABLED"}:
             return 403
@@ -247,14 +261,16 @@ class AuthService:
         return cls._resolve_user_type(user) == 1
 
     @staticmethod
-    def _department_pair_from_mapping(data: dict[str, Any] | None) -> tuple[int | None, int | None]:
+    def _department_triplet_from_mapping(data: dict[str, Any] | None) -> tuple[int | None, int | None, int | None]:
         if not data:
-            return (None, None)
+            return (None, None, None)
         primary_id = data.get("primary_department_id")
         secondary_id = data.get("secondary_department_id")
+        tertiary_id = data.get("tertiary_department_id")
         return (
             int(primary_id) if primary_id is not None else None,
             int(secondary_id) if secondary_id is not None else None,
+            int(tertiary_id) if tertiary_id is not None else None,
         )
 
     @staticmethod
@@ -383,6 +399,7 @@ class AuthService:
             self._departments.describe_user_department(
                 primary_department_id=user.get("primary_department_id"),
                 secondary_department_id=user.get("secondary_department_id"),
+                tertiary_department_id=user.get("tertiary_department_id"),
             )
         )
         if self._is_admin_user(user):
@@ -429,6 +446,7 @@ class AuthService:
         user_id: int,
         primary_department_id: int | None,
         secondary_department_id: int | None,
+        tertiary_department_id: int | None = None,
     ) -> dict[str, Any]:
         try:
             user = self._repo.get_by_id(user_id)
@@ -438,13 +456,15 @@ class AuthService:
             current_department = self._departments.describe_user_department(
                 primary_department_id=user.get("primary_department_id"),
                 secondary_department_id=user.get("secondary_department_id"),
+                tertiary_department_id=user.get("tertiary_department_id"),
             )
             if (
-                self._department_pair_from_mapping(user)
-                == self._department_pair_from_mapping(
+                self._department_triplet_from_mapping(user)
+                == self._department_triplet_from_mapping(
                     {
                         "primary_department_id": primary_department_id,
                         "secondary_department_id": secondary_department_id,
+                        "tertiary_department_id": tertiary_department_id,
                     }
                 )
                 and not bool(current_department.get("require_department_setup"))
@@ -454,8 +474,10 @@ class AuthService:
             validation = self._departments.validate_department_selection(
                 primary_department_id=primary_department_id,
                 secondary_department_id=secondary_department_id,
+                tertiary_department_id=tertiary_department_id,
                 require_active=True,
-                allow_empty=False,
+                allow_empty=True,
+                allow_legacy_two_level=False,
             )
             if not validation.get("success"):
                 return validation
@@ -465,18 +487,20 @@ class AuthService:
                 user_id=user_id,
                 primary_department_id=department_data.get("primary_department_id"),
                 secondary_department_id=department_data.get("secondary_department_id"),
+                tertiary_department_id=department_data.get("tertiary_department_id"),
             )
             refreshed_user = self._repo.get_by_id(user_id) or user
             if (
                 updated_count <= 0
-                and self._department_pair_from_mapping(refreshed_user)
-                != self._department_pair_from_mapping(department_data)
+                and self._department_triplet_from_mapping(refreshed_user)
+                != self._department_triplet_from_mapping(department_data)
             ):
                 return {"success": False, "error": "department_update_failed", "code": "UPDATE_ERROR"}
             updated_user = {
                 **refreshed_user,
                 "primary_department_id": department_data.get("primary_department_id"),
                 "secondary_department_id": department_data.get("secondary_department_id"),
+                "tertiary_department_id": department_data.get("tertiary_department_id"),
             }
             return {"success": True, "message": "department_updated", "data": self._build_user_payload(updated_user)}
         except Exception as exc:
@@ -617,6 +641,9 @@ class AuthService:
                         "primary_department_name": user_payload.get("primary_department_name"),
                         "secondary_department_id": user_payload.get("secondary_department_id"),
                         "secondary_department_name": user_payload.get("secondary_department_name"),
+                        "tertiary_department_id": user_payload.get("tertiary_department_id"),
+                        "tertiary_department_name": user_payload.get("tertiary_department_name"),
+                        "department_completion_level": user_payload.get("department_completion_level"),
                     },
                     "is_first_login": bool(user_payload.get("is_first_login")),
                     "has_security_questions": bool(user_payload.get("has_security_questions")),

@@ -124,6 +124,7 @@ export const adminApi = {
         user_type: userType,
         primary_department_id: department.primary_department_id ?? null,
         secondary_department_id: department.secondary_department_id ?? null,
+        tertiary_department_id: department.tertiary_department_id ?? null,
       })
     })
     const data = await safeJson(response)
@@ -138,6 +139,7 @@ export const adminApi = {
       body: JSON.stringify({
         primary_department_id: department.primary_department_id ?? null,
         secondary_department_id: department.secondary_department_id ?? null,
+        tertiary_department_id: department.tertiary_department_id ?? null,
       })
     })
     const data = await safeJson(response)
@@ -301,9 +303,49 @@ export const adminApi = {
     return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
   },
 
-  async getSecondaryDepartmentUsers(secondaryId) {
+  async createTertiaryDepartment(secondaryDepartmentId, name) {
     const token = readStoredToken()
-    return fetchWithErrorHandling(`${API_BASE}/departments/secondary/${secondaryId}/users`, {
+    const response = await fetch(`${API_BASE}/departments/tertiary`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ secondary_department_id: secondaryDepartmentId, name })
+    })
+    const data = await safeJson(response)
+    return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
+  },
+
+  async renameTertiaryDepartment(tertiaryId, name) {
+    const token = readStoredToken()
+    const response = await fetch(`${API_BASE}/departments/tertiary/${tertiaryId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ name })
+    })
+    const data = await safeJson(response)
+    return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
+  },
+
+  async updateTertiaryDepartmentStatus(tertiaryId, status) {
+    const token = readStoredToken()
+    const response = await fetch(`${API_BASE}/departments/tertiary/${tertiaryId}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ status })
+    })
+    const data = await safeJson(response)
+    return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
+  },
+
+  async getTertiaryDepartmentUsers(tertiaryId) {
+    const token = readStoredToken()
+    return fetchWithErrorHandling(`${API_BASE}/departments/tertiary/${tertiaryId}/users`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+  },
+
+  async getSecondaryLegacyDepartmentUsers(secondaryId) {
+    const token = readStoredToken()
+    return fetchWithErrorHandling(`${API_BASE}/departments/secondary/${secondaryId}/legacy-users`, {
       headers: { 'Authorization': `Bearer ${token}` }
     })
   },

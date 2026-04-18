@@ -22,5 +22,14 @@ class SecondaryDepartmentRenameRequest(BaseModel):
     name: str = Field(default="")
 
 
+class TertiaryDepartmentCreateRequest(BaseModel):
+    secondary_department_id: int = Field(default=0)
+    name: str = Field(default="")
+
+
+class TertiaryDepartmentRenameRequest(BaseModel):
+    name: str = Field(default="")
+
+
 class DepartmentStatusUpdateRequest(BaseModel):
     status: Literal["active", "disabled"] | str = Field(default="active")
