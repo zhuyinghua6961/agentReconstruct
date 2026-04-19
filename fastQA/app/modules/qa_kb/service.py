@@ -92,6 +92,7 @@ class QaKbService:
         active_stream_count: int | None = None,
         logger: Any | None = None,
         conversation_context: dict[str, Any] | None = None,
+        graph_evidence=None,
     ) -> QaKbExecutionResult:
         return self._generation_orchestrator.run(
             question=question,
@@ -102,6 +103,7 @@ class QaKbService:
             active_stream_count=active_stream_count,
             logger=logger or self._logger,
             conversation_context=conversation_context,
+            graph_evidence=graph_evidence,
         )
 
     def iter_generation_answer_events(
@@ -117,6 +119,7 @@ class QaKbService:
         logger: Any | None = None,
         chunk_size: int = 120,
         conversation_context: dict[str, Any] | None = None,
+        graph_evidence=None,
     ) -> Iterator[Any]:
         yield from self._generation_orchestrator.stream(
             question=question,
@@ -129,6 +132,7 @@ class QaKbService:
             sse_event=sse_event,
             chunk_size=chunk_size,
             conversation_context=conversation_context,
+            graph_evidence=graph_evidence,
         )
 
     def iter_answer_events(
@@ -184,6 +188,7 @@ class QaKbService:
             logger=log,
             chunk_size=chunk_size,
             conversation_context=conversation_context,
+            graph_evidence=request.graph_evidence,
         )
 
     def iter_result_events(

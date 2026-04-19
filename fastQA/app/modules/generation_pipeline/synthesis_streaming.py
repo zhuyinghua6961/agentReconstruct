@@ -320,6 +320,7 @@ def iter_stage4_synthesis_with_pdf_chunks(
     align_dois_with_pdf_chunks_fn: Callable[..., str] | None = None,
     should_cancel: Callable[[], bool] | None = None,
     conversation_context: dict[str, Any] | None = None,
+    graph_fact_block: str = "",
     logger: Any,
 ) -> Any:
     def _cancelled() -> bool:
@@ -437,6 +438,13 @@ def iter_stage4_synthesis_with_pdf_chunks(
                 )
         if not prompt:
             prompt = stage2_prompt.format_map(safe_kwargs)
+
+        if graph_fact_block:
+            prompt = (
+                "以下是图谱结构化事实，只能作为补充线索，不能覆盖 PDF 证据：\n"
+                f"{graph_fact_block}\n\n"
+                f"{prompt}"
+            )
 
         conversation_context_block = _format_conversation_context_for_stage4(conversation_context)
         if conversation_context_block:

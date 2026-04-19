@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+from app.modules.graph_kb.models import GraphRagPayload
 from app.modules.generation_pipeline.stage2_retrieval import run_stage2_targeted_retrieval
 
 
@@ -196,3 +197,34 @@ def test_stage2_targeted_retrieval_returns_cancelled_payload():
     assert result["success"] is False
     assert result["cancelled"] is True
     assert result["documents"] == []
+
+
+def test_stage2_targeted_retrieval_merges_graph_hints_into_query(monkeypatch):
+    monkeypatch.setenv("QA_STAGE2_FORCE_KEYWORD_INJECTION", "false")
+    monkeypatch.setenv("QA_STAGE2_ENTITY_LOCK_ENABLED", "false")
+    expert = _Expert(
+        default_response={
+            "documents": ["doc-graph"],
+            "metadatas": [{"doi": "10.9/graph"}],
+            "distances": [0.1],
+        }
+    )
+
+    result = run_stage2_targeted_retrieval(
+        retrieval_claims=[{"claim": "claim one", "keywords": []}],
+        n_results_per_claim=1,
+        user_question="battery cycle life",
+        literature_expert=expert,
+        logger=logging.getLogger("test.stage2"),
+        preprocess_retrieval_query_fn=lambda query: query,
+        validate_retrieval_relevance_fn=lambda results, query, claim: results,
+        graph_evidence=GraphRagPayload(
+            stage2_doi_candidates=("10.9/graph",),
+            stage2_entity_hints={"materials": ("GRAPH_HINT",)},
+            cache_fingerprint="graph:abc",
+        ),
+    )
+
+    assert result["success"] is True
+    assert "GRAPH_HINT" in result["claim_to_results"]["claim one"]["query"]
+    assert "10.9/graph" in result["claim_to_results"]["claim one"]["query"]

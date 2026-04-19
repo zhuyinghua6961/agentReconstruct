@@ -131,6 +131,7 @@ class FileRouteService:
         settings = get_settings()
 
         class _PdfAgent:
+            # Compatibility shim for legacy MaterialScienceAgent entrypoints kept during V2 rollout.
             llm = service._resolve_llm()
 
             def smart_query(self, question: str, use_dual_retrieval: bool = False) -> dict[str, Any]:

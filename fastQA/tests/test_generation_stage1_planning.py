@@ -214,6 +214,22 @@ def test_stage1_planning_includes_normalized_conversation_context_in_user_messag
     assert "should-not-leak" not in user_message
 
 
+def test_stage1_planning_includes_graph_context_in_user_message():
+    client = _FakeClient('{"deep_answer":"answer","retrieval_claims":[]}')
+    run_stage1_pre_answer_and_planning(
+        user_question="what is lfp?",
+        stage1_prompt="prompt",
+        vector_db_context="context",
+        client=client,
+        model="gpt-test",
+        logger=_Logger(),
+        graph_context="doi:10.1000/test",
+    )
+
+    user_message = client.calls[0]["messages"][1]["content"]
+    assert "doi:10.1000/test" in user_message
+
+
 def test_stage1_planning_does_not_retry_without_response_format_for_unrelated_errors():
     client = _AlwaysFailingClient('ignored')
     result = run_stage1_pre_answer_and_planning(

@@ -3,12 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from app.modules.graph_kb.models import GraphRagPayload
+
 
 class GenerationRuntime(Protocol):
     def stage1_pre_answer_and_planning(
         self,
         user_question: str,
         conversation_context: dict[str, Any] | None = None,
+        graph_context: str | None = None,
     ) -> dict[str, Any]:
         ...
 
@@ -19,6 +22,7 @@ class GenerationRuntime(Protocol):
         user_question: str | None = None,
         should_cancel: Any | None = None,
         active_stream_count: int | None = None,
+        graph_evidence: GraphRagPayload | None = None,
     ) -> dict[str, Any]:
         ...
 
@@ -50,6 +54,7 @@ class GenerationRuntime(Protocol):
         retrieval_results: dict[str, Any] | None = None,
         should_cancel: Any | None = None,
         conversation_context: dict[str, Any] | None = None,
+        graph_fact_block: str = "",
     ) -> Any:
         ...
 
@@ -72,6 +77,7 @@ class QaKbRequest:
     summary_for_llm: dict[str, Any] = field(default_factory=dict)
     conversation_state: dict[str, Any] = field(default_factory=dict)
     source_selection: dict[str, Any] = field(default_factory=dict)
+    graph_evidence: GraphRagPayload | None = None
 
 
 @dataclass
@@ -80,6 +86,7 @@ class QaKbExecutionMetadata:
     pipeline_mode: str = "new"
     query_mode: str = ""
     use_generation_driven: bool = True
+    doi_source: str = "none"
     doi_count: int = 0
     chunk_count: int = 0
     source_count: int = 0

@@ -149,6 +149,8 @@ class Settings:
     redis_socket_timeout_sec: int
     generation_runtime_enabled: bool
     graph_kb_enabled: bool
+    graph_kb_v2_enabled: bool
+    graph_kb_rag_injection_enabled: bool
     graph_kb_timeout_ms: int
     graph_kb_max_rows: int
     graph_kb_query_logging: bool
@@ -255,6 +257,8 @@ def get_settings() -> Settings:
         redis_socket_timeout_sec=_get_int("REDIS_SOCKET_TIMEOUT_SEC", 2, minimum=1, maximum=60),
         generation_runtime_enabled=_get_bool("FASTQA_GENERATION_RUNTIME_ENABLED", False),
         graph_kb_enabled=_get_bool("FASTQA_GRAPH_KB_ENABLED", False),
+        graph_kb_v2_enabled=_get_bool("FASTQA_GRAPH_KB_V2_ENABLED", False),
+        graph_kb_rag_injection_enabled=_get_bool("FASTQA_GRAPH_KB_RAG_INJECTION_ENABLED", False),
         graph_kb_timeout_ms=_get_int("FASTQA_GRAPH_KB_TIMEOUT_MS", 3000, minimum=100, maximum=60000),
         graph_kb_max_rows=_get_int("FASTQA_GRAPH_KB_MAX_ROWS", 20, minimum=1, maximum=200),
         graph_kb_query_logging=_get_bool("FASTQA_GRAPH_KB_QUERY_LOGGING", False),

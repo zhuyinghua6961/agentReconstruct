@@ -105,6 +105,10 @@ def plan_graph_kb_query(question: str) -> GraphKbQueryPlan | None:
     return None
 
 
+def build_legacy_template_query_plan(question: str) -> GraphKbQueryPlan | None:
+    return plan_graph_kb_query(question)
+
+
 def _cypher_and_params(plan: GraphKbQueryPlan) -> tuple[str, dict[str, Any]]:
     params = dict(plan.params)
     if plan.template_id == "lookup_by_doi":

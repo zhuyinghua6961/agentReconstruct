@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from app.modules.graph_kb.models import GraphRagPayload
 from app.modules.generation_pipeline.generation_driven_rag_facade import GenerationDrivenRAG
 
 
@@ -228,6 +229,61 @@ def test_generation_driven_rag_stage4_uses_synthesis_streaming(monkeypatch):
     assert result[0] == "hello"
     assert result[-1]["success"] is True
     assert captured["user_question"] == "what is lfp?"
+
+
+def test_generation_driven_rag_forwards_graph_evidence_into_stage_calls(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.com/v1")
+    monkeypatch.setattr(
+        "app.modules.generation_pipeline.generation_driven_rag_facade.build_openai_client_impl",
+        lambda *, api_key, base_url, logger=None: object(),
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_stage1(**kwargs):
+        captured["stage1"] = kwargs
+        return {"success": True, "deep_answer": "a", "retrieval_claims": []}
+
+    def _fake_stage2(**kwargs):
+        captured["stage2"] = kwargs
+        return {"success": True, "documents": [], "metadatas": [], "distances": [], "claim_to_results": {}, "unique_count": 0, "total_count": 0}
+
+    def _fake_stage4(**kwargs):
+        captured["stage4"] = kwargs
+        yield {"success": True, "final_answer": "ok", "references": [], "cited_dois": [], "source_count": 0}
+
+    monkeypatch.setattr("app.modules.generation_pipeline.generation_driven_rag_facade.run_stage1_pre_answer_and_planning_impl", _fake_stage1)
+    monkeypatch.setattr("app.modules.generation_pipeline.generation_driven_rag_facade.run_stage2_targeted_retrieval_impl", _fake_stage2)
+    monkeypatch.setattr("app.modules.generation_pipeline.generation_driven_rag_facade.iter_stage4_synthesis_with_pdf_chunks_impl", _fake_stage4)
+
+    rag = GenerationDrivenRAG()
+    payload = GraphRagPayload(
+        stage1_context_block="doi:10.1000/test",
+        stage4_fact_block="structured graph facts",
+        cache_fingerprint="graph:abc",
+    )
+
+    rag.stage1_pre_answer_and_planning("what is lfp?", graph_context=payload.stage1_context_block)
+    rag.stage2_targeted_retrieval(
+        retrieval_claims=[{"claim": "lfp"}],
+        n_results_per_claim=3,
+        user_question="what is lfp?",
+        graph_evidence=payload,
+    )
+    list(
+        rag.stage4_synthesis_with_pdf_chunks(
+            user_question="what is lfp?",
+            deep_answer="draft",
+            pdf_chunks={"10.1/a": [{"text": "evidence"}]},
+            retrieval_results={"documents": []},
+            graph_fact_block=payload.stage4_fact_block,
+        )
+    )
+
+    assert captured["stage1"]["graph_context"] == "doi:10.1000/test"
+    assert captured["stage2"]["graph_evidence"] is payload
+    assert captured["stage4"]["graph_fact_block"] == "structured graph facts"
 
 
 def test_generation_driven_rag_uses_legacy_inline_stage_prompts_not_workspace_prompt_files(monkeypatch, tmp_path):

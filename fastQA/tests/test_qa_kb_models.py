@@ -1,3 +1,4 @@
+from app.modules.graph_kb.models import GraphRagPayload
 from app.modules.qa_kb.models import QaKbExecutionMetadata, QaKbExecutionResult, QaKbRequest
 from app.modules.qa_kb.streaming import iter_result_events, iter_text_chunks
 
@@ -10,6 +11,13 @@ def test_qakb_request_defaults_match_phase1_contract():
     assert request.n_results_per_claim == 10
     assert request.active_stream_count is None
     assert request.trace_id == ""
+
+
+def test_qakb_request_carries_graph_evidence_without_mutating_conversation_context():
+    payload = GraphRagPayload(stage1_context_block="doi:10.1000/test", cache_fingerprint="graph:abc")
+    request = QaKbRequest(question="q", graph_evidence=payload)
+
+    assert request.graph_evidence is payload
 
 
 def test_iter_text_chunks_splits_long_text():

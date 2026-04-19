@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import re
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+from app.modules.graph_kb.models import GraphRagPayload
 from app.modules.generation_pipeline.feature_flags import env_bool, env_int
 from app.modules.generation_pipeline.retrieval_validation import validate_retrieval_relevance
 from app.modules.generation_pipeline.text_processing import extract_question_keywords, preprocess_retrieval_query
@@ -259,6 +260,32 @@ def apply_stage2_query_constraints(
     return constrained, details
 
 
+def merge_graph_hints_into_retrieval(
+    *,
+    query: str,
+    preprocess_retrieval_query_fn: Callable[[str], str],
+    graph_evidence: GraphRagPayload | None,
+) -> str:
+    if graph_evidence is None:
+        return query
+
+    prefixes: list[str] = []
+    for doi in list(graph_evidence.stage2_doi_candidates or [])[:5]:
+        text = str(doi or "").strip()
+        if text and text not in prefixes and text not in query:
+            prefixes.append(text)
+
+    for values in dict(graph_evidence.stage2_entity_hints or {}).values():
+        for item in list(values or [])[:5]:
+            text = str(item or "").strip()
+            if text and text not in prefixes and text not in query:
+                prefixes.append(text)
+
+    if not prefixes:
+        return query
+    return preprocess_retrieval_query_fn(" ".join(prefixes + [query]))
+
+
 def _search_with_optional_rerank(
     *,
     literature_expert: Any,
@@ -428,6 +455,7 @@ def run_stage2_targeted_retrieval(
     entity_lock_enabled: Optional[bool] = None,
     use_rerank: Optional[bool] = None,
     rerank_candidates: Optional[int] = None,
+    graph_evidence: GraphRagPayload | None = None,
 ) -> Dict[str, Any]:
     def _cancelled() -> bool:
         if should_cancel is None:
@@ -585,6 +613,11 @@ def run_stage2_targeted_retrieval(
             preprocess_retrieval_query_fn=preprocess_fn,
             toggles=toggles,
             extract_question_keywords_fn=extract_keywords_fn,
+        )
+        combined_query = merge_graph_hints_into_retrieval(
+            query=combined_query,
+            preprocess_retrieval_query_fn=preprocess_fn,
+            graph_evidence=graph_evidence,
         )
         if query_guardrail_details["injected_keywords"] or query_guardrail_details["injected_entities"]:
             logger.info(

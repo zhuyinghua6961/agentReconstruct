@@ -21,6 +21,10 @@ def _stage1_cache_ttl_seconds() -> int:
         return 43200
 
 
+def _stage1_graph_cache_version() -> str:
+    return str(os.getenv("QA_STAGE1_GRAPH_CACHE_VERSION", "1") or "1").strip() or "1"
+
+
 def _normalize_question(question: str) -> str:
     return " ".join(str(question or "").split()).casefold()
 
@@ -119,15 +123,18 @@ def build_stage1_cache_key(
     question: str,
     conversation_context: dict[str, Any] | None = None,
     route_hint: str = "kb_qa",
+    graph_cache_fingerprint: str = "none",
 ) -> str:
     return redis_service.key_factory.cache(
         "stage1",
         _qa_cache_epoch(),
+        _stage1_graph_cache_version(),
         route_hint,
         _runtime_model_name(runtime),
         _runtime_prompt_version(runtime),
         _question_hash(question),
         _conversation_context_hash(conversation_context),
+        str(graph_cache_fingerprint or "none").strip() or "none",
     )
 
 
@@ -138,15 +145,18 @@ def build_stage1_lock_key(
     question: str,
     conversation_context: dict[str, Any] | None = None,
     route_hint: str = "kb_qa",
+    graph_cache_fingerprint: str = "none",
 ) -> str:
     return redis_service.key_factory.lock(
         "stage1",
         _qa_cache_epoch(),
+        _stage1_graph_cache_version(),
         route_hint,
         _runtime_model_name(runtime),
         _runtime_prompt_version(runtime),
         _question_hash(question),
         _conversation_context_hash(conversation_context),
+        str(graph_cache_fingerprint or "none").strip() or "none",
     )
 
 
@@ -157,6 +167,7 @@ def get_cached_stage1_result(
     question: str,
     conversation_context: dict[str, Any] | None = None,
     route_hint: str = "kb_qa",
+    graph_cache_fingerprint: str = "none",
 ) -> dict[str, Any] | None:
     if redis_service is None or not redis_service.available:
         return None
@@ -167,6 +178,7 @@ def get_cached_stage1_result(
             question=question,
             conversation_context=conversation_context,
             route_hint=route_hint,
+            graph_cache_fingerprint=graph_cache_fingerprint,
         ),
         default=None,
     )
@@ -192,6 +204,7 @@ def cache_stage1_result(
     stage1_result: dict[str, Any],
     conversation_context: dict[str, Any] | None = None,
     route_hint: str = "kb_qa",
+    graph_cache_fingerprint: str = "none",
 ) -> bool:
     if redis_service is None or not redis_service.available:
         return False
@@ -213,6 +226,7 @@ def cache_stage1_result(
             question=question,
             conversation_context=conversation_context,
             route_hint=route_hint,
+            graph_cache_fingerprint=graph_cache_fingerprint,
         ),
         payload,
         ttl_seconds=_stage1_cache_ttl_seconds(),

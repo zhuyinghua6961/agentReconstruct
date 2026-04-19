@@ -205,6 +205,26 @@ def test_stage1_cache_roundtrip_reuses_prompt_equivalent_context():
     ) == stage1_result
 
 
+def test_stage1_cache_key_changes_when_graph_payload_changes():
+    service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    runtime = _runtime()
+
+    first_key = build_stage1_cache_key(
+        redis_service=service,
+        runtime=runtime,
+        question="那它的缺点呢",
+        graph_cache_fingerprint="none",
+    )
+    second_key = build_stage1_cache_key(
+        redis_service=service,
+        runtime=runtime,
+        question="那它的缺点呢",
+        graph_cache_fingerprint="graph:abc",
+    )
+
+    assert first_key != second_key
+
+
 def test_stage1_cache_key_distinguishes_non_equivalent_open_threads_spacing():
     service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
     runtime = _runtime()

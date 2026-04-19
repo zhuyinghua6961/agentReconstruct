@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import inspect
 import time
 from typing import Any, Callable, Iterator
 
 from app.integrations.redis import RedisService
+from app.modules.graph_kb.models import GraphRagPayload
 from app.modules.qa_cache.metrics import increment_cache_metric
 from app.modules.qa_cache.singleflight import run_singleflight
 from app.modules.qa_cache.stage1_cache import (
@@ -102,6 +104,33 @@ class GenerationPipelineOrchestrator:
         timings[key] = round((time.perf_counter() - started) * 1000, 3)
         return result
 
+    @staticmethod
+    def _supports_kwarg(target: Callable[..., Any], name: str) -> bool:
+        try:
+            signature = inspect.signature(target)
+        except (TypeError, ValueError):
+            return False
+        parameters = signature.parameters
+        return name in parameters or any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+
+    @staticmethod
+    def _graph_cache_fingerprint(graph_evidence: GraphRagPayload | None) -> str:
+        if graph_evidence is None:
+            return "none"
+        return str(graph_evidence.cache_fingerprint or "none").strip() or "none"
+
+    @staticmethod
+    def _dedupe_preserve_order(values: list[str] | tuple[str, ...]) -> list[str]:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for item in list(values or []):
+            text = str(item or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            ordered.append(text)
+        return ordered
+
     def _fallback_result(
         self,
         *,
@@ -118,6 +147,7 @@ class GenerationPipelineOrchestrator:
                 pipeline_mode="new",
                 query_mode=query_mode,
                 use_generation_driven=True,
+                doi_source=str((raw or {}).get("doi_source") or "none"),
                 stage_timings_ms=timings,
             ),
             raw=raw,
@@ -130,12 +160,14 @@ class GenerationPipelineOrchestrator:
         runtime: GenerationRuntime,
         redis_service: RedisService | None,
         conversation_context: dict[str, Any] | None = None,
+        graph_evidence: GraphRagPayload | None = None,
     ) -> dict[str, Any]:
         cached = get_cached_stage1_result(
             redis_service=redis_service,
             runtime=runtime,
             question=question,
             conversation_context=conversation_context,
+            graph_cache_fingerprint=self._graph_cache_fingerprint(graph_evidence),
         )
         if cached is not None:
             increment_cache_metric("stage1", "cache_hit")
@@ -143,17 +175,21 @@ class GenerationPipelineOrchestrator:
         increment_cache_metric("stage1", "cache_miss")
 
         def _compute() -> dict[str, Any]:
-            result = self.stage1.run(
-                runtime=runtime,
-                user_question=question,
-                conversation_context=conversation_context,
-            )
+            kwargs = {
+                "runtime": runtime,
+                "user_question": question,
+                "conversation_context": conversation_context,
+            }
+            if self._supports_kwarg(self.stage1.run, "graph_evidence"):
+                kwargs["graph_evidence"] = graph_evidence
+            result = self.stage1.run(**kwargs)
             cache_stage1_result(
                 redis_service=redis_service,
                 runtime=runtime,
                 question=question,
                 stage1_result=result,
                 conversation_context=conversation_context,
+                graph_cache_fingerprint=self._graph_cache_fingerprint(graph_evidence),
             )
             return result
 
@@ -167,6 +203,7 @@ class GenerationPipelineOrchestrator:
                 runtime=runtime,
                 question=question,
                 conversation_context=conversation_context,
+                graph_cache_fingerprint=self._graph_cache_fingerprint(graph_evidence),
             ),
             namespace="stage1",
             read_cached_fn=lambda: get_cached_stage1_result(
@@ -174,6 +211,7 @@ class GenerationPipelineOrchestrator:
                 runtime=runtime,
                 question=question,
                 conversation_context=conversation_context,
+                graph_cache_fingerprint=self._graph_cache_fingerprint(graph_evidence),
             ),
             compute_fn=_compute,
         )
@@ -188,6 +226,7 @@ class GenerationPipelineOrchestrator:
         n_results_per_claim: int,
         should_cancel: Callable[[], bool] | None,
         active_stream_count: int | None,
+        graph_evidence: GraphRagPayload | None,
     ) -> dict[str, Any]:
         cached = get_cached_stage2_result(
             redis_service=redis_service,
@@ -195,6 +234,7 @@ class GenerationPipelineOrchestrator:
             question=question,
             retrieval_claims=retrieval_claims,
             n_results_per_claim=n_results_per_claim,
+            graph_cache_fingerprint=self._graph_cache_fingerprint(graph_evidence),
         )
         if cached is not None:
             increment_cache_metric("stage2", "cache_hit")
@@ -202,14 +242,17 @@ class GenerationPipelineOrchestrator:
         increment_cache_metric("stage2", "cache_miss")
 
         def _compute() -> dict[str, Any]:
-            result = self.stage2.run(
-                runtime=runtime,
-                retrieval_claims=retrieval_claims,
-                n_results_per_claim=n_results_per_claim,
-                user_question=question,
-                should_cancel=should_cancel,
-                active_stream_count=active_stream_count,
-            )
+            kwargs = {
+                "runtime": runtime,
+                "retrieval_claims": retrieval_claims,
+                "n_results_per_claim": n_results_per_claim,
+                "user_question": question,
+                "should_cancel": should_cancel,
+                "active_stream_count": active_stream_count,
+            }
+            if self._supports_kwarg(self.stage2.run, "graph_evidence"):
+                kwargs["graph_evidence"] = graph_evidence
+            result = self.stage2.run(**kwargs)
             cache_stage2_result(
                 redis_service=redis_service,
                 runtime=runtime,
@@ -217,6 +260,7 @@ class GenerationPipelineOrchestrator:
                 retrieval_claims=retrieval_claims,
                 n_results_per_claim=n_results_per_claim,
                 stage2_result=result,
+                graph_cache_fingerprint=self._graph_cache_fingerprint(graph_evidence),
             )
             return result
 
@@ -231,6 +275,7 @@ class GenerationPipelineOrchestrator:
                 question=question,
                 retrieval_claims=retrieval_claims,
                 n_results_per_claim=n_results_per_claim,
+                graph_cache_fingerprint=self._graph_cache_fingerprint(graph_evidence),
             ),
             namespace="stage2",
             read_cached_fn=lambda: get_cached_stage2_result(
@@ -239,6 +284,7 @@ class GenerationPipelineOrchestrator:
                 question=question,
                 retrieval_claims=retrieval_claims,
                 n_results_per_claim=n_results_per_claim,
+                graph_cache_fingerprint=self._graph_cache_fingerprint(graph_evidence),
             ),
             compute_fn=_compute,
         )
@@ -358,6 +404,7 @@ class GenerationPipelineOrchestrator:
         active_stream_count: int | None,
         logger: Any,
         conversation_context: dict[str, Any] | None = None,
+        graph_evidence: GraphRagPayload | None = None,
     ) -> QaKbExecutionResult | dict[str, Any]:
         timings: dict[str, float] = {}
         logger.info(
@@ -389,6 +436,7 @@ class GenerationPipelineOrchestrator:
                 runtime=runtime,
                 redis_service=redis_service,
                 conversation_context=conversation_context,
+                graph_evidence=graph_evidence,
             ),
         )
         if not stage1_result.get("success"):
@@ -426,6 +474,7 @@ class GenerationPipelineOrchestrator:
                 n_results_per_claim=n_results_per_claim,
                 should_cancel=should_cancel,
                 active_stream_count=active_stream_count,
+                graph_evidence=graph_evidence,
             ),
         )
         if not stage2_result.get("success"):
@@ -437,17 +486,28 @@ class GenerationPipelineOrchestrator:
             )
 
         dois = list(runtime._extract_dois_from_results(stage2_result))
+        doi_source = "retrieval" if dois else "none"
         logger.info(
             "fastqa stream stage2 extracted doi_count=%s doi_sample=%s",
             len(dois),
             dois[:10],
         )
+        if not dois and graph_evidence is not None and graph_evidence.stage2_doi_candidates:
+            dois = self._dedupe_preserve_order(graph_evidence.stage2_doi_candidates)[: max(1, int(n_results_per_claim))]
+            doi_source = "graph_seeded" if dois else "none"
+            logger.info("fastqa stream graph-seeded doi fallback engaged doi_count=%s doi_sample=%s", len(dois), dois[:10])
         if not dois:
             return self._fallback_result(
                 final_answer=deep_answer,
                 query_mode="生成驱动检索（无DOI，仅预回答）",
                 timings=timings,
-                raw={"deep_answer": deep_answer, "retrieval_claims": retrieval_claims, "retrieval_results": stage2_result, "dois": []},
+                raw={
+                    "deep_answer": deep_answer,
+                    "retrieval_claims": retrieval_claims,
+                    "retrieval_results": stage2_result,
+                    "dois": [],
+                    "doi_source": doi_source,
+                },
             )
 
         md_expansion_result = {
@@ -502,6 +562,7 @@ class GenerationPipelineOrchestrator:
             "retrieval_claims": retrieval_claims,
             "retrieval_results": stage2_result,
             "dois": dois,
+            "doi_source": doi_source,
             "pdf_chunks": pdf_chunks,
             "md_expansion": md_expansion_result,
             "skip_pdf": skip_pdf,
@@ -519,6 +580,7 @@ class GenerationPipelineOrchestrator:
         active_stream_count: int | None,
         logger: Any,
         conversation_context: dict[str, Any] | None = None,
+        graph_evidence: GraphRagPayload | None = None,
     ) -> QaKbExecutionResult:
         prepared = self._prepare(
             question=question,
@@ -529,6 +591,7 @@ class GenerationPipelineOrchestrator:
             active_stream_count=active_stream_count,
             logger=logger,
             conversation_context=conversation_context,
+            graph_evidence=graph_evidence,
         )
         if isinstance(prepared, QaKbExecutionResult):
             return prepared
@@ -537,13 +600,22 @@ class GenerationPipelineOrchestrator:
             prepared["timings"],
             "stage4",
             lambda: self.stage4.stream(
-                runtime=runtime,
-                user_question=question,
-                deep_answer=prepared["deep_answer"],
-                pdf_chunks=prepared["pdf_chunks"],
-                retrieval_results=prepared["retrieval_results"],
-                should_cancel=should_cancel,
-                conversation_context=conversation_context,
+                **(
+                    {
+                        "runtime": runtime,
+                        "user_question": question,
+                        "deep_answer": prepared["deep_answer"],
+                        "pdf_chunks": prepared["pdf_chunks"],
+                        "retrieval_results": prepared["retrieval_results"],
+                        "should_cancel": should_cancel,
+                        "conversation_context": conversation_context,
+                        **(
+                            {"graph_evidence": graph_evidence}
+                            if self._supports_kwarg(self.stage4.stream, "graph_evidence")
+                            else {}
+                        ),
+                    }
+                )
             ),
         )
         synthesis_result = _consume_stage4_result(stage4_output, logger)
@@ -563,6 +635,7 @@ class GenerationPipelineOrchestrator:
                 pipeline_mode="new",
                 query_mode=_final_query_mode(provided=synthesis_result.get("query_mode"), skip_pdf=prepared["skip_pdf"]),
                 use_generation_driven=True,
+                doi_source=str(prepared.get("doi_source") or "none"),
                 doi_count=len(prepared["dois"]),
                 chunk_count=sum(len(chunks) for chunks in prepared["pdf_chunks"].values()),
                 source_count=len(prepared["pdf_chunks"]),
@@ -586,6 +659,7 @@ class GenerationPipelineOrchestrator:
         sse_event: Callable[[dict[str, Any]], Any],
         chunk_size: int = 120,
         conversation_context: dict[str, Any] | None = None,
+        graph_evidence: GraphRagPayload | None = None,
     ) -> Iterator[Any]:
         timings: dict[str, float] = {}
         logger.info(
@@ -623,6 +697,7 @@ class GenerationPipelineOrchestrator:
                 runtime=runtime,
                 redis_service=redis_service,
                 conversation_context=conversation_context,
+                graph_evidence=graph_evidence,
             ),
         )
         logger.info(
@@ -670,6 +745,7 @@ class GenerationPipelineOrchestrator:
                 n_results_per_claim=n_results_per_claim,
                 should_cancel=should_cancel,
                 active_stream_count=active_stream_count,
+                graph_evidence=graph_evidence,
             ),
         )
         logger.info(
@@ -693,18 +769,29 @@ class GenerationPipelineOrchestrator:
             return
 
         dois = list(runtime._extract_dois_from_results(stage2_result))
+        doi_source = "retrieval" if dois else "none"
         logger.info(
             "fastqa stream stage2 extracted doi_count=%s doi_sample=%s",
             len(dois),
             dois[:10],
         )
+        if not dois and graph_evidence is not None and graph_evidence.stage2_doi_candidates:
+            dois = self._dedupe_preserve_order(graph_evidence.stage2_doi_candidates)[: max(1, int(n_results_per_claim))]
+            doi_source = "graph_seeded" if dois else "none"
+            logger.info("fastqa stream graph-seeded doi fallback engaged doi_count=%s doi_sample=%s", len(dois), dois[:10])
         if not dois:
             yield from iter_result_events(
                 result=self._fallback_result(
                     final_answer=deep_answer,
                     query_mode="生成驱动检索（无DOI，仅预回答）",
                     timings=timings,
-                    raw={"deep_answer": deep_answer, "retrieval_claims": retrieval_claims, "retrieval_results": stage2_result, "dois": []},
+                    raw={
+                        "deep_answer": deep_answer,
+                        "retrieval_claims": retrieval_claims,
+                        "retrieval_results": stage2_result,
+                        "dois": [],
+                        "doi_source": doi_source,
+                    },
                 ),
                 sse_event=sse_event,
                 chunk_size=chunk_size,
@@ -816,15 +903,18 @@ class GenerationPipelineOrchestrator:
             sum(len(chunks) for chunks in pdf_chunks.values()),
         )
         stage4_started = time.perf_counter()
-        stage4_output = self.stage4.stream(
-            runtime=runtime,
-            user_question=question,
-            deep_answer=deep_answer,
-            pdf_chunks=pdf_chunks,
-            retrieval_results=stage2_result,
-            should_cancel=should_cancel,
-            conversation_context=conversation_context,
-        )
+        stage4_kwargs = {
+            "runtime": runtime,
+            "user_question": question,
+            "deep_answer": deep_answer,
+            "pdf_chunks": pdf_chunks,
+            "retrieval_results": stage2_result,
+            "should_cancel": should_cancel,
+            "conversation_context": conversation_context,
+        }
+        if self._supports_kwarg(self.stage4.stream, "graph_evidence"):
+            stage4_kwargs["graph_evidence"] = graph_evidence
+        stage4_output = self.stage4.stream(**stage4_kwargs)
 
         final_chunks: list[str] = []
         final_result: dict[str, Any] | None = None
@@ -860,12 +950,19 @@ class GenerationPipelineOrchestrator:
                         "type": "done",
                         "query_mode": fallback.metadata.query_mode,
                         "route": fallback.metadata.route,
+                        "doi_source": fallback.metadata.doi_source,
                         "doi_count": 0,
                         "chunk_count": 0,
                         "source_count": 0,
                         "final_answer": "".join(final_chunks).strip() or fallback.final_answer,
                         "timings": timings,
                         "references": [],
+                        "metadata": {
+                            "route": fallback.metadata.route,
+                            "query_mode": fallback.metadata.query_mode,
+                            "pipeline_mode": fallback.metadata.pipeline_mode,
+                            "doi_source": fallback.metadata.doi_source,
+                        },
                     }
                 )
             return
@@ -884,11 +981,18 @@ class GenerationPipelineOrchestrator:
                 "type": "done",
                 "query_mode": _final_query_mode(provided=final_result.get("query_mode"), skip_pdf=skip_pdf),
                 "route": "kb_qa",
+                "doi_source": doi_source,
                 "doi_count": len(dois),
                 "chunk_count": sum(len(chunks) for chunks in pdf_chunks.values()),
                 "source_count": len(pdf_chunks),
                 "final_answer": final_answer,
                 "timings": timings,
                 "references": references if isinstance(references, list) else [],
+                "metadata": {
+                    "route": "kb_qa",
+                    "query_mode": _final_query_mode(provided=final_result.get("query_mode"), skip_pdf=skip_pdf),
+                    "pipeline_mode": "new",
+                    "doi_source": doi_source,
+                },
             }
         )

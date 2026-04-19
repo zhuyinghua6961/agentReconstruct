@@ -14,8 +14,8 @@ from pydantic import BaseModel, Field
 
 from app.core.runtime import generation_runtime_is_ready
 from app.core.sse import sse_response
-from app.modules.graph_kb.models import GraphKbExecutionResult
-from app.modules.graph_kb.service import try_graph_kb_answer
+from app.modules.graph_kb.models import GraphKbExecutionResult, GraphRagPayload
+from app.modules.graph_kb.service import route_graph_kb_v2, try_graph_kb_answer
 from app.modules.qa_kb.models import QaKbRequest
 from app.modules.qa_kb.service import qa_kb_service
 from app.modules.qa_kb.streaming import build_doi_locations, normalize_reference_objects, normalize_references
@@ -669,8 +669,43 @@ def _iter_route_events(
             primary_file_id=adapted_request.primary_file_id,
         )
         graph_enabled = bool(getattr(getattr(request.app.state, "settings", None), "graph_kb_enabled", False))
+        graph_v2_enabled = bool(getattr(getattr(request.app.state, "settings", None), "graph_kb_v2_enabled", False))
+        graph_rag_injection_enabled = bool(
+            getattr(getattr(request.app.state, "settings", None), "graph_kb_rag_injection_enabled", False)
+        )
         graph_client = getattr(request.app.state, "neo4j_client", None)
-        if graph_enabled:
+        graph_rag_payload: GraphRagPayload | None = None
+        graph_v2_metadata: dict[str, Any] | None = None
+        if graph_enabled and graph_v2_enabled:
+            try:
+                routing_result = route_graph_kb_v2(
+                    question=adapted_request.question,
+                    conversation_context=conversation_context,
+                    neo4j_client=graph_client,
+                    max_rows=int(getattr(getattr(request.app.state, "settings", None), "graph_kb_max_rows", 20) or 20),
+                    timeout_ms=int(getattr(getattr(request.app.state, "settings", None), "graph_kb_timeout_ms", 3000) or 3000),
+                    generation_runtime=getattr(request.app.state, "generation_runtime", None),
+                )
+                graph_v2_metadata = _graph_v2_metadata(routing_result.diagnostics, tri_state_mode=routing_result.mode)
+                if routing_result.mode == "direct_answer" and routing_result.direct_result is not None and routing_result.direct_result.handled:
+                    yield from _iter_graph_kb_events(
+                        result=routing_result.direct_result,
+                        trace_id=adapted_request.trace_id,
+                        route=route,
+                        extra_metadata=graph_v2_metadata,
+                    )
+                    return
+                if routing_result.mode == "graph_for_rag" and routing_result.rag_payload is not None:
+                    if graph_rag_injection_enabled:
+                        graph_rag_payload = routing_result.rag_payload
+                        logger.info("fastqa graph kb v2 attached graph_for_rag evidence to generation request")
+                    else:
+                        logger.info("fastqa graph kb v2 produced graph_for_rag evidence but rag injection is disabled")
+                if routing_result.mode == "skip_graph":
+                    logger.info("fastqa graph kb v2 skipped graph execution and fell through to generation")
+            except Exception as exc:
+                logger.warning("fastqa graph kb v2 attempt failed, falling back to generation: %s", exc)
+        elif graph_enabled:
             try:
                 graph_result = try_graph_kb_answer(
                     question=adapted_request.question,
@@ -718,15 +753,17 @@ def _iter_route_events(
             summary_for_llm=conversation_context["summary_for_llm"],
             conversation_state=conversation_context["conversation_state"],
             source_selection=conversation_context["source_selection"],
+            graph_evidence=graph_rag_payload,
         )
-        yield from qa_kb_service.iter_answer_events(
+        for event in qa_kb_service.iter_answer_events(
             request=qa_request,
             generation_runtime=runtime,
             redis_service=redis_service,
             sse_event=lambda event: event,
             should_cancel=should_cancel,
             logger=logger,
-        )
+        ):
+            yield _merge_graph_v2_event(event, graph_v2_metadata)
         return
     if route == "pdf_qa":
         logger.info("fastqa dispatching to pdf_qa handler")
@@ -789,7 +826,40 @@ def _iter_route_events(
     )
 
 
-def _iter_graph_kb_events(*, result: GraphKbExecutionResult, trace_id: str, route: str) -> Iterator[dict[str, Any]]:
+def _graph_v2_metadata(diagnostics: dict[str, Any] | None, *, tri_state_mode: str | None = None) -> dict[str, Any]:
+    source = dict(diagnostics or {})
+    return {
+        "graph_pipeline_version": str(source.get("graph_pipeline_version") or "v2"),
+        "legacy_route_family": str(source.get("legacy_route_family") or source.get("legacy_route") or ""),
+        "tri_state_mode": str(source.get("tri_state_mode") or tri_state_mode or ""),
+        "neo4j_client": str(source.get("neo4j_client") or "neo4jgraph"),
+        "doi_source": str(source.get("doi_source") or "none"),
+        "legacy_template_fallback_used": bool(source.get("legacy_template_fallback_used", False)),
+    }
+
+
+def _merge_graph_v2_event(event: dict[str, Any], graph_v2_metadata: dict[str, Any] | None) -> dict[str, Any]:
+    if not graph_v2_metadata:
+        return event
+    payload = dict(event or {})
+    event_type = str(payload.get("type") or "").strip().lower()
+    if event_type == "metadata":
+        return {**graph_v2_metadata, **payload}
+    if event_type == "done":
+        merged_metadata = {**graph_v2_metadata, **dict(payload.get("metadata") or {})}
+        payload["metadata"] = merged_metadata
+        payload.setdefault("doi_source", merged_metadata.get("doi_source"))
+        return payload
+    return payload
+
+
+def _iter_graph_kb_events(
+    *,
+    result: GraphKbExecutionResult,
+    trace_id: str,
+    route: str,
+    extra_metadata: dict[str, Any] | None = None,
+) -> Iterator[dict[str, Any]]:
     template_label_map = {
         "lookup_by_doi": "按 DOI 查询文献",
         "expand_doi_context_by_doi": "按 DOI 展开测试/工艺",
@@ -805,6 +875,7 @@ def _iter_graph_kb_events(*, result: GraphKbExecutionResult, trace_id: str, rout
         "query_mode": str(result.query_mode or "graph_kb"),
         "route": route,
         "trace_id": trace_id,
+        **dict(extra_metadata or {}),
     }
     yield {
         "type": "step",
@@ -844,6 +915,7 @@ def _iter_graph_kb_events(*, result: GraphKbExecutionResult, trace_id: str, rout
         "route": route,
         "references": list(result.references or []),
         "trace_id": trace_id,
+        "metadata": dict(extra_metadata or {}),
     }
 
 

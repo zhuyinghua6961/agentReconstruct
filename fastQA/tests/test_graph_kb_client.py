@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from app.modules.graph_kb.client import (
+    build_legacy_template_query_plan,
     execute_graph_kb_plan,
     plan_graph_kb_query,
 )
@@ -14,6 +15,13 @@ def test_plan_lookup_by_doi():
     assert plan is not None
     assert plan.template_id == "lookup_by_doi"
     assert plan.params["doi"] == "10.1000/test"
+
+
+def test_build_legacy_template_query_plan_reuses_existing_hardcoded_templates():
+    plan = build_legacy_template_query_plan("10.1000/test 这篇文献是什么？")
+
+    assert plan is not None
+    assert plan.template_id == "lookup_by_doi"
 
 
 def test_plan_expand_doi_context_by_doi():

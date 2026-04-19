@@ -64,8 +64,8 @@ def test_stage1_cache_round_trip_and_lock_key_shape(monkeypatch):
     runtime = _Runtime()
     key = build_stage1_cache_key(redis_service=redis_service, runtime=runtime, question="What is LFP?")
     lock_key = build_stage1_lock_key(redis_service=redis_service, runtime=runtime, question="What is LFP?")
-    assert key.startswith("agentcode:cache:stage1:7:kb_qa:qwen-test:")
-    assert lock_key.startswith("agentcode:lock:stage1:7:kb_qa:qwen-test:")
+    assert key.startswith("agentcode:cache:stage1:7:1:kb_qa:qwen-test:")
+    assert lock_key.startswith("agentcode:lock:stage1:7:1:kb_qa:qwen-test:")
 
     payload = {"success": True, "deep_answer": "answer", "retrieval_claims": [{"claim": "a"}]}
     assert cache_stage1_result(redis_service=redis_service, runtime=runtime, question="What is LFP?", stage1_result=payload) is True
@@ -85,7 +85,7 @@ def test_stage2_cache_round_trip(monkeypatch):
         retrieval_claims=claims,
         n_results_per_claim=6,
     )
-    assert key.startswith("agentcode:cache:stage2:2:9:1:kb_qa:qwen-test:6:")
+    assert key.startswith("agentcode:cache:stage2:2:9:1:1:kb_qa:qwen-test:6:")
 
     payload = {
         "success": True,
@@ -114,6 +114,55 @@ def test_stage2_cache_round_trip(monkeypatch):
         )
         == payload
     )
+
+
+def test_stage1_cache_key_changes_when_graph_cache_version_changes(monkeypatch):
+    redis_service = _redis_service()
+    runtime = _Runtime()
+    monkeypatch.setenv("QA_STAGE1_GRAPH_CACHE_VERSION", "1")
+    first_key = build_stage1_cache_key(
+        redis_service=redis_service,
+        runtime=runtime,
+        question="What is LFP?",
+        graph_cache_fingerprint="graph:abc",
+    )
+
+    monkeypatch.setenv("QA_STAGE1_GRAPH_CACHE_VERSION", "2")
+    second_key = build_stage1_cache_key(
+        redis_service=redis_service,
+        runtime=runtime,
+        question="What is LFP?",
+        graph_cache_fingerprint="graph:abc",
+    )
+
+    assert first_key != second_key
+
+
+def test_stage2_cache_key_changes_when_graph_cache_version_changes(monkeypatch):
+    redis_service = _redis_service()
+    runtime = _Runtime()
+    claims = [{"claim": "cycle life"}]
+    monkeypatch.setenv("QA_STAGE2_GRAPH_CACHE_VERSION", "1")
+    first_key = build_stage2_cache_key(
+        redis_service=redis_service,
+        runtime=runtime,
+        question="Explain cycle life",
+        retrieval_claims=claims,
+        n_results_per_claim=6,
+        graph_cache_fingerprint="graph:abc",
+    )
+
+    monkeypatch.setenv("QA_STAGE2_GRAPH_CACHE_VERSION", "2")
+    second_key = build_stage2_cache_key(
+        redis_service=redis_service,
+        runtime=runtime,
+        question="Explain cycle life",
+        retrieval_claims=claims,
+        n_results_per_claim=6,
+        graph_cache_fingerprint="graph:abc",
+    )
+
+    assert first_key != second_key
 
 
 def test_singleflight_uses_lock_then_cached_value(monkeypatch):

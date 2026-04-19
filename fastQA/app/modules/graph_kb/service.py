@@ -5,8 +5,15 @@ import re
 from typing import Any
 
 from app.modules.graph_kb.classifier import classify_graph_kb_question
+from app.modules.graph_kb.classifier_v2 import classify_graph_question_v2
 from app.modules.graph_kb.client import execute_graph_kb_plan, plan_graph_kb_query
-from app.modules.graph_kb.models import GraphKbExecutionResult, GraphKbQueryPlan
+from app.modules.graph_kb.canonicalizer import canonicalize_graph_rows
+from app.modules.graph_kb.direct_renderer import render_direct_answer
+from app.modules.graph_kb.executor_v2 import execute_prepared_query
+from app.modules.graph_kb.rag_adapter import build_graph_rag_payload
+from app.modules.graph_kb.models import GraphKbExecutionResult, GraphKbQueryPlan, GraphRoutingResult
+from app.modules.graph_kb.planner_v2 import build_graph_query_plan_v2
+from app.modules.graph_kb.schema_registry import build_default_schema_registry
 
 
 _GRAPH_ROW_DOI_START_RE = re.compile(r"^10\.\d{1,9}[/_]", re.IGNORECASE)
@@ -365,3 +372,71 @@ def try_graph_kb_answer(
         latency_ms=latency_ms,
         fallback_reason="",
     )
+
+
+def route_graph_kb_v2(
+    *,
+    question: str,
+    conversation_context: dict[str, Any] | None,
+    neo4j_client: Any,
+    max_rows: int,
+    timeout_ms: int = 3000,
+    generation_runtime: Any | None = None,
+) -> GraphRoutingResult:
+    decision = classify_graph_question_v2(question=question, conversation_context=conversation_context or {})
+    plan = build_graph_query_plan_v2(
+        question=question,
+        decision=decision,
+        schema_registry=build_default_schema_registry(),
+    )
+    diagnostics = dict(decision.diagnostics)
+    diagnostics["legacy_route"] = decision.legacy_route
+    diagnostics["legacy_route_family"] = decision.legacy_route
+    diagnostics["graph_pipeline_version"] = "v2"
+    diagnostics["tri_state_mode"] = decision.mode
+    diagnostics["neo4j_client"] = "neo4jgraph"
+    diagnostics["doi_source"] = "none"
+    diagnostics["legacy_template_fallback_used"] = False
+    diagnostics["strategy"] = plan.strategy if plan is not None else ""
+
+    if decision.mode == "skip_graph" or plan is None:
+        return GraphRoutingResult(mode="skip_graph", diagnostics=diagnostics)
+
+    execution = execute_prepared_query(
+        plan=plan,
+        neo4j_client=neo4j_client,
+        max_rows=max_rows,
+        timeout_ms=timeout_ms,
+        max_path_attempts=2,
+    )
+    diagnostics["matched_path"] = execution.trace.matched_path
+    diagnostics["attempted_paths"] = execution.trace.attempted_paths
+    diagnostics["guardrail_verdict"] = execution.trace.guardrail_verdict
+    diagnostics["neo4j_client"] = execution.trace.neo4j_client
+    if execution.trace.fallback_reason:
+        diagnostics["fallback_reason"] = execution.trace.fallback_reason
+
+    bundle = canonicalize_graph_rows(plan=plan, rows=execution.rows)
+    rag_payload = build_graph_rag_payload(
+        decision=decision,
+        plan=plan,
+        bundle=bundle,
+    )
+    if decision.mode == "direct_answer":
+        direct = render_direct_answer(decision=decision, plan=plan, bundle=bundle)
+        if direct.handled:
+            direct_result = GraphKbExecutionResult(
+                handled=True,
+                answer=direct.answer,
+                references=direct.references,
+                query_mode="graph_kb",
+                template_id=plan.legacy_template_id,
+                result_count=len(tuple(bundle.render_slots.get("rows") or ())),
+                fallback_reason="",
+            )
+            return GraphRoutingResult(mode="direct_answer", direct_result=direct_result, diagnostics=diagnostics)
+        diagnostics["direct_fallback_reason"] = str(direct.metadata.get("reason") or execution.trace.fallback_reason or "render_unavailable")
+        diagnostics["legacy_template_fallback_used"] = True
+        return GraphRoutingResult(mode="graph_for_rag", rag_payload=rag_payload, diagnostics=diagnostics)
+
+    return GraphRoutingResult(mode=decision.mode, rag_payload=rag_payload, diagnostics=diagnostics)

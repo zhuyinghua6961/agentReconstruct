@@ -20,6 +20,7 @@ def _reload_config_module():
 def test_settings_default_graph_kb_disabled(monkeypatch):
     for name in (
         "FASTQA_GRAPH_KB_ENABLED",
+        "FASTQA_GRAPH_KB_V2_ENABLED",
         "FASTQA_GRAPH_KB_TIMEOUT_MS",
         "FASTQA_GRAPH_KB_MAX_ROWS",
         "FASTQA_GRAPH_KB_QUERY_LOGGING",
@@ -30,6 +31,7 @@ def test_settings_default_graph_kb_disabled(monkeypatch):
     settings = get_settings()
 
     assert settings.graph_kb_enabled is False
+    assert settings.graph_kb_v2_enabled is False
     assert settings.graph_kb_timeout_ms == 3000
     assert settings.graph_kb_max_rows == 20
     assert settings.graph_kb_query_logging is False

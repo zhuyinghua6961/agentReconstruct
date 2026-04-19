@@ -106,3 +106,28 @@ def test_stage2_cache_rejects_invalid_payloads():
         retrieval_claims=["claim"],
         n_results_per_claim=3,
     ) is None
+
+
+def test_stage2_cache_key_changes_when_graph_doi_candidates_change():
+    service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    runtime = SimpleNamespace(model="qwen-max")
+    claims = [{"claim": "lfp voltage"}]
+
+    first_key = build_stage2_cache_key(
+        redis_service=service,
+        runtime=runtime,
+        question="What is LFP voltage?",
+        retrieval_claims=claims,
+        n_results_per_claim=8,
+        graph_cache_fingerprint="graph:a",
+    )
+    second_key = build_stage2_cache_key(
+        redis_service=service,
+        runtime=runtime,
+        question="What is LFP voltage?",
+        retrieval_claims=claims,
+        n_results_per_claim=8,
+        graph_cache_fingerprint="graph:b",
+    )
+
+    assert first_key != second_key

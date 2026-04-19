@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
+from app.modules.graph_kb.models import GraphRagPayload
 from app.modules.generation_pipeline.context_loading import (
     build_vector_db_context_for_prompt as build_vector_db_context_for_prompt_impl,
     load_pdf_sentences as load_pdf_sentences_impl,
@@ -186,6 +187,7 @@ class GenerationDrivenRAG:
         self,
         user_question: str,
         conversation_context: dict[str, Any] | None = None,
+        graph_context: str | None = None,
     ) -> Dict[str, Any]:
         return run_stage1_pre_answer_and_planning_impl(
             user_question=user_question,
@@ -195,6 +197,7 @@ class GenerationDrivenRAG:
             model=self.model,
             logger=logger,
             conversation_context=conversation_context,
+            graph_context=graph_context,
         )
 
     def stage2_targeted_retrieval(
@@ -204,6 +207,7 @@ class GenerationDrivenRAG:
         user_question: Optional[str] = None,
         should_cancel=None,
         active_stream_count=None,
+        graph_evidence: GraphRagPayload | None = None,
     ) -> Dict[str, Any]:
         return run_stage2_targeted_retrieval_impl(
             retrieval_claims=list(retrieval_claims or []),
@@ -225,6 +229,7 @@ class GenerationDrivenRAG:
             expand_query_fn=self._get_query_expander().expand,
             should_cancel=should_cancel,
             active_stream_count=active_stream_count,
+            graph_evidence=graph_evidence,
         )
 
     def stage25_md_expansion(self, *, retrieval_results: dict[str, Any], user_question: str, dois: list[str]) -> dict[str, Any]:
@@ -286,6 +291,7 @@ class GenerationDrivenRAG:
         retrieval_results: dict[str, Any] | None = None,
         should_cancel=None,
         conversation_context: dict[str, Any] | None = None,
+        graph_fact_block: str = "",
     ):
         yield from iter_stage4_synthesis_with_pdf_chunks_impl(
             user_question=user_question,
@@ -306,5 +312,6 @@ class GenerationDrivenRAG:
             align_dois_with_pdf_chunks_fn=self._align_dois_with_pdf_chunks,
             should_cancel=should_cancel,
             conversation_context=conversation_context,
+            graph_fact_block=graph_fact_block,
             logger=logger,
         )

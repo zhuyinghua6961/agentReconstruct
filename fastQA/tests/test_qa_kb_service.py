@@ -1,3 +1,4 @@
+from app.modules.graph_kb.models import GraphRagPayload
 from app.modules.qa_kb.models import QaKbRequest
 from app.modules.qa_kb.service import qa_kb_service
 
@@ -48,3 +49,31 @@ def test_iter_answer_events_returns_explicit_error_for_unsupported_legacy_mode()
     assert events[0]['type'] == 'error'
     assert events[0]['code'] == 'FASTQA_PIPELINE_MODE_UNSUPPORTED'
     assert events[0]['trace_id'] == 'trace-legacy'
+
+
+def test_iter_answer_events_forwards_graph_evidence_to_generation_path(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_iter_generation_answer_events(**kwargs):
+        captured["graph_evidence"] = kwargs.get("graph_evidence")
+        yield {"type": "done", "references": [], "route": "kb_qa"}
+
+    monkeypatch.setattr(qa_kb_service, "iter_generation_answer_events", _fake_iter_generation_answer_events)
+
+    request = QaKbRequest(
+        question='hello',
+        route_hint='kb_qa',
+        trace_id='trace-graph',
+        graph_evidence=GraphRagPayload(stage1_context_block="doi:10.1000/test", cache_fingerprint="graph:abc"),
+    )
+    events = list(
+        qa_kb_service.iter_answer_events(
+            request=request,
+            generation_runtime=object(),
+            redis_service=None,
+            sse_event=lambda payload: payload,
+        )
+    )
+
+    assert events[-1]['type'] == 'done'
+    assert captured["graph_evidence"] is request.graph_evidence

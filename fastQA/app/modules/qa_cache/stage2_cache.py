@@ -29,6 +29,10 @@ def _stage2_cache_ttl_seconds() -> int:
         return 43200
 
 
+def _stage2_graph_cache_version() -> str:
+    return str(os.getenv("QA_STAGE2_GRAPH_CACHE_VERSION", "1") or "1").strip() or "1"
+
+
 def _normalize_question(question: str) -> str:
     return " ".join(str(question or "").split()).casefold()
 
@@ -98,18 +102,21 @@ def build_stage2_cache_key(
     retrieval_claims: list[dict[str, Any]] | list[Any],
     n_results_per_claim: int,
     route_hint: str = "kb_qa",
+    graph_cache_fingerprint: str = "none",
 ) -> str:
     return redis_service.key_factory.cache(
         "stage2",
         _qa_cache_epoch(),
         _kb_data_epoch(),
         _stage2_retrieval_version(),
+        _stage2_graph_cache_version(),
         route_hint,
         _runtime_model_name(runtime),
         int(n_results_per_claim),
         _flags_hash(),
         _question_hash(question),
         _claims_hash(retrieval_claims),
+        str(graph_cache_fingerprint or "none").strip() or "none",
     )
 
 
@@ -121,18 +128,21 @@ def build_stage2_lock_key(
     retrieval_claims: list[dict[str, Any]] | list[Any],
     n_results_per_claim: int,
     route_hint: str = "kb_qa",
+    graph_cache_fingerprint: str = "none",
 ) -> str:
     return redis_service.key_factory.lock(
         "stage2",
         _qa_cache_epoch(),
         _kb_data_epoch(),
         _stage2_retrieval_version(),
+        _stage2_graph_cache_version(),
         route_hint,
         _runtime_model_name(runtime),
         int(n_results_per_claim),
         _flags_hash(),
         _question_hash(question),
         _claims_hash(retrieval_claims),
+        str(graph_cache_fingerprint or "none").strip() or "none",
     )
 
 
@@ -144,6 +154,7 @@ def get_cached_stage2_result(
     retrieval_claims: list[dict[str, Any]] | list[Any],
     n_results_per_claim: int,
     route_hint: str = "kb_qa",
+    graph_cache_fingerprint: str = "none",
 ) -> dict[str, Any] | None:
     if redis_service is None or not redis_service.available:
         return None
@@ -155,6 +166,7 @@ def get_cached_stage2_result(
             retrieval_claims=retrieval_claims,
             n_results_per_claim=n_results_per_claim,
             route_hint=route_hint,
+            graph_cache_fingerprint=graph_cache_fingerprint,
         ),
         default=None,
     )
@@ -182,6 +194,7 @@ def cache_stage2_result(
     n_results_per_claim: int,
     stage2_result: dict[str, Any],
     route_hint: str = "kb_qa",
+    graph_cache_fingerprint: str = "none",
 ) -> bool:
     if redis_service is None or not redis_service.available:
         return False
@@ -205,6 +218,7 @@ def cache_stage2_result(
             retrieval_claims=retrieval_claims,
             n_results_per_claim=n_results_per_claim,
             route_hint=route_hint,
+            graph_cache_fingerprint=graph_cache_fingerprint,
         ),
         payload,
         ttl_seconds=_stage2_cache_ttl_seconds(),

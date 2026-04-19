@@ -4,6 +4,7 @@ import logging
 from dataclasses import dataclass
 
 from app.integrations.redis import RedisService
+from app.modules.graph_kb.models import GraphRagPayload
 from app.modules.qa_cache import reset_cache_metrics, snapshot_cache_metrics
 from app.modules.qa_kb.orchestrators.generation import GenerationPipelineOrchestrator
 
@@ -277,6 +278,77 @@ def test_orchestrator_stream_emits_content_and_done():
     assert [event["content"] for event in events if event.get("type") == "content"] == ["hel", "lo"]
     assert events[-1]["type"] == "done"
     assert events[-1]["final_answer"] == "hello"
+
+
+def test_orchestrator_passes_graph_evidence_to_stage1_and_stage4():
+    runtime = _Runtime(
+        stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]},
+        stage2_payload={"success": True, "documents": ["doc"], "metadatas": [{"doi": "10.1"}], "distances": [0.1]},
+        doi_payload=["10.1"],
+        stage25_payload={"enabled": False, "applied": False, "md_chunks_by_doi": {}, "stats": {}},
+        stage3_payload={"10.1": [{"text": "evidence"}]},
+        stage4_payload=[{"success": True, "final_answer": "final", "query_mode": "kb_qa", "references": []}],
+    )
+    captured: dict[str, object] = {}
+
+    class _Stage1:
+        def run(self, *, runtime, user_question, conversation_context=None, graph_evidence=None):
+            captured["stage1_graph_evidence"] = graph_evidence
+            return {"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]}
+
+    class _Stage4:
+        def stream(self, *, runtime, user_question, deep_answer, pdf_chunks, retrieval_results=None, should_cancel=None, conversation_context=None, graph_evidence=None):
+            captured["stage4_graph_evidence"] = graph_evidence
+            yield {"success": True, "final_answer": "final", "query_mode": "kb_qa", "references": []}
+
+    orchestrator = GenerationPipelineOrchestrator(stage1=_Stage1(), stage4=_Stage4())
+    payload = GraphRagPayload(stage1_context_block="doi:10.1000/test", stage4_fact_block="structured graph facts", cache_fingerprint="graph:abc")
+
+    result = orchestrator.run(
+        question="hello",
+        runtime=runtime,
+        redis_service=None,
+        n_results_per_claim=5,
+        should_cancel=None,
+        active_stream_count=None,
+        logger=_logger(),
+        graph_evidence=payload,
+    )
+
+    assert result.success is True
+    assert captured["stage1_graph_evidence"] is payload
+    assert captured["stage4_graph_evidence"] is payload
+
+
+def test_orchestrator_uses_graph_seeded_doi_fallback_when_stage2_has_no_doi():
+    runtime = _Runtime(
+        stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]},
+        stage2_payload={"success": True, "documents": [], "metadatas": [], "distances": []},
+        doi_payload=[],
+        stage25_payload={"enabled": False, "applied": False, "md_chunks_by_doi": {}, "stats": {}},
+        stage3_payload={"10.1000/test": [{"text": "evidence"}]},
+        stage4_payload=[{"success": True, "final_answer": "final", "query_mode": "kb_qa", "references": [{"doi": "10.1000/test"}]}],
+    )
+    orchestrator = GenerationPipelineOrchestrator()
+
+    result = orchestrator.run(
+        question="hello",
+        runtime=runtime,
+        redis_service=None,
+        n_results_per_claim=5,
+        should_cancel=None,
+        active_stream_count=None,
+        logger=_logger(),
+        graph_evidence=GraphRagPayload(
+            stage2_doi_candidates=("10.1000/test",),
+            cache_fingerprint="graph:abc",
+        ),
+    )
+
+    assert result.success is True
+    assert result.metadata.doi_count == 1
+    assert result.raw["doi_source"] == "graph_seeded"
+    assert result.raw["dois"] == ["10.1000/test"]
 
 
 def test_orchestrator_model_identity_shortcut_matches_legacy_copy():

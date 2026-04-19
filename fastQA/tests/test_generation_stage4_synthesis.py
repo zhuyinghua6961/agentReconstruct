@@ -154,6 +154,34 @@ def test_stage4_synthesis_returns_cancelled_result():
     assert outputs == [{"success": False, "cancelled": True, "error": "cancelled"}]
 
 
+def test_stage4_synthesis_includes_graph_fact_block_in_prompt(monkeypatch):
+    monkeypatch.setenv("QA_STAGE4_MIN_CITATIONS", "1")
+    client = _FakeClient([_chunk("结论"), _chunk(" (doi=10.1/a)")])
+    list(
+        iter_stage4_synthesis_with_pdf_chunks(
+            user_question="what is lfp?",
+            deep_answer="draft",
+            pdf_chunks={"10.1/a": [{"text": "evidence", "page": 1}]},
+            retrieval_results={"claim_to_results": {}},
+            stage2_prompt="prompt {user_question} {deep_answer} {evidence_documents} {top5_references}",
+            client=client,
+            model="m",
+            safe_dict_cls=_SafeDict,
+            escape_braces_fn=_escape_braces,
+            format_pdf_chunks_evidence_fn=_format_pdf_chunks_evidence,
+            build_top5_reference_context_fn=build_top5_reference_context,
+            extract_cited_dois_fn=extract_cited_dois,
+            log_top5_coverage_fn=log_top5_coverage,
+            build_references_from_pdf_chunks_fn=build_references_from_pdf_chunks,
+            graph_fact_block="structured graph facts",
+            logger=_logger(),
+        )
+    )
+
+    prompt = client.calls[0]["messages"][1]["content"]
+    assert "structured graph facts" in prompt
+
+
 def test_extract_cited_dois_and_build_references():
     answer = "A (doi=10.1/a). B (doi=10.1_a) C"
     cited, _ = extract_cited_dois(answer, logger=_logger())

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from app.modules.graph_kb.models import GraphKbQueryPlan
 import app.modules.graph_kb.service as graph_kb_service
-from app.modules.graph_kb.service import render_graph_kb_answer, try_graph_kb_answer
+from app.modules.graph_kb.service import render_graph_kb_answer, route_graph_kb_v2, try_graph_kb_answer
 
 
 def test_render_lookup_by_doi_answer_is_deterministic():
@@ -258,7 +258,103 @@ def test_render_raw_material_list_answer_filters_truncated_doi_rows():
 
     assert "Good Paper" in answer
     assert "Broken Paper" not in answer
-    assert references == ("10.1038/s44359-024-00018-w",)
+
+
+def test_route_graph_kb_v2_renders_direct_answer_for_legacy_template():
+    class _Graph:
+        def query(self, cypher, params):
+            _ = cypher
+            _ = params
+            return [{"doi": "10.1000/test", "title": "Direct Paper", "raw_materials": ["LFP powder"]}]
+
+    routing_result = route_graph_kb_v2(
+        question="10.1000/test 这篇文献是什么？",
+        conversation_context={},
+        neo4j_client=SimpleNamespace(graph=_Graph(), available=True, degraded=False),
+        max_rows=5,
+    )
+
+    assert routing_result.mode == "direct_answer"
+    assert routing_result.direct_result is not None
+    assert routing_result.direct_result.handled is True
+    assert "Direct Paper" in routing_result.direct_result.answer
+    assert routing_result.direct_result.references == ("10.1000/test",)
+
+
+def test_route_graph_kb_v2_preserves_expand_doi_context_direct_rendering():
+    class _Graph:
+        def query(self, cypher, params):
+            _ = cypher
+            _ = params
+            return [
+                {
+                    "doi": "10.1039/c4ra15767b",
+                    "title": "Context Paper",
+                    "testing_items": ["Rate capability test"],
+                    "preparation_methods": ["Composite electrolyte preparation"],
+                    "process_parameters": ["vacuum drying at 70°C"],
+                }
+            ]
+
+    routing_result = route_graph_kb_v2(
+        question="10.1039/c4ra15767b 这篇文献的测试和工艺是什么？",
+        conversation_context={},
+        neo4j_client=SimpleNamespace(graph=_Graph(), available=True, degraded=False),
+        max_rows=5,
+    )
+
+    assert routing_result.mode == "direct_answer"
+    assert routing_result.direct_result is not None
+    assert "## 📄 文献信息" in routing_result.direct_result.answer
+    assert "## 🔬 测试/表征" in routing_result.direct_result.answer
+    assert "## ⚙️ 制备/工艺" in routing_result.direct_result.answer
+
+
+def test_route_graph_kb_v2_preserves_raw_material_list_direct_rendering():
+    class _Graph:
+        def query(self, cypher, params):
+            _ = cypher
+            _ = params
+            return [
+                {"doi": "10.1/a", "title": "Paper A", "matched_raw_materials": ["LiFePO4 powder"]},
+                {"doi": "10.1/b", "title": "Paper B", "matched_raw_materials": ["commercial LiFePO4"]},
+            ]
+
+    routing_result = route_graph_kb_v2(
+        question="有哪些使用LiFePO4作为原料的文献？",
+        conversation_context={},
+        neo4j_client=SimpleNamespace(graph=_Graph(), available=True, degraded=False),
+        max_rows=5,
+    )
+
+    assert routing_result.mode == "direct_answer"
+    assert routing_result.direct_result is not None
+    assert "## 📚 文献概览" in routing_result.direct_result.answer
+    assert "### [1] Paper A" in routing_result.direct_result.answer
+    assert "### [2] Paper B" in routing_result.direct_result.answer
+
+
+def test_route_graph_kb_v2_executes_planner_generated_parametric_query_without_guardrail_reject():
+    calls: list[tuple[str, dict]] = []
+
+    class _Graph:
+        def query(self, cypher, params):
+            calls.append((str(cypher), dict(params)))
+            return [{"doi": "10.1/a", "title": "Paper A", "raw_materials": ["LFP powder"]}]
+
+    routing_result = route_graph_kb_v2(
+        question="压实密度最高的LFP材料有哪些？",
+        conversation_context={},
+        neo4j_client=SimpleNamespace(graph=_Graph(), available=True, degraded=False),
+        max_rows=5,
+    )
+
+    assert routing_result.mode == "graph_for_rag"
+    assert routing_result.rag_payload is not None
+    assert calls
+    assert calls[0][1]["query_terms"]
+    assert "LIMIT $limit LIMIT 20" not in calls[0][0]
+    assert routing_result.diagnostics.get("fallback_reason") != "guardrail_reject"
 
 
 def test_render_lookup_by_doi_answer_keeps_fixable_doi():

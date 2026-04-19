@@ -153,6 +153,7 @@ def run_stage1_pre_answer_and_planning(
     model: str,
     logger: Any,
     conversation_context: dict[str, Any] | None = None,
+    graph_context: str | None = None,
 ) -> Dict[str, Any]:
     logger.info("阶段一：LLM预回答与检索规划")
     logger.info("用户问题: %s", user_question)
@@ -162,6 +163,8 @@ def run_stage1_pre_answer_and_planning(
         full_system_prompt = stage1_prompt + (("\n\n" + vector_db_context) if vector_db_context else "")
         context_block = _format_conversation_context(conversation_context)
         user_content = f"{context_block}\n\n用户问题：{user_question}" if context_block else f"用户问题：{user_question}"
+        if graph_context:
+            user_content = f"图谱结构化线索：\n{graph_context}\n\n{user_content}"
         logger.info(
             "阶段一提示词拼装完成: prompt_chars=%s user_content_chars=%s context_chars=%s elapsed_ms=%.3f",
             len(

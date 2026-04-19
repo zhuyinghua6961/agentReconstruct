@@ -108,6 +108,7 @@ def iter_result_events(
         "route": result.metadata.route,
         "pipeline_mode": result.metadata.pipeline_mode,
         "use_generation_driven": int(result.metadata.use_generation_driven),
+        "doi_source": result.metadata.doi_source,
         "stage_timings_ms": result.metadata.stage_timings_ms,
         "stage3_pdf_skipped": result.metadata.stage3_pdf_skipped,
         "stage3_pdf_skip_reason": result.metadata.stage3_pdf_skip_reason,
@@ -120,6 +121,7 @@ def iter_result_events(
             "type": "done",
             "query_mode": result.metadata.query_mode,
             "route": result.metadata.route,
+            "doi_source": result.metadata.doi_source,
             "doi_count": result.metadata.doi_count,
             "chunk_count": result.metadata.chunk_count,
             "source_count": result.metadata.source_count,
@@ -134,6 +136,7 @@ def iter_result_events(
                 "route": result.metadata.route,
                 "query_mode": result.metadata.query_mode,
                 "pipeline_mode": result.metadata.pipeline_mode,
+                "doi_source": result.metadata.doi_source,
             },
         }
     )

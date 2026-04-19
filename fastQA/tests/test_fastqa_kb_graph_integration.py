@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 import app.modules.graph_kb.service as graph_kb_service
 import app.routers.qa as qa_router_module
+from app.modules.graph_kb.models import GraphKbExecutionResult, GraphRoutingResult
 
 
 client = TestClient(app)
@@ -21,7 +22,7 @@ def _payload() -> dict[str, object]:
 
 
 def _enable_graph_kb(monkeypatch):
-    monkeypatch.setattr(app.state, "settings", replace(app.state.settings, graph_kb_enabled=True))
+    monkeypatch.setattr(app.state, "settings", replace(app.state.settings, graph_kb_enabled=True, graph_kb_v2_enabled=False))
     monkeypatch.setattr(app.state, "persist_user_message_hook", None)
     monkeypatch.setattr(app.state, "load_conversation_context_hook", None)
     monkeypatch.setattr(app.state, "persist_assistant_summary_hook", None)
@@ -63,6 +64,230 @@ def test_sync_ask_returns_graph_answer_when_handled(monkeypatch):
     assert payload["reference_links"] == [{"doi": "10.1000/test", "pdf_url": "/api/v1/view_pdf/10.1000/test"}]
     assert payload["pdf_links"] == payload["reference_links"]
     assert payload["doi_locations"] == {}
+
+
+def test_sync_ask_uses_graph_direct_answer_when_mode_is_direct_answer(monkeypatch):
+    _enable_graph_kb(monkeypatch)
+    monkeypatch.setattr(app.state, "settings", replace(app.state.settings, graph_kb_enabled=True, graph_kb_v2_enabled=True))
+    monkeypatch.setattr(qa_router_module, "generation_runtime_is_ready", lambda runtime: True)
+    app.state.generation_runtime = object()
+
+    monkeypatch.setattr(
+        qa_router_module,
+        "route_graph_kb_v2",
+        lambda **kwargs: GraphRoutingResult(
+            mode="direct_answer",
+            direct_result=GraphKbExecutionResult(
+                handled=True,
+                answer="graph v2 answer",
+                references=("10.1000/test",),
+                query_mode="graph_kb",
+                template_id="lookup_by_doi",
+                result_count=1,
+            ),
+            diagnostics={"legacy_route": "precise"},
+        ),
+    )
+    monkeypatch.setattr(
+        qa_router_module.qa_kb_service,
+        "iter_answer_events",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("generation path should not run")),
+    )
+
+    response = client.post("/api/ask", json=_payload())
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["final_answer"] == "graph v2 answer"
+    assert payload["query_mode"] == "graph_kb"
+
+
+def test_sync_ask_graph_v2_metadata_exposes_pipeline_version_and_legacy_route_family(monkeypatch):
+    _enable_graph_kb(monkeypatch)
+    monkeypatch.setattr(app.state, "settings", replace(app.state.settings, graph_kb_enabled=True, graph_kb_v2_enabled=True))
+    monkeypatch.setattr(qa_router_module, "generation_runtime_is_ready", lambda runtime: True)
+    app.state.generation_runtime = object()
+
+    monkeypatch.setattr(
+        qa_router_module,
+        "route_graph_kb_v2",
+        lambda **kwargs: GraphRoutingResult(
+            mode="direct_answer",
+            direct_result=GraphKbExecutionResult(
+                handled=True,
+                answer="graph v2 answer",
+                references=("10.1000/test",),
+                query_mode="graph_kb",
+                template_id="lookup_by_doi",
+                result_count=1,
+            ),
+            diagnostics={
+                "graph_pipeline_version": "v2",
+                "legacy_route_family": "precise",
+                "tri_state_mode": "direct_answer",
+                "neo4j_client": "neo4jgraph",
+                "doi_source": "none",
+                "legacy_template_fallback_used": False,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        qa_router_module.qa_kb_service,
+        "iter_answer_events",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("generation path should not run")),
+    )
+
+    response = client.post("/api/ask", json=_payload())
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["metadata"]["graph_pipeline_version"] == "v2"
+    assert payload["metadata"]["legacy_route_family"] == "precise"
+    assert payload["metadata"]["tri_state_mode"] == "direct_answer"
+    assert payload["metadata"]["legacy_template_fallback_used"] is False
+
+
+def test_sync_ask_graph_v2_metadata_exposes_neo4j_client_choice(monkeypatch):
+    _enable_graph_kb(monkeypatch)
+    monkeypatch.setattr(app.state, "settings", replace(app.state.settings, graph_kb_enabled=True, graph_kb_v2_enabled=True))
+    monkeypatch.setattr(qa_router_module, "generation_runtime_is_ready", lambda runtime: True)
+    app.state.generation_runtime = object()
+
+    monkeypatch.setattr(
+        qa_router_module,
+        "route_graph_kb_v2",
+        lambda **kwargs: GraphRoutingResult(
+            mode="direct_answer",
+            direct_result=GraphKbExecutionResult(
+                handled=True,
+                answer="graph v2 answer",
+                references=("10.1000/test",),
+                query_mode="graph_kb",
+                template_id="lookup_by_doi",
+                result_count=1,
+            ),
+            diagnostics={
+                "graph_pipeline_version": "v2",
+                "legacy_route_family": "precise",
+                "tri_state_mode": "direct_answer",
+                "neo4j_client": "neo4jgraph",
+                "doi_source": "none",
+                "legacy_template_fallback_used": False,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        qa_router_module.qa_kb_service,
+        "iter_answer_events",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("generation path should not run")),
+    )
+
+    response = client.post("/api/ask", json=_payload())
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["metadata"]["neo4j_client"] == "neo4jgraph"
+
+
+def test_sync_ask_skips_graph_v2_when_feature_flag_disabled(monkeypatch):
+    _enable_graph_kb(monkeypatch)
+    monkeypatch.setattr(app.state, "settings", replace(app.state.settings, graph_kb_enabled=True, graph_kb_v2_enabled=False))
+    monkeypatch.setattr(qa_router_module, "generation_runtime_is_ready", lambda runtime: True)
+    app.state.generation_runtime = object()
+
+    monkeypatch.setattr(
+        qa_router_module,
+        "route_graph_kb_v2",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("graph v2 should not run when disabled")),
+    )
+    monkeypatch.setattr(
+        qa_router_module,
+        "try_graph_kb_answer",
+        lambda **kwargs: GraphKbExecutionResult(handled=False, fallback_reason="legacy_skip"),
+    )
+
+    def _fake_generation(**kwargs):
+        yield {"type": "metadata", "query_mode": "生成驱动检索", "route": "kb_qa"}
+        yield {"type": "content", "content": "generation when v2 disabled"}
+        yield {"type": "done", "route": "kb_qa", "references": []}
+
+    monkeypatch.setattr(qa_router_module.qa_kb_service, "iter_answer_events", _fake_generation)
+
+    response = client.post("/api/ask", json=_payload())
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["final_answer"] == "generation when v2 disabled"
+    assert payload["query_mode"] == "生成驱动检索"
+
+
+def test_sync_ask_goes_straight_to_generation_when_mode_is_skip_graph(monkeypatch):
+    _enable_graph_kb(monkeypatch)
+    monkeypatch.setattr(app.state, "settings", replace(app.state.settings, graph_kb_enabled=True, graph_kb_v2_enabled=True))
+    monkeypatch.setattr(qa_router_module, "generation_runtime_is_ready", lambda runtime: True)
+    app.state.generation_runtime = object()
+
+    monkeypatch.setattr(
+        qa_router_module,
+        "route_graph_kb_v2",
+        lambda **kwargs: GraphRoutingResult(mode="skip_graph", diagnostics={"legacy_route": "semantic"}),
+    )
+    monkeypatch.setattr(
+        qa_router_module,
+        "try_graph_kb_answer",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("legacy graph path should not run")),
+    )
+
+    def _fake_generation(**kwargs):
+        yield {"type": "metadata", "query_mode": "生成驱动检索", "route": "kb_qa"}
+        yield {"type": "content", "content": "generation after skip_graph"}
+        yield {"type": "done", "route": "kb_qa", "references": []}
+
+    monkeypatch.setattr(qa_router_module.qa_kb_service, "iter_answer_events", _fake_generation)
+
+    response = client.post("/api/ask", json=_payload())
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["final_answer"] == "generation after skip_graph"
+    assert payload["query_mode"] == "生成驱动检索"
+
+
+def test_sync_ask_passes_graph_payload_into_generation_when_mode_is_graph_for_rag(monkeypatch):
+    _enable_graph_kb(monkeypatch)
+    monkeypatch.setattr(app.state, "settings", replace(app.state.settings, graph_kb_enabled=True, graph_kb_v2_enabled=True, graph_kb_rag_injection_enabled=True))
+    monkeypatch.setattr(qa_router_module, "generation_runtime_is_ready", lambda runtime: True)
+    app.state.generation_runtime = object()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        qa_router_module,
+        "route_graph_kb_v2",
+        lambda **kwargs: GraphRoutingResult(
+            mode="graph_for_rag",
+            rag_payload=qa_router_module.GraphRagPayload(
+                stage1_context_block="doi:10.1000/test",
+                stage2_doi_candidates=("10.1000/test",),
+                stage4_fact_block="structured graph facts",
+                cache_fingerprint="graph:abc",
+            ),
+            diagnostics={"legacy_route": "semantic"},
+        ),
+    )
+
+    def _fake_generation(**kwargs):
+        captured["request"] = kwargs["request"]
+        yield {"type": "metadata", "query_mode": "生成驱动检索", "route": "kb_qa"}
+        yield {"type": "content", "content": "generation with graph evidence"}
+        yield {"type": "done", "route": "kb_qa", "references": []}
+
+    monkeypatch.setattr(qa_router_module.qa_kb_service, "iter_answer_events", _fake_generation)
+
+    response = client.post("/api/ask", json=_payload())
+
+    assert response.status_code == 200
+    assert response.json()["query_mode"] == "生成驱动检索"
+    assert captured["request"].graph_evidence is not None
 
 
 def test_sync_ask_falls_back_to_generation_when_graph_not_handled(monkeypatch):
