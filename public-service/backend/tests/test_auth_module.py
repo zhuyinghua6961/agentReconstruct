@@ -10,6 +10,7 @@ from app.core.errors import AppError
 from app.main import app
 from app.modules.auth import api as auth_api_module
 from app.modules.auth import deps as auth_deps_module
+from app.modules.auth.repository import AuthRepository
 from app.modules.auth import service as auth_service_module
 from app.modules.auth.deps import get_bearer_token, get_optional_auth_context, require_auth_context
 from app.modules.auth.schemas import LoginRequest, RegisterRequest, SecurityQuestionItem, SetSecurityQuestionsRequest
@@ -31,6 +32,8 @@ def test_auth_routes_registered():
     paths = {route.path for route in app.routes if hasattr(route, "path")}
     assert "/api/v1/auth/login" in paths
     assert "/api/auth/login" in paths
+    assert "/api/v1/auth/register" in paths
+    assert "/api/auth/register" in paths
     assert "/api/v1/auth/me" in paths
     assert "/api/auth/me" in paths
     assert "/api/v1/auth/departments/tree" in paths
@@ -52,12 +55,12 @@ def test_auth_routes_registered():
     security_route = _route_for("/api/v1/auth/security-questions", "PUT")
     password_route = _route_for("/api/v1/auth/password", "PUT")
     assert require_auth_context in {dep.call for dep in me_route.dependant.dependencies}
-    assert require_auth_context in {dep.call for dep in department_tree_route.dependant.dependencies}
     assert require_auth_context in {dep.call for dep in department_update_route.dependant.dependencies}
     assert require_auth_context in {dep.call for dep in personnel_binding_route.dependant.dependencies}
     assert require_auth_context in {dep.call for dep in username_update_route.dependant.dependencies}
     assert require_auth_context in {dep.call for dep in security_route.dependant.dependencies}
     assert require_auth_context in {dep.call for dep in password_route.dependant.dependencies}
+    assert require_auth_context not in {dep.call for dep in department_tree_route.dependant.dependencies}
 
 
 def test_login_route_contract(monkeypatch):
@@ -187,31 +190,91 @@ def test_login_route_exposes_personnel_flags(monkeypatch):
     assert body["require_personnel_setup"] is True
 
 
-def test_register_route_first_login_contract(monkeypatch):
-    def fake_register(username: str, password: str):
-        assert username == "alice"
-        assert password == "Secret123!"
+def test_register_route_complete_profile_contract(monkeypatch):
+    def fake_register(**kwargs):
+        assert kwargs["username"] == "alice"
+        assert kwargs["password"] == "Secret123!"
+        assert kwargs["primary_department_id"] == 1
+        assert kwargs["secondary_department_id"] == 11
+        assert kwargs["tertiary_department_id"] == 111
+        assert kwargs["employee_no"] == "T2024001"
+        assert kwargs["full_name"] == "张三"
+        assert kwargs["verification_code"] == "ABC123"
+        assert kwargs["security_questions"] == [
+            {"question": "我最喜欢的水果是什么？", "answer": "苹果"}
+        ]
         return {
             "success": True,
             "message": "register_success",
             "data": {
                 "token": "token-2",
-                "user": {"id": 2, "username": "alice", "role": "user", "user_type": 3},
-                "is_first_login": True,
-                "has_security_questions": False,
-                "require_security_questions_setup": True,
+                "user": {
+                    "id": 2,
+                    "username": "alice",
+                    "role": "user",
+                    "user_type": 2,
+                    "primary_department_id": 1,
+                    "primary_department_name": "计算机学院",
+                    "secondary_department_id": 11,
+                    "secondary_department_name": "软件工程系",
+                    "tertiary_department_id": 111,
+                    "tertiary_department_name": "软件工程教研室",
+                    "department_completion_level": "complete",
+                    "require_department_setup": False,
+                    "personnel_id": 501,
+                    "employee_no": "T2024001",
+                    "full_name": "张三",
+                    "personnel_binding_status": "bound_active",
+                    "require_personnel_setup": False,
+                    "has_security_questions": True,
+                    "require_security_questions_setup": False,
+                    "is_first_login": False,
+                },
+                "is_first_login": False,
+                "has_security_questions": True,
+                "require_security_questions_setup": False,
+                "require_department_setup": False,
+                "require_personnel_setup": False,
             },
-            "require_password_change": True,
-            "require_security_questions_setup": True,
         }
 
     monkeypatch.setattr(auth_service_module.auth_service, "register", fake_register)
-    response = auth_api_module.register(RegisterRequest(username="alice", password="Secret123!"))
+    response = auth_api_module.register(
+        RegisterRequest(
+            username="alice",
+            password="Secret123!",
+            primary_department_id=1,
+            secondary_department_id=11,
+            tertiary_department_id=111,
+            employee_no="T2024001",
+            full_name="张三",
+            verification_code="ABC123",
+            security_questions=[
+                SecurityQuestionItem(question="我最喜欢的水果是什么？", answer="苹果")
+            ],
+        )
+    )
     assert response.status_code == 201
     body = _decode(response)
-    assert body["require_password_change"] is True
-    assert body["require_security_questions_setup"] is True
-    assert body["data"]["is_first_login"] is True
+    user = body["data"]["user"]
+    assert user["role"] == "user"
+    assert user["user_type"] == 2
+    assert user["primary_department_name"] == "计算机学院"
+    assert user["secondary_department_name"] == "软件工程系"
+    assert user["tertiary_department_name"] == "软件工程教研室"
+    assert user["department_completion_level"] == "complete"
+    assert user["employee_no"] == "T2024001"
+    assert user["full_name"] == "张三"
+    assert user["personnel_binding_status"] == "bound_active"
+    assert user["has_security_questions"] is True
+    assert user["require_security_questions_setup"] is False
+    assert user["require_department_setup"] is False
+    assert user["require_personnel_setup"] is False
+    assert user["is_first_login"] is False
+    assert body["data"]["is_first_login"] is False
+    assert body["data"]["require_security_questions_setup"] is False
+    assert body["data"]["require_department_setup"] is False
+    assert body["data"]["require_personnel_setup"] is False
 
 
 def test_forgot_password_initiate_contract(monkeypatch):
@@ -350,13 +413,13 @@ def test_auth_department_tree_contract(monkeypatch):
     monkeypatch.setattr(
         auth_service_module.auth_service,
         "get_selectable_department_tree",
-        lambda **kwargs: {
+        lambda: {
             "success": True,
             "data": {"items": [{"id": 1, "name": "计算机学院", "secondary_items": []}]},
         },
     )
 
-    response = auth_api_module.get_department_tree(AuthContext(user_id=9, role="user", username="bob"))
+    response = auth_api_module.get_department_tree()
     assert response.status_code == 200
     assert _decode(response)["data"]["items"][0]["name"] == "计算机学院"
 
@@ -553,6 +616,683 @@ def test_auth_service_change_password_rejects_password_history_reuse():
     result = service.change_password(user_id=1, old_password="OldPassword1!", new_password="ReusePassword1!")
     assert result["success"] is False
     assert result["code"] == "PASSWORD_REUSED"
+
+
+def test_auth_service_register_creates_super_user_with_completed_profile():
+    register_payload = {
+        "username": " alice ",
+        "password": "Secret123!",
+        "primary_department_id": 1,
+        "secondary_department_id": 11,
+        "tertiary_department_id": 111,
+        "employee_no": "T2024001",
+        "full_name": "张三",
+        "verification_code": "ABC123",
+        "security_questions": [
+            {"question": "我最喜欢的水果是什么？", "answer": " 苹果 "},
+        ],
+    }
+
+    class FakeRepo:
+        def __init__(self):
+            self.created_payload = None
+            self.get_by_id_calls = 0
+
+        def get_by_username(self, username):
+            assert username == "alice"
+            return None
+
+        def create_user(self, **kwargs):
+            raise AssertionError(f"legacy create_user path should not be used: {kwargs}")
+
+        def add_password_history(self, **kwargs):
+            raise AssertionError(f"legacy add_password_history path should not be used: {kwargs}")
+
+        def trim_password_history(self, **kwargs):
+            raise AssertionError(f"legacy trim_password_history path should not be used: {kwargs}")
+
+        def create_registered_user(self, **kwargs):
+            self.created_payload = dict(kwargs)
+            return 27
+
+        def get_by_id(self, user_id):
+            self.get_by_id_calls += 1
+            if user_id != 27 or not self.created_payload:
+                return None
+            return {
+                "id": 27,
+                "username": self.created_payload["username"],
+                "role": "user",
+                "user_type": 2,
+                "status": "active",
+                "is_first_login": 0,
+                "must_set_security_questions": 0,
+                "primary_department_id": self.created_payload["primary_department_id"],
+                "secondary_department_id": self.created_payload["secondary_department_id"],
+                "tertiary_department_id": self.created_payload["tertiary_department_id"],
+                "personnel_id": self.created_payload["personnel_id"],
+            }
+
+        def has_security_questions(self, *, user_id: int):
+            assert user_id == 27
+            return True
+
+    class FakeDepartments:
+        def validate_department_selection(
+            self,
+            *,
+            primary_department_id: int | None,
+            secondary_department_id: int | None,
+            tertiary_department_id: int | None,
+            require_active: bool,
+            allow_empty: bool,
+            allow_legacy_two_level: bool,
+        ):
+            assert primary_department_id == 1
+            assert secondary_department_id == 11
+            assert tertiary_department_id == 111
+            assert require_active is True
+            assert allow_empty is False
+            assert allow_legacy_two_level is False
+            return {
+                "success": True,
+                "data": {
+                    "primary_department_id": 1,
+                    "primary_department_name": "计算机学院",
+                    "secondary_department_id": 11,
+                    "secondary_department_name": "软件工程系",
+                    "tertiary_department_id": 111,
+                    "tertiary_department_name": "软件工程教研室",
+                    "department_completion_level": "complete",
+                    "require_department_setup": False,
+                },
+            }
+
+        def describe_user_department(self, **kwargs):
+            assert kwargs["primary_department_id"] == 1
+            assert kwargs["secondary_department_id"] == 11
+            assert kwargs["tertiary_department_id"] == 111
+            return {
+                "primary_department_id": 1,
+                "primary_department_name": "计算机学院",
+                "secondary_department_id": 11,
+                "secondary_department_name": "软件工程系",
+                "tertiary_department_id": 111,
+                "tertiary_department_name": "软件工程教研室",
+                "department_completion_level": "complete",
+                "require_department_setup": False,
+            }
+
+    class FakePersonnel:
+        def verify_personnel_identity(self, **kwargs):
+            assert kwargs == {
+                "employee_no": "T2024001",
+                "full_name": "张三",
+                "verification_code": "ABC123",
+            }
+            return {
+                "success": True,
+                "data": {
+                    "id": 501,
+                    "employee_no": "T2024001",
+                    "full_name": "张三",
+                    "status": "active",
+                },
+            }
+
+        def describe_user_personnel(self, *, personnel_id: int | None):
+            assert personnel_id == 501
+            return {
+                "personnel_id": 501,
+                "employee_no": "T2024001",
+                "full_name": "张三",
+                "personnel_binding_status": "bound_active",
+                "require_personnel_setup": False,
+            }
+
+    class FakeTokenService:
+        def issue_access_token(self, *, user_id: int, role: str):
+            assert user_id == 27
+            assert role == "user"
+            return "token-registered"
+
+    repo = FakeRepo()
+    service = AuthService(
+        repo=repo,
+        token_service=FakeTokenService(),
+        department_service=FakeDepartments(),
+        personnel_service=FakePersonnel(),
+    )
+
+    result = service.register(**register_payload)
+
+    assert result["success"] is True
+    assert result["message"] == "register_success"
+    assert "require_password_change" not in result
+    assert repo.created_payload is not None
+    assert repo.get_by_id_calls == 1
+    assert repo.created_payload["username"] == "alice"
+    assert repo.created_payload["user_type"] == 2
+    assert repo.created_payload["primary_department_id"] == 1
+    assert repo.created_payload["secondary_department_id"] == 11
+    assert repo.created_payload["tertiary_department_id"] == 111
+    assert repo.created_payload["personnel_id"] == 501
+    assert repo.created_payload["password_hash"]
+    question_items = repo.created_payload["security_question_items"]
+    assert len(question_items) == 1
+    assert question_items[0]["question"] == "我最喜欢的水果是什么？"
+    assert question_items[0]["sort_order"] == 1
+    assert question_items[0]["answer_hash"]
+
+    user = result["data"]["user"]
+    assert result["data"]["token"] == "token-registered"
+    assert user["role"] == "user"
+    assert user["user_type"] == 2
+    assert user["primary_department_id"] == 1
+    assert user["primary_department_name"] == "计算机学院"
+    assert user["secondary_department_id"] == 11
+    assert user["secondary_department_name"] == "软件工程系"
+    assert user["tertiary_department_id"] == 111
+    assert user["tertiary_department_name"] == "软件工程教研室"
+    assert user["department_completion_level"] == "complete"
+    assert user["require_department_setup"] is False
+    assert user["personnel_id"] == 501
+    assert user["employee_no"] == "T2024001"
+    assert user["full_name"] == "张三"
+    assert user["personnel_binding_status"] == "bound_active"
+    assert user["require_personnel_setup"] is False
+    assert user["has_security_questions"] is True
+    assert user["require_security_questions_setup"] is False
+    assert user["is_first_login"] is False
+    assert result["data"]["is_first_login"] is False
+    assert result["data"]["has_security_questions"] is True
+    assert result["data"]["require_security_questions_setup"] is False
+    assert result["data"]["require_department_setup"] is False
+    assert result["data"]["require_personnel_setup"] is False
+
+
+def test_auth_service_register_rejects_incomplete_department_selection():
+    class FakeRepo:
+        def get_by_username(self, username):
+            return None
+
+        def create_registered_user(self, **kwargs):
+            raise AssertionError(f"unexpected create_registered_user call: {kwargs}")
+
+    class FakeDepartments:
+        def validate_department_selection(self, **kwargs):
+            assert kwargs["primary_department_id"] == 1
+            assert kwargs["secondary_department_id"] == 11
+            assert kwargs["tertiary_department_id"] is None
+            assert kwargs["allow_empty"] is False
+            assert kwargs["allow_legacy_two_level"] is False
+            assert kwargs["require_active"] is True
+            return {"success": False, "error": "一级、二级和三级部门必须同时填写", "code": "DEPARTMENT_REQUIRED"}
+
+    class FakePersonnel:
+        def verify_personnel_identity(self, **kwargs):
+            raise AssertionError(f"unexpected verify_personnel_identity call: {kwargs}")
+
+    service = AuthService(
+        repo=FakeRepo(),
+        token_service=TokenService(),
+        department_service=FakeDepartments(),
+        personnel_service=FakePersonnel(),
+    )
+
+    result = service.register(
+        username="alice",
+        password="Secret123!",
+        primary_department_id=1,
+        secondary_department_id=11,
+        tertiary_department_id=None,
+        employee_no="T2024001",
+        full_name="张三",
+        verification_code="ABC123",
+        security_questions=[{"question": "我最喜欢的水果是什么？", "answer": "苹果"}],
+    )
+
+    assert result["success"] is False
+    assert result["code"] == "DEPARTMENT_REQUIRED"
+
+
+def test_auth_service_register_rejects_invalid_personnel_identity():
+    class FakeRepo:
+        def get_by_username(self, username):
+            return None
+
+        def create_registered_user(self, **kwargs):
+            raise AssertionError(f"unexpected create_registered_user call: {kwargs}")
+
+    class FakeDepartments:
+        def validate_department_selection(self, **kwargs):
+            return {
+                "success": True,
+                "data": {
+                    "primary_department_id": 1,
+                    "primary_department_name": "计算机学院",
+                    "secondary_department_id": 11,
+                    "secondary_department_name": "软件工程系",
+                    "tertiary_department_id": 111,
+                    "tertiary_department_name": "软件工程教研室",
+                    "department_completion_level": "complete",
+                    "require_department_setup": False,
+                },
+            }
+
+    class FakePersonnel:
+        def verify_personnel_identity(self, **kwargs):
+            return {"success": False, "error": "人员信息校验失败", "code": "PERSONNEL_BINDING_INVALID"}
+
+    service = AuthService(
+        repo=FakeRepo(),
+        token_service=TokenService(),
+        department_service=FakeDepartments(),
+        personnel_service=FakePersonnel(),
+    )
+
+    result = service.register(
+        username="alice",
+        password="Secret123!",
+        primary_department_id=1,
+        secondary_department_id=11,
+        tertiary_department_id=111,
+        employee_no="T2024001",
+        full_name="张三",
+        verification_code="BAD",
+        security_questions=[{"question": "我最喜欢的水果是什么？", "answer": "苹果"}],
+    )
+
+    assert result["success"] is False
+    assert result["code"] == "PERSONNEL_BINDING_INVALID"
+
+
+def test_auth_service_register_rejects_disabled_personnel():
+    class FakeRepo:
+        def get_by_username(self, username):
+            return None
+
+        def create_registered_user(self, **kwargs):
+            raise AssertionError(f"unexpected create_registered_user call: {kwargs}")
+
+    class FakeDepartments:
+        def validate_department_selection(self, **kwargs):
+            return {
+                "success": True,
+                "data": {
+                    "primary_department_id": 1,
+                    "primary_department_name": "计算机学院",
+                    "secondary_department_id": 11,
+                    "secondary_department_name": "软件工程系",
+                    "tertiary_department_id": 111,
+                    "tertiary_department_name": "软件工程教研室",
+                    "department_completion_level": "complete",
+                    "require_department_setup": False,
+                },
+            }
+
+    class FakePersonnel:
+        def verify_personnel_identity(self, **kwargs):
+            return {"success": False, "error": "该人员已停用", "code": "PERSONNEL_DISABLED"}
+
+    service = AuthService(
+        repo=FakeRepo(),
+        token_service=TokenService(),
+        department_service=FakeDepartments(),
+        personnel_service=FakePersonnel(),
+    )
+
+    result = service.register(
+        username="alice",
+        password="Secret123!",
+        primary_department_id=1,
+        secondary_department_id=11,
+        tertiary_department_id=111,
+        employee_no="T2024001",
+        full_name="张三",
+        verification_code="ABC123",
+        security_questions=[{"question": "我最喜欢的水果是什么？", "answer": "苹果"}],
+    )
+
+    assert result["success"] is False
+    assert result["code"] == "PERSONNEL_DISABLED"
+
+
+def test_auth_service_register_requires_1_to_3_security_questions():
+    class FakeRepo:
+        def get_by_username(self, username):
+            return None
+
+    class FakeDepartments:
+        def validate_department_selection(self, **kwargs):
+            return {
+                "success": True,
+                "data": {
+                    "primary_department_id": 1,
+                    "primary_department_name": "计算机学院",
+                    "secondary_department_id": 11,
+                    "secondary_department_name": "软件工程系",
+                    "tertiary_department_id": 111,
+                    "tertiary_department_name": "软件工程教研室",
+                    "department_completion_level": "complete",
+                    "require_department_setup": False,
+                },
+            }
+
+    class FakePersonnel:
+        def verify_personnel_identity(self, **kwargs):
+            return {
+                "success": True,
+                "data": {
+                    "id": 501,
+                    "employee_no": "T2024001",
+                    "full_name": "张三",
+                    "status": "active",
+                },
+            }
+
+    service = AuthService(
+        repo=FakeRepo(),
+        token_service=TokenService(),
+        department_service=FakeDepartments(),
+        personnel_service=FakePersonnel(),
+    )
+
+    empty_result = service.register(
+        username="alice",
+        password="Secret123!",
+        primary_department_id=1,
+        secondary_department_id=11,
+        tertiary_department_id=111,
+        employee_no="T2024001",
+        full_name="张三",
+        verification_code="ABC123",
+        security_questions=[],
+    )
+    too_many_result = service.register(
+        username="alice",
+        password="Secret123!",
+        primary_department_id=1,
+        secondary_department_id=11,
+        tertiary_department_id=111,
+        employee_no="T2024001",
+        full_name="张三",
+        verification_code="ABC123",
+        security_questions=[
+            {"question": "q1", "answer": "a1"},
+            {"question": "q2", "answer": "a2"},
+            {"question": "q3", "answer": "a3"},
+            {"question": "q4", "answer": "a4"},
+        ],
+    )
+
+    assert empty_result["success"] is False
+    assert empty_result["code"] == "VALIDATION_ERROR"
+    assert too_many_result["success"] is False
+    assert too_many_result["code"] == "VALIDATION_ERROR"
+
+
+def test_auth_service_register_returns_username_exists_on_duplicate():
+    class FakeRepo:
+        def get_by_username(self, username):
+            return {"id": 9, "username": username}
+
+    service = AuthService(repo=FakeRepo(), token_service=TokenService())
+    result = service.register(
+        username="alice",
+        password="Secret123!",
+        primary_department_id=1,
+        secondary_department_id=11,
+        tertiary_department_id=111,
+        employee_no="T2024001",
+        full_name="张三",
+        verification_code="ABC123",
+        security_questions=[{"question": "我最喜欢的水果是什么？", "answer": "苹果"}],
+    )
+
+    assert result["success"] is False
+    assert result["code"] == "USERNAME_EXISTS"
+
+
+def test_auth_service_register_uses_atomic_repository_path():
+    class FakeRepo:
+        def __init__(self):
+            self.atomic_called = 0
+
+        def get_by_username(self, username):
+            return None
+
+        def create_user(self, **kwargs):
+            raise AssertionError(f"legacy create_user path should not be used: {kwargs}")
+
+        def add_password_history(self, **kwargs):
+            raise AssertionError(f"legacy add_password_history path should not be used: {kwargs}")
+
+        def trim_password_history(self, **kwargs):
+            raise AssertionError(f"legacy trim_password_history path should not be used: {kwargs}")
+
+        def create_registered_user(self, **kwargs):
+            self.atomic_called += 1
+            return 27
+
+        def get_by_id(self, user_id):
+            return {
+                "id": 27,
+                "username": "alice",
+                "role": "user",
+                "user_type": 2,
+                "status": "active",
+                "is_first_login": 0,
+                "must_set_security_questions": 0,
+                "primary_department_id": 1,
+                "secondary_department_id": 11,
+                "tertiary_department_id": 111,
+                "personnel_id": 501,
+            }
+
+        def has_security_questions(self, *, user_id: int):
+            return True
+
+    class FakeDepartments:
+        def validate_department_selection(self, **kwargs):
+            return {
+                "success": True,
+                "data": {
+                    "primary_department_id": 1,
+                    "primary_department_name": "计算机学院",
+                    "secondary_department_id": 11,
+                    "secondary_department_name": "软件工程系",
+                    "tertiary_department_id": 111,
+                    "tertiary_department_name": "软件工程教研室",
+                    "department_completion_level": "complete",
+                    "require_department_setup": False,
+                },
+            }
+
+        def describe_user_department(self, **kwargs):
+            return {
+                "primary_department_id": 1,
+                "primary_department_name": "计算机学院",
+                "secondary_department_id": 11,
+                "secondary_department_name": "软件工程系",
+                "tertiary_department_id": 111,
+                "tertiary_department_name": "软件工程教研室",
+                "department_completion_level": "complete",
+                "require_department_setup": False,
+            }
+
+    class FakePersonnel:
+        def verify_personnel_identity(self, **kwargs):
+            return {
+                "success": True,
+                "data": {
+                    "id": 501,
+                    "employee_no": "T2024001",
+                    "full_name": "张三",
+                    "status": "active",
+                },
+            }
+
+        def describe_user_personnel(self, *, personnel_id: int | None):
+            return {
+                "personnel_id": 501,
+                "employee_no": "T2024001",
+                "full_name": "张三",
+                "personnel_binding_status": "bound_active",
+                "require_personnel_setup": False,
+            }
+
+    class FakeTokenService:
+        def issue_access_token(self, *, user_id: int, role: str):
+            return "token-registered"
+
+    repo = FakeRepo()
+    service = AuthService(
+        repo=repo,
+        token_service=FakeTokenService(),
+        department_service=FakeDepartments(),
+        personnel_service=FakePersonnel(),
+    )
+    result = service.register(
+        username="alice",
+        password="Secret123!",
+        primary_department_id=1,
+        secondary_department_id=11,
+        tertiary_department_id=111,
+        employee_no="T2024001",
+        full_name="张三",
+        verification_code="ABC123",
+        security_questions=[{"question": "我最喜欢的水果是什么？", "answer": "苹果"}],
+    )
+
+    assert result["success"] is True
+    assert repo.atomic_called == 1
+
+
+def test_auth_repository_create_registered_user_requires_complete_schema_support():
+    class FakeDatabase:
+        def connection(self):
+            raise AssertionError("connection should not be opened when required schema is missing")
+
+    repo = AuthRepository(database=FakeDatabase())
+    repo.has_column = lambda name: name != "personnel_id"
+    repo.has_table = lambda name: True
+
+    with pytest.raises(RuntimeError, match="registration_schema_incomplete:columns=personnel_id"):
+        repo.create_registered_user(
+            username="alice",
+            password_hash="hash-1",
+            primary_department_id=1,
+            secondary_department_id=11,
+            tertiary_department_id=111,
+            personnel_id=501,
+            security_question_items=[
+                {"question": "我最喜欢的水果是什么？", "answer_hash": "hash-answer", "sort_order": 1},
+            ],
+            user_type=2,
+        )
+
+
+def test_auth_repository_create_registered_user_rolls_back_on_security_question_failure():
+    class FakeCursor:
+        def __init__(self, connection):
+            self._connection = connection
+            self.lastrowid = 0
+            self.rowcount = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, query, params=()):
+            query_text = " ".join(str(query).split())
+            if "INSERT INTO users" in query_text:
+                self.lastrowid = 91
+                self.rowcount = 1
+                self._connection.pending_usernames.append(str(params[0]))
+                return
+            if "INSERT INTO password_history" in query_text:
+                self.lastrowid = 0
+                self.rowcount = 1
+                return
+            if "INSERT INTO user_security_questions" in query_text:
+                raise RuntimeError("question insert failed")
+            raise AssertionError(f"unexpected query: {query_text}")
+
+    class FakeConnection:
+        def __init__(self):
+            self.pending_usernames: list[str] = []
+            self.persisted_usernames: list[str] = []
+            self.begin_called = 0
+            self.commit_called = 0
+            self.rollback_called = 0
+
+        def begin(self):
+            self.begin_called += 1
+
+        def commit(self):
+            self.commit_called += 1
+            self.persisted_usernames = list(self.pending_usernames)
+
+        def rollback(self):
+            self.rollback_called += 1
+            self.pending_usernames = []
+            self.persisted_usernames = []
+
+        def cursor(self):
+            return FakeCursor(self)
+
+    class FakeConnectionManager:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def __enter__(self):
+            return self._connection
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeDatabase:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def connection(self):
+            return FakeConnectionManager(self._connection)
+
+    connection = FakeConnection()
+    repo = AuthRepository(database=FakeDatabase(connection))
+    repo.has_column = lambda name: name in {
+        "user_type",
+        "is_first_login",
+        "must_set_security_questions",
+        "personnel_id",
+        "primary_department_id",
+        "secondary_department_id",
+        "tertiary_department_id",
+        "password_updated_at",
+    }
+    repo.has_table = lambda name: name in {"password_history", "user_security_questions"}
+
+    with pytest.raises(RuntimeError, match="question insert failed"):
+        repo.create_registered_user(
+            username="alice",
+            password_hash="hash-1",
+            primary_department_id=1,
+            secondary_department_id=11,
+            tertiary_department_id=111,
+            personnel_id=501,
+            security_question_items=[
+                {"question": "我最喜欢的水果是什么？", "answer_hash": "hash-answer", "sort_order": 1},
+            ],
+            user_type=2,
+        )
+
+    assert connection.begin_called == 1
+    assert connection.commit_called == 0
+    assert connection.rollback_called == 1
+    assert connection.persisted_usernames == []
 
 
 def test_auth_service_login_includes_tertiary_department_payload_and_flags():

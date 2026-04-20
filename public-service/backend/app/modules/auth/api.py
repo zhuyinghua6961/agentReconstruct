@@ -39,7 +39,20 @@ def login(payload: LoginRequest):
 @router.post("/api/v1/auth/register")
 @router.post("/api/auth/register")
 def register(payload: RegisterRequest):
-    return _respond(auth_service_module.auth_service.register(payload.username, payload.password), ok_status=201)
+    return _respond(
+        auth_service_module.auth_service.register(
+            username=payload.username,
+            password=payload.password,
+            primary_department_id=payload.primary_department_id,
+            secondary_department_id=payload.secondary_department_id,
+            tertiary_department_id=payload.tertiary_department_id,
+            employee_no=payload.employee_no,
+            full_name=payload.full_name,
+            verification_code=payload.verification_code,
+            security_questions=[item.model_dump() for item in payload.security_questions],
+        ),
+        ok_status=201,
+    )
 
 
 @router.get("/api/v1/auth/me")
@@ -50,8 +63,8 @@ def me(context: AuthContext = Depends(require_auth_context)):
 
 @router.get("/api/v1/auth/departments/tree")
 @router.get("/api/auth/departments/tree")
-def get_department_tree(context: AuthContext = Depends(require_auth_context)):
-    return _respond(auth_service_module.auth_service.get_selectable_department_tree(user_id=context.user_id), ok_status=200)
+def get_department_tree():
+    return _respond(auth_service_module.auth_service.get_selectable_department_tree(), ok_status=200)
 
 
 @router.put("/api/v1/auth/department")

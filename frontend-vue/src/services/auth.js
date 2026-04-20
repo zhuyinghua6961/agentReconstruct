@@ -111,15 +111,25 @@ export const authApi = {
   /**
    * 注册
    */
-  async register(username, password) {
-    const response = await fetch(`${API_BASE}/register`, {
+  async register(payload) {
+    const submitPayload = {
+      username: payload?.username ?? '',
+      password: payload?.password ?? '',
+      primary_department_id: payload?.primary_department_id ?? null,
+      secondary_department_id: payload?.secondary_department_id ?? null,
+      tertiary_department_id: payload?.tertiary_department_id ?? null,
+      employee_no: payload?.employee_no ?? '',
+      full_name: payload?.full_name ?? '',
+      verification_code: payload?.verification_code ?? '',
+      security_questions: Array.isArray(payload?.security_questions) ? payload.security_questions : [],
+    }
+    return fetchWithErrorHandling(`${API_BASE}/register`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ username, password })
+      body: JSON.stringify(submitPayload)
     })
-    return response.json()
   },
 
   /**

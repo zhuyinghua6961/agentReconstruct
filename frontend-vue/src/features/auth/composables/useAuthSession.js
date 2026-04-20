@@ -1,5 +1,5 @@
 import { computed, ref } from 'vue';
-import { getCurrentUser, loginAuth, registerAuth } from '../../../api/auth';
+import { getCurrentUser, loginAuth, registerAuth } from '../../../api/auth.js';
 
 const TOKEN_KEY = 'agentcode.auth.token.v1';
 const USER_KEY = 'agentcode.auth.user.v1';
@@ -102,11 +102,11 @@ export function useAuthSession() {
     }
   }
 
-  async function register({ username, password }) {
+  async function register(payload) {
     authLoadingRef.value = true;
     authErrorRef.value = '';
     try {
-      const resp = await registerAuth(username, password);
+      const resp = await registerAuth(payload);
       if (resp?.success && resp?.data?.token) {
         tokenRef.value = resp.data.token;
         userRef.value = resp.data.user || null;
@@ -143,4 +143,3 @@ export function useAuthSession() {
     logout,
   };
 }
-

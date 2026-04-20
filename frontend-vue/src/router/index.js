@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import Login from '../views/Login.vue'
+import Register from '../views/Register.vue'
 import AdminDashboard from '../views/AdminDashboard.vue'
 import Home from '../views/Home.vue'
 import UserProfile from '../views/UserProfile.vue'
@@ -16,6 +17,7 @@ import {
 const routes = [
   { path: '/', component: Home, meta: { requiresAuth: true } },
   { path: '/login', component: Login },
+  { path: '/register', component: Register },
   { path: '/forgot-password', component: ForgotPassword },
   { path: '/admin', component: AdminDashboard, meta: { requiresAuth: true, requiresAdmin: true } },
   { path: '/profile', component: UserProfile, meta: { requiresAuth: true } },
@@ -40,6 +42,7 @@ router.beforeEach(async (to, from, next) => {
   const token = readStoredToken()
   const user = readStoredUser()
   let currentUser = user
+  const isGuestOnlyRoute = to.path === '/login' || to.path === '/register'
   
   // 如果需要认证但没有 token
   if (to.meta.requiresAuth && !token) {
@@ -47,8 +50,8 @@ router.beforeEach(async (to, from, next) => {
     return
   }
   
-  // 如果有 token 且需要认证或访问登录页，验证 token 是否有效
-  if ((to.meta.requiresAuth || to.path === '/login') && token) {
+  // 如果有 token 且需要认证或访问游客页，验证 token 是否有效
+  if ((to.meta.requiresAuth || to.path === '/login' || to.path === '/register') && token) {
     const now = Date.now()
     const shouldValidate = !tokenValidated || (now - lastValidationTime > VALIDATION_CACHE_TIME)
     
@@ -59,7 +62,7 @@ router.beforeEach(async (to, from, next) => {
           // Token 无效，清除登录状态
           clearStoredAuth()
           tokenValidated = false
-          next('/login')
+          next(to.path === '/register' ? '/register' : '/login')
           return
         }
 
@@ -81,7 +84,7 @@ router.beforeEach(async (to, from, next) => {
         console.error('Token 验证失败:', e)
         clearStoredAuth()
         tokenValidated = false
-        next('/login')
+        next(to.path === '/register' ? '/register' : '/login')
         return
       }
     } else {
@@ -104,8 +107,8 @@ router.beforeEach(async (to, from, next) => {
     return
   }
   
-  // 已登录用户访问登录页，跳转到首页
-  if (to.path === '/login' && token) {
+  // 已登录用户访问游客页，跳转到对应首页
+  if (isGuestOnlyRoute && token) {
     if (currentUser && hasRequiredProfileSetup(currentUser)) {
       next(buildRequiredProfilePath(currentUser))
       return

@@ -21,6 +21,18 @@ class DatabaseUnavailableError(Exception):
 class AuthRepositoryProtocol(Protocol):
     def get_by_username(self, username: str) -> dict[str, Any] | None: ...
     def get_by_id(self, user_id: int) -> dict[str, Any] | None: ...
+    def create_registered_user(
+        self,
+        *,
+        username: str,
+        password_hash: str,
+        primary_department_id: int,
+        secondary_department_id: int,
+        tertiary_department_id: int,
+        personnel_id: int,
+        security_question_items: list[dict[str, Any]],
+        user_type: int = 2,
+    ) -> int: ...
     def create_user(
         self,
         *,
@@ -97,6 +109,9 @@ class UnavailableAuthRepository:
         self._raise()
 
     def get_by_id(self, user_id: int) -> dict[str, Any] | None:
+        self._raise()
+
+    def create_registered_user(self, **kwargs) -> int:
         self._raise()
 
     def create_user(self, **kwargs) -> int:
@@ -401,6 +416,28 @@ class AuthService:
                 }
         return {"success": True}
 
+    def _normalize_security_question_items(self, questions: list[dict[str, Any]]) -> dict[str, Any]:
+        if not isinstance(questions, list) or not questions:
+            return {"success": False, "error": "请提供安全问题设置", "code": "VALIDATION_ERROR"}
+        if len(questions) < 1 or len(questions) > 3:
+            return {"success": False, "error": "安全问题数量必须在1-3个之间", "code": "VALIDATION_ERROR"}
+
+        items: list[dict[str, Any]] = []
+        for index, item in enumerate(questions):
+            question = str((item or {}).get("question") or "").strip()
+            answer = str((item or {}).get("answer") or "")
+            normalized_answer = self._normalize_answer(answer)
+            if not question or not normalized_answer:
+                return {"success": False, "error": f"第{index + 1}个问题缺少问题或答案", "code": "VALIDATION_ERROR"}
+            items.append(
+                {
+                    "question": question,
+                    "answer_hash": _hash_password(normalized_answer),
+                    "sort_order": index + 1,
+                }
+            )
+        return {"success": True, "data": items}
+
     def _password_expired(self, user: dict[str, Any]) -> tuple[bool, int | None]:
         updated_at = self._to_datetime(user.get("password_updated_at"))
         if not updated_at:
@@ -611,7 +648,19 @@ class AuthService:
                 return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
             return {"success": False, "error": str(exc), "code": "UPDATE_ERROR"}
 
-    def register(self, username: str, password: str) -> dict[str, Any]:
+    def register(
+        self,
+        *,
+        username: str,
+        password: str,
+        primary_department_id: int | None,
+        secondary_department_id: int | None,
+        tertiary_department_id: int | None,
+        employee_no: str,
+        full_name: str,
+        verification_code: str,
+        security_questions: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         username = (username or "").strip()
         password = password or ""
         validation = self._validate_password_strength(password=password, role="user")
@@ -622,17 +671,50 @@ class AuthService:
             if not username_validation.get("success"):
                 return username_validation
             normalized_username = str(username_validation.get("data", {}).get("username") or "").strip()
+            department_validation = self._departments.validate_department_selection(
+                primary_department_id=primary_department_id,
+                secondary_department_id=secondary_department_id,
+                tertiary_department_id=tertiary_department_id,
+                require_active=True,
+                allow_empty=False,
+                allow_legacy_two_level=False,
+            )
+            if not department_validation.get("success"):
+                return department_validation
+
+            personnel_validation = self._personnel.verify_personnel_identity(
+                employee_no=str(employee_no or "").strip(),
+                full_name=str(full_name or "").strip(),
+                verification_code=str(verification_code or "").strip(),
+            )
+            if not personnel_validation.get("success"):
+                return personnel_validation
+
+            security_question_validation = self._normalize_security_question_items(security_questions)
+            if not security_question_validation.get("success"):
+                return security_question_validation
+
+            department_data = department_validation.get("data") if isinstance(department_validation.get("data"), dict) else {}
+            personnel_record = personnel_validation.get("data") if isinstance(personnel_validation.get("data"), dict) else {}
+            personnel_id = int(personnel_record.get("id") or 0)
+            if personnel_id <= 0:
+                return {"success": False, "error": "人员信息校验失败", "code": "PERSONNEL_BINDING_INVALID"}
+
             password_hash = _hash_password(password)
-            user_id = self._repo.create_user(
+            user_id = self._repo.create_registered_user(
                 username=normalized_username,
                 password_hash=password_hash,
-                role="user",
-                user_type=3,
-                is_first_login=True,
-                must_set_security_questions=True,
+                primary_department_id=int(department_data.get("primary_department_id") or 0),
+                secondary_department_id=int(department_data.get("secondary_department_id") or 0),
+                tertiary_department_id=int(department_data.get("tertiary_department_id") or 0),
+                personnel_id=personnel_id,
+                security_question_items=list(security_question_validation.get("data") or []),
+                user_type=2,
             )
-            self._repo.add_password_history(user_id=user_id, password_hash=password_hash)
-            self._repo.trim_password_history(user_id=user_id, keep_limit=self._password_history_limit("user"))
+            created_user = self._repo.get_by_id(user_id)
+            if not created_user:
+                return {"success": False, "error": "注册结果校验失败", "code": "REGISTER_ERROR"}
+            user_payload = self._build_user_payload(created_user)
             token = self._tokens.issue_access_token(user_id=user_id, role="user")
             return {
                 "success": True,
@@ -640,24 +722,33 @@ class AuthService:
                 "data": {
                     "token": token,
                     "user": {
-                        "id": user_id,
-                        "username": normalized_username,
-                        "role": "user",
-                        "user_type": 3,
-                        "personnel_id": None,
-                        "employee_no": None,
-                        "full_name": None,
-                        "personnel_binding_status": "unbound",
-                        "require_personnel_setup": True,
+                        "id": user_payload["id"],
+                        "username": user_payload["username"],
+                        "role": user_payload["role"],
+                        "user_type": user_payload["user_type"],
+                        "primary_department_id": user_payload.get("primary_department_id"),
+                        "primary_department_name": user_payload.get("primary_department_name"),
+                        "secondary_department_id": user_payload.get("secondary_department_id"),
+                        "secondary_department_name": user_payload.get("secondary_department_name"),
+                        "tertiary_department_id": user_payload.get("tertiary_department_id"),
+                        "tertiary_department_name": user_payload.get("tertiary_department_name"),
+                        "department_completion_level": user_payload.get("department_completion_level"),
+                        "require_department_setup": bool(user_payload.get("require_department_setup")),
+                        "personnel_id": user_payload.get("personnel_id"),
+                        "employee_no": user_payload.get("employee_no"),
+                        "full_name": user_payload.get("full_name"),
+                        "personnel_binding_status": user_payload.get("personnel_binding_status"),
+                        "require_personnel_setup": bool(user_payload.get("require_personnel_setup")),
+                        "has_security_questions": bool(user_payload.get("has_security_questions")),
+                        "require_security_questions_setup": bool(user_payload.get("require_security_questions_setup")),
+                        "is_first_login": bool(user_payload.get("is_first_login")),
                     },
-                    "is_first_login": True,
-                    "has_security_questions": False,
-                    "require_security_questions_setup": True,
-                    "require_personnel_setup": True,
+                    "is_first_login": bool(user_payload.get("is_first_login")),
+                    "has_security_questions": bool(user_payload.get("has_security_questions")),
+                    "require_security_questions_setup": bool(user_payload.get("require_security_questions_setup")),
+                    "require_department_setup": bool(user_payload.get("require_department_setup")),
+                    "require_personnel_setup": bool(user_payload.get("require_personnel_setup")),
                 },
-                "require_password_change": True,
-                "require_security_questions_setup": True,
-                "require_personnel_setup": True,
             }
         except Exception as exc:
             if _is_db_unavailable_error(exc):
@@ -875,18 +966,10 @@ class AuthService:
             return {"success": False, "error": str(exc), "code": "FETCH_ERROR"}
 
     def set_security_questions(self, *, user_id: int, questions: list[dict[str, Any]]) -> dict[str, Any]:
-        if not isinstance(questions, list) or not questions:
-            return {"success": False, "error": "请提供安全问题设置", "code": "VALIDATION_ERROR"}
-        if len(questions) < 1 or len(questions) > 3:
-            return {"success": False, "error": "安全问题数量必须在1-3个之间", "code": "VALIDATION_ERROR"}
-        items: list[dict[str, Any]] = []
-        for index, item in enumerate(questions):
-            question = str((item or {}).get("question") or "").strip()
-            answer = str((item or {}).get("answer") or "")
-            normalized_answer = self._normalize_answer(answer)
-            if not question or not normalized_answer:
-                return {"success": False, "error": f"第{index + 1}个问题缺少问题或答案", "code": "VALIDATION_ERROR"}
-            items.append({"question": question, "answer_hash": _hash_password(normalized_answer), "sort_order": index + 1})
+        normalization = self._normalize_security_question_items(questions)
+        if not normalization.get("success"):
+            return normalization
+        items = list(normalization.get("data") or [])
         try:
             user = self._repo.get_by_id(user_id)
             if not user:

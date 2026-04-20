@@ -1,6 +1,20 @@
-import { getJson, postJson, putJson } from './http';
+import { getJson, postJson, putJson } from './http.js';
 
 const API_PREFIX = '/api/auth';
+
+function normalizeRegisterPayload(payload) {
+  return {
+    username: payload?.username ?? '',
+    password: payload?.password ?? '',
+    primary_department_id: payload?.primary_department_id ?? null,
+    secondary_department_id: payload?.secondary_department_id ?? null,
+    tertiary_department_id: payload?.tertiary_department_id ?? null,
+    employee_no: payload?.employee_no ?? '',
+    full_name: payload?.full_name ?? '',
+    verification_code: payload?.verification_code ?? '',
+    security_questions: Array.isArray(payload?.security_questions) ? payload.security_questions : [],
+  };
+}
 
 export async function loginAuth(username, password) {
   return await postJson(
@@ -10,10 +24,10 @@ export async function loginAuth(username, password) {
   );
 }
 
-export async function registerAuth(username, password) {
+export async function registerAuth(payload) {
   return await postJson(
     `${API_PREFIX}/register`,
-    { username, password },
+    normalizeRegisterPayload(payload),
     { auth: false }
   );
 }
@@ -28,4 +42,3 @@ export async function changePassword(oldPassword, newPassword) {
     new_password: newPassword,
   });
 }
-

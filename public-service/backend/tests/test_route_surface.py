@@ -4,6 +4,8 @@ from app.main import app
 def test_public_route_surface_contains_key_modules():
     paths = {route.path for route in app.routes if hasattr(route, "path")}
     expected = {
+        "/api/auth/register",
+        "/api/v1/auth/register",
         "/api/auth/login",
         "/api/auth/personnel-binding",
         "/api/v1/auth/personnel-binding",
@@ -49,3 +51,10 @@ def test_internal_quota_grant_routes_are_not_exposed_on_public_api_surface():
     assert "/api/v1/quota/grants/precheck" not in paths
     assert "/api/quota/grants/{grant_id}/finalize" not in paths
     assert "/api/v1/quota/grants/{grant_id}/finalize" not in paths
+
+
+def test_public_route_surface_contains_register_variants():
+    paths = {route.path for route in app.routes if hasattr(route, "path")}
+
+    assert "/api/auth/register" in paths
+    assert "/api/v1/auth/register" in paths

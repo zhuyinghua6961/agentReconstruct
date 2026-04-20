@@ -155,10 +155,12 @@ export function mergePreservedDepartmentTree(tree, department) {
 export const departmentApi = {
   async getSelectableTree() {
     const token = readStoredToken()
+    const headers = {}
+    if (token) {
+      headers.Authorization = `Bearer ${token}`
+    }
     return fetchDepartmentJson(`${AUTH_DEPARTMENT_BASE}/departments/tree`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
+      headers,
     })
   },
 

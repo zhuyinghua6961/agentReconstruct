@@ -225,6 +225,8 @@ function goToChangePassword() {
       <div class="login-footer">
         <a href="/">返回首页</a>
         <span class="divider">|</span>
+        <a href="/register">注册账号</a>
+        <span class="divider">|</span>
         <a href="/forgot-password">忘记密码？</a>
       </div>
     </div>

@@ -178,6 +178,109 @@ class AuthRepository:
         """
         return self._execute_update(sql, tuple(params))
 
+    def create_registered_user(
+        self,
+        *,
+        username: str,
+        password_hash: str,
+        primary_department_id: int,
+        secondary_department_id: int,
+        tertiary_department_id: int,
+        personnel_id: int,
+        security_question_items: list[dict[str, Any]],
+        user_type: int = 2,
+    ) -> int:
+        required_columns = [
+            "user_type",
+            "is_first_login",
+            "must_set_security_questions",
+            "personnel_id",
+            "primary_department_id",
+            "secondary_department_id",
+            "tertiary_department_id",
+        ]
+        missing_columns = [name for name in required_columns if not self.has_column(name)]
+        required_tables = ["password_history", "user_security_questions"]
+        missing_tables = [name for name in required_tables if not self.has_table(name)]
+        if missing_columns or missing_tables:
+            missing_parts = []
+            if missing_columns:
+                missing_parts.append(f"columns={','.join(missing_columns)}")
+            if missing_tables:
+                missing_parts.append(f"tables={','.join(missing_tables)}")
+            raise RuntimeError(f"registration_schema_incomplete:{';'.join(missing_parts)}")
+
+        columns = ["username", "password_hash", "role", "status"]
+        values: list[Any] = [username, password_hash, "user", "active"]
+
+        columns.append("user_type")
+        values.append(int(user_type))
+        columns.append("is_first_login")
+        values.append(0)
+        columns.append("must_set_security_questions")
+        values.append(0)
+        columns.append("personnel_id")
+        values.append(int(personnel_id))
+        columns.append("primary_department_id")
+        values.append(int(primary_department_id))
+        columns.append("secondary_department_id")
+        values.append(int(secondary_department_id))
+        columns.append("tertiary_department_id")
+        values.append(int(tertiary_department_id))
+        if self.has_column("password_updated_at"):
+            columns.append("password_updated_at")
+            values.append("NOW_FUNC_PLACEHOLDER")
+
+        placeholders: list[str] = []
+        params: list[Any] = []
+        for value in values:
+            if value == "NOW_FUNC_PLACEHOLDER":
+                placeholders.append("NOW()")
+            else:
+                placeholders.append("%s")
+                params.append(value)
+
+        insert_user_sql = f"""
+            INSERT INTO users ({", ".join(columns)})
+            VALUES ({", ".join(placeholders)})
+        """
+
+        with self._db.connection() as conn:
+            conn.begin()
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute(insert_user_sql, tuple(params))
+                    user_id = int(cursor.lastrowid or 0)
+                    if user_id <= 0:
+                        raise RuntimeError("create_registered_user_failed")
+
+                    cursor.execute(
+                        """
+                        INSERT INTO password_history (user_id, password_hash)
+                        VALUES (%s, %s)
+                        """,
+                        (user_id, password_hash),
+                    )
+
+                    for item in security_question_items:
+                        cursor.execute(
+                            """
+                            INSERT INTO user_security_questions (user_id, question, answer_hash, sort_order)
+                            VALUES (%s, %s, %s, %s)
+                            """,
+                            (
+                                user_id,
+                                str(item.get("question") or ""),
+                                str(item.get("answer_hash") or ""),
+                                int(item.get("sort_order") or 0),
+                            ),
+                        )
+                conn.commit()
+                return user_id
+            except Exception:
+                conn.rollback()
+                raise
+
     def update_password_hash(self, *, user_id: int, password_hash: str) -> int:
         if self.has_column("password_updated_at"):
             return self._execute_update(
