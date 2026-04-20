@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import secrets
 from hashlib import pbkdf2_hmac
 from typing import Any
@@ -7,6 +8,10 @@ from typing import Any
 from app.modules.departments.service import department_service as shared_department_service
 from app.modules.auth.repository import AuthRepository
 from app.modules.auth.service import auth_service
+from app.modules.personnel.service import personnel_service as shared_personnel_service
+
+
+logger = logging.getLogger(__name__)
 
 
 def _is_db_unavailable_error(exc: Exception) -> bool:
@@ -14,9 +19,16 @@ def _is_db_unavailable_error(exc: Exception) -> bool:
 
 
 class AdminUsersService:
-    def __init__(self, *, users_repo: AuthRepository | None = None, department_service: Any | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        users_repo: AuthRepository | None = None,
+        department_service: Any | None = None,
+        personnel_service: Any | None = None,
+    ) -> None:
         self._users = users_repo or AuthRepository()
         self._departments = department_service or shared_department_service
+        self._personnel = personnel_service or shared_personnel_service
 
     @property
     def users(self) -> AuthRepository:
@@ -43,6 +55,67 @@ class AdminUsersService:
     @staticmethod
     def clean_text(value: object) -> str:
         return str(value or "").strip()
+
+    @staticmethod
+    def _normalize_optional_int(value: object) -> int | None:
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _build_personnel_display(self, payload: dict[str, Any]) -> str:
+        binding_status = self.clean_text(payload.get("personnel_binding_status")).lower()
+        employee_no = self.clean_text(payload.get("employee_no"))
+        full_name = self.clean_text(payload.get("full_name"))
+        parts = [part for part in (employee_no, full_name) if part]
+        base = " / ".join(parts)
+        if binding_status == "unbound":
+            return "未绑定"
+        if binding_status == "bound_missing":
+            return base or "绑定记录缺失"
+        if binding_status == "bound_disabled":
+            return f"{base}（已停用）" if base else "已停用"
+        return base or "未绑定"
+
+    def _build_user_payload(self, user: dict[str, Any]) -> dict[str, Any]:
+        role = str(user.get("role") or "user")
+        user_type = int(user.get("user_type") or self._role_to_user_type(role))
+        department_payload = dict(
+            self._departments.describe_user_department(
+                primary_department_id=user.get("primary_department_id"),
+                secondary_department_id=user.get("secondary_department_id"),
+                tertiary_department_id=user.get("tertiary_department_id"),
+            )
+        )
+        if user_type == 1:
+            department_payload["require_department_setup"] = False
+        if not department_payload.get("department_display"):
+            parts = [
+                part
+                for part in (
+                    department_payload.get("primary_department_name"),
+                    department_payload.get("secondary_department_name"),
+                    department_payload.get("tertiary_department_name"),
+                )
+                if part
+            ]
+            department_payload["department_display"] = " / ".join(parts) if parts else "未填写"
+        personnel_payload = dict(
+            self._personnel.describe_user_personnel(
+                personnel_id=user.get("personnel_id"),
+            )
+        )
+        return {
+            "id": int(user["id"]),
+            "username": user["username"],
+            "role": role,
+            "user_type": user_type,
+            "status": user["status"],
+            **department_payload,
+            **personnel_payload,
+            "personnel_display": self._build_personnel_display(personnel_payload),
+            "created_at": user["created_at"].isoformat() if user.get("created_at") else None,
+        }
 
     def _validate_username_candidate(self, *, username: str, owner_user_id: int | None = None) -> dict[str, Any]:
         validation_service = auth_service.__class__(
@@ -104,6 +177,7 @@ class AdminUsersService:
             "DEPARTMENT_REQUIRED",
             "DEPARTMENT_RELATION_INVALID",
             "DEPARTMENT_DISABLED",
+            "PERSONNEL_DISABLED",
         }:
             return 400
         if code in {"PERMISSION_DENIED"}:
@@ -112,7 +186,13 @@ class AdminUsersService:
             return 409
         if code in {"QUOTA_EXCEEDED"}:
             return 429
-        if code in {"USER_NOT_FOUND", "PRIMARY_DEPARTMENT_NOT_FOUND", "SECONDARY_DEPARTMENT_NOT_FOUND", "TERTIARY_DEPARTMENT_NOT_FOUND"}:
+        if code in {
+            "USER_NOT_FOUND",
+            "PRIMARY_DEPARTMENT_NOT_FOUND",
+            "SECONDARY_DEPARTMENT_NOT_FOUND",
+            "TERTIARY_DEPARTMENT_NOT_FOUND",
+            "PERSONNEL_NOT_FOUND",
+        }:
             return 404
         if code in {"DB_UNAVAILABLE"}:
             return 503
@@ -127,32 +207,7 @@ class AdminUsersService:
             offset = (page - 1) * page_size
             total = self._users.count_users()
             rows = self._users.list_users(offset=offset, limit=page_size)
-            data = []
-            for row in rows:
-                department_payload = self._departments.describe_user_department(
-                    primary_department_id=row.get("primary_department_id"),
-                    secondary_department_id=row.get("secondary_department_id"),
-                    tertiary_department_id=row.get("tertiary_department_id"),
-                )
-                primary_name = department_payload.get("primary_department_name")
-                secondary_name = department_payload.get("secondary_department_name")
-                tertiary_name = department_payload.get("tertiary_department_name")
-                department_display = department_payload.get("department_display")
-                if not department_display:
-                    parts = [part for part in (primary_name, secondary_name, tertiary_name) if part]
-                    department_display = " / ".join(parts) if parts else "未填写"
-                data.append(
-                    {
-                        "id": int(row["id"]),
-                        "username": row["username"],
-                        "role": row["role"],
-                        "user_type": int(row.get("user_type") or self._role_to_user_type(str(row.get("role") or "user"))),
-                        "status": row["status"],
-                        **department_payload,
-                        "department_display": department_display,
-                        "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
-                    }
-                )
+            data = [self._build_user_payload(row) for row in rows]
             return {
                 "success": True,
                 "data": data,
@@ -264,6 +319,80 @@ class AdminUsersService:
             if self._duplicate_error(exc):
                 return {"success": False, "error": "用户名已存在", "code": "USERNAME_EXISTS"}
             return {"success": False, "error": "修改用户名失败", "code": "UPDATE_ERROR"}
+
+    def update_user_personnel_binding(self, *, target_user_id: int, actor_user_id: int, personnel_id: int) -> dict[str, Any]:
+        try:
+            user = self._users.get_by_id(target_user_id)
+            if not user:
+                return {"success": False, "error": "用户不存在", "code": "USER_NOT_FOUND"}
+            target_personnel_id = int(personnel_id)
+            record = self._personnel.get_personnel_by_id(personnel_id=target_personnel_id)
+            if not record:
+                return {"success": False, "error": "人员不存在", "code": "PERSONNEL_NOT_FOUND"}
+            if self.clean_text(record.get("status")).lower() != "active":
+                return {"success": False, "error": "该人员已停用", "code": "PERSONNEL_DISABLED"}
+
+            old_personnel_id = self._normalize_optional_int(user.get("personnel_id"))
+            updated_count = self._users.update_user_personnel(user_id=target_user_id, personnel_id=target_personnel_id)
+            refreshed_user = self._users.get_by_id(target_user_id) or user
+            current_personnel_id = self._normalize_optional_int(refreshed_user.get("personnel_id"))
+            if updated_count <= 0 and current_personnel_id != target_personnel_id:
+                return {"success": False, "error": "修改用户人员绑定失败", "code": "UPDATE_ERROR"}
+
+            logger.info(
+                "personnel_bound_by_admin",
+                extra={
+                    "event": "personnel_bound_by_admin",
+                    "actor_user_id": int(actor_user_id),
+                    "target_user_id": int(target_user_id),
+                    "old_personnel_id": old_personnel_id,
+                    "new_personnel_id": target_personnel_id,
+                },
+            )
+            updated_user = {**refreshed_user, "personnel_id": target_personnel_id}
+            return {
+                "success": True,
+                "message": "用户人员绑定已更新",
+                "data": self._build_user_payload(updated_user),
+            }
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "修改用户人员绑定失败", "code": "UPDATE_ERROR"}
+
+    def clear_user_personnel_binding(self, *, target_user_id: int, actor_user_id: int) -> dict[str, Any]:
+        try:
+            user = self._users.get_by_id(target_user_id)
+            if not user:
+                return {"success": False, "error": "用户不存在", "code": "USER_NOT_FOUND"}
+
+            old_personnel_id = self._normalize_optional_int(user.get("personnel_id"))
+            updated_count = self._users.update_user_personnel(user_id=target_user_id, personnel_id=None)
+            refreshed_user = self._users.get_by_id(target_user_id) or user
+            current_personnel_id = self._normalize_optional_int(refreshed_user.get("personnel_id"))
+            if updated_count <= 0 and current_personnel_id is not None:
+                return {"success": False, "error": "解绑用户人员失败", "code": "UPDATE_ERROR"}
+
+            logger.info(
+                "personnel_unbound_by_admin",
+                extra={
+                    "event": "personnel_unbound_by_admin",
+                    "actor_user_id": int(actor_user_id),
+                    "target_user_id": int(target_user_id),
+                    "old_personnel_id": old_personnel_id,
+                    "new_personnel_id": None,
+                },
+            )
+            updated_user = {**refreshed_user, "personnel_id": None}
+            return {
+                "success": True,
+                "message": "用户人员绑定已解除",
+                "data": self._build_user_payload(updated_user),
+            }
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "解绑用户人员失败", "code": "UPDATE_ERROR"}
 
     def update_department(
         self,

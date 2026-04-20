@@ -40,19 +40,34 @@ async function handleLogin() {
       const userData = {
         ...result.data.user,
         is_first_login: result.data.is_first_login || false,
+        personnel_id: result.data?.user?.personnel_id ?? null,
+        employee_no: result.data?.user?.employee_no ?? null,
+        full_name: result.data?.user?.full_name ?? null,
+        personnel_binding_status: result.data?.user?.personnel_binding_status || 'unbound',
         require_security_questions_setup: Boolean(result.require_security_questions_setup),
         require_department_setup: Boolean(result.require_department_setup || result.data?.require_department_setup),
+        require_personnel_setup: Boolean(
+          result.require_personnel_setup
+          || result.data?.require_personnel_setup
+          || result.data?.user?.require_personnel_setup
+        ),
         has_security_questions: Boolean(result.data?.has_security_questions),
       }
       persistStoredUser(userData)
       
-      // 检查是否需要进入强制补全流程（改密码 + 安全问题 + 部门信息）
+      // 检查是否需要进入强制补全流程（改密码 + 安全问题 + 部门信息 + 人员信息）
       const requireDepartmentSetup = Boolean(result.require_department_setup || result.data?.require_department_setup)
-      if (result.require_password_change || result.require_security_questions_setup || requireDepartmentSetup) {
+      const requirePersonnelSetup = Boolean(
+        result.require_personnel_setup
+        || result.data?.require_personnel_setup
+        || result.data?.user?.require_personnel_setup
+      )
+      if (result.require_password_change || result.require_security_questions_setup || requireDepartmentSetup || requirePersonnelSetup) {
         const hints = []
         if (result.require_password_change) hints.push('修改密码')
         if (result.require_security_questions_setup) hints.push('设置至少一个安全问题')
         if (requireDepartmentSetup) hints.push('补全部门信息')
+        if (requirePersonnelSetup) hints.push('绑定人员信息')
         setupWarningTitle.value = (result.require_password_change || result.require_security_questions_setup) ? '首次登录' : '信息补全'
         setupWarningText.value = `为了继续使用系统，请立即${hints.join('并')}。`
         showSetupWarning.value = true
@@ -61,6 +76,7 @@ async function handleLogin() {
           if (result.require_password_change) params.set('change_password', 'required')
           if (result.require_security_questions_setup) params.set('security_questions', 'required')
           if (requireDepartmentSetup) params.set('department', 'required')
+          if (requirePersonnelSetup) params.set('personnel', 'required')
           const query = params.toString()
           window.location.href = query ? `/profile?${query}` : '/profile'
         }, 3000)

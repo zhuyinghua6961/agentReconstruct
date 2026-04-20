@@ -45,5 +45,11 @@ class DepartmentUpdateRequest(BaseModel):
     tertiary_department_id: int | None = Field(default=None)
 
 
+class PersonnelBindingUpdateRequest(BaseModel):
+    employee_no: str = Field(default="")
+    full_name: str = Field(default="")
+    verification_code: str = Field(default="")
+
+
 class UsernameUpdateRequest(BaseModel):
     username: str = Field(default="")

@@ -150,6 +150,25 @@ export const authApi = {
   },
 
   /**
+   * 绑定/改绑当前用户人员信息
+   */
+  async updatePersonnelBinding(employeeNo, fullName, verificationCode) {
+    const token = readStoredToken()
+    return fetchWithErrorHandling(`${API_BASE}/personnel-binding`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({
+        employee_no: employeeNo,
+        full_name: fullName,
+        verification_code: verificationCode,
+      })
+    })
+  },
+
+  /**
    * 修改密码
    */
   async changePassword(oldPassword, newPassword) {

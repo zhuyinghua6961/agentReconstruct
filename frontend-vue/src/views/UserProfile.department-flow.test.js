@@ -13,6 +13,15 @@ test('Login persists department completion flags from the auth payload', () => {
   assert.match(loginSource, /result\.require_department_setup|result\.data\?\.require_department_setup/)
 })
 
+test('Login persists personnel completion flags from auth payload', () => {
+  assert.match(loginSource, /personnel_id/)
+  assert.match(loginSource, /employee_no/)
+  assert.match(loginSource, /full_name/)
+  assert.match(loginSource, /personnel_binding_status/)
+  assert.match(loginSource, /require_personnel_setup/)
+  assert.match(loginSource, /params\.set\('personnel', 'required'\)/)
+})
+
 test('UserProfile renders department completion card and selector', () => {
   assert.match(profileSource, /部门信息/)
   assert.match(profileSource, /DepartmentSelector/)
@@ -20,9 +29,32 @@ test('UserProfile renders department completion card and selector', () => {
   assert.match(profileSource, /tertiary-id/)
 })
 
+test('UserProfile renders personnel binding section', () => {
+  assert.match(profileSource, /人员信息/)
+  assert.match(profileSource, /employeeNoInput/)
+  assert.match(profileSource, /fullNameInput/)
+  assert.match(profileSource, /verificationCodeInput/)
+  assert.match(profileSource, /forcePersonnelSetup/)
+  assert.match(profileSource, /showPersonnelForm/)
+})
+
 test('UserProfile keeps department fetch errors scoped to the department section', () => {
   assert.match(profileSource, /departmentError/)
   assert.match(profileSource, /departmentSuccess/)
+})
+
+test('UserProfile keeps personnel binding errors scoped locally', () => {
+  assert.match(profileSource, /personnelError/)
+  assert.match(profileSource, /personnelSuccess/)
+  assert.doesNotMatch(profileSource, /error\.value\s*=\s*result\.error \|\| '绑定人员信息失败'/)
+  assert.doesNotMatch(profileSource, /departmentError\.value\s*=\s*result\.error \|\| '绑定人员信息失败'/)
+})
+
+test('UserProfile wires authApi.updatePersonnelBinding into self-bind flow', () => {
+  assert.match(profileSource, /authApi\.updatePersonnelBinding/)
+  assert.match(profileSource, /syncStoredUser\(result\.data \|\| \{\}\)/)
+  assert.match(profileSource, /forcePersonnelSetup\.value = Boolean\(result\.data\?\.require_personnel_setup\)/)
+  assert.match(profileSource, /hasPendingForcedSetup\(\)/)
 })
 
 test('UserProfile exposes username edit flow for non-admin users', () => {

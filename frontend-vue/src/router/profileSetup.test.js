@@ -33,6 +33,25 @@ test('hasRequiredProfileSetup ignores department completion for admins', () => {
   )
 })
 
+test('hasRequiredProfileSetup ignores personnel requirement for admins', () => {
+  assert.equal(
+    hasRequiredProfileSetup({
+      role: 'admin',
+      user_type: 1,
+      require_personnel_setup: true,
+    }),
+    false,
+  )
+  assert.equal(
+    hasRequiredProfileSetup({
+      role: 'user',
+      user_type: 3,
+      require_personnel_setup: true,
+    }),
+    true,
+  )
+})
+
 test('buildRequiredProfilePath only appends department for non-admin users', () => {
   assert.equal(
     buildRequiredProfilePath({
@@ -49,6 +68,26 @@ test('buildRequiredProfilePath only appends department for non-admin users', () 
       require_department_setup: true,
     }),
     '/profile?department=required',
+  )
+})
+
+test('buildRequiredProfilePath only appends personnel for non-admin users', () => {
+  assert.equal(
+    buildRequiredProfilePath({
+      role: 'admin',
+      user_type: 1,
+      require_personnel_setup: true,
+    }),
+    '/profile',
+  )
+  assert.equal(
+    buildRequiredProfilePath({
+      role: 'user',
+      user_type: 3,
+      require_department_setup: true,
+      require_personnel_setup: true,
+    }),
+    '/profile?department=required&personnel=required',
   )
 })
 
@@ -72,4 +111,23 @@ test('mergeValidatedUser prefers fresh auth payload and clears admin department 
   assert.equal(merged.user_type, 1)
   assert.equal(merged.require_department_setup, false)
   assert.equal(merged.has_security_questions, true)
+})
+
+test('mergeValidatedUser clears require_personnel_setup for admin users', () => {
+  const merged = mergeValidatedUser(
+    {
+      role: 'admin',
+      user_type: 1,
+      require_personnel_setup: false,
+    },
+    {
+      role: 'admin',
+      user_type: 1,
+      require_department_setup: true,
+      require_personnel_setup: true,
+    },
+  )
+
+  assert.equal(merged.require_department_setup, false)
+  assert.equal(merged.require_personnel_setup, false)
 })

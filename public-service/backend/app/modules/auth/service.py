@@ -11,6 +11,7 @@ from itsdangerous import URLSafeTimedSerializer
 from itsdangerous.exc import BadSignature, BadTimeSignature, SignatureExpired
 
 from app.modules.departments.service import department_service as shared_department_service
+from app.modules.personnel.service import personnel_service as shared_personnel_service
 
 
 class DatabaseUnavailableError(Exception):
@@ -49,6 +50,7 @@ class AuthRepositoryProtocol(Protocol):
         secondary_department_id: int | None,
         tertiary_department_id: int | None = None,
     ) -> int: ...
+    def update_user_personnel(self, *, user_id: int, personnel_id: int | None) -> int: ...
     def update_username(self, *, user_id: int, username: str) -> int: ...
 
 
@@ -59,6 +61,18 @@ class DepartmentServiceProtocol(Protocol):
         primary_department_id: int | None,
         secondary_department_id: int | None,
         tertiary_department_id: int | None = None,
+    ) -> dict[str, Any]: ...
+
+
+class PersonnelServiceProtocol(Protocol):
+    def describe_user_personnel(self, *, personnel_id: int | None) -> dict[str, Any]: ...
+
+    def verify_personnel_identity(
+        self,
+        *,
+        employee_no: str,
+        full_name: str,
+        verification_code: str,
     ) -> dict[str, Any]: ...
 
     def get_selectable_tree(self) -> dict[str, Any]: ...
@@ -131,6 +145,9 @@ class UnavailableAuthRepository:
     ) -> int:
         self._raise()
 
+    def update_user_personnel(self, *, user_id: int, personnel_id: int | None) -> int:
+        self._raise()
+
     def update_username(self, *, user_id: int, username: str) -> int:
         self._raise()
 
@@ -190,10 +207,12 @@ class AuthService:
         repo: AuthRepositoryProtocol | None = None,
         token_service: TokenService | None = None,
         department_service: DepartmentServiceProtocol | None = None,
+        personnel_service: PersonnelServiceProtocol | None = None,
     ) -> None:
         self._repo = repo or UnavailableAuthRepository()
         self._tokens = token_service or TokenService()
         self._departments = department_service or shared_department_service
+        self._personnel = personnel_service or shared_personnel_service
         self._password_expire_days = max(1, int(os.getenv("PASSWORD_EXPIRE_DAYS", "180") or "180"))
         self._lock_threshold = max(2, int(os.getenv("LOGIN_FAILURE_LOCK_THRESHOLD", "5") or "5"))
         self._lock_minutes = max(1, int(os.getenv("LOGIN_FAILURE_LOCK_MINUTES", "5") or "5"))
@@ -202,7 +221,7 @@ class AuthService:
         if result.get("success"):
             return ok_status
         code = str(result.get("code") or "")
-        if code in {"VALIDATION_ERROR", "USERNAME_INVALID"}:
+        if code in {"VALIDATION_ERROR", "USERNAME_INVALID", "PERSONNEL_BINDING_INVALID", "PERSONNEL_DISABLED"}:
             return 400
         if code in {
             "PASSWORD_TOO_SHORT",
@@ -404,6 +423,13 @@ class AuthService:
         )
         if self._is_admin_user(user):
             department_payload["require_department_setup"] = False
+        personnel_payload = dict(
+            self._personnel.describe_user_personnel(
+                personnel_id=user.get("personnel_id"),
+            )
+        )
+        if self._is_admin_user(user):
+            personnel_payload["require_personnel_setup"] = False
         return {
             "id": user_id,
             "username": user["username"],
@@ -414,6 +440,7 @@ class AuthService:
             "has_security_questions": has_security_questions,
             "require_security_questions_setup": require_security_questions_setup,
             **department_payload,
+            **personnel_payload,
             "created_at": created_at.isoformat() if created_at else None,
         }
 
@@ -533,6 +560,57 @@ class AuthService:
                 return {"success": False, "error": "用户名已存在", "code": "USERNAME_EXISTS"}
             return {"success": False, "error": str(exc), "code": "UPDATE_ERROR"}
 
+    def update_personnel_binding(
+        self,
+        *,
+        user_id: int,
+        employee_no: str,
+        full_name: str,
+        verification_code: str,
+    ) -> dict[str, Any]:
+        try:
+            user = self._repo.get_by_id(user_id)
+            if not user:
+                return {"success": False, "error": "user_not_found", "code": "USER_NOT_FOUND"}
+            employee_no = str(employee_no or "").strip()
+            full_name = str(full_name or "").strip()
+            verification_code = str(verification_code or "").strip()
+            if not employee_no or not full_name or not verification_code:
+                return {"success": False, "error": "请完整填写工号、姓名和校验码", "code": "VALIDATION_ERROR"}
+
+            verification = self._personnel.verify_personnel_identity(
+                employee_no=employee_no,
+                full_name=full_name,
+                verification_code=verification_code,
+            )
+            if not verification.get("success"):
+                code = str(verification.get("code") or "")
+                if code == "PERSONNEL_DISABLED":
+                    return {"success": False, "error": "该人员已停用", "code": "PERSONNEL_DISABLED"}
+                return {"success": False, "error": "人员信息校验失败", "code": "PERSONNEL_BINDING_INVALID"}
+
+            target_record = verification.get("data") if isinstance(verification.get("data"), dict) else {}
+            target_personnel_id = int(target_record.get("id") or 0)
+            if target_personnel_id <= 0:
+                return {"success": False, "error": "人员信息校验失败", "code": "PERSONNEL_BINDING_INVALID"}
+
+            updated_count = self._repo.update_user_personnel(user_id=user_id, personnel_id=target_personnel_id)
+            refreshed_user = self._repo.get_by_id(user_id) or user
+            current_personnel_id = refreshed_user.get("personnel_id")
+            try:
+                current_personnel_id = int(current_personnel_id) if current_personnel_id is not None else None
+            except (TypeError, ValueError):
+                current_personnel_id = None
+            if updated_count <= 0 and current_personnel_id != target_personnel_id:
+                return {"success": False, "error": "personnel_binding_update_failed", "code": "UPDATE_ERROR"}
+
+            updated_user = {**refreshed_user, "personnel_id": target_personnel_id}
+            return {"success": True, "message": "personnel_binding_updated", "data": self._build_user_payload(updated_user)}
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
+            return {"success": False, "error": str(exc), "code": "UPDATE_ERROR"}
+
     def register(self, username: str, password: str) -> dict[str, Any]:
         username = (username or "").strip()
         password = password or ""
@@ -561,13 +639,25 @@ class AuthService:
                 "message": "register_success",
                 "data": {
                     "token": token,
-                    "user": {"id": user_id, "username": normalized_username, "role": "user", "user_type": 3},
+                    "user": {
+                        "id": user_id,
+                        "username": normalized_username,
+                        "role": "user",
+                        "user_type": 3,
+                        "personnel_id": None,
+                        "employee_no": None,
+                        "full_name": None,
+                        "personnel_binding_status": "unbound",
+                        "require_personnel_setup": True,
+                    },
                     "is_first_login": True,
                     "has_security_questions": False,
                     "require_security_questions_setup": True,
+                    "require_personnel_setup": True,
                 },
                 "require_password_change": True,
                 "require_security_questions_setup": True,
+                "require_personnel_setup": True,
             }
         except Exception as exc:
             if _is_db_unavailable_error(exc):
@@ -644,13 +734,20 @@ class AuthService:
                         "tertiary_department_id": user_payload.get("tertiary_department_id"),
                         "tertiary_department_name": user_payload.get("tertiary_department_name"),
                         "department_completion_level": user_payload.get("department_completion_level"),
+                        "personnel_id": user_payload.get("personnel_id"),
+                        "employee_no": user_payload.get("employee_no"),
+                        "full_name": user_payload.get("full_name"),
+                        "personnel_binding_status": user_payload.get("personnel_binding_status"),
+                        "require_personnel_setup": bool(user_payload.get("require_personnel_setup")),
                     },
                     "is_first_login": bool(user_payload.get("is_first_login")),
                     "has_security_questions": bool(user_payload.get("has_security_questions")),
                     "require_security_questions_setup": bool(user_payload.get("require_security_questions_setup")),
                     "require_department_setup": bool(user_payload.get("require_department_setup")),
+                    "require_personnel_setup": bool(user_payload.get("require_personnel_setup")),
                 },
                 "require_department_setup": bool(user_payload.get("require_department_setup")),
+                "require_personnel_setup": bool(user_payload.get("require_personnel_setup")),
             }
             if bool(user_payload.get("is_first_login")):
                 result["require_password_change"] = True

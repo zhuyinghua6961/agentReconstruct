@@ -32,6 +32,10 @@ class UserDepartmentUpdateRequest(BaseModel):
     tertiary_department_id: int | None = Field(default=None)
 
 
+class UserPersonnelBindingUpdateRequest(BaseModel):
+    personnel_id: int = Field(gt=0)
+
+
 class UserUsernameUpdateRequest(BaseModel):
     username: str = Field(default="")
 

@@ -15,6 +15,7 @@ from app.modules.admin_users.schemas import (
     UserCreateRequest,
     UserDepartmentUpdateRequest,
     UserPasswordResetRequest,
+    UserPersonnelBindingUpdateRequest,
     UserStatusUpdateRequest,
     UserTypeUpdateRequest,
     UserUsernameUpdateRequest,
@@ -97,6 +98,36 @@ def update_user_department(
             primary_department_id=payload.primary_department_id,
             secondary_department_id=payload.secondary_department_id,
             tertiary_department_id=payload.tertiary_department_id,
+        ),
+        ok_status=200,
+    )
+
+
+@router.put("/users/{user_id}/personnel-binding")
+def update_user_personnel_binding(
+    user_id: int,
+    payload: UserPersonnelBindingUpdateRequest,
+    context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(
+        admin_users_service.update_user_personnel_binding(
+            target_user_id=user_id,
+            actor_user_id=context.user_id,
+            personnel_id=payload.personnel_id,
+        ),
+        ok_status=200,
+    )
+
+
+@router.delete("/users/{user_id}/personnel-binding")
+def clear_user_personnel_binding(
+    user_id: int,
+    context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(
+        admin_users_service.clear_user_personnel_binding(
+            target_user_id=user_id,
+            actor_user_id=context.user_id,
         ),
         ok_status=200,
     )

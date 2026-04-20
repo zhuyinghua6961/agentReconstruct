@@ -16,6 +16,7 @@ from app.modules.conversation.api import router as conversation_router
 from app.modules.conversation.internal_api import router as conversation_internal_router
 from app.modules.departments.api import router as departments_router
 from app.modules.documents.api import router as documents_router
+from app.modules.personnel.api import router as personnel_router
 from app.modules.quota.api import router as quota_router
 from app.modules.system.api import router as system_router
 from app.modules.uploads.api import router as uploads_router
@@ -26,6 +27,7 @@ DEFAULT_ROUTERS: tuple[APIRouter, ...] = (
     auth_router,
     admin_users_router,
     departments_router,
+    personnel_router,
     quota_router,
     conversation_router,
     conversation_internal_router,
@@ -75,6 +77,7 @@ def create_app(
                     "auth",
                     "admin_users",
                     "departments",
+                    "personnel",
                     "quota",
                     "conversation",
                     "documents",

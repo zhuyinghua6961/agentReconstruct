@@ -142,6 +142,35 @@ test('AdminDashboard promotes quota, users, and departments into top admin tabs'
   assert.match(adminSource, /部门管理/)
 })
 
+test('AdminDashboard adds user management secondary tabs for accounts and personnel', () => {
+  assert.match(adminSource, /activeUserManagementTab/)
+  assert.match(adminSource, /账号列表/)
+  assert.match(adminSource, /人员表/)
+})
+
+test('AdminDashboard mounts PersonnelManagementPanel under user management', () => {
+  assert.match(adminSource, /PersonnelManagementPanel/)
+  assert.match(adminSource, /activeUserManagementTab === 'personnel'/)
+  assert.match(adminSource, /handlePersonnelManagementUpdated/)
+  assert.match(adminSource, /@updated="handlePersonnelManagementUpdated"/)
+  assert.match(adminSource, /await fetchUsers\(\)/)
+})
+
+test('AdminDashboard user table shows personnel info column', () => {
+  assert.match(adminSource, /<th>\s*人员信息\s*<\/th>/)
+  assert.match(adminSource, /personnel_display/)
+})
+
+test('AdminDashboard wires admin bind and unbind personnel actions', () => {
+  assert.match(adminSource, /PersonnelLookupSelect/)
+  assert.match(adminSource, /showPersonnelModal/)
+  assert.match(adminSource, /loadPersonnelLookupOptions\(/)
+  assert.match(adminSource, /initial-options=/)
+  assert.match(adminSource, /bindUserPersonnel/)
+  assert.match(adminSource, /unbindUserPersonnel/)
+  assert.match(adminSource, /fetchUsers\(\)/)
+})
+
 test('quota management route redirects into admin quota tab', () => {
   assert.match(routerSource, /quota-management/)
   assert.match(routerSource, /tab:\s*['"]quota['"]/)

@@ -12,6 +12,7 @@ from app.modules.auth.schemas import (
     ForgotPasswordInitiateRequest,
     ForgotPasswordVerifyRequest,
     LoginRequest,
+    PersonnelBindingUpdateRequest,
     RegisterRequest,
     SetSecurityQuestionsRequest,
     UsernameUpdateRequest,
@@ -65,6 +66,23 @@ def update_department(
             primary_department_id=payload.primary_department_id,
             secondary_department_id=payload.secondary_department_id,
             tertiary_department_id=payload.tertiary_department_id,
+        ),
+        ok_status=200,
+    )
+
+
+@router.put("/api/v1/auth/personnel-binding")
+@router.put("/api/auth/personnel-binding")
+def update_personnel_binding(
+    payload: PersonnelBindingUpdateRequest,
+    context: AuthContext = Depends(require_auth_context),
+):
+    return _respond(
+        auth_service_module.auth_service.update_personnel_binding(
+            user_id=context.user_id,
+            employee_no=payload.employee_no,
+            full_name=payload.full_name,
+            verification_code=payload.verification_code,
         ),
         ok_status=200,
     )

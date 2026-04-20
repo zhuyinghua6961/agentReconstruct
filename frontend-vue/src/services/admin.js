@@ -230,6 +230,89 @@ export const adminApi = {
     await downloadFile(`${API_BASE}/users/import-template?format=${format}`, token, `user_import_template.${format}`)
   },
 
+  async bindUserPersonnel(userId, personnelId) {
+    const token = readStoredToken()
+    return fetchWithErrorHandling(`${API_BASE}/users/${userId}/personnel-binding`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ personnel_id: personnelId })
+    })
+  },
+
+  async unbindUserPersonnel(userId) {
+    const token = readStoredToken()
+    return fetchWithErrorHandling(`${API_BASE}/users/${userId}/personnel-binding`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+  },
+
+  async getPersonnel(params = {}) {
+    const token = readStoredToken()
+    const searchParams = new URLSearchParams()
+    Object.entries(params || {}).forEach(([key, value]) => {
+      if (value === null || value === undefined || value === '') {
+        return
+      }
+      searchParams.set(key, String(value))
+    })
+    const query = searchParams.toString()
+    return fetchWithErrorHandling(
+      `${API_BASE}/personnel${query ? `?${query}` : ''}`,
+      {
+        headers: { 'Authorization': `Bearer ${token}` }
+      }
+    )
+  },
+
+  async createPersonnel(payload) {
+    const token = readStoredToken()
+    return fetchWithErrorHandling(`${API_BASE}/personnel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify(payload || {})
+    })
+  },
+
+  async updatePersonnel(personnelId, payload) {
+    const token = readStoredToken()
+    return fetchWithErrorHandling(`${API_BASE}/personnel/${personnelId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify(payload || {})
+    })
+  },
+
+  async updatePersonnelStatus(personnelId, status) {
+    const token = readStoredToken()
+    return fetchWithErrorHandling(`${API_BASE}/personnel/${personnelId}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ status })
+    })
+  },
+
+  async getPersonnelBindings(personnelId) {
+    const token = readStoredToken()
+    return fetchWithErrorHandling(`${API_BASE}/personnel/${personnelId}/bindings`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+  },
+
+  async batchImportPersonnel(file) {
+    const token = readStoredToken()
+    return uploadFile(`${API_BASE}/personnel/batch-import`, file, token)
+  },
+
+  async downloadPersonnelImportTemplate(format = 'xlsx') {
+    const token = readStoredToken()
+    await downloadFile(
+      `${API_BASE}/personnel/import-template?format=${format}`,
+      token,
+      `personnel_import_template.${format}`
+    )
+  },
+
   async getDepartmentTree() {
     const token = readStoredToken()
     return fetchWithErrorHandling(`${API_BASE}/departments/tree`, {

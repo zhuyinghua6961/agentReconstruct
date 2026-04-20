@@ -72,6 +72,7 @@ def test_admin_user_routes_registered():
     assert "/api/admin/users" in paths
     assert "/api/admin/users/{user_id}/username" in paths
     assert "/api/admin/users/{user_id}/department" in paths
+    assert "/api/admin/users/{user_id}/personnel-binding" in paths
     assert "/api/admin/users/batch-delete" in paths
     assert "/api/admin/users/batch-type" in paths
     assert "/api/admin/users/batch-import" in paths
@@ -327,6 +328,83 @@ def test_admin_update_user_department_contract(monkeypatch):
     assert captured["primary_department_id"] == 1
     assert captured["secondary_department_id"] == 11
     assert captured["tertiary_department_id"] == 111
+
+
+def test_admin_update_user_personnel_binding_contract(monkeypatch):
+    assert hasattr(admin_users_api_module, "update_user_personnel_binding")
+    captured = {}
+
+    def fake_update_user_personnel_binding(**kwargs):
+        captured.update(kwargs)
+        return {"success": True, "data": {"id": kwargs["target_user_id"], "personnel_id": kwargs["personnel_id"]}}
+
+    monkeypatch.setattr(admin_users_service, "update_user_personnel_binding", fake_update_user_personnel_binding)
+
+    response = admin_users_api_module.update_user_personnel_binding(
+        7,
+        admin_users_api_module.UserPersonnelBindingUpdateRequest(personnel_id=9),
+        AuthContext(user_id=1, role="admin", username="admin"),
+    )
+
+    assert response.status_code == 200
+    assert captured == {"target_user_id": 7, "actor_user_id": 1, "personnel_id": 9}
+    assert _decode(response)["data"]["personnel_id"] == 9
+
+
+def test_admin_clear_user_personnel_binding_contract(monkeypatch):
+    assert hasattr(admin_users_api_module, "clear_user_personnel_binding")
+    captured = {}
+
+    def fake_clear_user_personnel_binding(**kwargs):
+        captured.update(kwargs)
+        return {"success": True, "data": {"id": kwargs["target_user_id"], "personnel_id": None}}
+
+    monkeypatch.setattr(admin_users_service, "clear_user_personnel_binding", fake_clear_user_personnel_binding)
+
+    response = admin_users_api_module.clear_user_personnel_binding(
+        7,
+        AuthContext(user_id=1, role="admin", username="admin"),
+    )
+
+    assert response.status_code == 200
+    assert captured == {"target_user_id": 7, "actor_user_id": 1}
+    assert _decode(response)["data"]["personnel_id"] is None
+
+
+def test_admin_update_user_personnel_binding_returns_404_for_missing_personnel(monkeypatch):
+    assert hasattr(admin_users_api_module, "update_user_personnel_binding")
+    monkeypatch.setattr(
+        admin_users_service,
+        "update_user_personnel_binding",
+        lambda **kwargs: {"success": False, "error": "人员不存在", "code": "PERSONNEL_NOT_FOUND"},
+    )
+
+    response = admin_users_api_module.update_user_personnel_binding(
+        7,
+        admin_users_api_module.UserPersonnelBindingUpdateRequest(personnel_id=99),
+        AuthContext(user_id=1, role="admin", username="admin"),
+    )
+
+    assert response.status_code == 404
+    assert _decode(response)["code"] == "PERSONNEL_NOT_FOUND"
+
+
+def test_admin_update_user_personnel_binding_returns_400_for_disabled_personnel(monkeypatch):
+    assert hasattr(admin_users_api_module, "update_user_personnel_binding")
+    monkeypatch.setattr(
+        admin_users_service,
+        "update_user_personnel_binding",
+        lambda **kwargs: {"success": False, "error": "该人员已停用", "code": "PERSONNEL_DISABLED"},
+    )
+
+    response = admin_users_api_module.update_user_personnel_binding(
+        7,
+        admin_users_api_module.UserPersonnelBindingUpdateRequest(personnel_id=9),
+        AuthContext(user_id=1, role="admin", username="admin"),
+    )
+
+    assert response.status_code == 400
+    assert _decode(response)["code"] == "PERSONNEL_DISABLED"
 
 
 def test_admin_batch_import_and_template_routes(monkeypatch):
@@ -1092,6 +1170,248 @@ def test_admin_service_update_department_persists_selected_departments():
     assert users.updated["secondary_department_id"] == 11
     assert users.updated["tertiary_department_id"] == 111
     assert result["data"]["require_department_setup"] is False
+
+
+def test_list_users_includes_personnel_summary_fields():
+    class FakeUsers:
+        def count_users(self):
+            return 1
+
+        def list_users(self, *, offset: int, limit: int):
+            assert offset == 0
+            assert limit == 10
+            return [
+                {
+                    "id": 7,
+                    "username": "alice",
+                    "role": "user",
+                    "user_type": 3,
+                    "status": "active",
+                    "personnel_id": 9,
+                    "primary_department_id": None,
+                    "secondary_department_id": None,
+                    "tertiary_department_id": None,
+                    "created_at": None,
+                }
+            ]
+
+    class FakeDepartments:
+        def describe_user_department(
+            self,
+            *,
+            primary_department_id: int | None,
+            secondary_department_id: int | None,
+            tertiary_department_id: int | None,
+        ):
+            return {
+                "primary_department_id": primary_department_id,
+                "primary_department_name": None,
+                "secondary_department_id": secondary_department_id,
+                "secondary_department_name": None,
+                "tertiary_department_id": tertiary_department_id,
+                "tertiary_department_name": None,
+                "department_completion_level": 0,
+                "department_display": "未填写",
+                "require_department_setup": True,
+            }
+
+    class FakePersonnel:
+        def describe_user_personnel(self, *, personnel_id: int | None):
+            assert personnel_id == 9
+            return {
+                "personnel_id": 9,
+                "employee_no": "T2024001",
+                "full_name": "张三",
+                "personnel_binding_status": "bound_active",
+                "require_personnel_setup": False,
+            }
+
+    service = admin_users_service.__class__(users_repo=FakeUsers(), department_service=FakeDepartments())
+    service._personnel = FakePersonnel()
+
+    result = service.list_users(page=1, page_size=10)
+
+    assert result["success"] is True
+    row = result["data"][0]
+    assert row["personnel_id"] == 9
+    assert row["employee_no"] == "T2024001"
+    assert row["full_name"] == "张三"
+    assert row["personnel_binding_status"] == "bound_active"
+    assert row["personnel_display"] == "T2024001 / 张三"
+
+
+def test_admin_bind_user_to_active_personnel():
+    class FakeUsers:
+        def __init__(self):
+            self.updated = None
+
+        def get_by_id(self, user_id):
+            if int(user_id) != 7:
+                return None
+            payload = {
+                "id": 7,
+                "username": "alice",
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+                "primary_department_id": None,
+                "secondary_department_id": None,
+                "tertiary_department_id": None,
+                "created_at": None,
+            }
+            payload["personnel_id"] = None if self.updated is None else self.updated["personnel_id"]
+            return payload
+
+        def update_user_personnel(self, *, user_id: int, personnel_id: int | None):
+            self.updated = {"user_id": user_id, "personnel_id": personnel_id}
+            return 1
+
+    class FakeDepartments:
+        def describe_user_department(self, **kwargs):
+            return {
+                "primary_department_id": None,
+                "primary_department_name": None,
+                "secondary_department_id": None,
+                "secondary_department_name": None,
+                "tertiary_department_id": None,
+                "tertiary_department_name": None,
+                "department_completion_level": 0,
+                "department_display": "未填写",
+                "require_department_setup": True,
+            }
+
+    class FakePersonnel:
+        def get_personnel_by_id(self, *, personnel_id: int | None):
+            assert personnel_id == 9
+            return {"id": 9, "employee_no": "T2024001", "full_name": "张三", "status": "active"}
+
+        def describe_user_personnel(self, *, personnel_id: int | None):
+            assert personnel_id == 9
+            return {
+                "personnel_id": 9,
+                "employee_no": "T2024001",
+                "full_name": "张三",
+                "personnel_binding_status": "bound_active",
+                "require_personnel_setup": False,
+            }
+
+    users = FakeUsers()
+    service = admin_users_service.__class__(users_repo=users, department_service=FakeDepartments())
+    service._personnel = FakePersonnel()
+
+    assert hasattr(service, "update_user_personnel_binding")
+    result = service.update_user_personnel_binding(target_user_id=7, actor_user_id=1, personnel_id=9)
+
+    assert result["success"] is True
+    assert users.updated == {"user_id": 7, "personnel_id": 9}
+    assert result["data"]["personnel_id"] == 9
+    assert result["data"]["personnel_binding_status"] == "bound_active"
+    assert result["data"]["require_personnel_setup"] is False
+
+
+def test_admin_bind_rejects_disabled_personnel():
+    class FakeUsers:
+        def get_by_id(self, user_id):
+            return {"id": 7, "username": "alice", "role": "user", "user_type": 3, "status": "active", "personnel_id": None}
+
+    class FakePersonnel:
+        def get_personnel_by_id(self, *, personnel_id: int | None):
+            return {"id": 9, "employee_no": "T2024001", "full_name": "张三", "status": "disabled"}
+
+    service = admin_users_service.__class__(users_repo=FakeUsers())
+    service._personnel = FakePersonnel()
+
+    assert hasattr(service, "update_user_personnel_binding")
+    result = service.update_user_personnel_binding(target_user_id=7, actor_user_id=1, personnel_id=9)
+
+    assert result["success"] is False
+    assert result["code"] == "PERSONNEL_DISABLED"
+    assert service.status_code_for(result, ok_status=200) == 400
+
+
+def test_admin_unbind_user_sets_require_personnel_setup_again():
+    class FakeUsers:
+        def __init__(self):
+            self.updated = None
+
+        def get_by_id(self, user_id):
+            if int(user_id) != 7:
+                return None
+            payload = {
+                "id": 7,
+                "username": "alice",
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+                "primary_department_id": None,
+                "secondary_department_id": None,
+                "tertiary_department_id": None,
+                "created_at": None,
+            }
+            payload["personnel_id"] = 9 if self.updated is None else None
+            return payload
+
+        def update_user_personnel(self, *, user_id: int, personnel_id: int | None):
+            self.updated = {"user_id": user_id, "personnel_id": personnel_id}
+            return 1
+
+    class FakeDepartments:
+        def describe_user_department(self, **kwargs):
+            return {
+                "primary_department_id": None,
+                "primary_department_name": None,
+                "secondary_department_id": None,
+                "secondary_department_name": None,
+                "tertiary_department_id": None,
+                "tertiary_department_name": None,
+                "department_completion_level": 0,
+                "department_display": "未填写",
+                "require_department_setup": True,
+            }
+
+    class FakePersonnel:
+        def describe_user_personnel(self, *, personnel_id: int | None):
+            assert personnel_id is None
+            return {
+                "personnel_id": None,
+                "employee_no": None,
+                "full_name": None,
+                "personnel_binding_status": "unbound",
+                "require_personnel_setup": True,
+            }
+
+    users = FakeUsers()
+    service = admin_users_service.__class__(users_repo=users, department_service=FakeDepartments())
+    service._personnel = FakePersonnel()
+
+    assert hasattr(service, "clear_user_personnel_binding")
+    result = service.clear_user_personnel_binding(target_user_id=7, actor_user_id=1)
+
+    assert result["success"] is True
+    assert users.updated == {"user_id": 7, "personnel_id": None}
+    assert result["data"]["personnel_id"] is None
+    assert result["data"]["personnel_binding_status"] == "unbound"
+    assert result["data"]["require_personnel_setup"] is True
+
+
+def test_admin_bind_returns_404_for_missing_personnel():
+    class FakeUsers:
+        def get_by_id(self, user_id):
+            return {"id": 7, "username": "alice", "role": "user", "user_type": 3, "status": "active", "personnel_id": None}
+
+    class FakePersonnel:
+        def get_personnel_by_id(self, *, personnel_id: int | None):
+            return None
+
+    service = admin_users_service.__class__(users_repo=FakeUsers())
+    service._personnel = FakePersonnel()
+
+    assert hasattr(service, "update_user_personnel_binding")
+    result = service.update_user_personnel_binding(target_user_id=7, actor_user_id=1, personnel_id=99)
+
+    assert result["success"] is False
+    assert result["code"] == "PERSONNEL_NOT_FOUND"
+    assert service.status_code_for(result, ok_status=200) == 404
 
 
 def test_admin_service_update_department_requires_full_three_level_chain():

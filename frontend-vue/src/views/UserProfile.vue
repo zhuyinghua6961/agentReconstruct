@@ -13,9 +13,12 @@ const usernameError = ref('')
 const usernameSuccess = ref('')
 const departmentError = ref('')
 const departmentSuccess = ref('')
+const personnelError = ref('')
+const personnelSuccess = ref('')
 const forcePasswordChange = ref(false)
 const forceSecurityQuestionSetup = ref(false)
 const forceDepartmentSetup = ref(false)
+const forcePersonnelSetup = ref(false)
 
 // 配额信息
 const quotas = ref(null)
@@ -37,6 +40,10 @@ const departmentLoading = ref(false)
 const selectedPrimaryDepartmentId = ref(null)
 const selectedSecondaryDepartmentId = ref(null)
 const selectedTertiaryDepartmentId = ref(null)
+const showPersonnelForm = ref(false)
+const employeeNoInput = ref('')
+const fullNameInput = ref('')
+const verificationCodeInput = ref('')
 const departmentSelectorTree = computed(() => (
   mergePreservedDepartmentTree(departmentTree.value, currentUser.value)
 ))
@@ -102,6 +109,12 @@ function syncUsernameInputFromCurrentUser() {
   usernameInput.value = currentUser.value?.username || ''
 }
 
+function syncPersonnelInputsFromCurrentUser() {
+  employeeNoInput.value = currentUser.value?.employee_no || ''
+  fullNameInput.value = currentUser.value?.full_name || ''
+  verificationCodeInput.value = ''
+}
+
 function openUsernameForm() {
   syncUsernameInputFromCurrentUser()
   usernameError.value = ''
@@ -116,6 +129,32 @@ function cancelUsernameEdit() {
   showUsernameForm.value = false
 }
 
+function getPersonnelDisplay(user) {
+  const bindingStatus = String(user?.personnel_binding_status || '').trim().toLowerCase()
+  const employeeNo = String(user?.employee_no || '').trim()
+  const fullName = String(user?.full_name || '').trim()
+  const base = [employeeNo, fullName].filter(Boolean).join(' / ')
+  if (bindingStatus === 'unbound') return '未绑定'
+  if (bindingStatus === 'bound_disabled') return base ? `${base}（已停用）` : '当前绑定人员已停用'
+  if (bindingStatus === 'bound_missing') return base || '绑定记录缺失'
+  return base || '未绑定'
+}
+
+function openPersonnelForm() {
+  syncPersonnelInputsFromCurrentUser()
+  personnelError.value = ''
+  personnelSuccess.value = ''
+  showPersonnelForm.value = true
+}
+
+function cancelPersonnelEdit() {
+  if (forcePersonnelSetup.value) return
+  syncPersonnelInputsFromCurrentUser()
+  personnelError.value = ''
+  personnelSuccess.value = ''
+  showPersonnelForm.value = false
+}
+
 async function fetchCurrentUser() {
   loading.value = true
   try {
@@ -123,9 +162,11 @@ async function fetchCurrentUser() {
     if (result.success) {
       currentUser.value = result.data
       syncUsernameInputFromCurrentUser()
+      syncPersonnelInputsFromCurrentUser()
       forcePasswordChange.value = Boolean(result.data?.is_first_login)
       forceSecurityQuestionSetup.value = Boolean(result.data?.require_security_questions_setup)
       forceDepartmentSetup.value = Boolean(result.data?.require_department_setup)
+      forcePersonnelSetup.value = Boolean(result.data?.require_personnel_setup)
       selectedPrimaryDepartmentId.value = result.data?.primary_department_id ?? null
       selectedSecondaryDepartmentId.value = result.data?.secondary_department_id ?? null
       selectedTertiaryDepartmentId.value = result.data?.tertiary_department_id ?? null
@@ -138,11 +179,14 @@ async function fetchCurrentUser() {
       if (forceDepartmentSetup.value) {
         showDepartmentForm.value = true
       }
+      if (forcePersonnelSetup.value) {
+        showPersonnelForm.value = true
+      }
       // 获取已设置的安全问题
-      await Promise.all([
-        fetchSecurityQuestions(),
-        fetchDepartmentTree(),
-      ])
+      await fetchSecurityQuestions()
+      if (forceDepartmentSetup.value || showDepartmentForm.value) {
+        await ensureDepartmentTreeLoaded()
+      }
     } else {
       error.value = result.error || '获取用户信息失败'
     }
@@ -213,6 +257,18 @@ async function fetchDepartmentTree() {
   }
 }
 
+async function ensureDepartmentTreeLoaded() {
+  if (departmentLoading.value || departmentTree.value.length > 0) {
+    return
+  }
+  await fetchDepartmentTree()
+}
+
+async function openDepartmentForm() {
+  showDepartmentForm.value = true
+  await ensureDepartmentTreeLoaded()
+}
+
 function syncStoredUser(patch) {
   const latestUser = {
     ...(readStoredUser() || {}),
@@ -223,7 +279,12 @@ function syncStoredUser(patch) {
 }
 
 function hasPendingForcedSetup() {
-  return forcePasswordChange.value || forceSecurityQuestionSetup.value || forceDepartmentSetup.value
+  return (
+    forcePasswordChange.value
+    || forceSecurityQuestionSetup.value
+    || forceDepartmentSetup.value
+    || forcePersonnelSetup.value
+  )
 }
 
 function redirectAfterProfileCompletion() {
@@ -437,6 +498,47 @@ async function saveDepartment() {
   departmentError.value = result.error || '保存部门信息失败'
 }
 
+async function savePersonnelBinding() {
+  personnelError.value = ''
+  personnelSuccess.value = ''
+
+  const normalizedEmployeeNo = String(employeeNoInput.value || '').trim()
+  const normalizedFullName = String(fullNameInput.value || '').trim()
+  const normalizedVerificationCode = String(verificationCodeInput.value || '').trim()
+  if (!normalizedEmployeeNo || !normalizedFullName || !normalizedVerificationCode) {
+    personnelError.value = '请完整填写工号、姓名和校验码'
+    return
+  }
+
+  const result = await authApi.updatePersonnelBinding(
+    normalizedEmployeeNo,
+    normalizedFullName,
+    normalizedVerificationCode,
+  )
+
+  if (result.success) {
+    currentUser.value = { ...(currentUser.value || {}), ...(result.data || {}) }
+    syncStoredUser(result.data || {})
+    forcePersonnelSetup.value = Boolean(result.data?.require_personnel_setup)
+    showPersonnelForm.value = false
+    syncPersonnelInputsFromCurrentUser()
+    personnelSuccess.value = '人员信息保存成功'
+    setTimeout(async () => {
+      personnelSuccess.value = ''
+      if (forceDepartmentSetup.value) {
+        await openDepartmentForm()
+        return
+      }
+      if (!hasPendingForcedSetup()) {
+        redirectAfterProfileCompletion()
+      }
+    }, 1500)
+    return
+  }
+
+  personnelError.value = result.error || '绑定人员信息失败'
+}
+
 async function logout() {
   clearStoredAuth()
   window.location.href = '/login'
@@ -457,6 +559,10 @@ function checkForcePasswordChange() {
   if (urlParams.get('department') === 'required') {
     forceDepartmentSetup.value = true
     showDepartmentForm.value = true
+  }
+  if (urlParams.get('personnel') === 'required') {
+    forcePersonnelSetup.value = true
+    showPersonnelForm.value = true
   }
 }
 
@@ -597,10 +703,57 @@ onMounted(() => {
           </div>
         </div>
 
+        <div class="action-card">
+          <h2>人员信息</h2>
+          <p class="hint">请绑定您的工号、姓名和校验码。未绑定或当前绑定人员已停用时，会被强制拦截到个人中心补全。</p>
+
+          <div v-if="forcePersonnelSetup" class="alert alert-warning">
+            <strong>⚠️ 人员信息必填</strong><br>
+            请先完成人员信息绑定后再继续使用系统。
+          </div>
+
+          <div v-if="currentUser.personnel_binding_status === 'bound_disabled'" class="alert alert-warning">
+            <strong>⚠️ 当前绑定人员已停用</strong><br>
+            请重新绑定有效的人员信息，或联系管理员处理。
+          </div>
+
+          <div v-if="personnelSuccess" class="alert alert-success">{{ personnelSuccess }}</div>
+          <div v-if="personnelError" class="alert alert-error">{{ personnelError }}</div>
+
+          <div v-if="!showPersonnelForm" class="department-summary">
+            <div class="info-row">
+              <span class="label">当前人员</span>
+              <span class="value">{{ getPersonnelDisplay(currentUser) }}</span>
+            </div>
+            <button class="action-btn" @click="openPersonnelForm">
+              {{ currentUser.personnel_id ? '修改人员信息' : '绑定人员信息' }}
+            </button>
+          </div>
+
+          <div v-else class="password-form">
+            <div class="form-group">
+              <label>工号</label>
+              <input type="text" v-model="employeeNoInput" placeholder="请输入工号">
+            </div>
+            <div class="form-group">
+              <label>姓名</label>
+              <input type="text" v-model="fullNameInput" placeholder="请输入姓名">
+            </div>
+            <div class="form-group">
+              <label>校验码</label>
+              <input type="password" v-model="verificationCodeInput" placeholder="请输入校验码">
+            </div>
+            <div class="form-actions">
+              <button class="btn-secondary" @click="cancelPersonnelEdit" :disabled="forcePersonnelSetup">取消</button>
+              <button class="btn-primary" @click="savePersonnelBinding">保存人员信息</button>
+            </div>
+          </div>
+        </div>
+
         <!-- 部门信息 -->
         <div class="action-card">
           <h2>部门信息</h2>
-          <p class="hint">请选择您的一级、二级部门。未填写部门信息时会被强制拦截到个人中心补全。</p>
+          <p class="hint">请选择您的一级、二级、三级部门。未填写部门信息时会被强制拦截到个人中心补全。</p>
 
           <div v-if="forceDepartmentSetup" class="alert alert-warning">
             <strong>⚠️ 部门信息必填</strong><br>
@@ -620,7 +773,7 @@ onMounted(() => {
                 {{ currentUser.department_display || '未填写' }}
               </span>
             </div>
-            <button class="action-btn" @click="showDepartmentForm = true">
+            <button class="action-btn" @click="openDepartmentForm">
               {{ currentUser.primary_department_id && currentUser.secondary_department_id ? '修改部门' : '填写部门' }}
             </button>
           </div>

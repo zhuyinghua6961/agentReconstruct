@@ -83,6 +83,8 @@ class AuthRepository:
             fields.append("is_first_login")
         if self.has_column("must_set_security_questions"):
             fields.append("must_set_security_questions")
+        if self.has_column("personnel_id"):
+            fields.append("personnel_id")
         if self.has_column("primary_department_id"):
             fields.append("primary_department_id")
         if self.has_column("secondary_department_id"):
@@ -236,6 +238,18 @@ class AuthRepository:
             (username, user_id),
         )
 
+    def update_user_personnel(self, *, user_id: int, personnel_id: int | None) -> int:
+        if not self.has_column("personnel_id"):
+            return 0
+        return self._execute_update(
+            """
+            UPDATE users
+            SET personnel_id = %s
+            WHERE id = %s
+            """,
+            (personnel_id, user_id),
+        )
+
     def count_users(self) -> int:
         rows = self._execute_query("SELECT COUNT(*) AS total FROM users")
         if not rows:
@@ -246,6 +260,8 @@ class AuthRepository:
         fields = ["id", "username", "role", "status"]
         if self.has_column("user_type"):
             fields.append("user_type")
+        if self.has_column("personnel_id"):
+            fields.append("personnel_id")
         if self.has_column("primary_department_id"):
             fields.append("primary_department_id")
         if self.has_column("secondary_department_id"):

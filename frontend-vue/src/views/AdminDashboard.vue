@@ -8,7 +8,10 @@ import BatchImportDialog from '../components/BatchImportDialog.vue'
 import DepartmentManagementPanel from '../components/DepartmentManagementPanel.vue'
 import DepartmentSelector from '../components/DepartmentSelector.vue'
 import ImportResultDialog from '../components/ImportResultDialog.vue'
+import PersonnelLookupSelect from '../components/PersonnelLookupSelect.vue'
+import PersonnelManagementPanel from '../components/PersonnelManagementPanel.vue'
 import QuotaManagementPanel from '../components/QuotaManagementPanel.vue'
+import { runPersonnelManagementRefresh } from '../utils/personnelManagementSync'
 
 const route = useRoute()
 const router = useRouter()
@@ -26,6 +29,7 @@ const loading = ref(false)
 const error = ref('')
 const success = ref('')
 const pagination = ref({ page: 1, pageSize: 10, total: 0 })
+const activeUserManagementTab = ref('accounts')
 
 const showPasswordModal = ref(false)
 const showStatusModal = ref(false)
@@ -36,6 +40,7 @@ const showBatchImportDialog = ref(false)
 const showImportResultDialog = ref(false)
 const showDepartmentModal = ref(false)
 const showUsernameModal = ref(false)
+const showPersonnelModal = ref(false)
 const importResult = ref(null)
 const operationResultTitle = ref('操作结果')
 const selectedUserIds = ref([])
@@ -58,6 +63,9 @@ const newTertiaryDepartmentId = ref(null)
 const editPrimaryDepartmentId = ref(null)
 const editSecondaryDepartmentId = ref(null)
 const editTertiaryDepartmentId = ref(null)
+const selectedPersonnelId = ref(null)
+const selectedPersonnelSummary = ref('')
+const personnelLookupOptions = ref([])
 
 const currentPageUserIds = computed(() => users.value.map(user => user.id))
 const hasSelectedUsers = computed(() => selectedUserIds.value.length > 0)
@@ -151,6 +159,10 @@ function getRoleClass(user) {
 
 function isAdminIdentity(user) {
   return user?.user_type === 1 || user?.role === 'admin'
+}
+
+function getPersonnelDisplay(user) {
+  return user?.personnel_display || '未绑定'
 }
 
 function getTargetUserType(user) {
@@ -420,6 +432,73 @@ function openDepartmentModal(user) {
   showDepartmentModal.value = true
 }
 
+function openPersonnelModal(user) {
+  selectedUser.value = user
+  selectedPersonnelId.value = user?.personnel_id ?? null
+  selectedPersonnelSummary.value = user?.personnel_display || '未绑定'
+  error.value = ''
+  showPersonnelModal.value = true
+  void loadPersonnelLookupOptions()
+}
+
+function handlePersonnelSelected(item) {
+  selectedPersonnelId.value = item?.id ?? null
+  selectedPersonnelSummary.value = item ? `${item.employee_no} / ${item.full_name}` : ''
+}
+
+async function loadPersonnelLookupOptions(keyword = '') {
+  const result = await adminApi.getPersonnel({
+    keyword,
+    status: 'active',
+    page_size: 100,
+  })
+  if (result.success) {
+    personnelLookupOptions.value = Array.isArray(result.data?.items) ? result.data.items : []
+    return
+  }
+  personnelLookupOptions.value = []
+}
+
+async function submitPersonnelBinding() {
+  error.value = ''
+  if (!selectedUser.value) {
+    error.value = '未选择要编辑的用户'
+    return
+  }
+  if (!selectedPersonnelId.value) {
+    error.value = '请选择要绑定的人员'
+    return
+  }
+
+  const result = await adminApi.bindUserPersonnel(selectedUser.value.id, selectedPersonnelId.value)
+  if (result.success) {
+    success.value = `用户 ${selectedUser.value.username} 的人员信息已更新`
+    showPersonnelModal.value = false
+    await fetchUsers()
+    setTimeout(() => success.value = '', 3000)
+    return
+  }
+  error.value = result.error || '设置人员失败'
+}
+
+async function submitPersonnelUnbind() {
+  error.value = ''
+  if (!selectedUser.value) {
+    error.value = '未选择要编辑的用户'
+    return
+  }
+
+  const result = await adminApi.unbindUserPersonnel(selectedUser.value.id)
+  if (result.success) {
+    success.value = `用户 ${selectedUser.value.username} 的人员绑定已解除`
+    showPersonnelModal.value = false
+    await fetchUsers()
+    setTimeout(() => success.value = '', 3000)
+    return
+  }
+  error.value = result.error || '解绑人员失败'
+}
+
 async function openResetPasswordModal(user) {
   selectedUser.value = user
   const tempPassword = generateTemporaryPassword()
@@ -567,6 +646,12 @@ async function handleDepartmentDictionaryUpdated() {
   ])
 }
 
+async function handlePersonnelManagementUpdated() {
+  await runPersonnelManagementRefresh(async () => {
+    await fetchUsers()
+  })
+}
+
 onMounted(async () => {
   await ensureAdminTab()
   await fetchCurrentUser()
@@ -625,6 +710,31 @@ onMounted(async () => {
       <div v-else class="user-section">
         <div class="section-header">
           <h2>用户管理</h2>
+          <div class="user-subtabs">
+            <button
+              type="button"
+              class="admin-tab-btn"
+              :class="{ active: activeUserManagementTab === 'accounts' }"
+              @click="activeUserManagementTab = 'accounts'"
+            >
+              账号列表
+            </button>
+            <button
+              type="button"
+              class="admin-tab-btn"
+              :class="{ active: activeUserManagementTab === 'personnel' }"
+              @click="activeUserManagementTab = 'personnel'"
+            >
+              人员表
+            </button>
+          </div>
+        </div>
+
+        <section v-if="activeUserManagementTab === 'personnel'" class="user-management-panel">
+          <PersonnelManagementPanel @updated="handlePersonnelManagementUpdated" />
+        </section>
+
+        <template v-else>
           <div class="header-actions">
             <button class="action-btn batch-action-btn" :disabled="!hasSelectedUsers" @click="openBatchTypeModal">
               批量改类型
@@ -638,15 +748,14 @@ onMounted(async () => {
             <button class="add-user-btn batch-import-btn" @click="openBatchImportDialog">批量导入</button>
             <button class="add-user-btn" @click="openCreateModal">添加用户</button>
           </div>
-        </div>
 
-        <div v-if="hasSelectedUsers" class="selection-summary">
-          已选择 {{ selectedUserIds.length }} 个用户
-        </div>
+          <div v-if="hasSelectedUsers" class="selection-summary">
+            已选择 {{ selectedUserIds.length }} 个用户
+          </div>
 
-        <div v-if="loading" class="loading">加载中...</div>
+          <div v-if="loading" class="loading">加载中...</div>
 
-        <table v-else class="user-table">
+          <table v-else class="user-table">
           <thead>
             <tr>
               <th class="checkbox-col">
@@ -660,6 +769,7 @@ onMounted(async () => {
               <th>用户名</th>
               <th>角色</th>
               <th>部门</th>
+              <th>人员信息</th>
               <th>状态</th>
               <th>创建时间</th>
               <th>操作</th>
@@ -682,9 +792,11 @@ onMounted(async () => {
                   {{ user.department_display || '未填写' }}
                 </span>
               </td>
+              <td>{{ user.personnel_display || getPersonnelDisplay(user) }}</td>
               <td><span class="status-badge" :class="user.status">{{ user.status === 'active' ? '正常' : '停用' }}</span></td>
               <td>{{ user.created_at }}</td>
               <td class="actions">
+                <button class="action-btn" @click="openPersonnelModal(user)">设置人员</button>
                 <button class="action-btn" @click="openDepartmentModal(user)">设置部门</button>
                 <button
                   v-if="!isAdminIdentity(user)"
@@ -709,13 +821,14 @@ onMounted(async () => {
               </td>
             </tr>
           </tbody>
-        </table>
+          </table>
 
-        <div v-if="pagination.total > pagination.pageSize" class="pagination">
-          <button :disabled="pagination.page === 1" @click="changePage(pagination.page - 1)">上一页</button>
-          <span>第 {{ pagination.page }} 页 / 共 {{ Math.ceil(pagination.total / pagination.pageSize) }} 页</span>
-          <button :disabled="pagination.page * pagination.pageSize >= pagination.total" @click="changePage(pagination.page + 1)">下一页</button>
-        </div>
+          <div v-if="pagination.total > pagination.pageSize" class="pagination">
+            <button :disabled="pagination.page === 1" @click="changePage(pagination.page - 1)">上一页</button>
+            <span>第 {{ pagination.page }} 页 / 共 {{ Math.ceil(pagination.total / pagination.pageSize) }} 页</span>
+            <button :disabled="pagination.page * pagination.pageSize >= pagination.total" @click="changePage(pagination.page + 1)">下一页</button>
+          </div>
+        </template>
       </div>
     </main>
 
@@ -890,6 +1003,31 @@ onMounted(async () => {
         <div class="modal-footer">
           <button class="btn-secondary" @click="showDepartmentModal = false">取消</button>
           <button class="btn-primary" @click="submitUserDepartment">保存部门</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="showPersonnelModal" class="modal-overlay" @click.self="showPersonnelModal = false">
+      <div class="modal modal-wide">
+        <h3>设置人员 - {{ selectedUser?.username }}</h3>
+        <div class="modal-body">
+          <p class="hint-text">
+            当前人员：<strong>{{ selectedUser?.personnel_display || getPersonnelDisplay(selectedUser) }}</strong>
+          </p>
+          <p class="hint-text">
+            已选人员：<strong>{{ selectedPersonnelSummary || '未选择' }}</strong>
+          </p>
+          <PersonnelLookupSelect
+            v-model="selectedPersonnelId"
+            :initial-options="personnelLookupOptions"
+            :disabled="false"
+            @select="handlePersonnelSelected"
+          />
+        </div>
+        <div class="modal-footer">
+          <button class="btn-secondary" @click="showPersonnelModal = false">取消</button>
+          <button class="btn-danger" @click="submitPersonnelUnbind">解绑</button>
+          <button class="btn-primary" @click="submitPersonnelBinding">保存绑定</button>
         </div>
       </div>
     </div>

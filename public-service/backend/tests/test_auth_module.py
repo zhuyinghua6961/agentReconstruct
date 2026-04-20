@@ -1,5 +1,6 @@
 import json
 import os
+import inspect
 
 import pytest
 
@@ -36,6 +37,8 @@ def test_auth_routes_registered():
     assert "/api/auth/departments/tree" in paths
     assert "/api/v1/auth/department" in paths
     assert "/api/auth/department" in paths
+    assert "/api/v1/auth/personnel-binding" in paths
+    assert "/api/auth/personnel-binding" in paths
     assert "/api/v1/auth/username" in paths
     assert "/api/auth/username" in paths
     assert "/api/v1/auth/security-questions" in paths
@@ -44,12 +47,14 @@ def test_auth_routes_registered():
     me_route = _route_for("/api/v1/auth/me", "GET")
     department_tree_route = _route_for("/api/v1/auth/departments/tree", "GET")
     department_update_route = _route_for("/api/v1/auth/department", "PUT")
+    personnel_binding_route = _route_for("/api/v1/auth/personnel-binding", "PUT")
     username_update_route = _route_for("/api/v1/auth/username", "PUT")
     security_route = _route_for("/api/v1/auth/security-questions", "PUT")
     password_route = _route_for("/api/v1/auth/password", "PUT")
     assert require_auth_context in {dep.call for dep in me_route.dependant.dependencies}
     assert require_auth_context in {dep.call for dep in department_tree_route.dependant.dependencies}
     assert require_auth_context in {dep.call for dep in department_update_route.dependant.dependencies}
+    assert require_auth_context in {dep.call for dep in personnel_binding_route.dependant.dependencies}
     assert require_auth_context in {dep.call for dep in username_update_route.dependant.dependencies}
     assert require_auth_context in {dep.call for dep in security_route.dependant.dependencies}
     assert require_auth_context in {dep.call for dep in password_route.dependant.dependencies}
@@ -143,6 +148,45 @@ def test_login_route_exposes_department_flags(monkeypatch):
     assert body["require_department_setup"] is True
 
 
+def test_login_route_exposes_personnel_flags(monkeypatch):
+    def fake_login(username: str, password: str):
+        assert username == "alice"
+        assert password == "Secret123!"
+        return {
+            "success": True,
+            "message": "login_success",
+            "data": {
+                "token": "token-1",
+                "user": {
+                    "id": 1,
+                    "username": "alice",
+                    "role": "user",
+                    "user_type": 3,
+                    "personnel_id": None,
+                    "employee_no": None,
+                    "full_name": None,
+                    "personnel_binding_status": "unbound",
+                    "require_personnel_setup": True,
+                },
+                "is_first_login": False,
+                "has_security_questions": True,
+                "require_security_questions_setup": False,
+                "require_department_setup": False,
+                "require_personnel_setup": True,
+            },
+            "require_department_setup": False,
+            "require_personnel_setup": True,
+        }
+
+    monkeypatch.setattr(auth_service_module.auth_service, "login", fake_login)
+    response = auth_api_module.login(LoginRequest(username="alice", password="Secret123!"))
+    body = _decode(response)
+    assert response.status_code == 200
+    assert body["data"]["user"]["personnel_binding_status"] == "unbound"
+    assert body["data"]["require_personnel_setup"] is True
+    assert body["require_personnel_setup"] is True
+
+
 def test_register_route_first_login_contract(monkeypatch):
     def fake_register(username: str, password: str):
         assert username == "alice"
@@ -234,6 +278,34 @@ def test_me_route_exposes_department_fields(monkeypatch):
     assert body["data"]["require_department_setup"] is False
 
 
+def test_me_route_exposes_personnel_fields(monkeypatch):
+    monkeypatch.setattr(
+        auth_service_module.auth_service,
+        "get_user_info",
+        lambda user_id: {
+            "success": True,
+            "data": {
+                "id": user_id,
+                "username": "alice",
+                "role": "user",
+                "user_type": 3,
+                "personnel_id": 9,
+                "employee_no": "T2024001",
+                "full_name": "张三",
+                "personnel_binding_status": "bound_active",
+                "require_personnel_setup": False,
+            },
+        },
+    )
+
+    response = auth_api_module.me(AuthContext(user_id=7, role="user", username="alice"))
+    body = _decode(response)
+    assert response.status_code == 200
+    assert body["data"]["employee_no"] == "T2024001"
+    assert body["data"]["personnel_binding_status"] == "bound_active"
+    assert body["data"]["require_personnel_setup"] is False
+
+
 def test_security_questions_write_contract(monkeypatch):
     captured = {}
 
@@ -323,6 +395,42 @@ def test_auth_department_update_contract(monkeypatch):
         "tertiary_department_id": 111,
     }
     assert _decode(response)["data"]["require_department_setup"] is False
+
+
+def test_auth_personnel_binding_update_contract(monkeypatch):
+    assert hasattr(auth_api_module, "update_personnel_binding")
+
+    def fake_update_personnel_binding(*, user_id: int, employee_no: str, full_name: str, verification_code: str):
+        assert user_id == 9
+        assert employee_no == "T2024001"
+        assert full_name == "张三"
+        assert verification_code == "ABC123"
+        return {
+            "success": True,
+            "data": {
+                "personnel_id": 9,
+                "employee_no": "T2024001",
+                "full_name": "张三",
+                "personnel_binding_status": "bound_active",
+                "require_personnel_setup": False,
+            },
+        }
+
+    monkeypatch.setattr(auth_service_module.auth_service, "update_personnel_binding", fake_update_personnel_binding)
+
+    payload_cls = getattr(auth_api_module, "PersonnelBindingUpdateRequest", None)
+    assert payload_cls is not None
+    response = auth_api_module.update_personnel_binding(
+        payload_cls(
+            employee_no="T2024001",
+            full_name="张三",
+            verification_code="ABC123",
+        ),
+        AuthContext(user_id=9, role="user", username="bob"),
+    )
+
+    assert response.status_code == 200
+    assert _decode(response)["data"]["personnel_binding_status"] == "bound_active"
 
 
 def test_auth_update_username_contract(monkeypatch):
@@ -1102,6 +1210,440 @@ def test_auth_service_update_username_returns_user_not_found():
 
     assert result["success"] is False
     assert result["code"] == "USER_NOT_FOUND"
+
+
+def _build_auth_service_with_personnel(*, repo, departments, personnel):
+    assert "personnel_service" in inspect.signature(AuthService).parameters
+    return AuthService(
+        repo=repo,
+        token_service=TokenService(),
+        department_service=departments,
+        personnel_service=personnel,
+    )
+
+
+def test_auth_service_login_marks_unbound_user_as_require_personnel_setup():
+    class FakeRepo:
+        password_hash = _hash_password("Secret123!")
+
+        def get_by_username(self, username):
+            assert username == "alice"
+            return {
+                "id": 9,
+                "username": "alice",
+                "password_hash": self.password_hash,
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+                "is_first_login": 0,
+                "must_set_security_questions": 0,
+                "personnel_id": None,
+            }
+
+        def reset_login_attempts(self, *, user_id: int):
+            return 1
+
+        def has_security_questions(self, *, user_id: int):
+            return True
+
+    class FakeDepartments:
+        def describe_user_department(self, **kwargs):
+            return {
+                "primary_department_id": None,
+                "primary_department_name": None,
+                "secondary_department_id": None,
+                "secondary_department_name": None,
+                "tertiary_department_id": None,
+                "tertiary_department_name": None,
+                "department_completion_level": "empty",
+                "require_department_setup": False,
+            }
+
+    class FakePersonnel:
+        def describe_user_personnel(self, *, personnel_id: int | None):
+            assert personnel_id is None
+            return {
+                "personnel_id": None,
+                "employee_no": None,
+                "full_name": None,
+                "personnel_binding_status": "unbound",
+                "require_personnel_setup": True,
+            }
+
+    service = _build_auth_service_with_personnel(
+        repo=FakeRepo(),
+        departments=FakeDepartments(),
+        personnel=FakePersonnel(),
+    )
+    result = service.login("alice", "Secret123!")
+
+    assert result["success"] is True
+    assert result["data"]["user"]["personnel_binding_status"] == "unbound"
+    assert result["data"]["require_personnel_setup"] is True
+    assert result["require_personnel_setup"] is True
+
+
+def test_auth_service_login_marks_disabled_personnel_as_require_setup():
+    class FakeRepo:
+        password_hash = _hash_password("Secret123!")
+
+        def get_by_username(self, username):
+            assert username == "alice"
+            return {
+                "id": 9,
+                "username": "alice",
+                "password_hash": self.password_hash,
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+                "is_first_login": 0,
+                "must_set_security_questions": 0,
+                "personnel_id": 7,
+            }
+
+        def reset_login_attempts(self, *, user_id: int):
+            return 1
+
+        def has_security_questions(self, *, user_id: int):
+            return True
+
+    class FakeDepartments:
+        def describe_user_department(self, **kwargs):
+            return {
+                "primary_department_id": None,
+                "primary_department_name": None,
+                "secondary_department_id": None,
+                "secondary_department_name": None,
+                "tertiary_department_id": None,
+                "tertiary_department_name": None,
+                "department_completion_level": "empty",
+                "require_department_setup": False,
+            }
+
+    class FakePersonnel:
+        def describe_user_personnel(self, *, personnel_id: int | None):
+            assert personnel_id == 7
+            return {
+                "personnel_id": 7,
+                "employee_no": "T2024001",
+                "full_name": "张三",
+                "personnel_binding_status": "bound_disabled",
+                "require_personnel_setup": True,
+            }
+
+    service = _build_auth_service_with_personnel(
+        repo=FakeRepo(),
+        departments=FakeDepartments(),
+        personnel=FakePersonnel(),
+    )
+    result = service.login("alice", "Secret123!")
+
+    assert result["success"] is True
+    assert result["data"]["user"]["employee_no"] == "T2024001"
+    assert result["data"]["user"]["personnel_binding_status"] == "bound_disabled"
+    assert result["require_personnel_setup"] is True
+
+
+def test_auth_service_get_user_info_exposes_bound_active_personnel_payload():
+    class FakeRepo:
+        def get_by_id(self, user_id):
+            if user_id != 9:
+                return None
+            return {
+                "id": 9,
+                "username": "alice",
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+                "is_first_login": 0,
+                "must_set_security_questions": 0,
+                "personnel_id": 9,
+            }
+
+        def has_security_questions(self, *, user_id: int):
+            return True
+
+    class FakeDepartments:
+        def describe_user_department(self, **kwargs):
+            return {
+                "primary_department_id": None,
+                "primary_department_name": None,
+                "secondary_department_id": None,
+                "secondary_department_name": None,
+                "tertiary_department_id": None,
+                "tertiary_department_name": None,
+                "department_completion_level": "empty",
+                "require_department_setup": False,
+            }
+
+    class FakePersonnel:
+        def describe_user_personnel(self, *, personnel_id: int | None):
+            assert personnel_id == 9
+            return {
+                "personnel_id": 9,
+                "employee_no": "T2024001",
+                "full_name": "张三",
+                "personnel_binding_status": "bound_active",
+                "require_personnel_setup": False,
+            }
+
+    service = _build_auth_service_with_personnel(
+        repo=FakeRepo(),
+        departments=FakeDepartments(),
+        personnel=FakePersonnel(),
+    )
+    result = service.get_user_info(9)
+
+    assert result["success"] is True
+    assert result["data"]["employee_no"] == "T2024001"
+    assert result["data"]["personnel_binding_status"] == "bound_active"
+    assert result["data"]["require_personnel_setup"] is False
+
+
+def test_auth_service_update_personnel_binding_rejects_invalid_tuple_without_leaking_detail():
+    class FakeRepo:
+        def get_by_id(self, user_id):
+            if user_id != 9:
+                return None
+            return {
+                "id": 9,
+                "username": "alice",
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+                "personnel_id": None,
+                "is_first_login": 0,
+                "must_set_security_questions": 0,
+            }
+
+    class FakeDepartments:
+        def describe_user_department(self, **kwargs):
+            return {
+                "primary_department_id": None,
+                "primary_department_name": None,
+                "secondary_department_id": None,
+                "secondary_department_name": None,
+                "tertiary_department_id": None,
+                "tertiary_department_name": None,
+                "department_completion_level": "empty",
+                "require_department_setup": False,
+            }
+
+    class FakePersonnel:
+        def verify_personnel_identity(self, **kwargs):
+            return {"success": False, "error": "工号不存在", "code": "PERSONNEL_BINDING_INVALID"}
+
+    service = _build_auth_service_with_personnel(
+        repo=FakeRepo(),
+        departments=FakeDepartments(),
+        personnel=FakePersonnel(),
+    )
+    result = service.update_personnel_binding(
+        user_id=9,
+        employee_no="T2024999",
+        full_name="未知",
+        verification_code="BAD",
+    )
+
+    assert result["success"] is False
+    assert result["code"] == "PERSONNEL_BINDING_INVALID"
+    assert result["error"] == "人员信息校验失败"
+
+
+def test_auth_service_update_personnel_binding_rejects_disabled_personnel():
+    class FakeRepo:
+        def get_by_id(self, user_id):
+            if user_id != 9:
+                return None
+            return {
+                "id": 9,
+                "username": "alice",
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+                "personnel_id": None,
+                "is_first_login": 0,
+                "must_set_security_questions": 0,
+            }
+
+    class FakeDepartments:
+        def describe_user_department(self, **kwargs):
+            return {
+                "primary_department_id": None,
+                "primary_department_name": None,
+                "secondary_department_id": None,
+                "secondary_department_name": None,
+                "tertiary_department_id": None,
+                "tertiary_department_name": None,
+                "department_completion_level": "empty",
+                "require_department_setup": False,
+            }
+
+    class FakePersonnel:
+        def verify_personnel_identity(self, **kwargs):
+            return {"success": False, "error": "该人员已停用", "code": "PERSONNEL_DISABLED"}
+
+    service = _build_auth_service_with_personnel(
+        repo=FakeRepo(),
+        departments=FakeDepartments(),
+        personnel=FakePersonnel(),
+    )
+    result = service.update_personnel_binding(
+        user_id=9,
+        employee_no="T2024001",
+        full_name="张三",
+        verification_code="ABC123",
+    )
+
+    assert result["success"] is False
+    assert result["code"] == "PERSONNEL_DISABLED"
+    assert result["error"] == "该人员已停用"
+
+
+def test_auth_service_update_personnel_binding_allows_rebind_to_other_active_personnel():
+    class FakeRepo:
+        def __init__(self):
+            self.updated = None
+
+        def get_by_id(self, user_id):
+            if user_id != 9:
+                return None
+            if self.updated:
+                return {
+                    "id": 9,
+                    "username": "alice",
+                    "role": "user",
+                    "user_type": 3,
+                    "status": "active",
+                    "personnel_id": self.updated[1],
+                    "is_first_login": 0,
+                    "must_set_security_questions": 0,
+                }
+            return {
+                "id": 9,
+                "username": "alice",
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+                "personnel_id": 7,
+                "is_first_login": 0,
+                "must_set_security_questions": 0,
+            }
+
+        def update_user_personnel(self, *, user_id: int, personnel_id: int | None):
+            self.updated = (user_id, personnel_id)
+            return 1
+
+        def has_security_questions(self, *, user_id: int):
+            return True
+
+    class FakeDepartments:
+        def describe_user_department(self, **kwargs):
+            return {
+                "primary_department_id": None,
+                "primary_department_name": None,
+                "secondary_department_id": None,
+                "secondary_department_name": None,
+                "tertiary_department_id": None,
+                "tertiary_department_name": None,
+                "department_completion_level": "empty",
+                "require_department_setup": False,
+            }
+
+    class FakePersonnel:
+        def verify_personnel_identity(self, **kwargs):
+            return {
+                "success": True,
+                "data": {
+                    "id": 15,
+                    "employee_no": "T2024002",
+                    "full_name": "李四",
+                    "status": "active",
+                },
+            }
+
+        def describe_user_personnel(self, *, personnel_id: int | None):
+            assert personnel_id == 15
+            return {
+                "personnel_id": 15,
+                "employee_no": "T2024002",
+                "full_name": "李四",
+                "personnel_binding_status": "bound_active",
+                "require_personnel_setup": False,
+            }
+
+    repo = FakeRepo()
+    service = _build_auth_service_with_personnel(
+        repo=repo,
+        departments=FakeDepartments(),
+        personnel=FakePersonnel(),
+    )
+    result = service.update_personnel_binding(
+        user_id=9,
+        employee_no="T2024002",
+        full_name="李四",
+        verification_code="XYZ789",
+    )
+
+    assert result["success"] is True
+    assert repo.updated == (9, 15)
+    assert result["data"]["personnel_binding_status"] == "bound_active"
+    assert result["data"]["employee_no"] == "T2024002"
+
+
+def test_auth_service_admin_user_is_exempt_from_personnel_requirement():
+    class FakeRepo:
+        def get_by_id(self, user_id):
+            if user_id != 1:
+                return None
+            return {
+                "id": 1,
+                "username": "admin",
+                "role": "admin",
+                "user_type": 1,
+                "status": "active",
+                "personnel_id": None,
+                "is_first_login": 0,
+                "must_set_security_questions": 0,
+            }
+
+        def has_security_questions(self, *, user_id: int):
+            return True
+
+    class FakeDepartments:
+        def describe_user_department(self, **kwargs):
+            return {
+                "primary_department_id": None,
+                "primary_department_name": None,
+                "secondary_department_id": None,
+                "secondary_department_name": None,
+                "tertiary_department_id": None,
+                "tertiary_department_name": None,
+                "department_completion_level": "empty",
+                "require_department_setup": True,
+            }
+
+    class FakePersonnel:
+        def describe_user_personnel(self, *, personnel_id: int | None):
+            assert personnel_id is None
+            return {
+                "personnel_id": None,
+                "employee_no": None,
+                "full_name": None,
+                "personnel_binding_status": "unbound",
+                "require_personnel_setup": True,
+            }
+
+    service = _build_auth_service_with_personnel(
+        repo=FakeRepo(),
+        departments=FakeDepartments(),
+        personnel=FakePersonnel(),
+    )
+    result = service.get_user_info(1)
+
+    assert result["success"] is True
+    assert result["data"]["require_department_setup"] is False
+    assert result["data"]["require_personnel_setup"] is False
 
 
 def test_auth_default_service_reports_db_unavailable():

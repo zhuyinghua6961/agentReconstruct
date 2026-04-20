@@ -455,6 +455,23 @@ def test_public_proxy_accepts_x_request_id_and_forwards_canonical_trace_header()
     assert response.headers["x-trace-id"] == "trace-from-request-id"
 
 
+def test_public_proxy_registers_personnel_route_methods():
+    methods_by_path = {
+        route.path: set(getattr(route, "methods", set())) - {"HEAD"}
+        for route in public_proxy_router.routes
+    }
+
+    assert methods_by_path["/api/auth/personnel-binding"] == {"PUT"}
+    assert methods_by_path["/api/v1/auth/personnel-binding"] == {"PUT"}
+    assert methods_by_path["/api/admin/personnel"] == {"GET", "POST"}
+    assert methods_by_path["/api/admin/personnel/{personnel_id}"] == {"PUT"}
+    assert methods_by_path["/api/admin/personnel/{personnel_id}/status"] == {"PUT"}
+    assert methods_by_path["/api/admin/personnel/{personnel_id}/bindings"] == {"GET"}
+    assert methods_by_path["/api/admin/personnel/batch-import"] == {"POST"}
+    assert methods_by_path["/api/admin/personnel/import-template"] == {"GET"}
+    assert methods_by_path["/api/admin/users/{user_id}/personnel-binding"] == {"PUT", "DELETE"}
+
+
 @pytest.mark.parametrize(
     ("method", "path", "expected_path", "json_body", "expected_query"),
     [
@@ -526,6 +543,20 @@ def test_public_proxy_accepts_x_request_id_and_forwards_canonical_trace_header()
             "/api/auth/username",
             "/api/auth/username",
             {"username": "alice-renamed"},
+            b"",
+        ),
+        (
+            "PUT",
+            "/api/auth/personnel-binding",
+            "/api/auth/personnel-binding",
+            {"employee_no": "T2024001", "full_name": "张三", "verification_code": "ABC123"},
+            b"",
+        ),
+        (
+            "PUT",
+            "/api/v1/auth/personnel-binding",
+            "/api/v1/auth/personnel-binding",
+            {"employee_no": "T2024002", "full_name": "李四", "verification_code": "XYZ789"},
             b"",
         ),
         (
@@ -631,6 +662,69 @@ def test_public_proxy_accepts_x_request_id_and_forwards_canonical_trace_header()
             "/api/admin/users/7/username",
             "/api/admin/users/7/username",
             {"username": "alice-super"},
+            b"",
+        ),
+        (
+            "GET",
+            "/api/admin/personnel?page=1&page_size=20&keyword=zhang",
+            "/api/admin/personnel",
+            None,
+            b"page=1&page_size=20&keyword=zhang",
+        ),
+        (
+            "POST",
+            "/api/admin/personnel",
+            "/api/admin/personnel",
+            {"employee_no": "T2024001", "full_name": "张三", "verification_code": "ABC123", "status": "active"},
+            b"",
+        ),
+        (
+            "PUT",
+            "/api/admin/personnel/9",
+            "/api/admin/personnel/9",
+            {"full_name": "张三老师", "remarks": "updated"},
+            b"",
+        ),
+        (
+            "PUT",
+            "/api/admin/personnel/9/status",
+            "/api/admin/personnel/9/status",
+            {"status": "disabled"},
+            b"",
+        ),
+        (
+            "GET",
+            "/api/admin/personnel/9/bindings",
+            "/api/admin/personnel/9/bindings",
+            None,
+            b"",
+        ),
+        (
+            "POST",
+            "/api/admin/personnel/batch-import",
+            "/api/admin/personnel/batch-import",
+            None,
+            b"",
+        ),
+        (
+            "GET",
+            "/api/admin/personnel/import-template",
+            "/api/admin/personnel/import-template",
+            None,
+            b"",
+        ),
+        (
+            "PUT",
+            "/api/admin/users/7/personnel-binding",
+            "/api/admin/users/7/personnel-binding",
+            {"personnel_id": 9},
+            b"",
+        ),
+        (
+            "DELETE",
+            "/api/admin/users/7/personnel-binding",
+            "/api/admin/users/7/personnel-binding",
+            None,
             b"",
         ),
         (

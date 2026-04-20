@@ -46,3 +46,19 @@ def test_route_table_patterns_include_username_routes():
     }
 
     assert expected.issubset(set(PUBLIC_ROUTE_PATTERNS))
+
+
+def test_route_table_patterns_include_personnel_routes():
+    expected = {
+        "/api/auth/personnel-binding",
+        "/api/v1/auth/personnel-binding",
+        "/api/admin/personnel",
+        "/api/admin/personnel/{personnel_id}",
+        "/api/admin/personnel/{personnel_id}/status",
+        "/api/admin/personnel/{personnel_id}/bindings",
+        "/api/admin/personnel/batch-import",
+        "/api/admin/personnel/import-template",
+        "/api/admin/users/{user_id}/personnel-binding",
+    }
+
+    assert expected.issubset(set(PUBLIC_ROUTE_PATTERNS))
