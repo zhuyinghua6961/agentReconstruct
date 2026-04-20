@@ -132,6 +132,12 @@ async def health_check(
             "durable_requested": durable_requested,
             "patent_graph_kb_enabled": bool(getattr(settings, "graph_kb", None) and settings.graph_kb.enabled),
             "patent_graph_kb_ready": bool(dict(components.get("patent_graph_kb") or {}).get("ready", False)),
+            "patent_graph_kb_v2_enabled": bool(
+                getattr(settings, "graph_kb", None) and settings.graph_kb.v2_enabled
+            ),
+            "patent_graph_kb_rag_injection_enabled": bool(
+                getattr(settings, "graph_kb", None) and settings.graph_kb.rag_injection_enabled
+            ),
             "components": components,
         },
     )

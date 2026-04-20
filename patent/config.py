@@ -128,6 +128,8 @@ class AuthSettings:
 @dataclass(frozen=True)
 class PatentGraphSettings:
     enabled: bool
+    v2_enabled: bool
+    rag_injection_enabled: bool
     neo4j_url: str
     neo4j_username: str
     neo4j_password: str
@@ -200,6 +202,8 @@ def get_settings() -> Settings:
         ),
         graph_kb=PatentGraphSettings(
             enabled=_read_bool("PATENT_GRAPH_KB_ENABLED", False),
+            v2_enabled=_read_bool("PATENT_GRAPH_KB_V2_ENABLED", False),
+            rag_injection_enabled=_read_bool("PATENT_GRAPH_KB_RAG_INJECTION_ENABLED", False),
             neo4j_url=str(os.getenv("PATENT_NEO4J_URL", "bolt://127.0.0.1:8687") or "").strip(),
             neo4j_username=str(os.getenv("PATENT_NEO4J_USERNAME", "neo4j") or "neo4j").strip(),
             neo4j_password=str(os.getenv("PATENT_NEO4J_PASSWORD", "") or ""),

@@ -9,7 +9,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from config import get_settings
 from server.patent.executor import PatentExecutor
 from server.patent.graph_kb import bootstrap_patent_neo4j_client
-from server.patent.graph_kb.service import try_patent_graph_kb_answer
+from server.patent.graph_kb.service import route_patent_graph_kb_v2, try_patent_graph_kb_answer
 from server.patent.hybrid_synthesis import PatentHybridSynthesisClient
 from server.patent.original_service import OriginalViewService
 from server.patent.pdf_service import PatentPdfAnswerClient, PatentPdfService
@@ -191,6 +191,8 @@ def _bootstrap_service_state(app: FastAPI) -> None:
                 {
                     "ready": False,
                     "enabled": False,
+                    "v2_enabled": bool(graph_settings.v2_enabled),
+                    "rag_injection_enabled": bool(graph_settings.rag_injection_enabled),
                     "status": "skipped",
                     "url": str(graph_settings.neo4j_url or ""),
                     "database": str(graph_settings.neo4j_database or "neo4j"),
@@ -211,6 +213,8 @@ def _bootstrap_service_state(app: FastAPI) -> None:
                 {
                     "ready": graph_ready,
                     "enabled": True,
+                    "v2_enabled": bool(graph_settings.v2_enabled),
+                    "rag_injection_enabled": bool(graph_settings.rag_injection_enabled),
                     "status": "ok" if graph_ready else "degraded",
                     "url": str(graph_settings.neo4j_url or ""),
                     "database": str(graph_settings.neo4j_database or "neo4j"),
@@ -228,8 +232,11 @@ def _bootstrap_service_state(app: FastAPI) -> None:
                 tabular_service=patent_tabular_service,
                 hybrid_synthesis_service=patent_hybrid_synthesis_client,
                 graph_kb_service=try_patent_graph_kb_answer,
+                graph_kb_service_v2=route_patent_graph_kb_v2,
                 graph_kb_client=patent_graph_kb_client,
                 graph_kb_enabled=bool(graph_settings.enabled),
+                graph_kb_v2_enabled=bool(graph_settings.v2_enabled),
+                graph_kb_rag_injection_enabled=bool(graph_settings.rag_injection_enabled),
                 graph_kb_max_rows=int(graph_settings.max_rows or 20),
                 graph_kb_timeout_ms=int(graph_settings.timeout_ms or 3000),
             ),
@@ -368,6 +375,8 @@ def create_app() -> FastAPI:
         "patent_graph_kb": {
             "ready": False,
             "enabled": bool(settings.graph_kb.enabled),
+            "v2_enabled": bool(settings.graph_kb.v2_enabled),
+            "rag_injection_enabled": bool(settings.graph_kb.rag_injection_enabled),
             "status": "degraded" if bool(settings.graph_kb.enabled) else "skipped",
         },
     }

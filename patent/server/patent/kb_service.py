@@ -6,7 +6,8 @@ from typing import Any
 
 from server.errors import codes
 from server.errors.core import APIError
-from server.patent.graph_kb.models import PatentGraphKbExecutionResult
+from server.patent.graph_kb.models import PatentGraphKbExecutionResult, PatentGraphRagPayload, PatentGraphRoutingResult
+from server.patent.graph_kb.service import route_patent_graph_kb_v2
 from server.patent.models import PatentQaExecutionResult
 from server.patent.orchestrators.generation import PatentGenerationOrchestrator
 from server.patent.pipeline import (
@@ -31,8 +32,11 @@ class PatentKbService:
         mode_profile: PatentModeProfile | None = None,
         runtime: Any | None = None,
         graph_kb_service: Any | None = None,
+        graph_kb_service_v2: Any | None = None,
         graph_kb_client: Any | None = None,
         graph_kb_enabled: bool = False,
+        graph_kb_v2_enabled: bool = False,
+        graph_kb_rag_injection_enabled: bool = False,
         graph_kb_max_rows: int = 20,
         graph_kb_timeout_ms: int = 3000,
     ) -> None:
@@ -41,8 +45,11 @@ class PatentKbService:
         self._mode_profile = mode_profile or get_patent_mode_profile()
         self._runtime = runtime
         self._graph_kb_service = graph_kb_service
+        self._graph_kb_service_v2 = graph_kb_service_v2
         self._graph_kb_client = graph_kb_client
         self._graph_kb_enabled = bool(graph_kb_enabled)
+        self._graph_kb_v2_enabled = bool(graph_kb_v2_enabled)
+        self._graph_kb_rag_injection_enabled = bool(graph_kb_rag_injection_enabled)
         self._graph_kb_max_rows = max(1, int(graph_kb_max_rows or 20))
         self._graph_kb_timeout_ms = max(100, int(graph_kb_timeout_ms or 3000))
 
@@ -66,25 +73,33 @@ class PatentKbService:
             _supports_staged_runtime(active_runtime),
             retrieval_service is not None,
         )
+        effective_conversation_context = conversation_context
+        graph_metadata: dict[str, Any] | None = None
         graph_result = self._try_graph_preflight(
             request=request,
             profile=profile,
             active_runtime=active_runtime,
-            conversation_context=conversation_context,
+            conversation_context=effective_conversation_context,
         )
         if graph_result is not None:
-            _LOGGER.info(
-                "patent kb_service run completed via graph preflight trace=%s references=%s",
-                request.trace_id,
-                list(graph_result.get("references") or []),
-            )
-            return graph_result
+            direct_result = graph_result.get("execution_result")
+            if isinstance(direct_result, dict):
+                _LOGGER.info(
+                    "patent kb_service run completed via graph preflight trace=%s references=%s",
+                    request.trace_id,
+                    list(direct_result.get("references") or []),
+                )
+                return direct_result
+            effective_conversation_context = graph_result.get("conversation_context", effective_conversation_context)
+            metadata_payload = graph_result.get("graph_metadata")
+            if isinstance(metadata_payload, dict):
+                graph_metadata = metadata_payload
         if _supports_staged_runtime(active_runtime):
             result = _call_with_supported_kwargs(
                 self._orchestrator.run,
                 question=request.question,
                 runtime=active_runtime,
-                conversation_context=conversation_context,
+                conversation_context=effective_conversation_context,
                 trace_id=request.trace_id,
                 progress_callback=progress_callback,
                 content_callback=content_callback,
@@ -97,26 +112,32 @@ class PatentKbService:
                 len(str(result.final_answer or "")),
                 list(result.metadata.source_ids or []),
             )
-            return self._execution_result_from_pipeline_result(
+            execution_result = self._execution_result_from_pipeline_result(
                 request=request,
                 result=result,
                 profile=profile,
             )
+            if graph_metadata:
+                self._apply_graph_metadata(execution_result, graph_metadata=graph_metadata)
+            return execution_result
         if retrieval_service is not None:
             retrieval_outcome = retrieval_service.retrieve(
                 question=request.question,
-                context=conversation_context,
+                context=effective_conversation_context,
             )
             _LOGGER.info(
                 "patent kb_service run completed via retrieval fallback trace=%s references=%s",
                 request.trace_id,
                 list(retrieval_outcome.references or []),
             )
-            return build_retrieval_patent_result(
+            execution_result = build_retrieval_patent_result(
                 request=request,
                 retrieval_outcome=retrieval_outcome,
                 profile=profile,
             )
+            if graph_metadata:
+                self._apply_graph_metadata(execution_result, graph_metadata=graph_metadata)
+            return execution_result
         if _requires_live_kb_backend(request):
             raise APIError(
                 code=codes.SERVICE_NOT_READY,
@@ -126,11 +147,14 @@ class PatentKbService:
                 retriable=True,
             )
         _LOGGER.warning("patent kb_service run falling back to stub trace=%s", request.trace_id)
-        return build_stub_patent_result(
+        execution_result = build_stub_patent_result(
             request=request,
-            context=conversation_context,
+            context=effective_conversation_context,
             profile=profile,
         )
+        if graph_metadata:
+            self._apply_graph_metadata(execution_result, graph_metadata=graph_metadata)
+        return execution_result
 
     def _try_graph_preflight(
         self,
@@ -142,7 +166,52 @@ class PatentKbService:
     ) -> dict[str, Any] | None:
         if str(request.route or "").strip() != "kb_qa":
             return None
-        if not self._graph_kb_enabled or self._graph_kb_client is None or not callable(self._graph_kb_service):
+        if not self._graph_kb_enabled or self._graph_kb_client is None:
+            return None
+        if self._graph_kb_v2_enabled:
+            router = self._graph_kb_service_v2 if callable(self._graph_kb_service_v2) else route_patent_graph_kb_v2
+            try:
+                routing = _call_with_supported_kwargs(
+                    router,
+                    question=request.question,
+                    conversation_context=conversation_context,
+                    neo4j_client=self._graph_kb_client,
+                    max_rows=self._graph_kb_max_rows,
+                    timeout_ms=self._graph_kb_timeout_ms,
+                    generation_runtime=active_runtime,
+                )
+            except Exception:
+                _LOGGER.warning("patent kb_service graph v2 preflight failed trace=%s", request.trace_id, exc_info=True)
+                return None
+            if not isinstance(routing, PatentGraphRoutingResult):
+                return None
+            if routing.mode == "direct_answer" and isinstance(routing.direct_result, PatentGraphKbExecutionResult) and routing.direct_result.handled:
+                return {
+                    "execution_result": self._graph_execution_result_from_graph_result(
+                        request=request,
+                        profile=profile,
+                        result=routing.direct_result,
+                    )
+                }
+            if routing.mode == "graph_for_rag" and isinstance(routing.rag_payload, PatentGraphRagPayload):
+                graph_metadata = self._graph_metadata_from_routing(
+                    routing=routing,
+                    payload=routing.rag_payload,
+                    downgrade_reason="" if self._graph_kb_rag_injection_enabled else "rag_injection_disabled",
+                )
+                if not self._graph_kb_rag_injection_enabled:
+                    return {
+                        "conversation_context": conversation_context or {},
+                        "graph_metadata": graph_metadata,
+                    }
+                updated_context = dict(conversation_context or {})
+                updated_context["graph_kb"] = self._payload_to_conversation_context(routing.rag_payload)
+                return {
+                    "conversation_context": updated_context,
+                    "graph_metadata": graph_metadata,
+                }
+            return None
+        if not callable(self._graph_kb_service):
             return None
         try:
             result = _call_with_supported_kwargs(
@@ -159,11 +228,13 @@ class PatentKbService:
             return None
         if not isinstance(result, PatentGraphKbExecutionResult) or not result.handled:
             return None
-        return self._graph_execution_result_from_graph_result(
-            request=request,
-            profile=profile,
-            result=result,
-        )
+        return {
+            "execution_result": self._graph_execution_result_from_graph_result(
+                request=request,
+                profile=profile,
+                result=result,
+            )
+        }
 
     def _execution_result_from_pipeline_result(
         self,
@@ -237,6 +308,57 @@ class PatentKbService:
             "file_selection": dict(request.file_selection or {}),
             "source_scope": request.source_scope,
         }
+
+    def _payload_to_conversation_context(self, payload: PatentGraphRagPayload) -> dict[str, Any]:
+        return {
+            "mode": "graph_for_rag",
+            "cache_fingerprint": str(payload.cache_fingerprint or "none"),
+            "stage1_context_block": str(payload.stage1_context_block or ""),
+            "stage2_patent_candidates": list(payload.stage2_patent_candidates or ()),
+            "stage2_constraints": [
+                {"field": item.field, "operator": item.operator, "value": item.value}
+                for item in tuple(payload.stage2_constraints or ())
+            ],
+            "stage2_entity_hints": {
+                key: list(values)
+                for key, values in dict(payload.stage2_entity_hints or {}).items()
+            },
+            "stage4_fact_block": str(payload.stage4_fact_block or ""),
+            "stage4_graph_candidate_patent_ids": list(payload.stage4_graph_candidate_patent_ids or ()),
+            "diagnostics": dict(payload.diagnostics or {}),
+        }
+
+    def _graph_metadata_from_routing(
+        self,
+        *,
+        routing: PatentGraphRoutingResult,
+        payload: PatentGraphRagPayload,
+        downgrade_reason: str = "",
+    ) -> dict[str, Any]:
+        strategy = str(routing.diagnostics.get("strategy") or payload.diagnostics.get("strategy") or "")
+        fingerprint = str(payload.cache_fingerprint or "none")
+        nested = {
+            "mode": routing.mode,
+            "strategy": strategy,
+            "fingerprint": fingerprint,
+            "diagnostics": dict(routing.diagnostics or {}),
+            "payload_diagnostics": dict(payload.diagnostics or {}),
+        }
+        metadata = {
+            "graph_kb": nested,
+            "graph_kb_mode": routing.mode,
+            "graph_kb_strategy": strategy,
+            "graph_kb_fingerprint": fingerprint,
+        }
+        if downgrade_reason:
+            nested["downgrade_reason"] = downgrade_reason
+            metadata["graph_kb_downgrade_reason"] = downgrade_reason
+        return metadata
+
+    def _apply_graph_metadata(self, execution_result: dict[str, Any], *, graph_metadata: dict[str, Any]) -> None:
+        metadata = dict(execution_result.get("metadata") or {})
+        metadata.update(dict(graph_metadata or {}))
+        execution_result["metadata"] = metadata
 
 
 def _supports_staged_runtime(runtime: Any | None) -> bool:

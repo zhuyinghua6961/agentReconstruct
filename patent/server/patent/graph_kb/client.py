@@ -9,7 +9,30 @@ from server.patent.graph_kb.models import PatentGraphKbQueryPlan
 _DOI_PATTERN = re.compile(r"10\.\d+/[A-Za-z0-9._\-()/]+", re.IGNORECASE)
 _PATENT_ID_PATTERN = re.compile(r"\b((?:CN|US|WO|JP|EP|KR)[A-Z0-9]{6,})\b", re.IGNORECASE)
 _IPC_PATTERN = re.compile(r"\b([A-H][0-9]{2}[A-Z][0-9]+/[0-9A-Z]+)\b", re.IGNORECASE)
-_APPLICANT_LISTING_PATTERN = re.compile(r"^(?P<name>[\u4e00-\u9fffA-Za-z0-9()（）·\-.]+?)有哪些专利$")
+_IPC_SUBCLASS_PATTERN = re.compile(r"\b([A-H][0-9]{2}[A-Z][0-9]+)\b", re.IGNORECASE)
+_APPLICANT_LISTING_PATTERN = re.compile(
+    r"^(?!(?:发明人|发明者|代理机构|专利代理机构|代理所))(?P<name>[\u4e00-\u9fffA-Za-z0-9()（）·\-.]+?)有哪些专利$"
+)
+_APPLICANT_COUNT_PATTERN = re.compile(
+    r"^(?!(?:发明人|发明者|代理机构|专利代理机构|代理所))(?P<name>[\u4e00-\u9fffA-Za-z0-9()（）·\-.]+?)有多少专利$"
+)
+_INVENTOR_LISTING_PATTERN = re.compile(
+    r"^(?:发明人|发明者)(?P<name>[\u4e00-\u9fffA-Za-z0-9()（）·\-.]+?)有哪些专利$"
+)
+_INVENTOR_COUNT_PATTERN = re.compile(
+    r"^(?:发明人|发明者)(?P<name>[\u4e00-\u9fffA-Za-z0-9()（）·\-.]+?)有多少专利$"
+)
+_AGENCY_LISTING_PATTERN = re.compile(
+    r"^(?:代理机构|专利代理机构|代理所)(?P<name>[\u4e00-\u9fffA-Za-z0-9()（）·\-.]+?)有哪些专利$"
+)
+_IPC_COUNT_PATTERN = re.compile(r"\b([A-H][0-9]{2}[A-Z][0-9]+/[0-9A-Z]+)\b.*(?:有多少专利|多少专利|专利数量)")
+_COUNT_HINTS = ("有多少专利", "多少专利", "专利数量", "统计")
+_COMPARE_HINTS = ("比较", "对比", "差异")
+_PROCESS_HINTS = ("工艺步骤", "步骤", "工艺")
+_MATERIAL_HINTS = ("材料角色", "原料", "材料")
+_PROBLEM_SOLUTION_HINTS = ("技术问题", "技术方案", "方案", "应用场景")
+_ATMOSPHERE_HINTS = ("气氛", "atmosphere")
+_EMBODIMENT_HINTS = ("实施例洞察", "实施方式洞察", "实施例结论", "洞察", "embodiment")
 
 
 def _normalize_question(value: Any) -> str:
@@ -26,6 +49,32 @@ def _extract_patent_ids(text: str) -> tuple[str, ...]:
         seen.add(normalized)
         patent_ids.append(normalized)
     return tuple(patent_ids)
+
+
+def _extract_ipc_codes(text: str) -> tuple[str, ...]:
+    seen: set[str] = set()
+    ipc_codes: list[str] = []
+    for item in _IPC_PATTERN.findall(text):
+        normalized = str(item or "").upper()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ipc_codes.append(normalized)
+    return tuple(ipc_codes)
+
+
+def _extract_ipc_subclasses(text: str) -> tuple[str, ...]:
+    full_codes = _extract_ipc_codes(text)
+    full_prefixes = {item.split("/", 1)[0] for item in full_codes}
+    seen: set[str] = set()
+    subclasses: list[str] = []
+    for item in _IPC_SUBCLASS_PATTERN.findall(text):
+        normalized = str(item or "").upper()
+        if not normalized or normalized in full_prefixes or normalized in seen:
+            continue
+        seen.add(normalized)
+        subclasses.append(normalized)
+    return tuple(subclasses)
 
 
 def plan_patent_graph_query(question: str) -> PatentGraphKbQueryPlan | None:
@@ -64,6 +113,248 @@ def plan_patent_graph_query(question: str) -> PatentGraphKbQueryPlan | None:
         )
 
     return None
+
+
+def _candidate(path_id: str, cypher: str, params: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "path_id": path_id,
+        "cypher": cypher,
+        "params": dict(params),
+    }
+
+
+def build_patent_parametric_query_candidates(question: str) -> list[dict[str, Any]]:
+    text = _normalize_question(question)
+    if not text or _DOI_PATTERN.search(text):
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    patent_ids = _extract_patent_ids(text)
+    ipc_codes = _extract_ipc_codes(text)
+    ipc_subclasses = _extract_ipc_subclasses(text)
+
+    inventor_listing_match = _INVENTOR_LISTING_PATTERN.fullmatch(text)
+    if inventor_listing_match is not None:
+        inventor_name = str(inventor_listing_match.group("name") or "").strip()
+        if inventor_name:
+            candidates.append(
+                _candidate(
+                    "list_patents_by_inventor",
+                    (
+                        "MATCH (p:Patent)-[:HAS_INVENTOR]->(person:Person {name: $inventor_name}) "
+                        "RETURN "
+                        "p.patent_id AS patent_id, "
+                        "p.title AS title, "
+                        "p.application_date AS application_date, "
+                        "p.publication_date AS publication_date, "
+                        "person.name AS inventor_name, "
+                        "p.stub AS stub "
+                        "LIMIT 200"
+                    ),
+                    {"inventor_name": inventor_name},
+                )
+            )
+
+    agency_listing_match = _AGENCY_LISTING_PATTERN.fullmatch(text)
+    if agency_listing_match is not None:
+        agency_name = str(agency_listing_match.group("name") or "").strip()
+        if agency_name:
+            candidates.append(
+                _candidate(
+                    "list_patents_by_agency",
+                    (
+                        "MATCH (p:Patent)-[:HAS_AGENCY]->(agency:Organization {name: $agency_name}) "
+                        "RETURN "
+                        "p.patent_id AS patent_id, "
+                        "p.title AS title, "
+                        "p.application_date AS application_date, "
+                        "p.publication_date AS publication_date, "
+                        "agency.name AS agency_name, "
+                        "p.stub AS stub "
+                        "LIMIT 200"
+                    ),
+                    {"agency_name": agency_name},
+                )
+            )
+
+    if "专利" in text and "哪些" in text and not ipc_codes and ipc_subclasses:
+        candidates.append(
+            _candidate(
+                "list_patents_by_ipc_subclass",
+                (
+                    "MATCH (p:Patent)-[:IN_IPC_SUBCLASS]->(sub:IPCPrefix {subclass: $ipc_subclass}) "
+                    "RETURN "
+                    "p.patent_id AS patent_id, "
+                    "p.title AS title, "
+                    "p.application_date AS application_date, "
+                    "p.publication_date AS publication_date, "
+                    "sub.subclass AS ipc_subclass, "
+                    "p.stub AS stub "
+                    "LIMIT 200"
+                ),
+                {"ipc_subclass": ipc_subclasses[0]},
+            )
+        )
+
+    ipc_count_match = _IPC_COUNT_PATTERN.search(text)
+    if ipc_count_match is not None:
+        ipc_code = str(ipc_count_match.group(1) or "").strip().upper()
+        if ipc_code:
+            candidates.append(
+                _candidate(
+                    "count_patents_by_ipc",
+                    (
+                        "MATCH (p:Patent) "
+                        "OPTIONAL MATCH (p)-[:CLASSIFIED_AS]->(ipc:IPC) "
+                        "OPTIONAL MATCH (p)-[:IN_IPC_SUBCLASS]->(sub:IPCPrefix) "
+                        "WITH p, collect(DISTINCT ipc.code) + collect(DISTINCT sub.subclass) AS ipc_values "
+                        "WITH p, [item IN ipc_values WHERE item = $ipc_code][0] AS ipc_match "
+                        "WHERE ipc_match IS NOT NULL "
+                        "RETURN ipc_match AS ipc_code, count(DISTINCT p) AS patent_count "
+                        "LIMIT 1"
+                    ),
+                    {"ipc_code": ipc_code},
+                )
+            )
+
+    applicant_count_match = _APPLICANT_COUNT_PATTERN.fullmatch(text)
+    if applicant_count_match is not None:
+        organization_name = str(applicant_count_match.group("name") or "").strip()
+        if organization_name:
+            candidates.append(
+                _candidate(
+                    "count_patents_by_applicant",
+                    (
+                        "MATCH (p:Patent)-[:HAS_APPLICANT]->(org:Organization {name: $organization_name}) "
+                        "RETURN "
+                        "org.name AS applicant_name, "
+                        "count(DISTINCT p) AS patent_count "
+                        "LIMIT 1"
+                    ),
+                    {"organization_name": organization_name},
+                )
+            )
+
+    inventor_count_match = _INVENTOR_COUNT_PATTERN.fullmatch(text)
+    if inventor_count_match is not None:
+        inventor_name = str(inventor_count_match.group("name") or "").strip()
+        if inventor_name:
+            candidates.append(
+                _candidate(
+                    "count_patents_by_inventor",
+                    (
+                        "MATCH (p:Patent)-[:HAS_INVENTOR]->(person:Person {name: $inventor_name}) "
+                        "RETURN "
+                        "person.name AS inventor_name, "
+                        "count(DISTINCT p) AS patent_count "
+                        "LIMIT 1"
+                    ),
+                    {"inventor_name": inventor_name},
+                )
+            )
+
+    if len(patent_ids) >= 2 and any(hint in text for hint in _COMPARE_HINTS):
+        compare_patent_ids = list(patent_ids[:5])
+        if any(hint in text for hint in _PROCESS_HINTS):
+            candidates.append(
+                _candidate(
+                    "compare_patents_process_steps",
+                    (
+                        "MATCH (p:Patent)-[:HAS_PROCESS_STEP]->(step:ProcessStep) "
+                        "WHERE p.patent_id IN $patent_ids "
+                        "OPTIONAL MATCH (step)-[:INSTANCE_OF]->(template:StepTemplate) "
+                        "RETURN "
+                        "p.patent_id AS patent_id, "
+                        "p.stub AS stub, "
+                        "step.`order` AS step_order, "
+                        "step.name AS step_name, "
+                        "step.operation AS step_operation, "
+                        "template.label AS step_template "
+                        "ORDER BY patent_id ASC, step_order ASC "
+                        "LIMIT 500"
+                    ),
+                    {"patent_ids": compare_patent_ids},
+                )
+            )
+        if any(hint in text for hint in _MATERIAL_HINTS):
+            candidates.append(
+                _candidate(
+                    "compare_patents_material_roles",
+                    (
+                        "MATCH (p:Patent)-[:HAS_MATERIAL_ROLE]->(role:MaterialRole) "
+                        "WHERE p.patent_id IN $patent_ids "
+                        "OPTIONAL MATCH (role)-[:OPTION_INCLUDES]->(material:Material) "
+                        "RETURN "
+                        "p.patent_id AS patent_id, "
+                        "p.stub AS stub, "
+                        "role.type AS role_name, "
+                        "role.role AS role_type, "
+                        "role.ratio AS role_ratio, "
+                        "material.name AS material_name "
+                        "ORDER BY patent_id ASC, role_name ASC, material_name ASC "
+                        "LIMIT 500"
+                    ),
+                    {"patent_ids": compare_patent_ids},
+                )
+            )
+        if any(hint in text for hint in _PROBLEM_SOLUTION_HINTS):
+            candidates.append(
+                _candidate(
+                    "compare_patents_problem_solution",
+                    (
+                        "MATCH (p:Patent) "
+                        "WHERE p.patent_id IN $patent_ids "
+                        "OPTIONAL MATCH (p)-[:ADDRESSES]->(problem:TechnicalProblem) "
+                        "OPTIONAL MATCH (p)-[:PROPOSES]->(solution:TechnicalSolution) "
+                        "OPTIONAL MATCH (p)-[:HAS_APPLICATION_SCENARIO]->(scenario:ApplicationScenario) "
+                        "RETURN "
+                        "p.patent_id AS patent_id, "
+                        "p.stub AS stub, "
+                        "collect(DISTINCT problem.text) AS problem_texts, "
+                        "collect(DISTINCT solution.text) AS solution_texts, "
+                        "collect(DISTINCT scenario.text) AS scenario_texts "
+                        "ORDER BY patent_id ASC "
+                        "LIMIT 20"
+                    ),
+                    {"patent_ids": compare_patent_ids},
+                )
+            )
+
+    if len(patent_ids) == 1 and any(hint in text for hint in _ATMOSPHERE_HINTS):
+        candidates.append(
+            _candidate(
+                "list_patent_atmospheres",
+                (
+                    "MATCH (p:Patent {patent_id: $patent_id})-[:USES_ATMOSPHERE]->(atmosphere:Atmosphere) "
+                    "RETURN "
+                    "p.patent_id AS patent_id, "
+                    "p.stub AS stub, "
+                    "atmosphere.options AS atmosphere_options, "
+                    "atmosphere.preferred AS atmosphere_preferred "
+                    "LIMIT 200"
+                ),
+                {"patent_id": patent_ids[0]},
+            )
+        )
+
+    if len(patent_ids) == 1 and any(hint in text for hint in _EMBODIMENT_HINTS):
+        candidates.append(
+            _candidate(
+                "list_patent_embodiment_insights",
+                (
+                    "MATCH (p:Patent {patent_id: $patent_id})-[:HAS_EMBODIMENT_INSIGHT]->(insight:EmbodimentInsight) "
+                    "RETURN "
+                    "p.patent_id AS patent_id, "
+                    "p.stub AS stub, "
+                    "insight.conclusion AS insight_conclusion, "
+                    "insight.insight_type AS insight_type "
+                    "LIMIT 200"
+                ),
+                {"patent_id": patent_ids[0]},
+            )
+        )
+
+    return candidates
 
 
 def _cypher_and_params(plan: PatentGraphKbQueryPlan) -> tuple[str, dict[str, Any]]:

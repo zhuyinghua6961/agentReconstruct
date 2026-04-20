@@ -4,7 +4,7 @@ import pytest
 
 from server.errors import codes
 from server.errors.core import APIError
-from server.patent.graph_kb.models import PatentGraphKbExecutionResult
+from server.patent.graph_kb.models import PatentGraphKbExecutionResult, PatentGraphRagPayload, PatentGraphRoutingResult
 from server.patent.kb_service import PatentKbService
 from server.patent.models import PatentQaExecutionMetadata, PatentQaExecutionResult
 from server.patent.retrieval_models import (
@@ -302,6 +302,160 @@ def test_kb_service_falls_back_to_staged_runtime_when_graph_service_raises():
         request=_make_request(),
         runtime=_FakeStagedRuntime(),
         conversation_context={"recent_turns_for_llm": [{"role": "user", "content": "Earlier turn"}]},
+    )
+
+    assert orchestrator.calls == 1
+    assert execution_result["answer_text"] == "staged patent answer"
+
+
+def test_kb_service_v2_graph_for_rag_injects_context_when_enabled():
+    captured = {}
+
+    class _RecordingOrchestrator:
+        def run(self, *, question: str, runtime, conversation_context=None) -> PatentQaExecutionResult:
+            captured["conversation_context"] = conversation_context
+            return PatentQaExecutionResult(
+                success=True,
+                final_answer="staged patent answer",
+                metadata=PatentQaExecutionMetadata(route="kb_qa", query_mode="patent staged qa"),
+                raw={"references": [], "reference_objects": [], "reference_links": [], "original_links": [], "metadata": {}, "steps": []},
+            )
+
+    payload = PatentGraphRagPayload(
+        stage1_context_block="graph stage1 block",
+        stage2_patent_candidates=("CN100355122C",),
+        stage4_fact_block="- fact",
+        stage4_graph_candidate_patent_ids=("CN100355122C",),
+        cache_fingerprint="graph:test",
+        diagnostics={"adapter": "ok"},
+    )
+    service = PatentKbService(
+        orchestrator=_RecordingOrchestrator(),
+        graph_kb_client=object(),
+        graph_kb_enabled=True,
+        graph_kb_v2_enabled=True,
+        graph_kb_rag_injection_enabled=True,
+        graph_kb_service_v2=lambda **kwargs: PatentGraphRoutingResult(
+            mode="graph_for_rag",
+            rag_payload=payload,
+            diagnostics={"strategy": "parametric"},
+        ),
+    )
+
+    execution_result = service.run(
+        request=_make_request(question="比较 CN100355122C 和 CN100371239C 的工艺步骤差异"),
+        runtime=_FakeStagedRuntime(),
+        conversation_context={"recent_turns_for_llm": []},
+    )
+
+    assert captured["conversation_context"]["graph_kb"]["mode"] == "graph_for_rag"
+    assert captured["conversation_context"]["graph_kb"]["cache_fingerprint"] == "graph:test"
+    assert execution_result["metadata"]["graph_kb_mode"] == "graph_for_rag"
+    assert execution_result["metadata"]["graph_kb_strategy"] == "parametric"
+    assert execution_result["metadata"]["graph_kb_fingerprint"] == "graph:test"
+
+
+def test_kb_service_v2_graph_for_rag_skips_injection_when_disabled():
+    captured = {}
+
+    class _RecordingOrchestrator:
+        def run(self, *, question: str, runtime, conversation_context=None) -> PatentQaExecutionResult:
+            captured["conversation_context"] = conversation_context
+            return PatentQaExecutionResult(
+                success=True,
+                final_answer="staged patent answer",
+                metadata=PatentQaExecutionMetadata(route="kb_qa", query_mode="patent staged qa"),
+                raw={"references": [], "reference_objects": [], "reference_links": [], "original_links": [], "metadata": {}, "steps": []},
+            )
+
+    payload = PatentGraphRagPayload(cache_fingerprint="graph:test")
+    service = PatentKbService(
+        orchestrator=_RecordingOrchestrator(),
+        graph_kb_client=object(),
+        graph_kb_enabled=True,
+        graph_kb_v2_enabled=True,
+        graph_kb_rag_injection_enabled=False,
+        graph_kb_service_v2=lambda **kwargs: PatentGraphRoutingResult(
+            mode="graph_for_rag",
+            rag_payload=payload,
+            diagnostics={"strategy": "parametric"},
+        ),
+    )
+
+    execution_result = service.run(
+        request=_make_request(question="比较 CN100355122C 和 CN100371239C 的工艺步骤差异"),
+        runtime=_FakeStagedRuntime(),
+        conversation_context={"recent_turns_for_llm": []},
+    )
+
+    assert "graph_kb" not in captured["conversation_context"]
+    assert execution_result["metadata"]["graph_kb_mode"] == "graph_for_rag"
+    assert execution_result["metadata"]["graph_kb_downgrade_reason"] == "rag_injection_disabled"
+
+
+def test_kb_service_v2_skip_graph_leaves_staged_runtime_unchanged():
+    captured = {}
+
+    class _RecordingOrchestrator:
+        def run(self, *, question: str, runtime, conversation_context=None) -> PatentQaExecutionResult:
+            captured["conversation_context"] = conversation_context
+            return PatentQaExecutionResult(
+                success=True,
+                final_answer="staged patent answer",
+                metadata=PatentQaExecutionMetadata(route="kb_qa", query_mode="patent staged qa"),
+                raw={"references": [], "reference_objects": [], "reference_links": [], "original_links": [], "metadata": {}, "steps": []},
+            )
+
+    original_context = {"recent_turns_for_llm": []}
+    service = PatentKbService(
+        orchestrator=_RecordingOrchestrator(),
+        graph_kb_client=object(),
+        graph_kb_enabled=True,
+        graph_kb_v2_enabled=True,
+        graph_kb_rag_injection_enabled=True,
+        graph_kb_service_v2=lambda **kwargs: PatentGraphRoutingResult(
+            mode="skip_graph",
+            diagnostics={"strategy": ""},
+        ),
+    )
+
+    execution_result = service.run(
+        request=_make_request(question="为什么这种技术路线更有前景？"),
+        runtime=_FakeStagedRuntime(),
+        conversation_context=original_context,
+    )
+
+    assert captured["conversation_context"] == original_context
+    assert "graph_kb_mode" not in execution_result["metadata"]
+
+
+def test_kb_service_v2_graph_routing_exception_falls_back_silently():
+    class _RecordingOrchestrator:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run(self, *, question: str, runtime, conversation_context=None) -> PatentQaExecutionResult:
+            self.calls += 1
+            return PatentQaExecutionResult(
+                success=True,
+                final_answer="staged patent answer",
+                metadata=PatentQaExecutionMetadata(route="kb_qa", query_mode="patent staged qa"),
+                raw={"references": [], "reference_objects": [], "reference_links": [], "original_links": [], "metadata": {}, "steps": []},
+            )
+
+    orchestrator = _RecordingOrchestrator()
+    service = PatentKbService(
+        orchestrator=orchestrator,
+        graph_kb_client=object(),
+        graph_kb_enabled=True,
+        graph_kb_v2_enabled=True,
+        graph_kb_service_v2=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("graph v2 failure")),
+    )
+
+    execution_result = service.run(
+        request=_make_request(question="CN100355122C 这件专利是什么？"),
+        runtime=_FakeStagedRuntime(),
+        conversation_context={"recent_turns_for_llm": []},
     )
 
     assert orchestrator.calls == 1

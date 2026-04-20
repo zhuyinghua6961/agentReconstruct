@@ -431,6 +431,18 @@ def build_fallback_patent_answer(
     lines = [f"围绕“{question}”，当前检索命中了 {len(grouped_evidences)} 篇核心专利证据："]
     if stage1_deep_answer:
         lines.append(f"阶段1预分析：{stage1_deep_answer}")
+    graph_kb = dict(context.get("graph_kb") or {})
+    if graph_kb:
+        lines.append("图谱辅助线索：以下结构化线索仅用于补充检索定位，不作为可引用证据。")
+        graph_mode = str(graph_kb.get("mode") or "").strip()
+        if graph_mode:
+            lines.append(f"图谱模式：{graph_mode}")
+        graph_candidates = _normalize_patent_id_list(graph_kb.get("stage4_graph_candidate_patent_ids"))
+        if graph_candidates:
+            lines.append(f"图谱候选专利（仅供定位，不作为引用）：{', '.join(graph_candidates)}")
+        fact_block = " ".join(str(graph_kb.get("stage4_fact_block") or "").split()).strip()
+        if fact_block:
+            lines.append(f"图谱事实：{fact_block}")
     lines.append("证据口径：实质技术证据优先采用权利要求/说明书命中片段、摘要和同专利表格；背景/法律套话仅作背景说明，不作为核心结论依据。")
     for index, (_, patent_evidences) in enumerate(grouped_evidences, start=1):
         evidence = patent_evidences[0]
@@ -554,6 +566,7 @@ class PatentAnswerBuilder:
                 stream=False,
                 min_distinct_citations=min_distinct_citations,
             )
+            payload_body = json.dumps(payload, ensure_ascii=False)
             _LOGGER.info(
                 "patent answer builder request payload ready model=%s stream=%s message_count=%s payload_chars=%s allowed_patent_ids=%s",
                 self.model,
@@ -569,7 +582,7 @@ class PatentAnswerBuilder:
                     "POST",
                     request_url,
                     headers=headers,
-                    json=payload,
+                    content=payload_body.encode("utf-8"),
                 )
                 _LOGGER.info(
                     "patent answer builder request object built method=%s url=%s elapsed_ms=%.3f content_length=%s",
@@ -592,12 +605,22 @@ class PatentAnswerBuilder:
                         raise
                     response = self._client.send(request, stream=False)
             else:
-                response = self._client.post(
-                    request_url,
-                    headers=headers,
-                    json=payload,
-                    timeout=self.timeout_seconds,
-                )
+                try:
+                    response = self._client.post(
+                        request_url,
+                        headers=headers,
+                        content=payload_body.encode("utf-8"),
+                        timeout=self.timeout_seconds,
+                    )
+                except TypeError as exc:
+                    if "content" not in str(exc):
+                        raise
+                    response = self._client.post(
+                        request_url,
+                        headers=headers,
+                        json=payload,
+                        timeout=self.timeout_seconds,
+                    )
             _LOGGER.info(
                 "patent answer builder request dispatch returned status_code=%s elapsed_ms=%.3f",
                 getattr(response, "status_code", ""),
@@ -712,6 +735,7 @@ class PatentAnswerBuilder:
             stream=True,
             min_distinct_citations=min_distinct_citations,
         )
+        payload_body = json.dumps(payload, ensure_ascii=False)
         _LOGGER.info(
             "patent answer builder stream request payload ready model=%s stream=%s message_count=%s payload_chars=%s allowed_patent_ids=%s",
             self.model,
@@ -727,7 +751,7 @@ class PatentAnswerBuilder:
                     "POST",
                     request_url,
                     headers=headers,
-                    json=payload,
+                    content=payload_body.encode("utf-8"),
                 )
                 _LOGGER.info(
                     "patent answer builder stream request object built method=%s url=%s elapsed_ms=%.3f content_length=%s",
@@ -751,13 +775,24 @@ class PatentAnswerBuilder:
                     response_cm = self._client.send(request, stream=True)
                 response_context = closing(response_cm)
             else:
-                response_cm = self._client.stream(
-                    "POST",
-                    request_url,
-                    headers=headers,
-                    json=payload,
-                    timeout=self.timeout_seconds,
-                )
+                try:
+                    response_cm = self._client.stream(
+                        "POST",
+                        request_url,
+                        headers=headers,
+                        content=payload_body.encode("utf-8"),
+                        timeout=self.timeout_seconds,
+                    )
+                except TypeError as exc:
+                    if "content" not in str(exc):
+                        raise
+                    response_cm = self._client.stream(
+                        "POST",
+                        request_url,
+                        headers=headers,
+                        json=payload,
+                        timeout=self.timeout_seconds,
+                    )
                 response_context = response_cm
             with response_context as response:
                 _LOGGER.info(
@@ -922,6 +957,20 @@ class PatentAnswerBuilder:
         else:
             lines.extend(["", "5. 允许引用的专利白名单：无"])
         lines.append("最终答案中的引用格式必须严格使用 `(patent_id=公开号)`，并且只能引用上面的白名单公开号。")
+        lines.append("只有白名单允许引用；图谱候选专利和图谱事实只能作为结构化辅助线索。")
+        graph_kb = dict(context.get("graph_kb") or {})
+        if graph_kb:
+            lines.extend(["", "6. 图谱结构化辅助线索（不可直接当作文献引用，也不能把这些候选专利当作引用白名单）："])
+            graph_mode = str(graph_kb.get("mode") or "").strip()
+            if graph_mode:
+                lines.append(f"- 图谱模式：{graph_mode}")
+            graph_candidates = _normalize_patent_id_list(graph_kb.get("stage4_graph_candidate_patent_ids"))
+            if graph_candidates:
+                lines.append(f"- 图谱候选专利（非引用白名单）：{', '.join(graph_candidates)}")
+            fact_block = str(graph_kb.get("stage4_fact_block") or "").strip()
+            if fact_block:
+                lines.append("- 图谱事实：")
+                lines.extend(f"  {line}" for line in str(fact_block).splitlines() if str(line).strip())
         if min_distinct_citations > 0:
             lines.append(f"最终答案至少引用 {min_distinct_citations} 个不同公开号。")
         evidence_lines, evidence_metadata = _build_stage4_evidence_section(

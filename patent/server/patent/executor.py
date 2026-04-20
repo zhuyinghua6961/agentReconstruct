@@ -116,8 +116,11 @@ class PatentExecutor:
         execution_cache: Any | None = None,
         runtime_required: bool = False,
         graph_kb_service: Any | None = None,
+        graph_kb_service_v2: Any | None = None,
         graph_kb_client: Any | None = None,
         graph_kb_enabled: bool = False,
+        graph_kb_v2_enabled: bool = False,
+        graph_kb_rag_injection_enabled: bool = False,
         graph_kb_max_rows: int = 20,
         graph_kb_timeout_ms: int = 3000,
     ) -> None:
@@ -131,8 +134,11 @@ class PatentExecutor:
             mode_profile=self._mode_profile,
             runtime=runtime,
             graph_kb_service=graph_kb_service,
+            graph_kb_service_v2=graph_kb_service_v2,
             graph_kb_client=graph_kb_client,
             graph_kb_enabled=graph_kb_enabled,
+            graph_kb_v2_enabled=graph_kb_v2_enabled,
+            graph_kb_rag_injection_enabled=graph_kb_rag_injection_enabled,
             graph_kb_max_rows=graph_kb_max_rows,
             graph_kb_timeout_ms=graph_kb_timeout_ms,
         )

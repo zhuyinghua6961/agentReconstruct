@@ -162,7 +162,75 @@ def _format_conversation_context(conversation_context: dict[str, Any] | None) ->
             rendered_turns.append(f"{role_label}: {content}")
         if rendered_turns:
             parts.append("最近对话：\n" + "\n".join(rendered_turns))
+
+    graph_kb = conversation_context.get("graph_kb")
+    if isinstance(graph_kb, dict):
+        graph_lines: list[str] = []
+        mode = " ".join(str(graph_kb.get("mode") or "").split()).strip()
+        if mode:
+            graph_lines.append(f"图谱模式：{mode}")
+        patent_candidates = _normalize_text_list(graph_kb.get("stage2_patent_candidates"))
+        if patent_candidates:
+            graph_lines.append(f"图谱候选专利：{'；'.join(patent_candidates)}")
+        entity_hints = dict(graph_kb.get("stage2_entity_hints") or {})
+        rendered_hints: list[str] = []
+        for key, values in entity_hints.items():
+            hint_values = _normalize_text_list(values)
+            if hint_values:
+                rendered_hints.append(f"{str(key).strip()}={'；'.join(hint_values)}")
+        if rendered_hints:
+            graph_lines.append(f"图谱实体提示：{'；'.join(rendered_hints)}")
+        rendered_constraints: list[str] = []
+        for item in list(graph_kb.get("stage2_constraints") or []):
+            if not isinstance(item, dict):
+                continue
+            field = " ".join(str(item.get("field") or "").split()).strip()
+            operator = " ".join(str(item.get("operator") or "").split()).strip()
+            value = " ".join(str(item.get("value") or "").split()).strip()
+            if field and operator and value:
+                rendered_constraints.append(f"{field} {operator} {value}")
+        if rendered_constraints:
+            graph_lines.append(f"图谱约束：{'；'.join(rendered_constraints)}")
+        fact_block = " ".join(str(graph_kb.get("stage4_fact_block") or "").split()).strip()
+        if fact_block:
+            graph_lines.append(f"图谱事实：{fact_block}")
+        if graph_lines:
+            parts.append("图谱辅助：\n" + "\n".join(graph_lines))
     return "\n\n".join(parts).strip()
+
+
+def _seed_retrieval_claims_from_graph(
+    *,
+    question: str,
+    conversation_context: dict[str, Any] | None,
+) -> list[PatentRetrievalClaim]:
+    context = dict(conversation_context or {})
+    graph_kb = dict(context.get("graph_kb") or {})
+    if not graph_kb:
+        return []
+
+    patent_candidates = _normalize_text_list(graph_kb.get("stage2_patent_candidates"))
+    entity_hints = dict(graph_kb.get("stage2_entity_hints") or {})
+    ipc_codes = _normalize_text_list(entity_hints.get("ipc_codes"))
+    organizations = _normalize_text_list(entity_hints.get("organizations"))
+    inventors = _normalize_text_list(entity_hints.get("inventors"))
+    fact_lines = _normalize_text_list(str(graph_kb.get("stage4_fact_block") or "").splitlines())
+    keywords = patent_candidates + ipc_codes + organizations + inventors
+    if not (keywords or fact_lines):
+        return []
+
+    claim_parts = ["优先核验图谱候选专利与结构化实体线索"]
+    if fact_lines:
+        claim_parts.append(fact_lines[0].lstrip("- ").strip())
+    claim_text = "；".join(part for part in claim_parts if part)
+    return [
+        PatentRetrievalClaim(
+            claim=claim_text,
+            keywords=keywords[:10],
+            preferred_sections=["claims", "description", "tables"],
+            filters={"graph_seeded": True},
+        )
+    ]
 
 
 def _normalize_text_list(values: Any) -> list[str]:
@@ -383,7 +451,8 @@ def run_stage1_pre_answer_and_planning(
         str(model or "").strip(),
     )
     if client is None or not str(model or "").strip():
-        retrieval_plan = _empty_retrieval_plan(question)
+        retrieval_claims = _seed_retrieval_claims_from_graph(question=question, conversation_context=conversation_context)
+        retrieval_plan = _retrieval_plan_from_claims(retrieval_claims, question=question) if retrieval_claims else _empty_retrieval_plan(question)
         logger.warning(
             "patent stage1 planning using fallback because planner is unavailable question_type=%s explicit_patent_ids=%s",
             retrieval_plan.question_type,
@@ -392,7 +461,7 @@ def run_stage1_pre_answer_and_planning(
         return {
             "success": True,
             "deep_answer": _fallback_deep_answer(question, retrieval_plan),
-            "retrieval_claims": [],
+            "retrieval_claims": retrieval_claims,
             "retrieval_plan": retrieval_plan,
             "fallback": "planner_unavailable",
         }
@@ -427,7 +496,8 @@ def run_stage1_pre_answer_and_planning(
         )
         payload, cleaned_text = _parse_stage1_json_payload(result_text)
         if payload is None:
-            retrieval_plan = _empty_retrieval_plan(question)
+            retrieval_claims = _seed_retrieval_claims_from_graph(question=question, conversation_context=conversation_context)
+            retrieval_plan = _retrieval_plan_from_claims(retrieval_claims, question=question) if retrieval_claims else _empty_retrieval_plan(question)
             logger.warning(
                 "patent stage1 planning json parse failed response_chars=%s question_type=%s",
                 len(result_text),
@@ -436,7 +506,7 @@ def run_stage1_pre_answer_and_planning(
             return {
                 "success": True,
                 "deep_answer": result_text,
-                "retrieval_claims": [],
+                "retrieval_claims": retrieval_claims,
                 "retrieval_plan": retrieval_plan,
                 "raw_response": result_text,
                 "fallback": "json_parse_failed",
@@ -469,11 +539,12 @@ def run_stage1_pre_answer_and_planning(
         }
     except Exception as exc:
         logger.error("patent stage1 planning failed: %s", exc)
-        retrieval_plan = _empty_retrieval_plan(question)
+        retrieval_claims = _seed_retrieval_claims_from_graph(question=question, conversation_context=conversation_context)
+        retrieval_plan = _retrieval_plan_from_claims(retrieval_claims, question=question) if retrieval_claims else _empty_retrieval_plan(question)
         return {
             "success": True,
             "deep_answer": _fallback_deep_answer(question, retrieval_plan),
-            "retrieval_claims": [],
+            "retrieval_claims": retrieval_claims,
             "retrieval_plan": retrieval_plan,
             "fallback": "planner_error",
             "error": str(exc),

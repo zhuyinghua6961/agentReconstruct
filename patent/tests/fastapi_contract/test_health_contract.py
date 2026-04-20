@@ -36,6 +36,8 @@ def test_create_app_exposes_patent_runtime_defaults():
     assert app.state.component_status["runtime"]["ready"] is True
     assert app.state.component_status["patent_graph_kb"]["ready"] is False
     assert app.state.component_status["patent_graph_kb"]["enabled"] is False
+    assert app.state.component_status["patent_graph_kb"]["v2_enabled"] is False
+    assert app.state.component_status["patent_graph_kb"]["rag_injection_enabled"] is False
     assert app.state.component_status["patent_graph_kb"]["status"] == "skipped"
 
 
@@ -272,6 +274,8 @@ def test_health_contract_exposes_runtime_concurrency_and_trace(monkeypatch):
     assert runtime["ask_executor_max_workers"] == 3
     assert payload["patent_graph_kb_enabled"] is False
     assert payload["patent_graph_kb_ready"] is False
+    assert payload["patent_graph_kb_v2_enabled"] is False
+    assert payload["patent_graph_kb_rag_injection_enabled"] is False
     assert payload["components"]["patent_graph_kb"]["status"] == "skipped"
     assert response.headers["X-Trace-ID"] == "req_contract"
 
@@ -298,9 +302,65 @@ def test_health_remains_200_when_patent_graph_kb_is_degraded_but_runtime_is_read
     assert payload["components"]["patent_graph_kb"]["status"] == "degraded"
 
 
+def test_health_exposes_patent_graph_v2_and_rag_flags_when_enabled(monkeypatch):
+    monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "false")
+    monkeypatch.setenv("PATENT_GRAPH_KB_ENABLED", "true")
+    monkeypatch.setenv("PATENT_GRAPH_KB_V2_ENABLED", "true")
+    monkeypatch.setenv("PATENT_GRAPH_KB_RAG_INJECTION_ENABLED", "true")
+    app = create_app()
+
+    with TestClient(app) as client:
+        response = client.get("/api/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["patent_graph_kb_enabled"] is True
+    assert payload["patent_graph_kb_v2_enabled"] is True
+    assert payload["patent_graph_kb_rag_injection_enabled"] is True
+    assert payload["components"]["patent_graph_kb"]["v2_enabled"] is True
+    assert payload["components"]["patent_graph_kb"]["rag_injection_enabled"] is True
+
+
+def test_durable_health_remains_200_when_patent_graph_kb_is_degraded_but_other_dependencies_are_ready(monkeypatch):
+    monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_GRAPH_KB_ENABLED", "true")
+    monkeypatch.setenv("PATENT_GRAPH_KB_V2_ENABLED", "true")
+    monkeypatch.setenv("PATENT_GRAPH_KB_RAG_INJECTION_ENABLED", "true")
+    monkeypatch.setenv("JWT_SECRET", TEST_JWT_SECRET)
+    app = create_app()
+    app.state.component_status["redis"]["ready"] = True
+    app.state.component_status["authority"]["ready"] = True
+    app.state.component_status["patent_graph_kb"] = {
+        "ready": False,
+        "enabled": True,
+        "v2_enabled": True,
+        "rag_injection_enabled": True,
+        "status": "degraded",
+        "detail": "graph unavailable",
+    }
+    token = _make_bearer_token(42)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/health",
+            params={"durable": "true"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["patent_graph_kb_ready"] is False
+    assert payload["patent_graph_kb_v2_enabled"] is True
+    assert payload["patent_graph_kb_rag_injection_enabled"] is True
+    assert payload["components"]["patent_graph_kb"]["status"] == "degraded"
+
+
 def test_create_app_bootstraps_patent_graph_kb_client_when_enabled(monkeypatch):
     monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "false")
     monkeypatch.setenv("PATENT_GRAPH_KB_ENABLED", "true")
+    monkeypatch.setenv("PATENT_GRAPH_KB_V2_ENABLED", "true")
+    monkeypatch.setenv("PATENT_GRAPH_KB_RAG_INJECTION_ENABLED", "true")
     captured = {}
 
     class _GraphClient:
@@ -343,6 +403,11 @@ def test_create_app_bootstraps_patent_graph_kb_client_when_enabled(monkeypatch):
     assert captured["password"] == ""
     assert captured["database"] == "neo4j"
     assert app.state.component_status["patent_graph_kb"]["ready"] is True
+    assert app.state.component_status["patent_graph_kb"]["v2_enabled"] is True
+    assert app.state.component_status["patent_graph_kb"]["rag_injection_enabled"] is True
+    assert app.state.ask_service._patent_executor._kb_service._graph_kb_service_v2 is patent_fastapi_app.route_patent_graph_kb_v2
+    assert app.state.ask_service._patent_executor._kb_service._graph_kb_v2_enabled is True
+    assert app.state.ask_service._patent_executor._kb_service._graph_kb_rag_injection_enabled is True
     assert app.state.component_status["patent_graph_kb"]["status"] == "ok"
 
 

@@ -445,6 +445,10 @@ def run_stage4_synthesis_with_patent_evidence(
     synthesis_context = dict(conversation_context or {})
     if deep_answer:
         synthesis_context["stage1_deep_answer"] = str(deep_answer)
+    graph_kb = synthesis_context.get("graph_kb") if isinstance(synthesis_context.get("graph_kb"), dict) else None
+    if isinstance(graph_kb, dict):
+        synthesis_context["graph_kb_mode"] = str(graph_kb.get("mode") or "").strip()
+        synthesis_context["graph_kb_fingerprint"] = str(graph_kb.get("cache_fingerprint") or "").strip()
     synthesis_context["allowed_patent_ids"] = list(stage4_allowed_patent_ids)
     synthesis_context["allowed_patent_ids_all"] = list(allowed_patent_ids)
     synthesis_context["stage4_reference_topk"] = stage4_reference_topk
@@ -650,6 +654,8 @@ def run_stage4_synthesis_with_patent_evidence(
             "stage4_reference_topk": stage4_reference_topk,
             "stage4_min_citations_configured": stage4_min_citations_configured,
             "stage4_min_citations_required": stage4_min_citations_required,
+            "graph_kb_mode": str(synthesis_context.get("graph_kb_mode") or ""),
+            "graph_kb_fingerprint": str(synthesis_context.get("graph_kb_fingerprint") or ""),
             "evidence_patent_count": len(list(patent_evidence_bundle.get("evidences") or []))
             or len(dict(patent_evidence_bundle.get("evidence_by_patent_id") or {})),
             "matched_evidence_count": sum(

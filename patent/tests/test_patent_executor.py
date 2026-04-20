@@ -481,6 +481,49 @@ def test_executor_passes_graph_dependencies_to_default_kb_service():
     assert runtime.calls == []
 
 
+def test_executor_passes_graph_v2_flags_to_default_kb_service(monkeypatch):
+    captured = {}
+
+    class _FakeKbService:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def run(self, *, request, runtime=None, conversation_context=None, progress_callback=None, content_callback=None):
+            return {
+                "answer_text": "kb service answer",
+                "route": "kb_qa",
+                "query_mode": "patent staged qa",
+                "steps": [],
+                "references": [],
+                "reference_objects": [],
+                "reference_links": [],
+                "original_links": [],
+                "metadata": {},
+                "timings": {},
+                "used_files": [],
+                "file_selection": {},
+                "source_scope": request.source_scope,
+            }
+
+    monkeypatch.setattr("server.patent.executor.PatentKbService", _FakeKbService)
+
+    executor = PatentExecutor(
+        runtime=_RecordingStagedRuntime(),
+        graph_kb_enabled=True,
+        graph_kb_v2_enabled=True,
+        graph_kb_rag_injection_enabled=True,
+    )
+
+    result = executor.execute(
+        request=_make_request(question="Explain the novelty"),
+        context={"recent_turns_for_llm": []},
+    )
+
+    assert result["answer_text"] == "kb service answer"
+    assert captured["graph_kb_v2_enabled"] is True
+    assert captured["graph_kb_rag_injection_enabled"] is True
+
+
 def test_executor_returns_not_found_payload_for_retrieval_miss():
     retrieval_service = PatentRetrievalService(
         identity_registry={},

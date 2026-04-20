@@ -29,6 +29,7 @@ _TABLE_SCOPED_FILE_ROUTE_SIGNATURE_KEYS = {
     "tabular_compare_status_version",
     "table_parity_signature",
 }
+_GRAPH_KB_VOLATILE_KEYS = {"diagnostics"}
 
 
 def _normalize(value: object) -> str:
@@ -103,6 +104,19 @@ def _fingerprint(payload: dict[str, object]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _normalize_graph_kb_context_for_cache(value: object) -> object:
+    if not isinstance(value, dict):
+        return {}
+
+    normalized: dict[str, object] = {}
+    for key, item in sorted(value.items(), key=lambda entry: str(entry[0])):
+        normalized_key = str(key)
+        if normalized_key in _GRAPH_KB_VOLATILE_KEYS:
+            continue
+        normalized[normalized_key] = _normalize_payload_for_cache(item)
+    return normalized
+
+
 def build_stage1_cache_fingerprint(
     *,
     question: str,
@@ -115,6 +129,7 @@ def build_stage1_cache_fingerprint(
             "question": " ".join(str(question or "").split()),
             "recent_turns_for_llm": context.get("recent_turns_for_llm") or [],
             "summary_for_llm": context.get("summary_for_llm") or {},
+            "graph_kb": _normalize_graph_kb_context_for_cache(context.get("graph_kb")),
             "runtime_signature": runtime_signature or {},
         }
     )
