@@ -107,7 +107,7 @@ def test_admin_user_list_and_create_routes(monkeypatch):
     assert _decode(create_resp)["data"]["username"] == "bob"
 
 
-def test_admin_create_user_accepts_department_ids(monkeypatch):
+def test_admin_create_user_no_longer_accepts_department_ids(monkeypatch):
     captured = {}
 
     def fake_create_user(**kwargs):
@@ -121,17 +121,16 @@ def test_admin_create_user_accepts_department_ids(monkeypatch):
             username="bob",
             password="Pass123!",
             user_type="common",
-            primary_department_id=1,
-            secondary_department_id=11,
-            tertiary_department_id=111,
         ),
         AuthContext(user_id=1, role="admin", username="admin"),
     )
 
     assert response.status_code == 201
-    assert captured["primary_department_id"] == 1
-    assert captured["secondary_department_id"] == 11
-    assert captured["tertiary_department_id"] == 111
+    assert captured == {
+        "username": "bob",
+        "password": "Pass123!",
+        "user_type": "common",
+    }
 
 
 def test_admin_user_mutation_routes_contract(monkeypatch):
@@ -309,7 +308,11 @@ def test_admin_update_user_department_contract(monkeypatch):
 
     def fake_update_department(**kwargs):
         captured.update(kwargs)
-        return {"success": True, "data": kwargs}
+        return {
+            "success": False,
+            "error": "部门由人员信息维护，请联系管理员或修改绑定人员",
+            "code": "DEPARTMENT_MANAGED_BY_PERSONNEL",
+        }
 
     monkeypatch.setattr(admin_users_service, "update_department", fake_update_department)
 
@@ -323,11 +326,12 @@ def test_admin_update_user_department_contract(monkeypatch):
         AuthContext(user_id=1, role="admin", username="admin"),
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 400
     assert captured["target_user_id"] == 7
     assert captured["primary_department_id"] == 1
     assert captured["secondary_department_id"] == 11
     assert captured["tertiary_department_id"] == 111
+    assert _decode(response)["code"] == "DEPARTMENT_MANAGED_BY_PERSONNEL"
 
 
 def test_admin_update_user_personnel_binding_contract(monkeypatch):
@@ -442,28 +446,32 @@ def test_admin_batch_import_and_template_routes(monkeypatch):
     assert "attachment; filename=\"user_import_template.csv\"" == template_resp.headers["content-disposition"]
 
 
-def test_admin_import_template_contains_department_columns():
+def test_admin_import_template_drops_department_columns():
     response = admin_users_import_service.template_response(fmt="csv")
 
-    assert b"primary_department_name" in response.body
-    assert b"secondary_department_name" in response.body
-    assert b"tertiary_department_name" in response.body
+    assert b"primary_department_name" not in response.body
+    assert b"secondary_department_name" not in response.body
+    assert b"tertiary_department_name" not in response.body
 
 
-def test_admin_import_rejects_half_filled_department_columns(monkeypatch):
+def test_admin_import_calls_create_user_without_department_ids(monkeypatch):
+    created = []
+
     monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
     monkeypatch.setattr(admin_users_import_service, "_finalize_excel_upload_quota", lambda **kwargs: None)
-    monkeypatch.setattr(admin_users_service.users, "get_by_username", lambda username: None)
-
-    csv_bytes = (
-        b"username,password,user_type,primary_department_name,secondary_department_name,tertiary_department_name\n"
-        b"user1,Pass123!,common,\xe8\xae\xa1\xe7\xae\x97\xe6\x9c\xba\xe5\xad\xa6\xe9\x99\xa2,\xe8\xbd\xaf\xe4\xbb\xb6\xe5\xb7\xa5\xe7\xa8\x8b\xe7\xb3\xbb,\n"
+    monkeypatch.setattr(
+        admin_users_service,
+        "create_user",
+        lambda **kwargs: created.append(kwargs)
+        or {"success": True, "data": {"id": 1, "username": kwargs["username"], **kwargs}},
     )
+
+    csv_bytes = b"username,password,user_type\nuser1,Pass123!,common\n"
     result = admin_users_import_service.import_users(file_bytes=csv_bytes, filename="users.csv", actor_user_id=1)
 
     assert result["success"] is True
-    assert result["data"]["summary"]["failed"] == 1
-    assert "部门信息必须同时填写一级、二级和三级" in result["data"]["details"][0]["reason"]
+    assert result["data"]["summary"]["success"] == 1
+    assert created == [{"username": "user1", "password": "Pass123!", "user_type": "common"}]
 
 
 def test_admin_import_rejects_case_insensitive_admin_prefix_via_shared_rules(monkeypatch):
@@ -483,8 +491,8 @@ def test_admin_import_rejects_case_insensitive_admin_prefix_via_shared_rules(mon
     )
 
     csv_bytes = (
-        b"username,password,user_type,primary_department_name,secondary_department_name,tertiary_department_name\n"
-        b"AdminFoo,Pass123!,common,,\n"
+        b"username,password,user_type\n"
+        b"AdminFoo,Pass123!,common\n"
     )
     result = admin_users_import_service.import_users(file_bytes=csv_bytes, filename="users.csv", actor_user_id=1)
 
@@ -494,146 +502,11 @@ def test_admin_import_rejects_case_insensitive_admin_prefix_via_shared_rules(mon
     assert "admin" in result["data"]["details"][0]["reason"].lower()
 
 
-def test_admin_import_rejects_unknown_primary_department(monkeypatch):
-    monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
-    monkeypatch.setattr(admin_users_import_service, "_finalize_excel_upload_quota", lambda **kwargs: None)
-    monkeypatch.setattr(admin_users_service.users, "get_by_username", lambda username: None)
-    monkeypatch.setattr(
-        admin_import_service_module.department_service,
-        "resolve_by_names",
-        lambda **kwargs: {"success": False, "code": "PRIMARY_DEPARTMENT_NOT_FOUND", "error": "一级部门不存在"},
-    )
-
-    csv_bytes = (
-        b"username,password,user_type,primary_department_name,secondary_department_name,tertiary_department_name\n"
-        b"user1,Pass123!,common,\xe4\xb8\x8d\xe5\xad\x98\xe5\x9c\xa8\xe5\xad\xa6\xe9\x99\xa2,\xe8\xbd\xaf\xe4\xbb\xb6\xe5\xb7\xa5\xe7\xa8\x8b\xe7\xb3\xbb,\xe4\xba\xba\xe5\xb7\xa5\xe6\x99\xba\xe8\x83\xbd\xe5\xae\x9e\xe9\xaa\x8c\xe5\xae\xa4\n"
-    )
-    result = admin_users_import_service.import_users(file_bytes=csv_bytes, filename="users.csv", actor_user_id=1)
-
-    assert result["success"] is True
-    assert result["data"]["summary"]["failed"] == 1
-    assert "一级部门不存在" in result["data"]["details"][0]["reason"]
-
-
-def test_admin_import_rejects_unknown_secondary_department(monkeypatch):
-    monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
-    monkeypatch.setattr(admin_users_import_service, "_finalize_excel_upload_quota", lambda **kwargs: None)
-    monkeypatch.setattr(admin_users_service.users, "get_by_username", lambda username: None)
-    monkeypatch.setattr(
-        admin_import_service_module.department_service,
-        "resolve_by_names",
-        lambda **kwargs: {"success": False, "code": "SECONDARY_DEPARTMENT_NOT_FOUND", "error": "二级部门不存在"},
-    )
-
-    csv_bytes = (
-        b"username,password,user_type,primary_department_name,secondary_department_name,tertiary_department_name\n"
-        b"user1,Pass123!,common,\xe8\xae\xa1\xe7\xae\x97\xe6\x9c\xba\xe5\xad\xa6\xe9\x99\xa2,\xe4\xb8\x8d\xe5\xad\x98\xe5\x9c\xa8\xe7\xb3\xbb,\xe4\xba\xba\xe5\xb7\xa5\xe6\x99\xba\xe8\x83\xbd\xe5\xae\x9e\xe9\xaa\x8c\xe5\xae\xa4\n"
-    )
-    result = admin_users_import_service.import_users(file_bytes=csv_bytes, filename="users.csv", actor_user_id=1)
-
-    assert result["success"] is True
-    assert result["data"]["summary"]["failed"] == 1
-    assert "二级部门不存在" in result["data"]["details"][0]["reason"]
-
-
-def test_admin_import_rejects_invalid_primary_secondary_relation(monkeypatch):
-    monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
-    monkeypatch.setattr(admin_users_import_service, "_finalize_excel_upload_quota", lambda **kwargs: None)
-    monkeypatch.setattr(admin_users_service.users, "get_by_username", lambda username: None)
-    monkeypatch.setattr(
-        admin_import_service_module.department_service,
-        "resolve_by_names",
-        lambda **kwargs: {"success": False, "code": "DEPARTMENT_RELATION_INVALID", "error": "二级部门不属于所选一级部门"},
-    )
-
-    csv_bytes = (
-        b"username,password,user_type,primary_department_name,secondary_department_name,tertiary_department_name\n"
-        b"user1,Pass123!,common,\xe8\xae\xa1\xe7\xae\x97\xe6\x9c\xba\xe5\xad\xa6\xe9\x99\xa2,\xe6\x9d\x90\xe6\x96\x99\xe7\xb3\xbb,\xe4\xba\xba\xe5\xb7\xa5\xe6\x99\xba\xe8\x83\xbd\xe5\xae\x9e\xe9\xaa\x8c\xe5\xae\xa4\n"
-    )
-    result = admin_users_import_service.import_users(file_bytes=csv_bytes, filename="users.csv", actor_user_id=1)
-
-    assert result["success"] is True
-    assert result["data"]["summary"]["failed"] == 1
-    assert "二级部门不属于所选一级部门" in result["data"]["details"][0]["reason"]
-
-
-def test_admin_import_rejects_disabled_department(monkeypatch):
-    monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
-    monkeypatch.setattr(admin_users_import_service, "_finalize_excel_upload_quota", lambda **kwargs: None)
-    monkeypatch.setattr(admin_users_service.users, "get_by_username", lambda username: None)
-    monkeypatch.setattr(
-        admin_import_service_module.department_service,
-        "resolve_by_names",
-        lambda **kwargs: {"success": False, "code": "DEPARTMENT_DISABLED", "error": "部门已停用，无法选择"},
-    )
-
-    csv_bytes = (
-        b"username,password,user_type,primary_department_name,secondary_department_name,tertiary_department_name\n"
-        b"user1,Pass123!,common,\xe8\xae\xa1\xe7\xae\x97\xe6\x9c\xba\xe5\xad\xa6\xe9\x99\xa2,\xe8\xbd\xaf\xe4\xbb\xb6\xe5\xb7\xa5\xe7\xa8\x8b\xe7\xb3\xbb,\xe4\xba\xba\xe5\xb7\xa5\xe6\x99\xba\xe8\x83\xbd\xe5\xae\x9e\xe9\xaa\x8c\xe5\xae\xa4\n"
-    )
-    result = admin_users_import_service.import_users(file_bytes=csv_bytes, filename="users.csv", actor_user_id=1)
-
-    assert result["success"] is True
-    assert result["data"]["summary"]["failed"] == 1
-    assert "部门已停用，无法选择" in result["data"]["details"][0]["reason"]
-
-
-def test_admin_import_resolves_department_names_and_persists_ids(monkeypatch):
+def test_admin_import_accepts_xlsx_without_department_columns(monkeypatch):
     created = []
 
     monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
     monkeypatch.setattr(admin_users_import_service, "_finalize_excel_upload_quota", lambda **kwargs: None)
-    monkeypatch.setattr(admin_users_service.users, "get_by_username", lambda username: None)
-    monkeypatch.setattr(
-        admin_import_service_module.department_service,
-        "resolve_by_names",
-        lambda **kwargs: {
-            "success": True,
-            "data": {
-                "primary_department_id": 1,
-                "secondary_department_id": 11,
-                "tertiary_department_id": 111,
-            },
-        },
-    )
-    monkeypatch.setattr(
-        admin_users_service,
-        "create_user",
-        lambda **kwargs: created.append(kwargs)
-        or {"success": True, "data": {"id": 1, "username": kwargs["username"], **kwargs}},
-    )
-
-    csv_bytes = (
-        b"username,password,user_type,primary_department_name,secondary_department_name,tertiary_department_name\n"
-        b"user1,Pass123!,common,\xe8\xae\xa1\xe7\xae\x97\xe6\x9c\xba\xe5\xad\xa6\xe9\x99\xa2,\xe8\xbd\xaf\xe4\xbb\xb6\xe5\xb7\xa5\xe7\xa8\x8b\xe7\xb3\xbb,\xe4\xba\xba\xe5\xb7\xa5\xe6\x99\xba\xe8\x83\xbd\xe5\xae\x9e\xe9\xaa\x8c\xe5\xae\xa4\n"
-    )
-    result = admin_users_import_service.import_users(file_bytes=csv_bytes, filename="users.csv", actor_user_id=1)
-
-    assert result["success"] is True
-    assert result["data"]["summary"]["success"] == 1
-    assert created[0]["primary_department_id"] == 1
-    assert created[0]["secondary_department_id"] == 11
-    assert created[0]["tertiary_department_id"] == 111
-
-
-def test_admin_import_accepts_xlsx_and_persists_department_ids(monkeypatch):
-    created = []
-
-    monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
-    monkeypatch.setattr(admin_users_import_service, "_finalize_excel_upload_quota", lambda **kwargs: None)
-    monkeypatch.setattr(admin_users_service.users, "get_by_username", lambda username: None)
-    monkeypatch.setattr(
-        admin_import_service_module.department_service,
-        "resolve_by_names",
-        lambda **kwargs: {
-            "success": True,
-            "data": {
-                "primary_department_id": 1,
-                "secondary_department_id": 11,
-                "tertiary_department_id": 111,
-            },
-        },
-    )
     monkeypatch.setattr(
         admin_users_service,
         "create_user",
@@ -646,11 +519,8 @@ def test_admin_import_accepts_xlsx_and_persists_department_ids(monkeypatch):
             "username",
             "password",
             "user_type",
-            "primary_department_name",
-            "secondary_department_name",
-            "tertiary_department_name",
         ],
-        rows=[["user1", "Pass123!", "common", "计算机学院", "软件工程系", "人工智能实验室"]],
+        rows=[["user1", "Pass123!", "common"]],
         sheet_name="用户导入",
     )
 
@@ -662,9 +532,7 @@ def test_admin_import_accepts_xlsx_and_persists_department_ids(monkeypatch):
 
     assert result["success"] is True
     assert result["data"]["summary"]["success"] == 1
-    assert created[0]["primary_department_id"] == 1
-    assert created[0]["secondary_department_id"] == 11
-    assert created[0]["tertiary_department_id"] == 111
+    assert created == [{"username": "user1", "password": "Pass123!", "user_type": "common"}]
 
 
 def test_admin_import_quota_precheck_returns_db_unavailable_on_actor_lookup_failure(monkeypatch):
@@ -767,7 +635,7 @@ def test_admin_batch_change_user_type_partial_success(monkeypatch):
     assert result["data"]["details"][3]["status"] == "failed"
 
 
-def test_admin_service_create_user_accepts_department_ids():
+def test_admin_service_create_user_no_longer_accepts_department_ids():
     class FakeUsers:
         def __init__(self):
             self.created = None
@@ -789,109 +657,48 @@ def test_admin_service_create_user_accepts_department_ids():
             self.trim_calls.append((user_id, keep_limit))
             return 1
 
-    class FakeDepartments:
-        def describe_user_department(
-            self,
-            *,
-            primary_department_id: int | None,
-            secondary_department_id: int | None,
-            tertiary_department_id: int | None,
-        ):
-            return {
-                "primary_department_id": primary_department_id,
-                "primary_department_name": None,
-                "secondary_department_id": secondary_department_id,
-                "secondary_department_name": None,
-                "tertiary_department_id": tertiary_department_id,
-                "tertiary_department_name": None,
-                "require_department_setup": True,
-            }
-
-        def validate_department_selection(
-            self,
-            *,
-            primary_department_id: int | None,
-            secondary_department_id: int | None,
-            tertiary_department_id: int | None,
-            require_active: bool,
-            allow_empty: bool,
-            allow_legacy_two_level: bool,
-        ):
-            assert primary_department_id == 1
-            assert secondary_department_id == 11
-            assert tertiary_department_id == 111
-            assert require_active is True
-            assert allow_empty is True
-            assert allow_legacy_two_level is False
-            return {
-                "success": True,
-                "data": {
-                    "primary_department_id": 1,
-                    "primary_department_name": "计算机学院",
-                    "secondary_department_id": 11,
-                    "secondary_department_name": "软件工程系",
-                    "tertiary_department_id": 111,
-                    "tertiary_department_name": "人工智能实验室",
-                    "require_department_setup": False,
-                },
-            }
-
     users = FakeUsers()
-    service = admin_users_service.__class__(users_repo=users, department_service=FakeDepartments())
+    service = admin_users_service.__class__(users_repo=users)
     result = service.create_user(
         username="bob",
         password="Pass123!",
         user_type="common",
-        primary_department_id=1,
-        secondary_department_id=11,
-        tertiary_department_id=111,
     )
 
     assert result["success"] is True
-    assert users.created["primary_department_id"] == 1
-    assert users.created["secondary_department_id"] == 11
-    assert users.created["tertiary_department_id"] == 111
-    assert result["data"]["primary_department_name"] == "计算机学院"
-    assert result["data"]["secondary_department_name"] == "软件工程系"
-    assert result["data"]["tertiary_department_name"] == "人工智能实验室"
+    assert "primary_department_id" not in users.created
+    assert "secondary_department_id" not in users.created
+    assert "tertiary_department_id" not in users.created
+    assert result["data"]["username"] == "bob"
 
 
-def test_admin_service_create_user_requires_tertiary_for_non_empty_department():
+def test_admin_service_create_user_does_not_validate_department_selection():
     class FakeUsers:
         def get_by_username(self, username):
             return None
 
+        def create_user(self, **kwargs):
+            return 9
+
+        def add_password_history(self, *, user_id: int, password_hash: str):
+            return 1
+
+        def trim_password_history(self, *, user_id: int, keep_limit: int):
+            return 1
+
     class FakeDepartments:
-        def validate_department_selection(
-            self,
-            *,
-            primary_department_id: int | None,
-            secondary_department_id: int | None,
-            tertiary_department_id: int | None,
-            require_active: bool,
-            allow_empty: bool,
-            allow_legacy_two_level: bool,
-        ):
-            assert primary_department_id == 1
-            assert secondary_department_id == 11
-            assert tertiary_department_id is None
-            assert require_active is True
-            assert allow_empty is True
-            assert allow_legacy_two_level is False
-            return {"success": False, "error": "一级、二级和三级部门必须同时填写", "code": "DEPARTMENT_REQUIRED"}
+        def validate_department_selection(self, **kwargs):
+            raise AssertionError(f"unexpected validate_department_selection call: {kwargs}")
 
     service = admin_users_service.__class__(users_repo=FakeUsers(), department_service=FakeDepartments())
     result = service.create_user(
         username="bob",
         password="Pass123!",
         user_type="common",
-        primary_department_id=1,
-        secondary_department_id=11,
-        tertiary_department_id=None,
     )
 
-    assert result["success"] is False
-    assert result["code"] == "DEPARTMENT_REQUIRED"
+    assert result["success"] is True
+    assert result["data"]["username"] == "bob"
 
 
 def test_admin_service_update_username_rejects_target_admin(monkeypatch):
@@ -1085,78 +892,8 @@ def test_admin_service_update_username_accepts_same_username_as_noop(monkeypatch
     assert result["data"]["username"] == "alice"
 
 
-def test_admin_service_update_department_persists_selected_departments():
-    class FakeUsers:
-        def __init__(self):
-            self.updated = None
-
-        def get_by_id(self, user_id):
-            if user_id != 7:
-                return None
-            return {
-                "id": 7,
-                "username": "alice",
-                "role": "user",
-                "user_type": 3,
-                "status": "active",
-                "primary_department_id": None,
-                "secondary_department_id": None,
-                "tertiary_department_id": None,
-            }
-
-        def update_user_department(self, **kwargs):
-            self.updated = kwargs
-            return 1
-
-    class FakeDepartments:
-        def describe_user_department(
-            self,
-            *,
-            primary_department_id: int | None,
-            secondary_department_id: int | None,
-            tertiary_department_id: int | None,
-        ):
-            return {
-                "primary_department_id": primary_department_id,
-                "primary_department_name": None,
-                "secondary_department_id": secondary_department_id,
-                "secondary_department_name": None,
-                "tertiary_department_id": tertiary_department_id,
-                "tertiary_department_name": None,
-                "require_department_setup": True,
-            }
-
-        def validate_department_selection(
-            self,
-            *,
-            primary_department_id: int | None,
-            secondary_department_id: int | None,
-            tertiary_department_id: int | None,
-            require_active: bool,
-            allow_empty: bool,
-            allow_legacy_two_level: bool,
-        ):
-            assert primary_department_id == 1
-            assert secondary_department_id == 11
-            assert tertiary_department_id == 111
-            assert require_active is True
-            assert allow_empty is True
-            assert allow_legacy_two_level is False
-            return {
-                "success": True,
-                "data": {
-                    "primary_department_id": 1,
-                    "primary_department_name": "计算机学院",
-                    "secondary_department_id": 11,
-                    "secondary_department_name": "软件工程系",
-                    "tertiary_department_id": 111,
-                    "tertiary_department_name": "人工智能实验室",
-                    "require_department_setup": False,
-                },
-            }
-
-    users = FakeUsers()
-    service = admin_users_service.__class__(users_repo=users, department_service=FakeDepartments())
+def test_admin_service_update_department_is_rejected_when_managed_by_personnel():
+    service = admin_users_service.__class__(users_repo=object())
     result = service.update_department(
         target_user_id=7,
         primary_department_id=1,
@@ -1164,12 +901,9 @@ def test_admin_service_update_department_persists_selected_departments():
         tertiary_department_id=111,
     )
 
-    assert result["success"] is True
-    assert users.updated["user_id"] == 7
-    assert users.updated["primary_department_id"] == 1
-    assert users.updated["secondary_department_id"] == 11
-    assert users.updated["tertiary_department_id"] == 111
-    assert result["data"]["require_department_setup"] is False
+    assert result["success"] is False
+    assert result["code"] == "DEPARTMENT_MANAGED_BY_PERSONNEL"
+    assert result["error"] == "部门由人员信息维护，请联系管理员或修改绑定人员"
 
 
 def test_list_users_includes_personnel_summary_fields():
@@ -1243,7 +977,7 @@ def test_list_users_includes_personnel_summary_fields():
 def test_admin_bind_user_to_active_personnel():
     class FakeUsers:
         def __init__(self):
-            self.updated = None
+            self.bound = None
 
         def get_by_id(self, user_id):
             if int(user_id) != 7:
@@ -1259,31 +993,55 @@ def test_admin_bind_user_to_active_personnel():
                 "tertiary_department_id": None,
                 "created_at": None,
             }
-            payload["personnel_id"] = None if self.updated is None else self.updated["personnel_id"]
+            payload["personnel_id"] = None if self.bound is None else self.bound["personnel_id"]
             return payload
 
-        def update_user_personnel(self, *, user_id: int, personnel_id: int | None):
-            self.updated = {"user_id": user_id, "personnel_id": personnel_id}
+        def bind_user_personnel_with_departments(
+            self,
+            *,
+            user_id: int,
+            personnel_id: int,
+            primary_department_id: int | None,
+            secondary_department_id: int | None,
+            tertiary_department_id: int | None = None,
+        ):
+            self.bound = {
+                "user_id": user_id,
+                "personnel_id": personnel_id,
+                "primary_department_id": primary_department_id,
+                "secondary_department_id": secondary_department_id,
+                "tertiary_department_id": tertiary_department_id,
+            }
             return 1
 
     class FakeDepartments:
         def describe_user_department(self, **kwargs):
             return {
-                "primary_department_id": None,
-                "primary_department_name": None,
-                "secondary_department_id": None,
-                "secondary_department_name": None,
-                "tertiary_department_id": None,
-                "tertiary_department_name": None,
-                "department_completion_level": 0,
-                "department_display": "未填写",
-                "require_department_setup": True,
+                "primary_department_id": kwargs.get("primary_department_id"),
+                "primary_department_name": "计算机学院" if kwargs.get("primary_department_id") else None,
+                "secondary_department_id": kwargs.get("secondary_department_id"),
+                "secondary_department_name": "软件工程系" if kwargs.get("secondary_department_id") else None,
+                "tertiary_department_id": kwargs.get("tertiary_department_id"),
+                "tertiary_department_name": "人工智能实验室" if kwargs.get("tertiary_department_id") else None,
+                "department_completion_level": "complete" if kwargs.get("tertiary_department_id") else 0,
+                "department_display": "计算机学院 / 软件工程系 / 人工智能实验室"
+                if kwargs.get("tertiary_department_id")
+                else "未填写",
+                "require_department_setup": kwargs.get("tertiary_department_id") is None,
             }
 
     class FakePersonnel:
         def get_personnel_by_id(self, *, personnel_id: int | None):
             assert personnel_id == 9
-            return {"id": 9, "employee_no": "T2024001", "full_name": "张三", "status": "active"}
+            return {
+                "id": 9,
+                "employee_no": "T2024001",
+                "full_name": "张三",
+                "status": "active",
+                "primary_department_id": 1,
+                "secondary_department_id": 11,
+                "tertiary_department_id": 111,
+            }
 
         def describe_user_personnel(self, *, personnel_id: int | None):
             assert personnel_id == 9
@@ -1303,8 +1061,15 @@ def test_admin_bind_user_to_active_personnel():
     result = service.update_user_personnel_binding(target_user_id=7, actor_user_id=1, personnel_id=9)
 
     assert result["success"] is True
-    assert users.updated == {"user_id": 7, "personnel_id": 9}
+    assert users.bound == {
+        "user_id": 7,
+        "personnel_id": 9,
+        "primary_department_id": 1,
+        "secondary_department_id": 11,
+        "tertiary_department_id": 111,
+    }
     assert result["data"]["personnel_id"] == 9
+    assert result["data"]["primary_department_id"] == 1
     assert result["data"]["personnel_binding_status"] == "bound_active"
     assert result["data"]["require_personnel_setup"] is False
 
@@ -1332,7 +1097,7 @@ def test_admin_bind_rejects_disabled_personnel():
 def test_admin_unbind_user_sets_require_personnel_setup_again():
     class FakeUsers:
         def __init__(self):
-            self.updated = None
+            self.unbound = None
 
         def get_by_id(self, user_id):
             if int(user_id) != 7:
@@ -1348,11 +1113,11 @@ def test_admin_unbind_user_sets_require_personnel_setup_again():
                 "tertiary_department_id": None,
                 "created_at": None,
             }
-            payload["personnel_id"] = 9 if self.updated is None else None
+            payload["personnel_id"] = 9 if self.unbound is None else None
             return payload
 
-        def update_user_personnel(self, *, user_id: int, personnel_id: int | None):
-            self.updated = {"user_id": user_id, "personnel_id": personnel_id}
+        def clear_user_personnel_with_department_cache(self, *, user_id: int):
+            self.unbound = {"user_id": user_id}
             return 1
 
     class FakeDepartments:
@@ -1388,7 +1153,7 @@ def test_admin_unbind_user_sets_require_personnel_setup_again():
     result = service.clear_user_personnel_binding(target_user_id=7, actor_user_id=1)
 
     assert result["success"] is True
-    assert users.updated == {"user_id": 7, "personnel_id": None}
+    assert users.unbound == {"user_id": 7}
     assert result["data"]["personnel_id"] is None
     assert result["data"]["personnel_binding_status"] == "unbound"
     assert result["data"]["require_personnel_setup"] is True
@@ -1412,195 +1177,6 @@ def test_admin_bind_returns_404_for_missing_personnel():
     assert result["success"] is False
     assert result["code"] == "PERSONNEL_NOT_FOUND"
     assert service.status_code_for(result, ok_status=200) == 404
-
-
-def test_admin_service_update_department_requires_full_three_level_chain():
-    class FakeUsers:
-        def get_by_id(self, user_id):
-            if user_id != 7:
-                return None
-            return {
-                "id": 7,
-                "username": "alice",
-                "role": "user",
-                "user_type": 3,
-                "status": "active",
-                "primary_department_id": None,
-                "secondary_department_id": None,
-                "tertiary_department_id": None,
-            }
-
-    class FakeDepartments:
-        def describe_user_department(
-            self,
-            *,
-            primary_department_id: int | None,
-            secondary_department_id: int | None,
-            tertiary_department_id: int | None,
-        ):
-            return {
-                "primary_department_id": primary_department_id,
-                "primary_department_name": None,
-                "secondary_department_id": secondary_department_id,
-                "secondary_department_name": None,
-                "tertiary_department_id": tertiary_department_id,
-                "tertiary_department_name": None,
-                "require_department_setup": True,
-            }
-
-        def validate_department_selection(
-            self,
-            *,
-            primary_department_id: int | None,
-            secondary_department_id: int | None,
-            tertiary_department_id: int | None,
-            require_active: bool,
-            allow_empty: bool,
-            allow_legacy_two_level: bool,
-        ):
-            assert primary_department_id == 1
-            assert secondary_department_id == 11
-            assert tertiary_department_id is None
-            assert require_active is True
-            assert allow_empty is True
-            assert allow_legacy_two_level is False
-            return {"success": False, "error": "一级、二级和三级部门必须同时填写", "code": "DEPARTMENT_REQUIRED"}
-
-    service = admin_users_service.__class__(users_repo=FakeUsers(), department_service=FakeDepartments())
-    result = service.update_department(target_user_id=7, primary_department_id=1, secondary_department_id=11, tertiary_department_id=None)
-
-    assert result["success"] is False
-    assert result["code"] == "DEPARTMENT_REQUIRED"
-
-
-def test_admin_service_update_department_allows_unchanged_disabled_binding():
-    class FakeUsers:
-        def __init__(self):
-            self.update_called = False
-
-        def get_by_id(self, user_id):
-            if user_id != 7:
-                return None
-            return {
-                "id": 7,
-                "username": "alice",
-                "role": "user",
-                "user_type": 3,
-                "status": "active",
-                "primary_department_id": 1,
-                "secondary_department_id": 11,
-                "tertiary_department_id": 111,
-            }
-
-        def update_user_department(self, **kwargs):
-            self.update_called = True
-            raise AssertionError(f"unexpected update: {kwargs}")
-
-    class FakeDepartments:
-        def describe_user_department(
-            self,
-            *,
-            primary_department_id: int | None,
-            secondary_department_id: int | None,
-            tertiary_department_id: int | None,
-        ):
-            return {
-                "primary_department_id": primary_department_id,
-                "primary_department_name": "计算机学院",
-                "secondary_department_id": secondary_department_id,
-                "secondary_department_name": "软件工程系",
-                "tertiary_department_id": tertiary_department_id,
-                "tertiary_department_name": "人工智能实验室",
-                "department_effective_status": "disabled",
-                "department_display": "计算机学院 / 软件工程系 / 人工智能实验室（已停用）",
-                "require_department_setup": False,
-            }
-
-        def validate_department_selection(self, **kwargs):
-            raise AssertionError(f"unexpected validation: {kwargs}")
-
-    users = FakeUsers()
-    service = admin_users_service.__class__(users_repo=users, department_service=FakeDepartments())
-    result = service.update_department(target_user_id=7, primary_department_id=1, secondary_department_id=11, tertiary_department_id=111)
-
-    assert result["success"] is True
-    assert users.update_called is False
-    assert result["data"]["department_display"] == "计算机学院 / 软件工程系 / 人工智能实验室（已停用）"
-
-
-def test_admin_service_update_department_fails_when_write_does_not_persist():
-    class FakeUsers:
-        def get_by_id(self, user_id):
-            if user_id != 7:
-                return None
-            return {
-                "id": 7,
-                "username": "alice",
-                "role": "user",
-                "user_type": 3,
-                "status": "active",
-                "primary_department_id": None,
-                "secondary_department_id": None,
-                "tertiary_department_id": None,
-            }
-
-        def update_user_department(self, **kwargs):
-            return 0
-
-    class FakeDepartments:
-        def describe_user_department(
-            self,
-            *,
-            primary_department_id: int | None,
-            secondary_department_id: int | None,
-            tertiary_department_id: int | None,
-        ):
-            return {
-                "primary_department_id": primary_department_id,
-                "primary_department_name": "计算机学院" if primary_department_id else None,
-                "secondary_department_id": secondary_department_id,
-                "secondary_department_name": "软件工程系" if secondary_department_id else None,
-                "tertiary_department_id": tertiary_department_id,
-                "tertiary_department_name": "人工智能实验室" if tertiary_department_id else None,
-                "require_department_setup": (
-                    primary_department_id is None or secondary_department_id is None or tertiary_department_id is None
-                ),
-            }
-
-        def validate_department_selection(
-            self,
-            *,
-            primary_department_id: int | None,
-            secondary_department_id: int | None,
-            tertiary_department_id: int | None,
-            require_active: bool,
-            allow_empty: bool,
-            allow_legacy_two_level: bool,
-        ):
-            assert primary_department_id == 1
-            assert secondary_department_id == 11
-            assert tertiary_department_id == 111
-            assert require_active is True
-            assert allow_empty is True
-            assert allow_legacy_two_level is False
-            return {
-                "success": True,
-                "data": {
-                    "primary_department_id": 1,
-                    "primary_department_name": "计算机学院",
-                    "secondary_department_id": 11,
-                    "secondary_department_name": "软件工程系",
-                    "tertiary_department_id": 111,
-                    "tertiary_department_name": "人工智能实验室",
-                    "require_department_setup": False,
-                },
-            }
-
-    service = admin_users_service.__class__(users_repo=FakeUsers(), department_service=FakeDepartments())
-    result = service.update_department(target_user_id=7, primary_department_id=1, secondary_department_id=11, tertiary_department_id=111)
-
-    assert result["success"] is False
-    assert result["code"] == "UPDATE_ERROR"
 
 
 def test_admin_service_list_users_exposes_department_summary():

@@ -78,9 +78,6 @@ def create_user(payload: UserCreateRequest, _context: AuthContext = Depends(requ
             username=payload.username,
             password=payload.password,
             user_type=str(payload.user_type),
-            primary_department_id=payload.primary_department_id,
-            secondary_department_id=payload.secondary_department_id,
-            tertiary_department_id=payload.tertiary_department_id,
         ),
         ok_status=201,
     )

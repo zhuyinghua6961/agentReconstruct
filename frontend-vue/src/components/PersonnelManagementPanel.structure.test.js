@@ -15,6 +15,7 @@ function readSource(filename) {
 }
 
 const panelSource = readSource('PersonnelManagementPanel.vue')
+const editorSource = readSource('PersonnelEditorDialog.vue')
 const lookupSource = readSource('PersonnelLookupSelect.vue')
 const batchImportSource = readSource('PersonnelBatchImportDialog.vue')
 const importResultSource = readSource('PersonnelImportResultDialog.vue')
@@ -29,12 +30,30 @@ test('PersonnelManagementPanel renders account list filters and status filter', 
   assert.match(panelSource, /状态/)
 })
 
+test('PersonnelEditorDialog reuses DepartmentSelector with searchable department selection', () => {
+  assert.match(editorSource, /DepartmentSelector/)
+  assert.match(editorSource, /searchPlaceholder/)
+  assert.match(editorSource, /primary_department_id/)
+  assert.match(editorSource, /secondary_department_id/)
+  assert.match(editorSource, /tertiary_department_id/)
+})
+
 test('PersonnelManagementPanel exposes create edit status and bindings actions', () => {
-  assert.match(panelSource, /handleCreatePersonnel/)
-  assert.match(panelSource, /handleEditPersonnel/)
+  assert.match(panelSource, /PersonnelEditorDialog/)
+  assert.match(panelSource, /openCreateDialog/)
+  assert.match(panelSource, /openEditDialog/)
   assert.match(panelSource, /handleTogglePersonnelStatus/)
   assert.match(panelSource, /toggleBindings/)
   assert.match(panelSource, /绑定账号数/)
+})
+
+test('PersonnelManagementPanel submits primary secondary tertiary department ids on create and update', () => {
+  assert.match(panelSource, /primary_department_id/)
+  assert.match(panelSource, /secondary_department_id/)
+  assert.match(panelSource, /tertiary_department_id/)
+  assert.match(panelSource, /status:\s*normalizedPayload\.status/)
+  assert.doesNotMatch(panelSource, /updatePersonnelStatus\(currentItem\.id,\s*normalizedPayload\.status\)/)
+  assert.doesNotMatch(panelSource, /window\.prompt/)
 })
 
 test('PersonnelManagementPanel wires batch import and template download', () => {
@@ -50,10 +69,18 @@ test('PersonnelManagementPanel wires batch import and template download', () => 
   assert.match(importResultSource, /姓名/)
 })
 
+test('PersonnelManagementPanel shows personnel department display in list rows', () => {
+  assert.match(panelSource, /department_display/)
+  assert.match(panelSource, /部门/)
+})
+
 test('Personnel import result dialog supports created updated summary and statuses', () => {
   assert.match(importResultSource, /getPersonnelImportSuccessCount/)
   assert.match(importResultSource, /filterPersonnelImportDetails/)
   assert.match(importResultSource, /getPersonnelImportResultText/)
+  assert.match(importResultSource, /一级部门|department_display/)
+  assert.match(importResultSource, /二级部门|primary_department_name/)
+  assert.match(importResultSource, /三级部门|secondary_department_name/)
 })
 
 test('PersonnelManagementPanel lazy loads bindings when expanding a personnel row', () => {

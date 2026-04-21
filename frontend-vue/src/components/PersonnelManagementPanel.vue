@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 import { adminApi } from '../services/admin'
 import PersonnelBatchImportDialog from './PersonnelBatchImportDialog.vue'
+import PersonnelEditorDialog from './PersonnelEditorDialog.vue'
 import PersonnelImportResultDialog from './PersonnelImportResultDialog.vue'
 
 const emit = defineEmits(['updated'])
@@ -20,6 +21,12 @@ const bindingsErrorByPersonnelId = ref({})
 const showPersonnelImportDialog = ref(false)
 const showPersonnelImportResultDialog = ref(false)
 const personnelImportResult = ref(null)
+const showPersonnelEditorDialog = ref(false)
+const personnelEditorMode = ref('create')
+const selectedPersonnel = ref(null)
+const personnelSubmitting = ref(false)
+const selectableDepartmentTree = ref([])
+const departmentOptionsLoading = ref(false)
 
 function setSuccess(message) {
   success.value = message
@@ -45,6 +52,18 @@ async function fetchPersonnel() {
     error.value = result.error || '获取人员列表失败'
   }
   loading.value = false
+}
+
+async function fetchDepartmentTree() {
+  departmentOptionsLoading.value = true
+  const result = await adminApi.getDepartmentTree()
+  if (result.success) {
+    selectableDepartmentTree.value = Array.isArray(result.data?.items) ? result.data.items : []
+  } else {
+    error.value = result.error || '获取部门选项失败'
+    selectableDepartmentTree.value = []
+  }
+  departmentOptionsLoading.value = false
 }
 
 function resetFilters() {
@@ -99,55 +118,66 @@ async function toggleBindings(personnelId) {
   await loadBindings(normalizedId)
 }
 
-async function handleCreatePersonnel() {
-  const employeeNo = window.prompt('请输入工号：', '')
-  if (!employeeNo || !employeeNo.trim()) {
-    return
+function openCreateDialog() {
+  personnelEditorMode.value = 'create'
+  selectedPersonnel.value = null
+  showPersonnelEditorDialog.value = true
+}
+
+function openEditDialog(item) {
+  selectedPersonnel.value = item
+  personnelEditorMode.value = 'edit'
+  showPersonnelEditorDialog.value = true
+}
+
+async function handlePersonnelEditorSubmit(payload) {
+  personnelSubmitting.value = true
+  const normalizedPayload = {
+    employee_no: payload.employee_no,
+    full_name: payload.full_name,
+    verification_code: payload.verification_code || undefined,
+    status: payload.status || 'active',
+    remarks: payload.remarks || null,
+    primary_department_id: payload.primary_department_id ?? null,
+    secondary_department_id: payload.secondary_department_id ?? null,
+    tertiary_department_id: payload.tertiary_department_id ?? null,
   }
-  const fullName = window.prompt('请输入姓名：', '')
-  if (!fullName || !fullName.trim()) {
-    return
-  }
-  const verificationCode = window.prompt('请输入校验码：', '')
-  if (!verificationCode || !verificationCode.trim()) {
-    return
-  }
-  const remarks = window.prompt('备注（可选）：', '')
-  const result = await adminApi.createPersonnel({
-    employee_no: employeeNo.trim(),
-    full_name: fullName.trim(),
-    verification_code: verificationCode.trim(),
-    status: 'active',
-    remarks: remarks?.trim() || null,
-  })
-  if (result.success) {
+
+  if (personnelEditorMode.value === 'create') {
+    const createResult = await adminApi.createPersonnel(normalizedPayload)
+    personnelSubmitting.value = false
+    if (!createResult.success) {
+      error.value = createResult.error || '创建人员失败'
+      return
+    }
+    showPersonnelEditorDialog.value = false
     setSuccess('人员创建成功')
     await fetchPersonnel()
     emit('updated')
     return
   }
-  error.value = result.error || '创建人员失败'
-}
 
-async function handleEditPersonnel(item) {
-  const fullName = window.prompt('请输入新的姓名：', item.full_name || '')
-  if (!fullName || !fullName.trim()) {
-    return
-  }
-  const remarks = window.prompt('请输入备注（可选）：', item.remarks || '')
-  const verificationCode = window.prompt('如需重置校验码，请输入新的校验码（可留空）：', '')
-  const result = await adminApi.updatePersonnel(item.id, {
-    full_name: fullName.trim(),
-    remarks: remarks?.trim() || null,
-    verification_code: verificationCode?.trim() || undefined,
+  const currentItem = selectedPersonnel.value
+  const updateResult = await adminApi.updatePersonnel(currentItem.id, {
+    full_name: normalizedPayload.full_name,
+    verification_code: normalizedPayload.verification_code,
+    status: normalizedPayload.status,
+    remarks: normalizedPayload.remarks,
+    primary_department_id: normalizedPayload.primary_department_id,
+    secondary_department_id: normalizedPayload.secondary_department_id,
+    tertiary_department_id: normalizedPayload.tertiary_department_id,
   })
-  if (result.success) {
-    setSuccess('人员信息已更新')
-    await fetchPersonnel()
-    emit('updated')
+  if (!updateResult.success) {
+    personnelSubmitting.value = false
+    error.value = updateResult.error || '更新人员失败'
     return
   }
-  error.value = result.error || '更新人员失败'
+
+  personnelSubmitting.value = false
+  showPersonnelEditorDialog.value = false
+  setSuccess('人员信息已更新')
+  await fetchPersonnel()
+  emit('updated')
 }
 
 async function handleTogglePersonnelStatus(item) {
@@ -183,6 +213,7 @@ async function handlePersonnelImportSuccess(result) {
 }
 
 onMounted(() => {
+  fetchDepartmentTree()
   fetchPersonnel()
 })
 </script>
@@ -192,12 +223,12 @@ onMounted(() => {
     <div class="panel-header">
       <div>
         <h3>人员表</h3>
-        <p class="panel-hint">维护工号、姓名、状态和绑定账号关系。</p>
+        <p class="panel-hint">维护工号、姓名、状态、部门和绑定账号关系。</p>
       </div>
       <div class="panel-actions">
         <button class="btn-secondary" @click="downloadPersonnelImportTemplate('xlsx')">下载模板</button>
         <button class="btn-secondary" @click="showPersonnelImportDialog = true">批量导入</button>
-        <button class="btn-primary" @click="handleCreatePersonnel">新增人员</button>
+        <button class="btn-primary" @click="openCreateDialog">新增人员</button>
       </div>
     </div>
 
@@ -238,6 +269,7 @@ onMounted(() => {
             <th></th>
             <th>工号</th>
             <th>姓名</th>
+            <th>部门</th>
             <th>状态</th>
             <th>绑定账号数</th>
             <th>更新时间</th>
@@ -254,11 +286,12 @@ onMounted(() => {
               </td>
               <td>{{ item.employee_no }}</td>
               <td>{{ item.full_name }}</td>
+              <td>{{ item.department_display || '-' }}</td>
               <td>{{ item.personnel_record_status }}</td>
               <td>{{ item.binding_count }}</td>
               <td>{{ item.updated_at || '-' }}</td>
               <td class="row-actions">
-                <button class="link-btn" @click="handleEditPersonnel(item)">编辑</button>
+                <button class="link-btn" @click="openEditDialog(item)">编辑</button>
                 <button class="link-btn" @click="handleTogglePersonnelStatus(item)">
                   {{ item.personnel_record_status === 'active' ? '停用' : '启用' }}
                 </button>
@@ -266,7 +299,7 @@ onMounted(() => {
               </td>
             </tr>
             <tr v-if="isBindingsExpanded(item.id)" class="bindings-row">
-              <td colspan="7">
+              <td colspan="8">
                 <div v-if="bindingsLoadingByPersonnelId[item.id]" class="bindings-state">加载绑定账号中...</div>
                 <div v-else-if="bindingsErrorByPersonnelId[item.id]" class="bindings-state error">
                   {{ bindingsErrorByPersonnelId[item.id] }}
@@ -288,6 +321,16 @@ onMounted(() => {
       :show="showPersonnelImportDialog"
       @close="showPersonnelImportDialog = false"
       @import-success="handlePersonnelImportSuccess"
+    />
+    <PersonnelEditorDialog
+      :show="showPersonnelEditorDialog"
+      :mode="personnelEditorMode"
+      :initial-value="selectedPersonnel || {}"
+      :department-tree="selectableDepartmentTree"
+      :department-options-loading="departmentOptionsLoading"
+      :submitting="personnelSubmitting"
+      @close="showPersonnelEditorDialog = false"
+      @submit="handlePersonnelEditorSubmit"
     />
     <PersonnelImportResultDialog
       :show="showPersonnelImportResultDialog"

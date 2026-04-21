@@ -9,9 +9,6 @@ class UserCreateRequest(BaseModel):
     username: str = Field(default="")
     password: str = Field(default="")
     user_type: Literal["common", "super"] | str = Field(default="common")
-    primary_department_id: int | None = Field(default=None)
-    secondary_department_id: int | None = Field(default=None)
-    tertiary_department_id: int | None = Field(default=None)
 
 
 class UserPasswordResetRequest(BaseModel):

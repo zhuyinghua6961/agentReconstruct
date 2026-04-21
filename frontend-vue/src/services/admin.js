@@ -113,7 +113,7 @@ export const adminApi = {
     })
   },
 
-  async createUser(username, password, userType = 'common', department = {}) {
+  async createUser(username, password, userType = 'common') {
     const token = readStoredToken()
     const response = await fetch(`${API_BASE}/users`, {
       method: 'POST',
@@ -122,24 +122,6 @@ export const adminApi = {
         username,
         password,
         user_type: userType,
-        primary_department_id: department.primary_department_id ?? null,
-        secondary_department_id: department.secondary_department_id ?? null,
-        tertiary_department_id: department.tertiary_department_id ?? null,
-      })
-    })
-    const data = await safeJson(response)
-    return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
-  },
-
-  async updateUserDepartment(userId, department = {}) {
-    const token = readStoredToken()
-    const response = await fetch(`${API_BASE}/users/${userId}/department`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify({
-        primary_department_id: department.primary_department_id ?? null,
-        secondary_department_id: department.secondary_department_id ?? null,
-        tertiary_department_id: department.tertiary_department_id ?? null,
       })
     })
     const data = await safeJson(response)

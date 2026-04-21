@@ -10,6 +10,7 @@ from typing import Any, Protocol
 from itsdangerous import URLSafeTimedSerializer
 from itsdangerous.exc import BadSignature, BadTimeSignature, SignatureExpired
 
+from app.core.config import get_settings
 from app.modules.departments.service import department_service as shared_department_service
 from app.modules.personnel.service import personnel_service as shared_personnel_service
 
@@ -64,6 +65,14 @@ class AuthRepositoryProtocol(Protocol):
     ) -> int: ...
     def update_user_personnel(self, *, user_id: int, personnel_id: int | None) -> int: ...
     def update_username(self, *, user_id: int, username: str) -> int: ...
+    def sync_departments_for_personnel(
+        self,
+        *,
+        personnel_id: int,
+        primary_department_id: int | None,
+        secondary_department_id: int | None,
+        tertiary_department_id: int | None = None,
+    ) -> int: ...
 
 
 class DepartmentServiceProtocol(Protocol):
@@ -78,6 +87,7 @@ class DepartmentServiceProtocol(Protocol):
 
 class PersonnelServiceProtocol(Protocol):
     def describe_user_personnel(self, *, personnel_id: int | None) -> dict[str, Any]: ...
+    def get_personnel_by_id(self, *, personnel_id: int | None) -> dict[str, Any] | None: ...
 
     def verify_personnel_identity(
         self,
@@ -223,11 +233,18 @@ class AuthService:
         token_service: TokenService | None = None,
         department_service: DepartmentServiceProtocol | None = None,
         personnel_service: PersonnelServiceProtocol | None = None,
+        personnel_department_strict_source_enabled: bool | None = None,
     ) -> None:
         self._repo = repo or UnavailableAuthRepository()
         self._tokens = token_service or TokenService()
         self._departments = department_service or shared_department_service
         self._personnel = personnel_service or shared_personnel_service
+        settings = get_settings()
+        self._personnel_department_strict_source_enabled = (
+            settings.personnel_department_strict_source_enabled
+            if personnel_department_strict_source_enabled is None
+            else bool(personnel_department_strict_source_enabled)
+        )
         self._password_expire_days = max(1, int(os.getenv("PASSWORD_EXPIRE_DAYS", "180") or "180"))
         self._lock_threshold = max(2, int(os.getenv("LOGIN_FAILURE_LOCK_THRESHOLD", "5") or "5"))
         self._lock_minutes = max(1, int(os.getenv("LOGIN_FAILURE_LOCK_MINUTES", "5") or "5"))
@@ -236,7 +253,13 @@ class AuthService:
         if result.get("success"):
             return ok_status
         code = str(result.get("code") or "")
-        if code in {"VALIDATION_ERROR", "USERNAME_INVALID", "PERSONNEL_BINDING_INVALID", "PERSONNEL_DISABLED"}:
+        if code in {
+            "VALIDATION_ERROR",
+            "USERNAME_INVALID",
+            "PERSONNEL_BINDING_INVALID",
+            "PERSONNEL_DISABLED",
+            "DEPARTMENT_MANAGED_BY_PERSONNEL",
+        }:
             return 400
         if code in {
             "PASSWORD_TOO_SHORT",
@@ -306,6 +329,116 @@ class AuthService:
             int(secondary_id) if secondary_id is not None else None,
             int(tertiary_id) if tertiary_id is not None else None,
         )
+
+    @staticmethod
+    def _empty_department_payload() -> dict[str, Any]:
+        return {
+            "primary_department_id": None,
+            "primary_department_name": None,
+            "secondary_department_id": None,
+            "secondary_department_name": None,
+            "tertiary_department_id": None,
+            "tertiary_department_name": None,
+            "department_display": "未填写",
+            "department_completion_level": "empty",
+            "require_department_setup": True,
+        }
+
+    def _describe_department_from_mapping(self, data: dict[str, Any] | None) -> dict[str, Any]:
+        describe = getattr(self._departments, "describe_user_department", None)
+        if not callable(describe):
+            return self._empty_department_payload()
+        payload = describe(
+            primary_department_id=(data or {}).get("primary_department_id"),
+            secondary_department_id=(data or {}).get("secondary_department_id"),
+            tertiary_department_id=(data or {}).get("tertiary_department_id"),
+        )
+        if isinstance(payload, dict):
+            return payload
+        return self._empty_department_payload()
+
+    def _get_personnel_record(self, *, personnel_id: int | None) -> dict[str, Any] | None:
+        if personnel_id is None:
+            return None
+        getter = getattr(self._personnel, "get_personnel_by_id", None)
+        if not callable(getter):
+            return None
+        try:
+            return getter(personnel_id=personnel_id)
+        except TypeError:
+            return getter(personnel_id)
+
+    def _personnel_department_payload(self, *, personnel_id: int | None) -> dict[str, Any]:
+        record = self._get_personnel_record(personnel_id=personnel_id)
+        if not isinstance(record, dict):
+            return self._empty_department_payload()
+        return self._describe_department_from_mapping(record)
+
+    @staticmethod
+    def _department_payload_is_complete(payload: dict[str, Any] | None) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        triplet = (
+            payload.get("primary_department_id"),
+            payload.get("secondary_department_id"),
+            payload.get("tertiary_department_id"),
+        )
+        return all(item is not None for item in triplet) and not bool(payload.get("require_department_setup"))
+
+    def _resolve_department_from_personnel_record(self, *, personnel_record: dict[str, Any] | None) -> dict[str, Any]:
+        payload = self._describe_department_from_mapping(personnel_record)
+        if self._department_payload_is_complete(payload):
+            return {"success": True, "data": payload}
+        return {
+            "success": False,
+            "error": "绑定人员未维护完整部门信息，请联系管理员",
+            "code": "DEPARTMENT_REQUIRED",
+        }
+
+    def _may_use_legacy_department_fallback(
+        self,
+        *,
+        user: dict[str, Any],
+        personnel_payload: dict[str, Any],
+        personnel_department: dict[str, Any],
+        legacy_department: dict[str, Any],
+    ) -> bool:
+        if self._personnel_department_strict_source_enabled:
+            return False
+        if self._is_admin_user(user):
+            return False
+        if user.get("personnel_id") is None:
+            return False
+        if bool(personnel_payload.get("require_personnel_setup")):
+            return False
+        if not bool(personnel_department.get("require_department_setup")):
+            return False
+        return self._department_payload_is_complete(legacy_department)
+
+    def _build_department_payload_with_fallback(
+        self,
+        *,
+        user: dict[str, Any],
+        personnel_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self._is_admin_user(user):
+            legacy_department = self._describe_department_from_mapping(user)
+            return {**legacy_department, "require_department_setup": False}
+        if bool(personnel_payload.get("require_personnel_setup")):
+            return self._describe_department_from_mapping(user)
+
+        personnel_department = self._personnel_department_payload(personnel_id=user.get("personnel_id"))
+        if self._department_payload_is_complete(personnel_department):
+            return personnel_department
+        legacy_department = self._describe_department_from_mapping(user)
+        if self._may_use_legacy_department_fallback(
+            user=user,
+            personnel_payload=personnel_payload,
+            personnel_department=personnel_department,
+            legacy_department=legacy_department,
+        ):
+            return legacy_department
+        return personnel_department
 
     @staticmethod
     def _to_datetime(value: Any) -> datetime | None:
@@ -451,15 +584,6 @@ class AuthService:
         has_security_questions = self._repo.has_security_questions(user_id=user_id)
         require_security_questions_setup = bool(user.get("must_set_security_questions", False)) and not has_security_questions
         created_at = self._to_datetime(user.get("created_at"))
-        department_payload = dict(
-            self._departments.describe_user_department(
-                primary_department_id=user.get("primary_department_id"),
-                secondary_department_id=user.get("secondary_department_id"),
-                tertiary_department_id=user.get("tertiary_department_id"),
-            )
-        )
-        if self._is_admin_user(user):
-            department_payload["require_department_setup"] = False
         personnel_payload = dict(
             self._personnel.describe_user_personnel(
                 personnel_id=user.get("personnel_id"),
@@ -467,6 +591,9 @@ class AuthService:
         )
         if self._is_admin_user(user):
             personnel_payload["require_personnel_setup"] = False
+        department_payload = self._build_department_payload_with_fallback(user=user, personnel_payload=personnel_payload)
+        if self._is_admin_user(user):
+            department_payload["require_department_setup"] = False
         return {
             "id": user_id,
             "username": user["username"],
@@ -512,65 +639,12 @@ class AuthService:
         secondary_department_id: int | None,
         tertiary_department_id: int | None = None,
     ) -> dict[str, Any]:
-        try:
-            user = self._repo.get_by_id(user_id)
-            if not user:
-                return {"success": False, "error": "user_not_found", "code": "USER_NOT_FOUND"}
-
-            current_department = self._departments.describe_user_department(
-                primary_department_id=user.get("primary_department_id"),
-                secondary_department_id=user.get("secondary_department_id"),
-                tertiary_department_id=user.get("tertiary_department_id"),
-            )
-            if (
-                self._department_triplet_from_mapping(user)
-                == self._department_triplet_from_mapping(
-                    {
-                        "primary_department_id": primary_department_id,
-                        "secondary_department_id": secondary_department_id,
-                        "tertiary_department_id": tertiary_department_id,
-                    }
-                )
-                and not bool(current_department.get("require_department_setup"))
-            ):
-                return {"success": True, "message": "department_updated", "data": self._build_user_payload(user)}
-
-            validation = self._departments.validate_department_selection(
-                primary_department_id=primary_department_id,
-                secondary_department_id=secondary_department_id,
-                tertiary_department_id=tertiary_department_id,
-                require_active=True,
-                allow_empty=True,
-                allow_legacy_two_level=False,
-            )
-            if not validation.get("success"):
-                return validation
-
-            department_data = validation.get("data") if isinstance(validation.get("data"), dict) else {}
-            updated_count = self._repo.update_user_department(
-                user_id=user_id,
-                primary_department_id=department_data.get("primary_department_id"),
-                secondary_department_id=department_data.get("secondary_department_id"),
-                tertiary_department_id=department_data.get("tertiary_department_id"),
-            )
-            refreshed_user = self._repo.get_by_id(user_id) or user
-            if (
-                updated_count <= 0
-                and self._department_triplet_from_mapping(refreshed_user)
-                != self._department_triplet_from_mapping(department_data)
-            ):
-                return {"success": False, "error": "department_update_failed", "code": "UPDATE_ERROR"}
-            updated_user = {
-                **refreshed_user,
-                "primary_department_id": department_data.get("primary_department_id"),
-                "secondary_department_id": department_data.get("secondary_department_id"),
-                "tertiary_department_id": department_data.get("tertiary_department_id"),
-            }
-            return {"success": True, "message": "department_updated", "data": self._build_user_payload(updated_user)}
-        except Exception as exc:
-            if _is_db_unavailable_error(exc):
-                return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
-            return {"success": False, "error": str(exc), "code": "UPDATE_ERROR"}
+        del user_id, primary_department_id, secondary_department_id, tertiary_department_id
+        return {
+            "success": False,
+            "error": "部门由人员信息维护，请联系管理员或修改绑定人员",
+            "code": "DEPARTMENT_MANAGED_BY_PERSONNEL",
+        }
 
     def update_username(self, *, user_id: int, username: str) -> dict[str, Any]:
         try:
@@ -630,8 +704,30 @@ class AuthService:
             target_personnel_id = int(target_record.get("id") or 0)
             if target_personnel_id <= 0:
                 return {"success": False, "error": "人员信息校验失败", "code": "PERSONNEL_BINDING_INVALID"}
+            department_resolution = self._resolve_department_from_personnel_record(personnel_record=target_record)
+            if not department_resolution.get("success"):
+                return department_resolution
+            department_data = department_resolution.get("data") if isinstance(department_resolution.get("data"), dict) else {}
 
-            updated_count = self._repo.update_user_personnel(user_id=user_id, personnel_id=target_personnel_id)
+            bind_user_personnel_with_departments = getattr(self._repo, "bind_user_personnel_with_departments", None)
+            if callable(bind_user_personnel_with_departments):
+                updated_count = bind_user_personnel_with_departments(
+                    user_id=user_id,
+                    personnel_id=target_personnel_id,
+                    primary_department_id=department_data.get("primary_department_id"),
+                    secondary_department_id=department_data.get("secondary_department_id"),
+                    tertiary_department_id=department_data.get("tertiary_department_id"),
+                )
+            else:
+                updated_count = self._repo.update_user_personnel(user_id=user_id, personnel_id=target_personnel_id)
+                sync_departments_for_personnel = getattr(self._repo, "sync_departments_for_personnel", None)
+                if callable(sync_departments_for_personnel):
+                    sync_departments_for_personnel(
+                        personnel_id=target_personnel_id,
+                        primary_department_id=department_data.get("primary_department_id"),
+                        secondary_department_id=department_data.get("secondary_department_id"),
+                        tertiary_department_id=department_data.get("tertiary_department_id"),
+                    )
             refreshed_user = self._repo.get_by_id(user_id) or user
             current_personnel_id = refreshed_user.get("personnel_id")
             try:
@@ -641,7 +737,13 @@ class AuthService:
             if updated_count <= 0 and current_personnel_id != target_personnel_id:
                 return {"success": False, "error": "personnel_binding_update_failed", "code": "UPDATE_ERROR"}
 
-            updated_user = {**refreshed_user, "personnel_id": target_personnel_id}
+            updated_user = {
+                **refreshed_user,
+                "personnel_id": target_personnel_id,
+                "primary_department_id": department_data.get("primary_department_id"),
+                "secondary_department_id": department_data.get("secondary_department_id"),
+                "tertiary_department_id": department_data.get("tertiary_department_id"),
+            }
             return {"success": True, "message": "personnel_binding_updated", "data": self._build_user_payload(updated_user)}
         except Exception as exc:
             if _is_db_unavailable_error(exc):
@@ -653,9 +755,6 @@ class AuthService:
         *,
         username: str,
         password: str,
-        primary_department_id: int | None,
-        secondary_department_id: int | None,
-        tertiary_department_id: int | None,
         employee_no: str,
         full_name: str,
         verification_code: str,
@@ -671,17 +770,6 @@ class AuthService:
             if not username_validation.get("success"):
                 return username_validation
             normalized_username = str(username_validation.get("data", {}).get("username") or "").strip()
-            department_validation = self._departments.validate_department_selection(
-                primary_department_id=primary_department_id,
-                secondary_department_id=secondary_department_id,
-                tertiary_department_id=tertiary_department_id,
-                require_active=True,
-                allow_empty=False,
-                allow_legacy_two_level=False,
-            )
-            if not department_validation.get("success"):
-                return department_validation
-
             personnel_validation = self._personnel.verify_personnel_identity(
                 employee_no=str(employee_no or "").strip(),
                 full_name=str(full_name or "").strip(),
@@ -689,13 +777,16 @@ class AuthService:
             )
             if not personnel_validation.get("success"):
                 return personnel_validation
+            personnel_record = personnel_validation.get("data") if isinstance(personnel_validation.get("data"), dict) else {}
+            department_resolution = self._resolve_department_from_personnel_record(personnel_record=personnel_record)
+            if not department_resolution.get("success"):
+                return department_resolution
 
             security_question_validation = self._normalize_security_question_items(security_questions)
             if not security_question_validation.get("success"):
                 return security_question_validation
 
-            department_data = department_validation.get("data") if isinstance(department_validation.get("data"), dict) else {}
-            personnel_record = personnel_validation.get("data") if isinstance(personnel_validation.get("data"), dict) else {}
+            department_data = department_resolution.get("data") if isinstance(department_resolution.get("data"), dict) else {}
             personnel_id = int(personnel_record.get("id") or 0)
             if personnel_id <= 0:
                 return {"success": False, "error": "人员信息校验失败", "code": "PERSONNEL_BINDING_INVALID"}

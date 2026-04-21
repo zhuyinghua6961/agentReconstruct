@@ -9,6 +9,9 @@ class PersonnelCreateRequest(BaseModel):
     employee_no: str = Field(default="")
     full_name: str = Field(default="")
     verification_code: str = Field(default="")
+    primary_department_id: int | None = Field(default=None)
+    secondary_department_id: int | None = Field(default=None)
+    tertiary_department_id: int | None = Field(default=None)
     status: Literal["active", "disabled"] | str = Field(default="active")
     remarks: str | None = Field(default=None)
 
@@ -16,6 +19,10 @@ class PersonnelCreateRequest(BaseModel):
 class PersonnelUpdateRequest(BaseModel):
     full_name: str = Field(default="")
     verification_code: str | None = Field(default=None)
+    primary_department_id: int | None = Field(default=None)
+    secondary_department_id: int | None = Field(default=None)
+    tertiary_department_id: int | None = Field(default=None)
+    status: Literal["active", "disabled"] | str | None = Field(default=None)
     remarks: str | None = Field(default=None)
 
 

@@ -26,7 +26,7 @@ function createStorage(initial = {}) {
   }
 }
 
-test('authApi.register posts the complete self-service registration payload', async () => {
+test('authApi.register posts the self-service registration payload without department fields', async () => {
   const originalFetch = global.fetch
 
   const calls = []
@@ -45,9 +45,6 @@ test('authApi.register posts the complete self-service registration payload', as
       username: 'alice',
       password: 'Secret123!',
       confirmPassword: 'Secret123!',
-      primary_department_id: 1,
-      secondary_department_id: 11,
-      tertiary_department_id: 111,
       employee_no: 'T2024001',
       full_name: '张三',
       verification_code: 'ABC123',
@@ -65,9 +62,6 @@ test('authApi.register posts the complete self-service registration payload', as
     const body = JSON.parse(options.body)
     assert.equal(body.username, 'alice')
     assert.equal(body.password, 'Secret123!')
-    assert.equal(body.primary_department_id, 1)
-    assert.equal(body.secondary_department_id, 11)
-    assert.equal(body.tertiary_department_id, 111)
     assert.equal(body.employee_no, 'T2024001')
     assert.equal(body.full_name, '张三')
     assert.equal(body.verification_code, 'ABC123')
@@ -76,6 +70,9 @@ test('authApi.register posts the complete self-service registration payload', as
     ])
     assert.equal('confirmPassword' in body, false)
     assert.equal('confirm_password' in body, false)
+    assert.equal('primary_department_id' in body, false)
+    assert.equal('secondary_department_id' in body, false)
+    assert.equal('tertiary_department_id' in body, false)
   } finally {
     global.fetch = originalFetch
   }
@@ -100,9 +97,6 @@ test('authApi.register converts non-json error responses into structured failure
     const result = await authApi.register({
       username: 'alice',
       password: 'Secret123!',
-      primary_department_id: 1,
-      secondary_department_id: 11,
-      tertiary_department_id: 111,
       employee_no: 'T2024001',
       full_name: '张三',
       verification_code: 'ABC123',
@@ -145,9 +139,6 @@ test('registerAuth strips confirmPassword fields before posting to backend', asy
       password: 'Secret123!',
       confirmPassword: 'Secret123!',
       confirm_password: 'Secret123!',
-      primary_department_id: 1,
-      secondary_department_id: 11,
-      tertiary_department_id: 111,
       employee_no: 'T2024001',
       full_name: '张三',
       verification_code: 'ABC123',
@@ -161,6 +152,9 @@ test('registerAuth strips confirmPassword fields before posting to backend', asy
     const body = JSON.parse(options.body)
     assert.equal('confirmPassword' in body, false)
     assert.equal('confirm_password' in body, false)
+    assert.equal('primary_department_id' in body, false)
+    assert.equal('secondary_department_id' in body, false)
+    assert.equal('tertiary_department_id' in body, false)
     assert.deepEqual(body.security_questions, [
       { question: '我最喜欢的水果是什么？', answer: '苹果' },
     ])

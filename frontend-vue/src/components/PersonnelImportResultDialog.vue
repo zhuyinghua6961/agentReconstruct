@@ -37,6 +37,18 @@ function getStatusText(status) {
   return getPersonnelImportResultText(status)
 }
 
+function getDepartmentText(item) {
+  if (item?.department_display) {
+    return item.department_display
+  }
+  const parts = [
+    item?.primary_department_name,
+    item?.secondary_department_name,
+    item?.tertiary_department_name,
+  ].filter(Boolean)
+  return parts.length ? parts.join(' / ') : '-'
+}
+
 function close() {
   emit('close')
 }
@@ -87,6 +99,7 @@ function close() {
               <th>行号</th>
               <th>工号</th>
               <th>姓名</th>
+              <th>部门</th>
               <th>状态</th>
               <th>结果</th>
               <th>消息</th>
@@ -97,6 +110,7 @@ function close() {
               <td>{{ item.row || index + 1 }}</td>
               <td>{{ item.employee_no || '-' }}</td>
               <td>{{ item.full_name || '-' }}</td>
+              <td>{{ getDepartmentText(item) }}</td>
               <td>{{ item.personnel_record_status || '-' }}</td>
               <td>
                 <span class="status-badge" :class="getStatusClass(item.status)">

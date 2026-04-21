@@ -331,6 +331,185 @@ class AuthRepository:
             (primary_department_id, secondary_department_id, user_id),
         )
 
+    def sync_departments_for_personnel(
+        self,
+        *,
+        personnel_id: int,
+        primary_department_id: int | None,
+        secondary_department_id: int | None,
+        tertiary_department_id: int | None = None,
+    ) -> int:
+        if (
+            not self.has_column("personnel_id")
+            or not self.has_column("primary_department_id")
+            or not self.has_column("secondary_department_id")
+        ):
+            return 0
+        if self.has_column("tertiary_department_id"):
+            return self._execute_update(
+                """
+                UPDATE users
+                SET primary_department_id = %s,
+                    secondary_department_id = %s,
+                    tertiary_department_id = %s
+                WHERE personnel_id = %s
+                """,
+                (
+                    primary_department_id,
+                    secondary_department_id,
+                    tertiary_department_id,
+                    int(personnel_id),
+                ),
+            )
+        return self._execute_update(
+            """
+            UPDATE users
+            SET primary_department_id = %s,
+                secondary_department_id = %s
+            WHERE personnel_id = %s
+            """,
+            (
+                primary_department_id,
+                secondary_department_id,
+                int(personnel_id),
+            ),
+        )
+
+    def clear_user_department_cache(self, *, user_id: int) -> int:
+        if not self.has_column("primary_department_id") or not self.has_column("secondary_department_id"):
+            return 0
+        if self.has_column("tertiary_department_id"):
+            return self._execute_update(
+                """
+                UPDATE users
+                SET primary_department_id = %s,
+                    secondary_department_id = %s,
+                    tertiary_department_id = %s
+                WHERE id = %s
+                """,
+                (None, None, None, int(user_id)),
+            )
+        return self._execute_update(
+            """
+            UPDATE users
+            SET primary_department_id = %s,
+                secondary_department_id = %s
+            WHERE id = %s
+            """,
+            (None, None, int(user_id)),
+        )
+
+    def bind_user_personnel_with_departments(
+        self,
+        *,
+        user_id: int,
+        personnel_id: int,
+        primary_department_id: int | None,
+        secondary_department_id: int | None,
+        tertiary_department_id: int | None = None,
+    ) -> int:
+        if not self.has_column("personnel_id"):
+            return 0
+        has_department_cache = self.has_column("primary_department_id") and self.has_column("secondary_department_id")
+        has_tertiary_department = self.has_column("tertiary_department_id")
+
+        with self._db.connection() as conn:
+            try:
+                conn.begin()
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE users
+                        SET personnel_id = %s
+                        WHERE id = %s
+                        """,
+                        (int(personnel_id), int(user_id)),
+                    )
+                    updated_count = int(cursor.rowcount or 0)
+                    if has_department_cache:
+                        if has_tertiary_department:
+                            cursor.execute(
+                                """
+                                UPDATE users
+                                SET primary_department_id = %s,
+                                    secondary_department_id = %s,
+                                    tertiary_department_id = %s
+                                WHERE personnel_id = %s
+                                """,
+                                (
+                                    primary_department_id,
+                                    secondary_department_id,
+                                    tertiary_department_id,
+                                    int(personnel_id),
+                                ),
+                            )
+                        else:
+                            cursor.execute(
+                                """
+                                UPDATE users
+                                SET primary_department_id = %s,
+                                    secondary_department_id = %s
+                                WHERE personnel_id = %s
+                                """,
+                                (
+                                    primary_department_id,
+                                    secondary_department_id,
+                                    int(personnel_id),
+                                ),
+                            )
+                conn.commit()
+                return updated_count
+            except Exception:
+                conn.rollback()
+                raise
+
+    def clear_user_personnel_with_department_cache(self, *, user_id: int) -> int:
+        if not self.has_column("personnel_id"):
+            return 0
+        has_department_cache = self.has_column("primary_department_id") and self.has_column("secondary_department_id")
+        has_tertiary_department = self.has_column("tertiary_department_id")
+
+        with self._db.connection() as conn:
+            try:
+                conn.begin()
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE users
+                        SET personnel_id = %s
+                        WHERE id = %s
+                        """,
+                        (None, int(user_id)),
+                    )
+                    updated_count = int(cursor.rowcount or 0)
+                    if has_department_cache:
+                        if has_tertiary_department:
+                            cursor.execute(
+                                """
+                                UPDATE users
+                                SET primary_department_id = %s,
+                                    secondary_department_id = %s,
+                                    tertiary_department_id = %s
+                                WHERE id = %s
+                                """,
+                                (None, None, None, int(user_id)),
+                            )
+                        else:
+                            cursor.execute(
+                                """
+                                UPDATE users
+                                SET primary_department_id = %s,
+                                    secondary_department_id = %s
+                                WHERE id = %s
+                                """,
+                                (None, None, int(user_id)),
+                            )
+                conn.commit()
+                return updated_count
+            except Exception:
+                conn.rollback()
+                raise
+
     def update_username(self, *, user_id: int, username: str) -> int:
         return self._execute_update(
             """

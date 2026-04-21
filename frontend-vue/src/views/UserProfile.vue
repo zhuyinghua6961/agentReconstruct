@@ -1,8 +1,6 @@
 <script setup>
-import { computed, ref, onMounted } from 'vue'
-import DepartmentSelector from '../components/DepartmentSelector.vue'
+import { ref, onMounted } from 'vue'
 import { authApi, clearStoredAuth, persistStoredUser, readStoredUser } from '../services/auth'
-import { departmentApi, mergePreservedDepartmentTree } from '../services/departments'
 import { quotaApi } from '../services/quota'
 
 const currentUser = ref(null)
@@ -11,8 +9,6 @@ const error = ref('')
 const success = ref('')
 const usernameError = ref('')
 const usernameSuccess = ref('')
-const departmentError = ref('')
-const departmentSuccess = ref('')
 const personnelError = ref('')
 const personnelSuccess = ref('')
 const forcePasswordChange = ref(false)
@@ -33,20 +29,10 @@ const newPassword = ref('')
 const showUsernameForm = ref(false)
 const usernameInput = ref('')
 
-// 部门信息
-const showDepartmentForm = ref(false)
-const departmentTree = ref([])
-const departmentLoading = ref(false)
-const selectedPrimaryDepartmentId = ref(null)
-const selectedSecondaryDepartmentId = ref(null)
-const selectedTertiaryDepartmentId = ref(null)
 const showPersonnelForm = ref(false)
 const employeeNoInput = ref('')
 const fullNameInput = ref('')
 const verificationCodeInput = ref('')
-const departmentSelectorTree = computed(() => (
-  mergePreservedDepartmentTree(departmentTree.value, currentUser.value)
-))
 
 // 安全问题表单
 const showSecurityForm = ref(false)
@@ -167,26 +153,17 @@ async function fetchCurrentUser() {
       forceSecurityQuestionSetup.value = Boolean(result.data?.require_security_questions_setup)
       forceDepartmentSetup.value = Boolean(result.data?.require_department_setup)
       forcePersonnelSetup.value = Boolean(result.data?.require_personnel_setup)
-      selectedPrimaryDepartmentId.value = result.data?.primary_department_id ?? null
-      selectedSecondaryDepartmentId.value = result.data?.secondary_department_id ?? null
-      selectedTertiaryDepartmentId.value = result.data?.tertiary_department_id ?? null
       if (forcePasswordChange.value) {
         showPasswordForm.value = true
       }
       if (forceSecurityQuestionSetup.value) {
         showSecurityForm.value = true
       }
-      if (forceDepartmentSetup.value) {
-        showDepartmentForm.value = true
-      }
       if (forcePersonnelSetup.value) {
         showPersonnelForm.value = true
       }
       // 获取已设置的安全问题
       await fetchSecurityQuestions()
-      if (forceDepartmentSetup.value || showDepartmentForm.value) {
-        await ensureDepartmentTreeLoaded()
-      }
     } else {
       error.value = result.error || '获取用户信息失败'
     }
@@ -236,37 +213,6 @@ async function saveUsername() {
   } catch (e) {
     usernameError.value = e instanceof Error && e.message ? e.message : '修改用户名失败'
   }
-}
-
-async function fetchDepartmentTree() {
-  departmentLoading.value = true
-  departmentError.value = ''
-  try {
-    const result = await departmentApi.getSelectableTree()
-    if (result.success) {
-      departmentTree.value = Array.isArray(result.data?.items) ? result.data.items : []
-      return
-    }
-    departmentTree.value = []
-    departmentError.value = result.error || '获取部门选项失败'
-  } catch (e) {
-    departmentTree.value = []
-    departmentError.value = '获取部门选项失败'
-  } finally {
-    departmentLoading.value = false
-  }
-}
-
-async function ensureDepartmentTreeLoaded() {
-  if (departmentLoading.value || departmentTree.value.length > 0) {
-    return
-  }
-  await fetchDepartmentTree()
-}
-
-async function openDepartmentForm() {
-  showDepartmentForm.value = true
-  await ensureDepartmentTreeLoaded()
 }
 
 function syncStoredUser(patch) {
@@ -368,13 +314,11 @@ async function submitPasswordChange() {
     
     setTimeout(() => {
       success.value = ''
-      // 若仍需设置安全问题，停留在本页并展开安全问题表单
       if (forceSecurityQuestionSetup.value) {
         showSecurityForm.value = true
         return
       }
       if (forceDepartmentSetup.value) {
-        showDepartmentForm.value = true
         return
       }
       if (!hasPendingForcedSetup()) {
@@ -441,7 +385,6 @@ async function saveSecurityQuestions() {
       setTimeout(() => {
         success.value = ''
         if (forceDepartmentSetup.value) {
-          showDepartmentForm.value = true
           return
         }
         if (!hasPendingForcedSetup()) {
@@ -454,48 +397,6 @@ async function saveSecurityQuestions() {
   } else {
     error.value = result.error
   }
-}
-
-async function saveDepartment() {
-  departmentError.value = ''
-  departmentSuccess.value = ''
-
-  if (!selectedPrimaryDepartmentId.value || !selectedSecondaryDepartmentId.value || !selectedTertiaryDepartmentId.value) {
-    departmentError.value = '请选择一级、二级和三级部门'
-    return
-  }
-
-  const result = await departmentApi.updateMyDepartment(
-    selectedPrimaryDepartmentId.value,
-    selectedSecondaryDepartmentId.value,
-    selectedTertiaryDepartmentId.value,
-  )
-
-  if (result.success) {
-    currentUser.value = {
-      ...(currentUser.value || {}),
-      ...(result.data || {}),
-    }
-    selectedPrimaryDepartmentId.value = result.data?.primary_department_id ?? null
-    selectedSecondaryDepartmentId.value = result.data?.secondary_department_id ?? null
-    selectedTertiaryDepartmentId.value = result.data?.tertiary_department_id ?? null
-    forceDepartmentSetup.value = Boolean(result.data?.require_department_setup)
-    showDepartmentForm.value = false
-    syncStoredUser({
-      ...(result.data || {}),
-      require_department_setup: Boolean(result.data?.require_department_setup),
-    })
-    departmentSuccess.value = '部门信息保存成功'
-    setTimeout(() => {
-      departmentSuccess.value = ''
-      if (!hasPendingForcedSetup()) {
-        redirectAfterProfileCompletion()
-      }
-    }, 1500)
-    return
-  }
-
-  departmentError.value = result.error || '保存部门信息失败'
 }
 
 async function savePersonnelBinding() {
@@ -520,13 +421,13 @@ async function savePersonnelBinding() {
     currentUser.value = { ...(currentUser.value || {}), ...(result.data || {}) }
     syncStoredUser(result.data || {})
     forcePersonnelSetup.value = Boolean(result.data?.require_personnel_setup)
+    forceDepartmentSetup.value = Boolean(result.data?.require_department_setup)
     showPersonnelForm.value = false
     syncPersonnelInputsFromCurrentUser()
     personnelSuccess.value = '人员信息保存成功'
-    setTimeout(async () => {
+    setTimeout(() => {
       personnelSuccess.value = ''
       if (forceDepartmentSetup.value) {
-        await openDepartmentForm()
         return
       }
       if (!hasPendingForcedSetup()) {
@@ -558,7 +459,6 @@ function checkForcePasswordChange() {
   }
   if (urlParams.get('department') === 'required') {
     forceDepartmentSetup.value = true
-    showDepartmentForm.value = true
   }
   if (urlParams.get('personnel') === 'required') {
     forcePersonnelSetup.value = true
@@ -753,17 +653,19 @@ onMounted(() => {
         <!-- 部门信息 -->
         <div class="action-card">
           <h2>部门信息</h2>
-          <p class="hint">请选择您的一级、二级、三级部门。未填写部门信息时会被强制拦截到个人中心补全。</p>
+          <p class="hint">部门由人员信息统一维护。若当前显示缺失或不正确，请联系管理员在人员表维护。</p>
 
           <div v-if="forceDepartmentSetup" class="alert alert-warning">
             <strong>⚠️ 部门信息必填</strong><br>
-            请先补全部门信息后再继续使用系统。
+            当前绑定人员未维护完整部门信息，请联系管理员在人员表维护后再继续使用系统。
           </div>
 
-          <div v-if="departmentSuccess" class="alert alert-success">{{ departmentSuccess }}</div>
-          <div v-if="departmentError" class="alert alert-error">{{ departmentError }}</div>
+          <div v-if="currentUser.department_effective_status === 'disabled'" class="alert alert-warning">
+            <strong>⚠️ 当前部门已停用</strong><br>
+            请联系管理员调整当前绑定人员的部门信息。
+          </div>
 
-          <div v-if="!showDepartmentForm" class="department-summary">
+          <div class="department-summary">
             <div class="info-row">
               <span class="label">当前部门</span>
               <span
@@ -773,29 +675,10 @@ onMounted(() => {
                 {{ currentUser.department_display || '未填写' }}
               </span>
             </div>
-            <button class="action-btn" @click="openDepartmentForm">
-              {{ currentUser.primary_department_id && currentUser.secondary_department_id ? '修改部门' : '填写部门' }}
-            </button>
-          </div>
-
-          <div v-else class="department-form">
-            <div v-if="departmentLoading" class="loading-small">加载部门选项中...</div>
-            <template v-else>
-              <DepartmentSelector
-                :tree="departmentSelectorTree"
-                :primary-id="selectedPrimaryDepartmentId"
-                :secondary-id="selectedSecondaryDepartmentId"
-                :tertiary-id="selectedTertiaryDepartmentId"
-                :allow-empty="false"
-                @update:primary-id="selectedPrimaryDepartmentId = $event"
-                @update:secondary-id="selectedSecondaryDepartmentId = $event"
-                @update:tertiary-id="selectedTertiaryDepartmentId = $event"
-              />
-              <div class="form-actions">
-                <button class="btn-secondary" @click="showDepartmentForm = false" :disabled="forceDepartmentSetup">取消</button>
-                <button class="btn-primary" @click="saveDepartment" :disabled="departmentLoading || !departmentTree.length">保存部门</button>
-              </div>
-            </template>
+            <div class="info-row">
+              <span class="label">维护方式</span>
+              <span class="value">联系管理员在人员表维护</span>
+            </div>
           </div>
         </div>
 

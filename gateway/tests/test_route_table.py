@@ -38,6 +38,26 @@ def test_route_table_patterns_include_department_routes():
     assert expected.issubset(set(PUBLIC_ROUTE_PATTERNS))
 
 
+def test_auth_register_routes_keep_api_and_v1_parity():
+    expected = {
+        "/api/auth/register",
+        "/api/v1/auth/register",
+    }
+
+    assert expected.issubset(set(PUBLIC_ROUTE_PATTERNS))
+
+
+def test_auth_department_routes_keep_api_and_v1_parity_even_when_rejected():
+    expected = {
+        "/api/auth/departments/tree",
+        "/api/v1/auth/departments/tree",
+        "/api/auth/department",
+        "/api/v1/auth/department",
+    }
+
+    assert expected.issubset(set(PUBLIC_ROUTE_PATTERNS))
+
+
 def test_route_table_patterns_include_username_routes():
     expected = {
         "/api/auth/username",

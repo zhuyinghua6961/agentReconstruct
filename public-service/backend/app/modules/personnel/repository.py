@@ -123,6 +123,9 @@ class PersonnelRepository:
                 p.verification_code_hash,
                 p.status,
                 p.remarks,
+                p.primary_department_id,
+                p.secondary_department_id,
+                p.tertiary_department_id,
                 p.created_at,
                 p.updated_at,
                 COALESCE(u.binding_count, 0) AS binding_count
@@ -151,6 +154,9 @@ class PersonnelRepository:
                 p.verification_code_hash,
                 p.status,
                 p.remarks,
+                p.primary_department_id,
+                p.secondary_department_id,
+                p.tertiary_department_id,
                 p.created_at,
                 p.updated_at,
                 COALESCE(u.binding_count, 0) AS binding_count
@@ -219,6 +225,9 @@ class PersonnelRepository:
                 p.full_name,
                 p.status,
                 p.remarks,
+                p.primary_department_id,
+                p.secondary_department_id,
+                p.tertiary_department_id,
                 p.created_at,
                 p.updated_at,
                 COALESCE(u.binding_count, 0) AS binding_count
@@ -243,6 +252,9 @@ class PersonnelRepository:
         employee_no: str,
         full_name: str,
         verification_code_hash: str,
+        primary_department_id: int | None = None,
+        secondary_department_id: int | None = None,
+        tertiary_department_id: int | None = None,
         status: str = "active",
         remarks: str | None = None,
     ) -> int:
@@ -252,15 +264,21 @@ class PersonnelRepository:
                 employee_no,
                 full_name,
                 verification_code_hash,
+                primary_department_id,
+                secondary_department_id,
+                tertiary_department_id,
                 status,
                 remarks
             )
-            VALUES (%s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 self._clean_text(employee_no),
                 self._clean_text(full_name),
                 str(verification_code_hash or ""),
+                int(primary_department_id) if primary_department_id is not None else None,
+                int(secondary_department_id) if secondary_department_id is not None else None,
+                int(tertiary_department_id) if tertiary_department_id is not None else None,
                 self._clean_text(status).lower() or "active",
                 self._clean_text(remarks) or None,
             ),
@@ -272,6 +290,9 @@ class PersonnelRepository:
         personnel_id: int,
         full_name: str | None = None,
         verification_code_hash: str | None = None,
+        primary_department_id: int | None = None,
+        secondary_department_id: int | None = None,
+        tertiary_department_id: int | None = None,
         remarks: object = REMARKS_UNSET,
         status: str | None = None,
     ) -> int:
@@ -283,6 +304,15 @@ class PersonnelRepository:
         if verification_code_hash is not None:
             sets.append("verification_code_hash = %s")
             params.append(str(verification_code_hash or ""))
+        if primary_department_id is not None:
+            sets.append("primary_department_id = %s")
+            params.append(int(primary_department_id))
+        if secondary_department_id is not None:
+            sets.append("secondary_department_id = %s")
+            params.append(int(secondary_department_id))
+        if tertiary_department_id is not None:
+            sets.append("tertiary_department_id = %s")
+            params.append(int(tertiary_department_id))
         if remarks is not REMARKS_UNSET:
             sets.append("remarks = %s")
             params.append(self._clean_text(remarks) or None)
@@ -311,6 +341,121 @@ class PersonnelRepository:
             (self._clean_text(status).lower(), int(personnel_id)),
         )
 
+    def _sync_user_departments_for_personnel_cursor(
+        self,
+        *,
+        cursor: Any,
+        personnel_id: int,
+        primary_department_id: int | None,
+        secondary_department_id: int | None,
+        tertiary_department_id: int | None = None,
+    ) -> int:
+        if (
+            not self.has_table("users")
+            or not self.has_user_column("personnel_id")
+            or not self.has_user_column("primary_department_id")
+            or not self.has_user_column("secondary_department_id")
+        ):
+            return 0
+        if self.has_user_column("tertiary_department_id"):
+            cursor.execute(
+                """
+                UPDATE users
+                SET primary_department_id = %s,
+                    secondary_department_id = %s,
+                    tertiary_department_id = %s
+                WHERE personnel_id = %s
+                """,
+                (
+                    int(primary_department_id) if primary_department_id is not None else None,
+                    int(secondary_department_id) if secondary_department_id is not None else None,
+                    int(tertiary_department_id) if tertiary_department_id is not None else None,
+                    int(personnel_id),
+                ),
+            )
+            return int(cursor.rowcount or 0)
+        cursor.execute(
+            """
+            UPDATE users
+            SET primary_department_id = %s,
+                secondary_department_id = %s
+            WHERE personnel_id = %s
+            """,
+            (
+                int(primary_department_id) if primary_department_id is not None else None,
+                int(secondary_department_id) if secondary_department_id is not None else None,
+                int(personnel_id),
+            ),
+        )
+        return int(cursor.rowcount or 0)
+
+    def update_personnel_and_sync_bound_users(
+        self,
+        *,
+        personnel_id: int,
+        full_name: str | None = None,
+        verification_code_hash: str | None = None,
+        primary_department_id: int | None = None,
+        secondary_department_id: int | None = None,
+        tertiary_department_id: int | None = None,
+        remarks: object = REMARKS_UNSET,
+        status: str | None = None,
+        sync_bound_users: bool = False,
+    ) -> int:
+        sets: list[str] = []
+        params: list[Any] = []
+        if full_name is not None:
+            sets.append("full_name = %s")
+            params.append(self._clean_text(full_name))
+        if verification_code_hash is not None:
+            sets.append("verification_code_hash = %s")
+            params.append(str(verification_code_hash or ""))
+        if primary_department_id is not None:
+            sets.append("primary_department_id = %s")
+            params.append(int(primary_department_id))
+        if secondary_department_id is not None:
+            sets.append("secondary_department_id = %s")
+            params.append(int(secondary_department_id))
+        if tertiary_department_id is not None:
+            sets.append("tertiary_department_id = %s")
+            params.append(int(tertiary_department_id))
+        if remarks is not REMARKS_UNSET:
+            sets.append("remarks = %s")
+            params.append(self._clean_text(remarks) or None)
+        if status is not None:
+            sets.append("status = %s")
+            params.append(self._clean_text(status).lower())
+        if not sets:
+            return 0
+        params.append(int(personnel_id))
+
+        with self._db.connection() as conn:
+            try:
+                conn.begin()
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        f"""
+                        UPDATE personnel_records
+                        SET {", ".join(sets)}
+                        WHERE id = %s
+                        """,
+                        tuple(params),
+                    )
+                    updated_count = int(cursor.rowcount or 0)
+                    if sync_bound_users:
+                        self._sync_user_departments_for_personnel_cursor(
+                            cursor=cursor,
+                            personnel_id=int(personnel_id),
+                            primary_department_id=primary_department_id,
+                            secondary_department_id=secondary_department_id,
+                            tertiary_department_id=tertiary_department_id,
+                        )
+                conn.commit()
+                return updated_count
+            except Exception:
+                conn.rollback()
+                raise
+
     def list_bindings(self, *, personnel_id: int) -> list[dict[str, Any]]:
         fields = ["id", "username", "role", "status", "personnel_id"]
         if self.has_user_column("user_type"):
@@ -325,7 +470,106 @@ class PersonnelRepository:
             (int(personnel_id),),
         )
 
-    def import_personnel_rows(self, *, rows: list[dict[str, Any]]) -> dict[str, Any]:
+    def list_bound_department_candidates(self, *, personnel_id: int) -> list[dict[str, Any]]:
+        return self._execute_query(
+            """
+            SELECT
+                primary_department_id,
+                secondary_department_id,
+                tertiary_department_id,
+                COUNT(*) AS binding_count
+            FROM users
+            WHERE personnel_id = %s
+            GROUP BY primary_department_id, secondary_department_id, tertiary_department_id
+            ORDER BY binding_count DESC, primary_department_id ASC, secondary_department_id ASC, tertiary_department_id ASC
+            """,
+            (int(personnel_id),),
+        )
+
+    def list_personnel_for_backfill(self) -> list[dict[str, Any]]:
+        return self._execute_query(
+            """
+            SELECT
+                id,
+                employee_no,
+                full_name,
+                primary_department_id,
+                secondary_department_id,
+                tertiary_department_id
+            FROM personnel_records
+            WHERE primary_department_id IS NULL
+               OR secondary_department_id IS NULL
+               OR tertiary_department_id IS NULL
+            ORDER BY id ASC
+            """
+        )
+
+    def update_personnel_department(
+        self,
+        *,
+        personnel_id: int,
+        primary_department_id: int | None,
+        secondary_department_id: int | None,
+        tertiary_department_id: int | None,
+    ) -> int:
+        return self._execute_update(
+            """
+            UPDATE personnel_records
+            SET primary_department_id = %s,
+                secondary_department_id = %s,
+                tertiary_department_id = %s
+            WHERE id = %s
+            """,
+            (
+                int(primary_department_id) if primary_department_id is not None else None,
+                int(secondary_department_id) if secondary_department_id is not None else None,
+                int(tertiary_department_id) if tertiary_department_id is not None else None,
+                int(personnel_id),
+            ),
+        )
+
+    def backfill_personnel_department_and_sync_users(
+        self,
+        *,
+        personnel_id: int,
+        primary_department_id: int | None,
+        secondary_department_id: int | None,
+        tertiary_department_id: int | None,
+    ) -> int:
+        with self._db.connection() as conn:
+            try:
+                conn.begin()
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        UPDATE personnel_records
+                        SET primary_department_id = %s,
+                            secondary_department_id = %s,
+                            tertiary_department_id = %s
+                        WHERE id = %s
+                        """,
+                        (
+                            int(primary_department_id) if primary_department_id is not None else None,
+                            int(secondary_department_id) if secondary_department_id is not None else None,
+                            int(tertiary_department_id) if tertiary_department_id is not None else None,
+                            int(personnel_id),
+                        ),
+                    )
+                    updated_count = int(cursor.rowcount or 0)
+                    self._sync_user_departments_for_personnel_cursor(
+                        cursor=cursor,
+                        personnel_id=int(personnel_id),
+                        primary_department_id=primary_department_id,
+                        secondary_department_id=secondary_department_id,
+                        tertiary_department_id=tertiary_department_id,
+                    )
+                conn.commit()
+                return updated_count
+            except Exception:
+                conn.rollback()
+                raise
+
+    def import_personnel_rows(self, *, rows: list[dict[str, Any]], sync_bound_users: bool = False) -> dict[str, Any]:
         created = 0
         updated = 0
         details: list[dict[str, Any]] = []
@@ -340,6 +584,9 @@ class PersonnelRepository:
                         full_name = self._clean_text(row.get("full_name"))
                         verification_code_hash = str(row.get("verification_code_hash") or "")
                         status = self._clean_text(row.get("status")).lower()
+                        primary_department_id = row.get("primary_department_id")
+                        secondary_department_id = row.get("secondary_department_id")
+                        tertiary_department_id = row.get("tertiary_department_id")
                         raw_remarks = row.get("remarks", REMARKS_UNSET)
                         remarks = REMARKS_UNSET if raw_remarks is REMARKS_UNSET else (self._clean_text(raw_remarks) or None)
 
@@ -355,19 +602,26 @@ class PersonnelRepository:
                         )
                         existing = cursor.fetchone() or None
                         if existing:
+                            current_personnel_id = int(existing["id"])
                             update_sets = [
                                 "full_name = %s",
                                 "verification_code_hash = %s",
+                                "primary_department_id = %s",
+                                "secondary_department_id = %s",
+                                "tertiary_department_id = %s",
                                 "status = %s",
                             ]
                             update_params: list[Any] = [
                                 full_name,
                                 verification_code_hash,
+                                int(primary_department_id) if primary_department_id is not None else None,
+                                int(secondary_department_id) if secondary_department_id is not None else None,
+                                int(tertiary_department_id) if tertiary_department_id is not None else None,
                                 status,
                             ]
                             if remarks is not REMARKS_UNSET:
-                                update_sets.insert(2, "remarks = %s")
-                                update_params.insert(2, remarks)
+                                update_sets.insert(5, "remarks = %s")
+                                update_params.insert(5, remarks)
                             update_params.append(int(existing["id"]))
                             cursor.execute(
                                 f"""
@@ -377,6 +631,14 @@ class PersonnelRepository:
                                 """,
                                 tuple(update_params),
                             )
+                            if sync_bound_users:
+                                self._sync_user_departments_for_personnel_cursor(
+                                    cursor=cursor,
+                                    personnel_id=current_personnel_id,
+                                    primary_department_id=primary_department_id,
+                                    secondary_department_id=secondary_department_id,
+                                    tertiary_department_id=tertiary_department_id,
+                                )
                             updated += 1
                             details.append(
                                 {
@@ -395,19 +657,34 @@ class PersonnelRepository:
                                 employee_no,
                                 full_name,
                                 verification_code_hash,
+                                primary_department_id,
+                                secondary_department_id,
+                                tertiary_department_id,
                                 status,
                                 remarks
                             )
-                            VALUES (%s, %s, %s, %s, %s)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                             """,
                             (
                                 employee_no,
                                 full_name,
                                 verification_code_hash,
+                                int(primary_department_id) if primary_department_id is not None else None,
+                                int(secondary_department_id) if secondary_department_id is not None else None,
+                                int(tertiary_department_id) if tertiary_department_id is not None else None,
                                 status,
                                 None if remarks is REMARKS_UNSET else remarks,
                             ),
                         )
+                        current_personnel_id = int(getattr(cursor, "lastrowid", 0) or 0)
+                        if sync_bound_users and current_personnel_id > 0:
+                            self._sync_user_departments_for_personnel_cursor(
+                                cursor=cursor,
+                                personnel_id=current_personnel_id,
+                                primary_department_id=primary_department_id,
+                                secondary_department_id=secondary_department_id,
+                                tertiary_department_id=tertiary_department_id,
+                            )
                         created += 1
                         details.append(
                             {

@@ -193,10 +193,9 @@ function close() {
         <div class="info-section">
           <p class="info-title">📌 导入说明：</p>
           <ul class="info-list">
-            <li>文件包含五列：username、password、user_type、primary_department_name、secondary_department_name</li>
+            <li>文件包含三列：username、password、user_type</li>
             <li>用户身份只能是 <code>super</code>（超级用户）或 <code>common</code>（普通用户）</li>
-            <li>部门名称按去除首尾空格后的精确匹配；两个部门列要么都填，要么都留空</li>
-            <li>若部门已停用、二级部门不属于当前一级部门，或者只填了一列，当前行会导入失败</li>
+            <li>部门信息由绑定的人员记录同步，不再从用户导入模板填写部门</li>
             <li>用户名长度 3-50 字符，不能以 admin 开头</li>
             <li>密码长度不少于 6 位</li>
             <li>单次最多导入 1000 条记录</li>

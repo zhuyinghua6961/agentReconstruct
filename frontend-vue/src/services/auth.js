@@ -115,9 +115,6 @@ export const authApi = {
     const submitPayload = {
       username: payload?.username ?? '',
       password: payload?.password ?? '',
-      primary_department_id: payload?.primary_department_id ?? null,
-      secondary_department_id: payload?.secondary_department_id ?? null,
-      tertiary_department_id: payload?.tertiary_department_id ?? null,
       employee_no: payload?.employee_no ?? '',
       full_name: payload?.full_name ?? '',
       verification_code: payload?.verification_code ?? '',

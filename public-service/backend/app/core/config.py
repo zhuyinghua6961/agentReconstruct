@@ -153,6 +153,7 @@ class Settings:
     conversation_assistant_write_target: str
     conversation_overlay_enabled: bool
     conversation_legacy_fallback_enabled: bool
+    personnel_department_strict_source_enabled: bool
 
     @property
     def mysql_dsn(self) -> str:
@@ -254,4 +255,5 @@ def get_settings() -> Settings:
         conversation_assistant_write_target=conversation_assistant_write_target,
         conversation_overlay_enabled=conversation_overlay_enabled,
         conversation_legacy_fallback_enabled=_get_bool("PUBLIC_SERVICE_ENABLE_LEGACY_CONVERSATION_FALLBACK", False),
+        personnel_department_strict_source_enabled=_get_bool("PERSONNEL_DEPARTMENT_STRICT_SOURCE_ENABLED", False),
     )

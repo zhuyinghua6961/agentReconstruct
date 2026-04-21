@@ -3,10 +3,8 @@ import { computed, ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { authApi } from '../services/auth'
 import { adminApi } from '../services/admin'
-import { departmentApi, mergePreservedDepartmentTree } from '../services/departments'
 import BatchImportDialog from '../components/BatchImportDialog.vue'
 import DepartmentManagementPanel from '../components/DepartmentManagementPanel.vue'
-import DepartmentSelector from '../components/DepartmentSelector.vue'
 import ImportResultDialog from '../components/ImportResultDialog.vue'
 import PersonnelLookupSelect from '../components/PersonnelLookupSelect.vue'
 import PersonnelManagementPanel from '../components/PersonnelManagementPanel.vue'
@@ -38,7 +36,6 @@ const showCreateModal = ref(false)
 const showResetPasswordModal = ref(false)
 const showBatchImportDialog = ref(false)
 const showImportResultDialog = ref(false)
-const showDepartmentModal = ref(false)
 const showUsernameModal = ref(false)
 const showPersonnelModal = ref(false)
 const importResult = ref(null)
@@ -55,14 +52,6 @@ const newUserType = ref('common')  // 默认为普通用户
 const showPassword = ref(false)
 const showCreatePassword = ref(false)
 const resetPasswordValue = ref('')
-const departmentOptionsLoading = ref(false)
-const selectableDepartmentTree = ref([])
-const newPrimaryDepartmentId = ref(null)
-const newSecondaryDepartmentId = ref(null)
-const newTertiaryDepartmentId = ref(null)
-const editPrimaryDepartmentId = ref(null)
-const editSecondaryDepartmentId = ref(null)
-const editTertiaryDepartmentId = ref(null)
 const selectedPersonnelId = ref(null)
 const selectedPersonnelSummary = ref('')
 const personnelLookupOptions = ref([])
@@ -72,9 +61,6 @@ const hasSelectedUsers = computed(() => selectedUserIds.value.length > 0)
 const allCurrentPageSelected = computed(() => (
   currentPageUserIds.value.length > 0
   && currentPageUserIds.value.every(id => selectedUserIds.value.includes(id))
-))
-const editDepartmentTree = computed(() => (
-  mergePreservedDepartmentTree(selectableDepartmentTree.value, selectedUser.value)
 ))
 const activeAdminTab = computed(() => {
   const rawTab = Array.isArray(route.query.tab) ? route.query.tab[0] : route.query.tab
@@ -194,18 +180,6 @@ async function fetchUsers() {
   } finally {
     loading.value = false
   }
-}
-
-async function fetchDepartmentOptions() {
-  departmentOptionsLoading.value = true
-  const result = await departmentApi.getSelectableTree()
-  if (result.success) {
-    selectableDepartmentTree.value = Array.isArray(result.data?.items) ? result.data.items : []
-  } else {
-    selectableDepartmentTree.value = []
-    error.value = result.error || '获取部门选项失败'
-  }
-  departmentOptionsLoading.value = false
 }
 
 function toggleUserSelection(userId) {
@@ -416,20 +390,8 @@ function openCreateModal() {
   newUsername.value = ''
   newUserPassword.value = ''
   newUserType.value = 'common'  // 重置为默认值
-  newPrimaryDepartmentId.value = null
-  newSecondaryDepartmentId.value = null
-  newTertiaryDepartmentId.value = null
   error.value = ''
   showCreateModal.value = true
-}
-
-function openDepartmentModal(user) {
-  selectedUser.value = user
-  editPrimaryDepartmentId.value = user?.primary_department_id ?? null
-  editSecondaryDepartmentId.value = user?.secondary_department_id ?? null
-  editTertiaryDepartmentId.value = user?.tertiary_department_id ?? null
-  error.value = ''
-  showDepartmentModal.value = true
 }
 
 function openPersonnelModal(user) {
@@ -583,11 +545,6 @@ async function submitCreateUser() {
     newUsername.value,
     newUserPassword.value,
     newUserType.value,
-    {
-      primary_department_id: newPrimaryDepartmentId.value,
-      secondary_department_id: newSecondaryDepartmentId.value,
-      tertiary_department_id: newTertiaryDepartmentId.value,
-    },
   )
   
   if (result.success) {
@@ -598,29 +555,6 @@ async function submitCreateUser() {
   } else {
     error.value = result.error
   }
-}
-
-async function submitUserDepartment() {
-  error.value = ''
-  if (!selectedUser.value) {
-    error.value = '未选择要编辑的用户'
-    return
-  }
-
-  const result = await adminApi.updateUserDepartment(selectedUser.value.id, {
-    primary_department_id: editPrimaryDepartmentId.value,
-    secondary_department_id: editSecondaryDepartmentId.value,
-    tertiary_department_id: editTertiaryDepartmentId.value,
-  })
-
-  if (result.success) {
-    success.value = `用户 ${selectedUser.value.username} 的部门已更新`
-    showDepartmentModal.value = false
-    await fetchUsers()
-    setTimeout(() => success.value = '', 3000)
-    return
-  }
-  error.value = result.error || '修改用户部门失败'
 }
 
 function openBatchImportDialog() {
@@ -640,10 +574,7 @@ function handleImportSuccess(result) {
 }
 
 async function handleDepartmentDictionaryUpdated() {
-  await Promise.all([
-    fetchDepartmentOptions(),
-    fetchUsers(),
-  ])
+  await fetchUsers()
 }
 
 async function handlePersonnelManagementUpdated() {
@@ -655,10 +586,7 @@ async function handlePersonnelManagementUpdated() {
 onMounted(async () => {
   await ensureAdminTab()
   await fetchCurrentUser()
-  await Promise.all([
-    fetchUsers(),
-    fetchDepartmentOptions(),
-  ])
+  await fetchUsers()
 })
 </script>
 
@@ -797,7 +725,6 @@ onMounted(async () => {
               <td>{{ user.created_at }}</td>
               <td class="actions">
                 <button class="action-btn" @click="openPersonnelModal(user)">设置人员</button>
-                <button class="action-btn" @click="openDepartmentModal(user)">设置部门</button>
                 <button
                   v-if="!isAdminIdentity(user)"
                   class="action-btn"
@@ -940,20 +867,7 @@ onMounted(async () => {
               </label>
             </div>
           </div>
-          <div class="form-group">
-            <label>部门信息（可留空）</label>
-            <DepartmentSelector
-              :tree="selectableDepartmentTree"
-              :primary-id="newPrimaryDepartmentId"
-              :secondary-id="newSecondaryDepartmentId"
-              :tertiary-id="newTertiaryDepartmentId"
-              :allow-empty="true"
-              :disabled="departmentOptionsLoading"
-              @update:primary-id="newPrimaryDepartmentId = $event"
-              @update:secondary-id="newSecondaryDepartmentId = $event"
-              @update:tertiary-id="newTertiaryDepartmentId = $event"
-            />
-          </div>
+          <p class="hint-text">部门信息会在用户绑定人员后自动同步，无需在这里单独填写。</p>
         </div>
         <div class="modal-footer">
           <button class="btn-secondary" @click="showCreateModal = false">取消</button>
@@ -975,34 +889,6 @@ onMounted(async () => {
         <div class="modal-footer">
           <button class="btn-secondary" @click="showResetPasswordModal = false">关闭</button>
           <button class="btn-primary" @click="copyResetPassword">复制密码</button>
-        </div>
-      </div>
-    </div>
-
-    <div v-if="showDepartmentModal" class="modal-overlay" @click.self="showDepartmentModal = false">
-      <div class="modal modal-wide">
-        <h3>设置部门 - {{ selectedUser?.username }}</h3>
-        <div class="modal-body">
-          <p class="hint-text">
-            当前部门：<strong :class="{ 'department-disabled': selectedUser?.department_effective_status === 'disabled' }">
-              {{ selectedUser?.department_display || '未填写' }}
-            </strong>
-          </p>
-          <DepartmentSelector
-            :tree="editDepartmentTree"
-            :primary-id="editPrimaryDepartmentId"
-            :secondary-id="editSecondaryDepartmentId"
-            :tertiary-id="editTertiaryDepartmentId"
-            :allow-empty="true"
-            :disabled="departmentOptionsLoading"
-            @update:primary-id="editPrimaryDepartmentId = $event"
-            @update:secondary-id="editSecondaryDepartmentId = $event"
-            @update:tertiary-id="editTertiaryDepartmentId = $event"
-          />
-        </div>
-        <div class="modal-footer">
-          <button class="btn-secondary" @click="showDepartmentModal = false">取消</button>
-          <button class="btn-primary" @click="submitUserDepartment">保存部门</button>
         </div>
       </div>
     </div>

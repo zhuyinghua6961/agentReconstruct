@@ -472,6 +472,28 @@ def test_public_proxy_registers_personnel_route_methods():
     assert methods_by_path["/api/admin/users/{user_id}/personnel-binding"] == {"PUT", "DELETE"}
 
 
+def test_public_proxy_keeps_auth_register_routes_in_api_and_v1_parity():
+    methods_by_path = {
+        route.path: set(getattr(route, "methods", set())) - {"HEAD"}
+        for route in public_proxy_router.routes
+    }
+
+    assert methods_by_path["/api/auth/register"] == {"POST"}
+    assert methods_by_path["/api/v1/auth/register"] == {"POST"}
+
+
+def test_public_proxy_keeps_auth_department_routes_in_api_and_v1_parity():
+    methods_by_path = {
+        route.path: set(getattr(route, "methods", set())) - {"HEAD"}
+        for route in public_proxy_router.routes
+    }
+
+    assert methods_by_path["/api/auth/departments/tree"] == {"GET"}
+    assert methods_by_path["/api/v1/auth/departments/tree"] == {"GET"}
+    assert methods_by_path["/api/auth/department"] == {"PUT"}
+    assert methods_by_path["/api/v1/auth/department"] == {"PUT"}
+
+
 @pytest.mark.parametrize(
     ("method", "path", "expected_path", "json_body", "expected_query"),
     [

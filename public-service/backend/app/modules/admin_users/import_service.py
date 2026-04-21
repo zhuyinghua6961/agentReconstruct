@@ -8,7 +8,6 @@ from typing import Any
 from fastapi.responses import Response
 
 from app.core.spreadsheet import build_xlsx, load_rows
-from app.modules.departments.service import department_service
 from app.modules.admin_users.service import admin_users_service
 from app.modules.quota.deps import finalize_quota, precheck_quota
 from app.modules.quota.service import QuotaGrant
@@ -52,9 +51,6 @@ class AdminUsersImportService:
             username_col = normalized["username"]
             password_col = normalized["password"]
             user_type_col = normalized.get("user_type")
-            primary_department_name_col = normalized.get("primary_department_name")
-            secondary_department_name_col = normalized.get("secondary_department_name")
-            tertiary_department_name_col = normalized.get("tertiary_department_name")
 
             details: list[dict[str, Any]] = []
             success_count = 0
@@ -68,15 +64,6 @@ class AdminUsersImportService:
                 user_type = admin_users_service.clean_text(
                     row.get(user_type_col) if user_type_col else "common"
                 ).lower() or "common"
-                primary_department_name = admin_users_service.clean_text(
-                    row.get(primary_department_name_col) if primary_department_name_col else ""
-                )
-                secondary_department_name = admin_users_service.clean_text(
-                    row.get(secondary_department_name_col) if secondary_department_name_col else ""
-                )
-                tertiary_department_name = admin_users_service.clean_text(
-                    row.get(tertiary_department_name_col) if tertiary_department_name_col else ""
-                )
 
                 if not username:
                     failed_count += 1
@@ -91,56 +78,10 @@ class AdminUsersImportService:
                     details.append({"row": line_no, "username": username, "status": "failed", "reason": "user_type必须是common或super"})
                     continue
 
-                primary_department_id = None
-                secondary_department_id = None
-                tertiary_department_id = None
-                filled_department_names = [
-                    bool(primary_department_name),
-                    bool(secondary_department_name),
-                    bool(tertiary_department_name),
-                ]
-                if any(filled_department_names) and not all(filled_department_names):
-                    failed_count += 1
-                    details.append(
-                        {
-                            "row": line_no,
-                            "username": username,
-                            "status": "failed",
-                            "reason": "部门信息必须同时填写一级、二级和三级",
-                        }
-                    )
-                    continue
-                if all(filled_department_names):
-                    resolved = department_service.resolve_by_names(
-                        primary_name=primary_department_name,
-                        secondary_name=secondary_department_name,
-                        tertiary_name=tertiary_department_name,
-                        active_only=True,
-                        allow_legacy_two_level=False,
-                    )
-                    if not resolved.get("success"):
-                        failed_count += 1
-                        details.append(
-                            {
-                                "row": line_no,
-                                "username": username,
-                                "status": "failed",
-                                "reason": str(resolved.get("error") or resolved.get("code") or "部门解析失败"),
-                            }
-                        )
-                        continue
-                    resolved_data = resolved.get("data") if isinstance(resolved.get("data"), dict) else {}
-                    primary_department_id = resolved_data.get("primary_department_id")
-                    secondary_department_id = resolved_data.get("secondary_department_id")
-                    tertiary_department_id = resolved_data.get("tertiary_department_id")
-
                 create_result = admin_users_service.create_user(
                     username=username,
                     password=password,
                     user_type=user_type,
-                    primary_department_id=primary_department_id,
-                    secondary_department_id=secondary_department_id,
-                    tertiary_department_id=tertiary_department_id,
                 )
                 if create_result.get("success"):
                     normalized_username = str((create_result.get("data") or {}).get("username") or username)
@@ -197,14 +138,11 @@ class AdminUsersImportService:
             "username",
             "password",
             "user_type",
-            "primary_department_name",
-            "secondary_department_name",
-            "tertiary_department_name",
         ]
         rows = [
-            ["user001", "Pass123!", "common", "计算机学院", "软件工程系", "人工智能实验室"],
-            ["user002", "Test456@", "super", "化学学院", "材料系", "高分子实验室"],
-            ["user003", "Demo789#", "common", "", "", ""],
+            ["user001", "Pass123!", "common"],
+            ["user002", "Test456@", "super"],
+            ["user003", "Demo789#", "common"],
         ]
 
         if fmt == "csv":

@@ -1,8 +1,6 @@
 <script setup>
-import { onMounted, ref } from 'vue'
-import DepartmentSelector from '../components/DepartmentSelector.vue'
+import { ref } from 'vue'
 import { authApi, persistStoredUser } from '../services/auth'
-import { departmentApi } from '../services/departments'
 
 const username = ref('')
 const password = ref('')
@@ -10,13 +8,6 @@ const confirmPassword = ref('')
 const error = ref('')
 const success = ref('')
 const loading = ref(false)
-
-const departmentTree = ref([])
-const departmentLoading = ref(false)
-const departmentError = ref('')
-const selectedPrimaryDepartmentId = ref(null)
-const selectedSecondaryDepartmentId = ref(null)
-const selectedTertiaryDepartmentId = ref(null)
 
 const employeeNoInput = ref('')
 const fullNameInput = ref('')
@@ -34,29 +25,6 @@ const presetQuestions = [
   '我的偶像是谁？',
   '我最喜欢的一种运动是什么？',
 ]
-
-onMounted(() => {
-  fetchDepartmentTree()
-})
-
-async function fetchDepartmentTree() {
-  departmentLoading.value = true
-  departmentError.value = ''
-  try {
-    const result = await departmentApi.getSelectableTree()
-    if (result.success) {
-      departmentTree.value = Array.isArray(result.data?.items) ? result.data.items : []
-      return
-    }
-    departmentTree.value = []
-    departmentError.value = result.error || '获取部门选项失败'
-  } catch (e) {
-    departmentTree.value = []
-    departmentError.value = '获取部门选项失败'
-  } finally {
-    departmentLoading.value = false
-  }
-}
 
 function validatePasswordStrength(value) {
   if (!value || value.length < 8) {
@@ -137,11 +105,6 @@ async function handleRegister() {
     return
   }
 
-  if (!selectedPrimaryDepartmentId.value || !selectedSecondaryDepartmentId.value || !selectedTertiaryDepartmentId.value) {
-    error.value = '请选择一级、二级和三级部门'
-    return
-  }
-
   if (!String(employeeNoInput.value || '').trim() || !String(fullNameInput.value || '').trim() || !String(verificationCodeInput.value || '').trim()) {
     error.value = '请完整填写工号、姓名和校验码'
     return
@@ -159,9 +122,6 @@ async function handleRegister() {
       username: normalizedUsername,
       password: password.value,
       confirmPassword: confirmPassword.value,
-      primary_department_id: selectedPrimaryDepartmentId.value,
-      secondary_department_id: selectedSecondaryDepartmentId.value,
-      tertiary_department_id: selectedTertiaryDepartmentId.value,
       employee_no: String(employeeNoInput.value || '').trim(),
       full_name: String(fullNameInput.value || '').trim(),
       verification_code: String(verificationCodeInput.value || '').trim(),
@@ -198,7 +158,7 @@ async function handleRegister() {
     <div class="register-card">
       <div class="card-header">
         <h1>注册账号</h1>
-        <p class="subtitle">一次性完成账号、部门、人员和安全问题设置</p>
+        <p class="subtitle">一次性完成账号、人员绑定和安全问题设置</p>
       </div>
 
       <form class="register-form" @submit.prevent="handleRegister">
@@ -225,23 +185,8 @@ async function handleRegister() {
         </section>
 
         <section class="form-section">
-          <div class="section-title">
-            <h2>部门信息</h2>
-            <span v-if="departmentLoading" class="section-status">加载中...</span>
-          </div>
-          <p class="section-hint">请选择完整的一级、二级和三级部门。</p>
-          <div v-if="departmentError" class="alert alert-inline">{{ departmentError }}</div>
-          <DepartmentSelector
-            :tree="departmentTree"
-            :primary-id="selectedPrimaryDepartmentId"
-            :secondary-id="selectedSecondaryDepartmentId"
-            :tertiary-id="selectedTertiaryDepartmentId"
-            :allow-empty="false"
-            :disabled="loading || departmentLoading"
-            @update:primary-id="selectedPrimaryDepartmentId = $event"
-            @update:secondary-id="selectedSecondaryDepartmentId = $event"
-            @update:tertiary-id="selectedTertiaryDepartmentId = $event"
-          />
+          <h2>部门同步说明</h2>
+          <p class="section-hint">部门信息将根据绑定的人员记录自动带出，注册时无需单独填写。</p>
         </section>
 
         <section class="form-section">

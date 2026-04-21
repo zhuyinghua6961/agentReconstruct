@@ -347,7 +347,7 @@ def get_gunicorn_settings() -> GunicornSettings:
         bind_host=http_settings.app_host,
         bind_port=http_settings.app_port,
         worker_class=str(os.getenv("GUNICORN_WORKER_CLASS", "uvicorn.workers.UvicornWorker") or "uvicorn.workers.UvicornWorker").strip(),
-        workers=_get_int("GUNICORN_WORKERS", 16, minimum=1),
+        workers=_get_int("GUNICORN_WORKERS", 4, minimum=1),
         threads=_get_int("GUNICORN_THREADS", 8, minimum=1),
         timeout=_get_int("GUNICORN_TIMEOUT", 1800, minimum=30),
         keepalive=_get_int("GUNICORN_KEEPALIVE", 15, minimum=1),

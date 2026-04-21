@@ -13,9 +13,6 @@ class LoginRequest(BaseModel):
 class RegisterRequest(BaseModel):
     username: str = Field(default="")
     password: str = Field(default="")
-    primary_department_id: int | None = Field(default=None)
-    secondary_department_id: int | None = Field(default=None)
-    tertiary_department_id: int | None = Field(default=None)
     employee_no: str = Field(default="")
     full_name: str = Field(default="")
     verification_code: str = Field(default="")

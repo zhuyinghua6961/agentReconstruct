@@ -58,3 +58,10 @@ def test_public_route_surface_contains_register_variants():
 
     assert "/api/auth/register" in paths
     assert "/api/v1/auth/register" in paths
+
+
+def test_public_route_surface_contains_department_update_variants():
+    paths = {route.path for route in app.routes if hasattr(route, "path")}
+
+    assert "/api/auth/department" in paths
+    assert "/api/v1/auth/department" in paths

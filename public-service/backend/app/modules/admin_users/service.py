@@ -178,6 +178,7 @@ class AdminUsersService:
             "DEPARTMENT_RELATION_INVALID",
             "DEPARTMENT_DISABLED",
             "PERSONNEL_DISABLED",
+            "DEPARTMENT_MANAGED_BY_PERSONNEL",
         }:
             return 400
         if code in {"PERMISSION_DENIED"}:
@@ -224,9 +225,6 @@ class AdminUsersService:
         username: str,
         password: str,
         user_type: str,
-        primary_department_id: int | None = None,
-        secondary_department_id: int | None = None,
-        tertiary_department_id: int | None = None,
     ) -> dict[str, Any]:
         try:
             username = self.clean_text(username)
@@ -240,17 +238,6 @@ class AdminUsersService:
             if not username_validation.get("success"):
                 return username_validation
             normalized_username = str(username_validation.get("data", {}).get("username") or "").strip()
-            department_validation = self._departments.validate_department_selection(
-                primary_department_id=primary_department_id,
-                secondary_department_id=secondary_department_id,
-                tertiary_department_id=tertiary_department_id,
-                require_active=True,
-                allow_empty=True,
-                allow_legacy_two_level=False,
-            )
-            if not department_validation.get("success"):
-                return department_validation
-            department_data = department_validation.get("data") if isinstance(department_validation.get("data"), dict) else {}
             user_type_code = 2 if user_type == "super" else 3
             password_hash = self.hash_password(password)
             created_id = self._users.create_user(
@@ -260,9 +247,6 @@ class AdminUsersService:
                 user_type=user_type_code,
                 is_first_login=True,
                 must_set_security_questions=True,
-                primary_department_id=department_data.get("primary_department_id"),
-                secondary_department_id=department_data.get("secondary_department_id"),
-                tertiary_department_id=department_data.get("tertiary_department_id"),
             )
             self._users.add_password_history(user_id=created_id, password_hash=password_hash)
             self._users.trim_password_history(user_id=created_id, keep_limit=self._password_history_limit("user"))
@@ -275,7 +259,6 @@ class AdminUsersService:
                     "role": "user",
                     "user_type": user_type_code,
                     "status": "active",
-                    **department_data,
                 },
             }
         except Exception as exc:
@@ -331,9 +314,42 @@ class AdminUsersService:
                 return {"success": False, "error": "人员不存在", "code": "PERSONNEL_NOT_FOUND"}
             if self.clean_text(record.get("status")).lower() != "active":
                 return {"success": False, "error": "该人员已停用", "code": "PERSONNEL_DISABLED"}
+            department_payload = self._departments.describe_user_department(
+                primary_department_id=record.get("primary_department_id"),
+                secondary_department_id=record.get("secondary_department_id"),
+                tertiary_department_id=record.get("tertiary_department_id"),
+            )
+            if (
+                any(item is None for item in self._department_triplet_from_mapping(record))
+                or not isinstance(department_payload, dict)
+                or bool(department_payload.get("require_department_setup"))
+            ):
+                return {
+                    "success": False,
+                    "error": "绑定人员未维护完整部门信息，请联系管理员",
+                    "code": "DEPARTMENT_REQUIRED",
+                }
 
             old_personnel_id = self._normalize_optional_int(user.get("personnel_id"))
-            updated_count = self._users.update_user_personnel(user_id=target_user_id, personnel_id=target_personnel_id)
+            bind_user_personnel_with_departments = getattr(self._users, "bind_user_personnel_with_departments", None)
+            if callable(bind_user_personnel_with_departments):
+                updated_count = bind_user_personnel_with_departments(
+                    user_id=target_user_id,
+                    personnel_id=target_personnel_id,
+                    primary_department_id=record.get("primary_department_id"),
+                    secondary_department_id=record.get("secondary_department_id"),
+                    tertiary_department_id=record.get("tertiary_department_id"),
+                )
+            else:
+                updated_count = self._users.update_user_personnel(user_id=target_user_id, personnel_id=target_personnel_id)
+                sync_departments_for_personnel = getattr(self._users, "sync_departments_for_personnel", None)
+                if callable(sync_departments_for_personnel):
+                    sync_departments_for_personnel(
+                        personnel_id=target_personnel_id,
+                        primary_department_id=record.get("primary_department_id"),
+                        secondary_department_id=record.get("secondary_department_id"),
+                        tertiary_department_id=record.get("tertiary_department_id"),
+                    )
             refreshed_user = self._users.get_by_id(target_user_id) or user
             current_personnel_id = self._normalize_optional_int(refreshed_user.get("personnel_id"))
             if updated_count <= 0 and current_personnel_id != target_personnel_id:
@@ -349,7 +365,13 @@ class AdminUsersService:
                     "new_personnel_id": target_personnel_id,
                 },
             )
-            updated_user = {**refreshed_user, "personnel_id": target_personnel_id}
+            updated_user = {
+                **refreshed_user,
+                "personnel_id": target_personnel_id,
+                "primary_department_id": record.get("primary_department_id"),
+                "secondary_department_id": record.get("secondary_department_id"),
+                "tertiary_department_id": record.get("tertiary_department_id"),
+            }
             return {
                 "success": True,
                 "message": "用户人员绑定已更新",
@@ -367,7 +389,14 @@ class AdminUsersService:
                 return {"success": False, "error": "用户不存在", "code": "USER_NOT_FOUND"}
 
             old_personnel_id = self._normalize_optional_int(user.get("personnel_id"))
-            updated_count = self._users.update_user_personnel(user_id=target_user_id, personnel_id=None)
+            clear_user_personnel_with_department_cache = getattr(self._users, "clear_user_personnel_with_department_cache", None)
+            if callable(clear_user_personnel_with_department_cache):
+                updated_count = clear_user_personnel_with_department_cache(user_id=target_user_id)
+            else:
+                updated_count = self._users.update_user_personnel(user_id=target_user_id, personnel_id=None)
+                clear_user_department_cache = getattr(self._users, "clear_user_department_cache", None)
+                if callable(clear_user_department_cache):
+                    clear_user_department_cache(user_id=target_user_id)
             refreshed_user = self._users.get_by_id(target_user_id) or user
             current_personnel_id = self._normalize_optional_int(refreshed_user.get("personnel_id"))
             if updated_count <= 0 and current_personnel_id is not None:
@@ -383,7 +412,13 @@ class AdminUsersService:
                     "new_personnel_id": None,
                 },
             )
-            updated_user = {**refreshed_user, "personnel_id": None}
+            updated_user = {
+                **refreshed_user,
+                "personnel_id": None,
+                "primary_department_id": None,
+                "secondary_department_id": None,
+                "tertiary_department_id": None,
+            }
             return {
                 "success": True,
                 "message": "用户人员绑定已解除",
@@ -402,72 +437,12 @@ class AdminUsersService:
         secondary_department_id: int | None,
         tertiary_department_id: int | None = None,
     ) -> dict[str, Any]:
-        try:
-            user = self._users.get_by_id(target_user_id)
-            if not user:
-                return {"success": False, "error": "用户不存在", "code": "USER_NOT_FOUND"}
-            current_department = self._departments.describe_user_department(
-                primary_department_id=user.get("primary_department_id"),
-                secondary_department_id=user.get("secondary_department_id"),
-                tertiary_department_id=user.get("tertiary_department_id"),
-            )
-            if (
-                self._department_triplet_from_mapping(user)
-                == self._department_triplet_from_mapping(
-                    {
-                        "primary_department_id": primary_department_id,
-                        "secondary_department_id": secondary_department_id,
-                        "tertiary_department_id": tertiary_department_id,
-                    }
-                )
-                and not bool(current_department.get("require_department_setup"))
-            ):
-                return {
-                    "success": True,
-                    "message": "用户部门已更新",
-                    "data": {
-                        "id": int(user["id"]),
-                        "username": user["username"],
-                        **current_department,
-                    },
-                }
-            department_validation = self._departments.validate_department_selection(
-                primary_department_id=primary_department_id,
-                secondary_department_id=secondary_department_id,
-                tertiary_department_id=tertiary_department_id,
-                require_active=True,
-                allow_empty=True,
-                allow_legacy_two_level=False,
-            )
-            if not department_validation.get("success"):
-                return department_validation
-            department_data = department_validation.get("data") if isinstance(department_validation.get("data"), dict) else {}
-            updated_count = self._users.update_user_department(
-                user_id=target_user_id,
-                primary_department_id=department_data.get("primary_department_id"),
-                secondary_department_id=department_data.get("secondary_department_id"),
-                tertiary_department_id=department_data.get("tertiary_department_id"),
-            )
-            refreshed_user = self._users.get_by_id(target_user_id) or user
-            if (
-                updated_count <= 0
-                and self._department_triplet_from_mapping(refreshed_user)
-                != self._department_triplet_from_mapping(department_data)
-            ):
-                return {"success": False, "error": "修改用户部门失败", "code": "UPDATE_ERROR"}
-            return {
-                "success": True,
-                "message": "用户部门已更新",
-                "data": {
-                    "id": int(user["id"]),
-                    "username": user["username"],
-                    **department_data,
-                },
-            }
-        except Exception as exc:
-            if _is_db_unavailable_error(exc):
-                return self._db_error(exc)
-            return {"success": False, "error": "修改用户部门失败", "code": "UPDATE_ERROR"}
+        del target_user_id, primary_department_id, secondary_department_id, tertiary_department_id
+        return {
+            "success": False,
+            "error": "部门由人员信息维护，请联系管理员或修改绑定人员",
+            "code": "DEPARTMENT_MANAGED_BY_PERSONNEL",
+        }
 
     def reset_password(self, *, target_user_id: int, actor_user_id: int, new_password: str) -> dict[str, Any]:
         try:

@@ -28,20 +28,22 @@ test('AdminDashboard includes department management entry and user department co
   assert.match(adminSource, /<th>\s*部门\s*<\/th>/)
 })
 
-test('AdminDashboard wires department assignment into user editing flows', () => {
-  assert.match(adminSource, /DepartmentSelector/)
-  assert.match(adminSource, /updateUserDepartment|getDepartmentTree/)
-  assert.match(adminSource, /newTertiaryDepartmentId/)
-  assert.match(adminSource, /editTertiaryDepartmentId/)
-  assert.match(adminSource, /tertiary-id/)
-  assert.match(adminServiceSource, /tertiary_department_id/)
+test('AdminDashboard removes account-level department assignment flows while keeping department queries', () => {
+  assert.doesNotMatch(adminSource, /DepartmentSelector/)
+  assert.doesNotMatch(adminSource, /showDepartmentModal/)
+  assert.doesNotMatch(adminSource, /openDepartmentModal/)
+  assert.doesNotMatch(adminSource, /submitUserDepartment/)
+  assert.doesNotMatch(adminSource, /newTertiaryDepartmentId/)
+  assert.doesNotMatch(adminSource, /editTertiaryDepartmentId/)
+  assert.match(adminServiceSource, /getDepartmentTree/)
+  assert.doesNotMatch(adminServiceSource, /updateUserDepartment/)
   assert.match(adminServiceSource, /getTertiaryDepartmentUsers/)
   assert.match(adminServiceSource, /getSecondaryLegacyDepartmentUsers/)
 })
 
-test('admin service exposes department dictionary and user department APIs', () => {
+test('admin service still exposes department dictionary queries without account-level department mutation api', () => {
   assert.match(adminServiceSource, /getDepartmentTree/)
-  assert.match(adminServiceSource, /updateUserDepartment/)
+  assert.doesNotMatch(adminServiceSource, /updateUserDepartment/)
 })
 
 test('AdminDashboard wires username editing into user management flows', () => {
@@ -50,9 +52,11 @@ test('AdminDashboard wires username editing into user management flows', () => {
   assert.match(adminSource, /!isAdminIdentity\(user\)/)
 })
 
-test('BatchImportDialog documents department name columns in the template', () => {
-  assert.match(batchImportSource, /primary_department_name/)
-  assert.match(batchImportSource, /secondary_department_name/)
+test('BatchImportDialog documents the simplified user import template without department columns', () => {
+  assert.match(batchImportSource, /username、password、user_type/)
+  assert.match(batchImportSource, /部门信息由绑定的人员记录同步|不再从用户导入模板填写部门/)
+  assert.doesNotMatch(batchImportSource, /primary_department_name/)
+  assert.doesNotMatch(batchImportSource, /secondary_department_name/)
 })
 
 test('admin service exposes department import APIs', () => {

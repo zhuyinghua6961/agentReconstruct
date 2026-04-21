@@ -43,9 +43,6 @@ def register(payload: RegisterRequest):
         auth_service_module.auth_service.register(
             username=payload.username,
             password=payload.password,
-            primary_department_id=payload.primary_department_id,
-            secondary_department_id=payload.secondary_department_id,
-            tertiary_department_id=payload.tertiary_department_id,
             employee_no=payload.employee_no,
             full_name=payload.full_name,
             verification_code=payload.verification_code,

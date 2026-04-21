@@ -22,11 +22,12 @@ test('Login persists personnel completion flags from auth payload', () => {
   assert.match(loginSource, /params\.set\('personnel', 'required'\)/)
 })
 
-test('UserProfile renders department completion card and selector', () => {
+test('UserProfile renders department section as read-only personnel-sourced information', () => {
   assert.match(profileSource, /部门信息/)
-  assert.match(profileSource, /DepartmentSelector/)
-  assert.match(profileSource, /selectedTertiaryDepartmentId/)
-  assert.match(profileSource, /tertiary-id/)
+  assert.match(profileSource, /部门由人员信息统一维护|联系管理员在人员表维护/)
+  assert.doesNotMatch(profileSource, /DepartmentSelector/)
+  assert.doesNotMatch(profileSource, /selectedTertiaryDepartmentId/)
+  assert.doesNotMatch(profileSource, /tertiary-id/)
 })
 
 test('UserProfile renders personnel binding section', () => {
@@ -38,9 +39,13 @@ test('UserProfile renders personnel binding section', () => {
   assert.match(profileSource, /showPersonnelForm/)
 })
 
-test('UserProfile keeps department fetch errors scoped to the department section', () => {
-  assert.match(profileSource, /departmentError/)
-  assert.match(profileSource, /departmentSuccess/)
+test('UserProfile no longer exposes account-level department editing state', () => {
+  assert.match(profileSource, /forceDepartmentSetup/)
+  assert.doesNotMatch(profileSource, /showDepartmentForm/)
+  assert.doesNotMatch(profileSource, /fetchDepartmentTree/)
+  assert.doesNotMatch(profileSource, /departmentError/)
+  assert.doesNotMatch(profileSource, /departmentSuccess/)
+  assert.doesNotMatch(profileSource, /updateMyDepartment/)
 })
 
 test('UserProfile keeps personnel binding errors scoped locally', () => {
@@ -54,6 +59,7 @@ test('UserProfile wires authApi.updatePersonnelBinding into self-bind flow', () 
   assert.match(profileSource, /authApi\.updatePersonnelBinding/)
   assert.match(profileSource, /syncStoredUser\(result\.data \|\| \{\}\)/)
   assert.match(profileSource, /forcePersonnelSetup\.value = Boolean\(result\.data\?\.require_personnel_setup\)/)
+  assert.match(profileSource, /forceDepartmentSetup\.value = Boolean\(result\.data\?\.require_department_setup\)/)
   assert.match(profileSource, /hasPendingForcedSetup\(\)/)
 })
 
