@@ -1,3 +1,4 @@
+from app.integrations.llm.shared_http_pool import FastQASharedUpstreamHttpPool, SharedHttpPoolConfig
 from app.integrations.llm.openai_compat import (
     OpenAICompatChatAdapter,
     OpenAICompatClient,
@@ -7,6 +8,23 @@ from app.integrations.llm.openai_compat import (
     normalize_messages,
     normalize_openai_compatible_endpoint,
 )
+
+
+def is_upstream_pool_timeout(exc: BaseException | None) -> bool:
+    if exc is None:
+        return False
+    try:
+        import httpx
+
+        return isinstance(exc, httpx.PoolTimeout)
+    except Exception:
+        return exc.__class__.__name__ == "PoolTimeout"
+
+
+def raise_if_upstream_pool_timeout(exc: BaseException | None) -> None:
+    if is_upstream_pool_timeout(exc):
+        raise exc
+
 
 def should_use_dashscope_native(*, api_key: str | None, base_url: str | None, transport: str | None = None) -> bool:
     import os
@@ -22,12 +40,16 @@ def should_use_dashscope_native(*, api_key: str | None, base_url: str | None, tr
 
 
 __all__ = [
+    "FastQASharedUpstreamHttpPool",
     "OpenAICompatChatAdapter",
     "OpenAICompatClient",
+    "SharedHttpPoolConfig",
     "build_chat_adapter",
     "build_chat_completions_client",
     "extract_openai_compatible_text",
     "normalize_messages",
     "normalize_openai_compatible_endpoint",
+    "is_upstream_pool_timeout",
+    "raise_if_upstream_pool_timeout",
     "should_use_dashscope_native",
 ]

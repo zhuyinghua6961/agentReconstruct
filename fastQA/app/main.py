@@ -58,6 +58,7 @@ def create_app() -> FastAPI:
     app.state.generation_runtime_ready = False
     app.state.neo4j_client = None
     app.state.graph_kb_ready = False
+    app.state.shared_llm_http_pool = None
     app.state.shared_llm_adapter = None
     app.state.shared_llm_adapter_ready = False
     app.state.pdf_web_bindings = None

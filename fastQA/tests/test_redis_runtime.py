@@ -53,6 +53,22 @@ def test_fastqa_shared_config_enables_redis_by_default():
     assert "REDIS_KEY_PREFIX=fastqa" in content
 
 
+def test_fastqa_shared_config_defines_shared_llm_pool_defaults():
+    repo_root = Path(__file__).resolve().parents[2]
+    shared_env = repo_root / "resource/config/services/fastQA/config.shared.env"
+    content = shared_env.read_text(encoding="utf-8")
+
+    assert "FASTQA_LLM_HTTP_SHARED_POOL_ENABLED=0" in content
+    assert "FASTQA_LLM_HTTP_CONNECT_TIMEOUT_SECONDS=15" in content
+    assert "FASTQA_LLM_HTTP_READ_TIMEOUT_SECONDS=180" in content
+    assert "FASTQA_LLM_HTTP_STREAM_READ_TIMEOUT_SECONDS=600" in content
+    assert "FASTQA_LLM_HTTP_WRITE_TIMEOUT_SECONDS=180" in content
+    assert "FASTQA_LLM_HTTP_KEEPALIVE_EXPIRY_SECONDS=90" in content
+    assert "FASTQA_LLM_HTTP_MAX_CONNECTIONS=160" in content
+    assert "FASTQA_LLM_HTTP_MAX_KEEPALIVE_CONNECTIONS=64" in content
+    assert "FASTQA_LLM_HTTP_POOL_TIMEOUT_SECONDS=30" in content
+
+
 def test_redact_redis_url_masks_password():
     assert redact_redis_url("redis://:123456@127.0.0.1:6379/0") == "redis://:***@127.0.0.1:6379/0"
 
@@ -203,7 +219,7 @@ def test_bootstrap_generation_runtime_marks_ready(monkeypatch):
     sentinel = SimpleNamespace(model="m", base_url="https://example.com/v1")
     monkeypatch.setattr(
         "app.modules.generation_pipeline.generation_driven_rag_facade.GenerationDrivenRAG",
-        lambda: sentinel,
+        lambda **kwargs: sentinel,
     )
 
     bootstrap_generation_runtime(runtime)

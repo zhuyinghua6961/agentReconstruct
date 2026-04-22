@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import re
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+from app.integrations.llm import raise_if_upstream_pool_timeout
 from app.modules.graph_kb.models import GraphRagPayload
 from app.modules.generation_pipeline.feature_flags import env_bool, env_int
 from app.modules.generation_pipeline.retrieval_validation import validate_retrieval_relevance
@@ -424,6 +425,7 @@ def run_single_claim_retrieval(
             "claim_index": claim_index,
         }
     except Exception as exc:
+        raise_if_upstream_pool_timeout(exc)
         logger.error("❌ [并行检索 %s] 失败: %s", claim_index, exc)
         return {
             "documents": [],
@@ -588,6 +590,7 @@ def run_stage2_targeted_retrieval(
                 combined_query = preprocess_fn(ai_generated_query)
                 logger.info("[%s/%s] AI生成检索查询: %s...", index, len(claims), combined_query[:200])
         except Exception as exc:
+            raise_if_upstream_pool_timeout(exc)
             logger.warning("AI查询生成失败，使用传统方法: %s", exc)
 
         if not combined_query:
@@ -604,6 +607,7 @@ def run_stage2_targeted_retrieval(
                     combined_query = preprocess_fn(expanded_query)
                     logger.info("[%s/%s] 查询扩展后: %s...", index, len(claims), combined_query[:200])
             except Exception as exc:
+                raise_if_upstream_pool_timeout(exc)
                 logger.warning("查询扩展失败，保持原查询: %s", exc)
 
         combined_query, query_guardrail_details = apply_stage2_query_constraints(
@@ -667,6 +671,7 @@ def run_stage2_targeted_retrieval(
                 "ok": True,
             }
         except Exception as exc:
+            raise_if_upstream_pool_timeout(exc)
             logger.warning("[%s/%s] 检索失败: %s", index, len(claims), exc)
             return {
                 "index": index,
@@ -716,6 +721,7 @@ def run_stage2_targeted_retrieval(
                     try:
                         claim_outputs.append(future.result())
                     except Exception as exc:
+                        raise_if_upstream_pool_timeout(exc)
                         logger.warning("[%s/%s] 并行任务异常: %s", idx, len(claims), exc)
 
     if _cancelled():

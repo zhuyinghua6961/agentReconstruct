@@ -5,6 +5,8 @@ import re
 import time
 from typing import Any, Dict
 
+from app.integrations.llm import raise_if_upstream_pool_timeout
+
 
 def _is_response_format_capability_error(exc: Exception) -> bool:
     message = " ".join(str(exc or "").split()).lower()
@@ -249,5 +251,6 @@ def run_stage1_pre_answer_and_planning(
             "raw_response": cleaned_text,
         }
     except Exception as exc:
+        raise_if_upstream_pool_timeout(exc)
         logger.error("阶段一执行失败: %s", exc)
         return {"success": False, "error": str(exc)}

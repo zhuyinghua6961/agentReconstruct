@@ -82,6 +82,24 @@ def _trace_id(request: Request, payload: AskRequest) -> str:
     return uuid.uuid4().hex
 
 
+class UpstreamPoolTimeoutError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        trace_id: str,
+        route: str,
+        requested_mode: str,
+        actual_mode: str,
+        source_scope: str = "",
+    ) -> None:
+        super().__init__("upstream_pool_timeout")
+        self.trace_id = trace_id
+        self.route = route
+        self.requested_mode = requested_mode
+        self.actual_mode = actual_mode
+        self.source_scope = source_scope
+
+
 class _CompatLoggerAdapter:
     def __init__(self, base_logger: Any, trace_id: str, route: str) -> None:
         self._base_logger = base_logger
@@ -534,6 +552,38 @@ def _runtime_error_event(
     }
     if detail:
         payload["detail"] = dict(detail)
+    return payload
+
+
+def _upstream_pool_timeout_payload(*, trace_id: str, route: str) -> dict[str, Any]:
+    return {
+        "success": False,
+        "code": "UPSTREAM_POOL_TIMEOUT",
+        "error": "upstream_pool_timeout",
+        "message": "upstream_pool_timeout",
+        "retriable": True,
+        "route": route,
+        "trace_id": trace_id,
+    }
+
+
+def _upstream_pool_timeout_event(
+    *,
+    trace_id: str,
+    route: str,
+    requested_mode: str,
+    actual_mode: str,
+    source_scope: str = "",
+) -> dict[str, Any]:
+    payload = _upstream_pool_timeout_payload(trace_id=trace_id, route=route)
+    payload.update(
+        {
+            "type": "error",
+            "requested_mode": requested_mode,
+            "actual_mode": actual_mode,
+            "source_scope": source_scope,
+        }
+    )
     return payload
 
 
@@ -1120,6 +1170,20 @@ def _iter_qa_frames(*, request: Request, payload: AskRequest, adapted_request: G
                 query_mode=current_query_mode or route,
             )
     except Exception as exc:
+        if isinstance(exc, httpx.PoolTimeout):
+            logger.warning(
+                "fastqa upstream pool timeout route=%s trace_id=%s error=%s",
+                route,
+                trace_id,
+                exc,
+            )
+            raise UpstreamPoolTimeoutError(
+                trace_id=trace_id,
+                route=route,
+                requested_mode=requested_mode,
+                actual_mode=actual_mode,
+                source_scope=source_scope,
+            ) from exc
         logger.error("fastqa stream execution failed route=%s error=%s", route, exc, exc_info=True)
         if not metadata_emitted:
             yield _metadata_event(
@@ -1256,11 +1320,17 @@ def _collect_sync_result(events: list[dict[str, Any]], *, trace_id: str, request
         "file_selection": file_selection,
     }
     if error_payload is not None:
+        error_code = str(error_payload.get("code") or "FASTQA_RUNTIME_ERROR").strip().upper()
+        if error_code == "UPSTREAM_POOL_TIMEOUT":
+            return _upstream_pool_timeout_payload(
+                trace_id=trace_id,
+                route=str(error_payload.get("route") or metadata.get("route") or route),
+            ), 503
         payload.update({
             "success": False,
             "error": error_payload.get("error"),
             "message": error_payload.get("message") or error_payload.get("error"),
-            "code": error_payload.get("code") or "FASTQA_RUNTIME_ERROR",
+            "code": error_code or "FASTQA_RUNTIME_ERROR",
         })
         return payload, 500
     return payload, 200
@@ -1297,22 +1367,28 @@ def ask(payload: AskRequest, request: Request):
             exc=exc,
         )
     try:
-        events = list(
-            _wrap_stream_with_tap(
-                request=request,
-                adapted_request=adapted_request,
-                route=route,
-                trace_id=trace_id,
-                source=_iter_route_frames(
+        try:
+            events = list(
+                _wrap_stream_with_tap(
                     request=request,
-                    payload=payload,
                     adapted_request=adapted_request,
-                    limiter=limiter,
+                    route=route,
                     trace_id=trace_id,
-                    cancel_event=cancel_event,
-                ),
+                    source=_iter_route_frames(
+                        request=request,
+                        payload=payload,
+                        adapted_request=adapted_request,
+                        limiter=limiter,
+                        trace_id=trace_id,
+                        cancel_event=cancel_event,
+                    ),
+                )
             )
-        )
+        except UpstreamPoolTimeoutError as exc:
+            return JSONResponse(
+                status_code=503,
+                content=_upstream_pool_timeout_payload(trace_id=exc.trace_id, route=exc.route),
+            )
     finally:
         limiter.release()
     response_payload, status_code = _collect_sync_result(
@@ -1360,6 +1436,38 @@ def ask_stream(payload: AskRequest, request: Request):
             actual_mode=adapted_request.actual_mode,
             exc=exc,
         )
+
+    raw_source = _iter_qa_frames(
+        request=request,
+        payload=payload,
+        adapted_request=adapted_request,
+        limiter=limiter,
+        trace_id=trace_id,
+        cancel_event=cancel_event,
+    )
+    try:
+        first_event = next(raw_source)
+    except StopIteration:
+        first_event = _done_event(route=route, used_files=[], trace_id=trace_id)
+    except UpstreamPoolTimeoutError as exc:
+        return JSONResponse(
+            status_code=503,
+            content=_upstream_pool_timeout_payload(trace_id=exc.trace_id, route=exc.route),
+        )
+
+    def _source_with_pool_timeout_contract() -> Iterator[dict[str, Any]]:
+        yield first_event
+        try:
+            yield from raw_source
+        except UpstreamPoolTimeoutError as exc:
+            yield _upstream_pool_timeout_event(
+                trace_id=exc.trace_id,
+                route=exc.route,
+                requested_mode=exc.requested_mode,
+                actual_mode=exc.actual_mode,
+                source_scope=exc.source_scope,
+            )
+
     return sse_response(
         request=request,
         source=_wrap_stream_with_tap(
@@ -1367,14 +1475,7 @@ def ask_stream(payload: AskRequest, request: Request):
             adapted_request=adapted_request,
             route=route,
             trace_id=trace_id,
-            source=_iter_qa_frames(
-                request=request,
-                payload=payload,
-                adapted_request=adapted_request,
-                limiter=limiter,
-                trace_id=trace_id,
-                cancel_event=cancel_event,
-            ),
+            source=_source_with_pool_timeout_contract(),
         ),
         heartbeat_sec=request.app.state.settings.sse_heartbeat_sec,
         on_disconnect=lambda: (cancel_event.set(), limiter.release()),

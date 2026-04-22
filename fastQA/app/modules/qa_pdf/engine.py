@@ -10,6 +10,7 @@ from threading import Event, Thread
 import time
 from typing import Any, Callable, Iterator, Optional
 
+from app.integrations.llm import raise_if_upstream_pool_timeout
 from app.modules.qa_pdf.prompting import (
     GENERIC_PHRASES,
     PDF_QA_SYSTEM_MESSAGE,
@@ -284,6 +285,7 @@ def answer_from_pdf(
         except (PDFQAFirstTokenTimeoutError, PDFQAStreamCancelledError):
             raise
         except Exception as exc:
+            raise_if_upstream_pool_timeout(exc)
             logger.warning(f"⚠️ PDF流式回答失败，回退非流式: {exc}")
 
         if emitted:
@@ -308,6 +310,7 @@ def answer_from_pdf(
                 _log_timing("qa_complete_invoke_fallback", qa_started_at, answer_chars=len(answer))
             return
         except Exception as exc:
+            raise_if_upstream_pool_timeout(exc)
             logger.error(f"❌ PDF问答失败: {exc}")
             logger.error(traceback_module.format_exc())
             try:
@@ -321,6 +324,7 @@ def answer_from_pdf(
                     _log_timing("qa_complete_invoke_prompt_fallback", qa_started_at, answer_chars=len(fallback_answer))
                 return
             except Exception as fallback_exc:
+                raise_if_upstream_pool_timeout(fallback_exc)
                 logger.error(f"❌ PDF问答失败（回退方式）: {fallback_exc}")
                 if llm is None or not hasattr(llm, "invoke"):
                     yield LLM_NOT_READY_MESSAGE
@@ -355,6 +359,7 @@ def answer_from_pdf(
             logger.warning(f"   答案预览: {answer[:200]}...")
         return answer
     except Exception as exc:
+        raise_if_upstream_pool_timeout(exc)
         logger.error(f"❌ PDF问答失败: {exc}")
         logger.error(traceback_module.format_exc())
         try:
@@ -366,6 +371,7 @@ def answer_from_pdf(
             _log_timing("qa_complete_invoke_prompt_fallback", qa_started_at, answer_chars=len(fallback_answer))
             return fallback_answer
         except Exception as fallback_exc:
+            raise_if_upstream_pool_timeout(fallback_exc)
             logger.error(f"❌ PDF问答失败（回退方式）: {fallback_exc}")
             if llm is None or not hasattr(llm, "invoke"):
                 return LLM_NOT_READY_MESSAGE

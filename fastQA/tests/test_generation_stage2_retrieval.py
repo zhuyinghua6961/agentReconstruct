@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import httpx
 import logging
 
 from app.modules.graph_kb.models import GraphRagPayload
@@ -40,6 +41,12 @@ class _FakeClient:
             (),
             {"choices": [type("Choice", (), {"message": type("Msg", (), {"content": self.response_text})()})]},
         )()
+
+
+class _PoolTimeoutClient(_FakeClient):
+    def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        raise httpx.PoolTimeout("pool exhausted")
 
 
 def test_stage2_targeted_retrieval_applies_keyword_and_entity_guardrails(monkeypatch):
@@ -228,3 +235,72 @@ def test_stage2_targeted_retrieval_merges_graph_hints_into_query(monkeypatch):
     assert result["success"] is True
     assert "GRAPH_HINT" in result["claim_to_results"]["claim one"]["query"]
     assert "10.9/graph" in result["claim_to_results"]["claim one"]["query"]
+
+
+def test_stage2_targeted_retrieval_propagates_pool_timeout_from_ai_query_generation(monkeypatch):
+    monkeypatch.setenv("QA_STAGE2_FORCE_KEYWORD_INJECTION", "false")
+    monkeypatch.setenv("QA_STAGE2_ENTITY_LOCK_ENABLED", "false")
+    monkeypatch.setenv("QA_STAGE2_QUERY_EXPANSION_ENABLED", "false")
+    expert = _Expert(
+        default_response={
+            "documents": ["doc-1"],
+            "metadatas": [{"doi": "10.1/a"}],
+            "distances": [0.1],
+        }
+    )
+    client = _PoolTimeoutClient("ignored")
+
+    try:
+        run_stage2_targeted_retrieval(
+            retrieval_claims=[{"claim": "claim one", "keywords": []}],
+            n_results_per_claim=1,
+            user_question="battery cycle life",
+            literature_expert=expert,
+            logger=logging.getLogger("test.stage2"),
+            client=client,
+            model="gpt-test",
+            preprocess_retrieval_query_fn=lambda query: query,
+            validate_retrieval_relevance_fn=lambda results, query, claim: results,
+        )
+    except httpx.PoolTimeout:
+        pass
+    else:  # pragma: no cover - enforced by failing test before fix
+        raise AssertionError("expected PoolTimeout to propagate")
+
+    assert expert.calls == []
+
+
+def test_stage2_targeted_retrieval_propagates_pool_timeout_from_query_expansion(monkeypatch):
+    monkeypatch.setenv("QA_STAGE2_FORCE_KEYWORD_INJECTION", "false")
+    monkeypatch.setenv("QA_STAGE2_ENTITY_LOCK_ENABLED", "false")
+    monkeypatch.setenv("QA_STAGE2_QUERY_EXPANSION_ENABLED", "true")
+    expert = _Expert(
+        default_response={
+            "documents": ["doc-1"],
+            "metadatas": [{"doi": "10.1/a"}],
+            "distances": [0.1],
+        }
+    )
+
+    def _raise_pool_timeout(_query: str) -> str:
+        raise httpx.PoolTimeout("pool exhausted")
+
+    try:
+        run_stage2_targeted_retrieval(
+            retrieval_claims=[{"claim": "claim one", "keywords": []}],
+            n_results_per_claim=1,
+            user_question="battery cycle life",
+            literature_expert=expert,
+            logger=logging.getLogger("test.stage2"),
+            client=None,
+            model=None,
+            preprocess_retrieval_query_fn=lambda query: query,
+            validate_retrieval_relevance_fn=lambda results, query, claim: results,
+            expand_query_fn=_raise_pool_timeout,
+        )
+    except httpx.PoolTimeout:
+        pass
+    else:  # pragma: no cover - enforced by failing test before fix
+        raise AssertionError("expected PoolTimeout to propagate")
+
+    assert expert.calls == []

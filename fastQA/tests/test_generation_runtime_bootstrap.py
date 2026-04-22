@@ -63,20 +63,50 @@ def test_build_openai_client_uses_local_factory(monkeypatch):
     sentinel = object()
     calls: dict[str, object] = {}
 
-    def _fake_builder(*, api_key: str, base_url: str, logger=None, connect_timeout_seconds: float, read_timeout_seconds: float, write_timeout_seconds: float, pool_timeout_seconds: float):
+    def _fake_builder(
+        *,
+        api_key: str,
+        base_url: str,
+        logger=None,
+        connect_timeout_seconds: float,
+        read_timeout_seconds: float,
+        stream_read_timeout_seconds: float,
+        write_timeout_seconds: float,
+        pool_timeout_seconds: float,
+        keepalive_expiry_seconds: float,
+        max_connections: int,
+        max_keepalive_connections: int,
+        http_client=None,
+    ):
         calls["api_key"] = api_key
         calls["base_url"] = base_url
         calls["logger"] = logger
         calls["connect_timeout_seconds"] = connect_timeout_seconds
         calls["read_timeout_seconds"] = read_timeout_seconds
+        calls["stream_read_timeout_seconds"] = stream_read_timeout_seconds
         calls["write_timeout_seconds"] = write_timeout_seconds
         calls["pool_timeout_seconds"] = pool_timeout_seconds
+        calls["keepalive_expiry_seconds"] = keepalive_expiry_seconds
+        calls["max_connections"] = max_connections
+        calls["max_keepalive_connections"] = max_keepalive_connections
+        calls["http_client"] = http_client
         return sentinel
 
+    for name in (
+        "FASTQA_LLM_HTTP_CONNECT_TIMEOUT_SECONDS",
+        "FASTQA_LLM_HTTP_READ_TIMEOUT_SECONDS",
+        "FASTQA_LLM_HTTP_WRITE_TIMEOUT_SECONDS",
+        "FASTQA_LLM_HTTP_POOL_TIMEOUT_SECONDS",
+        "FASTQA_LLM_HTTP_KEEPALIVE_EXPIRY_SECONDS",
+        "FASTQA_LLM_HTTP_MAX_CONNECTIONS",
+        "FASTQA_LLM_HTTP_MAX_KEEPALIVE_CONNECTIONS",
+    ):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("OPENAI_CONNECT_TIMEOUT_SECONDS", "12")
     monkeypatch.setenv("OPENAI_READ_TIMEOUT_SECONDS", "180")
     monkeypatch.setenv("OPENAI_WRITE_TIMEOUT_SECONDS", "181")
     monkeypatch.setenv("OPENAI_POOL_TIMEOUT_SECONDS", "9")
+    monkeypatch.setenv("FASTQA_LLM_HTTP_STREAM_READ_TIMEOUT_SECONDS", "1")
     monkeypatch.setattr("app.modules.generation_pipeline.runtime_bootstrap.build_chat_completions_client", _fake_builder)
     logger = SimpleNamespace(info=lambda *args, **kwargs: None)
 
@@ -87,8 +117,13 @@ def test_build_openai_client_uses_local_factory(monkeypatch):
     assert calls["base_url"] == "https://example.com/v1"
     assert calls["connect_timeout_seconds"] == 12.0
     assert calls["read_timeout_seconds"] == 180.0
+    assert calls["stream_read_timeout_seconds"] == 5.0
     assert calls["write_timeout_seconds"] == 181.0
     assert calls["pool_timeout_seconds"] == 9.0
+    assert calls["keepalive_expiry_seconds"] == 90.0
+    assert calls["max_connections"] == 160
+    assert calls["max_keepalive_connections"] == 64
+    assert calls["http_client"] is None
 
 
 def test_ensure_literature_expert_uses_resolved_paths():
@@ -148,3 +183,41 @@ def test_create_app_registers_authority_hooks_when_enabled(monkeypatch):
     assert app.state.persist_user_message_hook.keywords["async_enabled"] is False
     assert app.state.persist_assistant_summary_hook.keywords["async_enabled"] is True
     assert app.state.persist_assistant_terminal_hook.keywords["async_enabled"] is True
+
+
+def test_runtime_bootstrap_reports_shared_pool_degraded_when_provider_init_fails(monkeypatch):
+    from app.core.runtime import bootstrap_generation_runtime
+
+    runtime = SimpleNamespace(
+        settings=SimpleNamespace(generation_runtime_enabled=True),
+        generation_runtime=None,
+        generation_runtime_ready=False,
+        component_status={},
+        health_flags={},
+        shared_llm_http_pool=None,
+    )
+    monkeypatch.setenv("FASTQA_LLM_HTTP_SHARED_POOL_ENABLED", "1")
+    monkeypatch.setattr(
+        "app.modules.generation_pipeline.runtime_bootstrap.resolve_generation_runtime_inputs",
+        lambda **kwargs: SimpleNamespace(api_key="k", base_url="https://example.com/v1", model="m"),
+    )
+    monkeypatch.setattr(
+        "app.core.runtime.FastQASharedUpstreamHttpPool.from_env",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("pool bootstrap failed")),
+    )
+    monkeypatch.setattr(
+        "app.modules.generation_pipeline.generation_driven_rag_facade.GenerationDrivenRAG",
+        lambda **kwargs: SimpleNamespace(model="m", base_url="https://example.com/v1", literature_expert=SimpleNamespace(available=True)),
+    )
+
+    bootstrap_generation_runtime(runtime)
+
+    shared_status = runtime.component_status["shared_llm_pool"]
+    assert shared_status["status"] == "degraded"
+    assert shared_status["ready"] is False
+    assert shared_status["client_owner"] == "private"
+    assert shared_status["pool_owner"] == "app"
+    assert shared_status["bootstrap_source"] == "startup"
+    assert shared_status["max_connections"] == 160
+    assert shared_status["max_keepalive_connections"] == 64
+    assert shared_status["keepalive_expiry_seconds"] == 90.0

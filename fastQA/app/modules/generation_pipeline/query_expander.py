@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 
-from app.integrations.llm import build_chat_completions_client
+from app.integrations.llm import SharedHttpPoolConfig, build_chat_completions_client, raise_if_upstream_pool_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -20,10 +20,20 @@ _EXPANSION_PROMPT = """你是一个学术文献检索助手。任务：对给定
 
 
 class QueryExpander:
-    def __init__(self, *, api_key: str | None = None, base_url: str | None = None, model: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        model: str | None = None,
+        http_client=None,
+        transport_config: SharedHttpPoolConfig | None = None,
+    ) -> None:
         self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY") or os.getenv("OPENAI_API_KEY")
         self.base_url = base_url or os.getenv("DASHSCOPE_BASE_URL") or os.getenv("OPENAI_BASE_URL")
         self.model = model or os.getenv("QUERY_EXPANSION_MODEL") or os.getenv("OPENAI_MODEL") or os.getenv("DASHSCOPE_MODEL") or "qwen-plus"
+        self._http_client = http_client
+        self._transport_config = transport_config or SharedHttpPoolConfig.from_env()
         self._client = None
 
     def _get_client(self):
@@ -31,7 +41,20 @@ class QueryExpander:
             return self._client
         if not self.api_key:
             return None
-        self._client = build_chat_completions_client(api_key=self.api_key, base_url=self.base_url, logger=logger)
+        self._client = build_chat_completions_client(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            logger=logger,
+            connect_timeout_seconds=self._transport_config.connect_timeout_seconds,
+            read_timeout_seconds=self._transport_config.read_timeout_seconds,
+            stream_read_timeout_seconds=self._transport_config.stream_read_timeout_seconds,
+            write_timeout_seconds=self._transport_config.write_timeout_seconds,
+            pool_timeout_seconds=self._transport_config.pool_timeout_seconds,
+            keepalive_expiry_seconds=self._transport_config.keepalive_expiry_seconds,
+            max_connections=self._transport_config.max_connections,
+            max_keepalive_connections=self._transport_config.max_keepalive_connections,
+            http_client=self._http_client,
+        )
         return self._client
 
     def expand(self, query: str) -> str:
@@ -57,5 +80,11 @@ class QueryExpander:
                 logger.info("stage2 query expanded original=%s expanded=%s", text[:80], expanded[:80])
                 return expanded
         except Exception as exc:
+            raise_if_upstream_pool_timeout(exc)
             logger.warning("stage2 query expansion failed, fallback to original query: %s", exc)
         return text
+
+    def close(self) -> None:
+        close = getattr(self._client, "close", None)
+        if callable(close):
+            close()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import httpx
 from types import SimpleNamespace
 
 from app.modules.generation_pipeline.synthesis_postprocess import (
@@ -22,6 +23,15 @@ class _FakeClient:
     def _create(self, **kwargs):
         self.calls.append(kwargs)
         return iter(self._chunks)
+
+
+class _PoolTimeoutClient(_FakeClient):
+    def __init__(self):
+        super().__init__([])
+
+    def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        raise httpx.PoolTimeout("pool exhausted")
 
 
 class _SafeDict(dict):
@@ -467,3 +477,33 @@ def test_stage4_synthesis_includes_conversation_context_but_excludes_trace_field
     assert "trace-summary" not in prompt
     assert "should-not-leak" not in prompt
     assert '"stage1": 12' not in prompt
+
+
+def test_stage4_synthesis_propagates_pool_timeout_without_fallback(monkeypatch):
+    monkeypatch.setenv("QA_STAGE4_MIN_CITATIONS", "1")
+    client = _PoolTimeoutClient()
+
+    try:
+        list(
+            iter_stage4_synthesis_with_pdf_chunks(
+                user_question="what is lfp?",
+                deep_answer="draft",
+                pdf_chunks={"10.1/a": [{"text": "evidence", "page": 1}]},
+                retrieval_results={"claim_to_results": {}},
+                stage2_prompt="prompt {user_question} {deep_answer} {evidence_documents} {top5_references}",
+                client=client,
+                model="m",
+                safe_dict_cls=_SafeDict,
+                escape_braces_fn=_escape_braces,
+                format_pdf_chunks_evidence_fn=_format_pdf_chunks_evidence,
+                build_top5_reference_context_fn=build_top5_reference_context,
+                extract_cited_dois_fn=extract_cited_dois,
+                log_top5_coverage_fn=log_top5_coverage,
+                build_references_from_pdf_chunks_fn=build_references_from_pdf_chunks,
+                logger=_logger(),
+            )
+        )
+    except httpx.PoolTimeout:
+        pass
+    else:  # pragma: no cover - enforced by failing test before fix
+        raise AssertionError("expected PoolTimeout to propagate")

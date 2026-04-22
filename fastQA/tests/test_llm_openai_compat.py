@@ -64,8 +64,10 @@ class _FakeHttpx:
 
     def __init__(self, *, client: _FakeClient) -> None:
         self._client = client
+        self.client_kwargs: list[dict[str, object]] = []
 
-    def Client(self, **_kwargs):
+    def Client(self, **kwargs):
+        self.client_kwargs.append(kwargs)
         return self._client
 
 
@@ -179,3 +181,175 @@ def test_openai_compat_stream_raises_on_error_frame():
         assert False, "expected RuntimeError"
     except RuntimeError as exc:
         assert "upstream failed" in str(exc)
+
+
+def test_openai_compat_client_supports_request_level_timeout_override():
+    post_response = _FakeResponse(payload={"choices": [{"message": {"content": "answer"}}]})
+    stream_response = _FakeResponse(lines=["data: [DONE]"])
+    fake_client = _FakeClient(post_response=post_response, stream_response=stream_response)
+    fake_httpx = _FakeHttpx(client=fake_client)
+    client = OpenAICompatClient(
+        httpx_module=fake_httpx,
+        endpoint="https://example.com/v1/chat/completions",
+        api_key="token",
+        connect_timeout_seconds=10.0,
+        read_timeout_seconds=65.0,
+        write_timeout_seconds=70.0,
+        pool_timeout_seconds=5.0,
+    )
+
+    client.chat.completions.create(
+        model="m",
+        messages=[{"role": "user", "content": "hi"}],
+        stream=False,
+        read_timeout_seconds=222.0,
+        pool_timeout_seconds=17.0,
+    )
+
+    timeout = fake_client.calls[0][2]["timeout"]
+    assert timeout.kwargs == {
+        "connect": 10.0,
+        "read": 222.0,
+        "write": 70.0,
+        "pool": 17.0,
+    }
+
+
+def test_openai_compat_stream_supports_streaming_safe_read_timeout_override():
+    post_response = _FakeResponse(payload={"choices": [{"message": {"content": "unused"}}]})
+    stream_response = _FakeResponse(lines=['data: {"choices":[{"delta":{"content":"a"}}]}', "data: [DONE]"])
+    fake_client = _FakeClient(post_response=post_response, stream_response=stream_response)
+    fake_httpx = _FakeHttpx(client=fake_client)
+    client = OpenAICompatClient(
+        httpx_module=fake_httpx,
+        endpoint="https://example.com/v1/chat/completions",
+        api_key="token",
+        connect_timeout_seconds=11.0,
+        read_timeout_seconds=65.0,
+        write_timeout_seconds=71.0,
+        pool_timeout_seconds=6.0,
+    )
+
+    list(
+        client.chat.completions.create(
+            model="m",
+            messages=[{"role": "user", "content": "hi"}],
+            stream=True,
+            read_timeout_seconds=600.0,
+            pool_timeout_seconds=21.0,
+        )
+    )
+
+    timeout = fake_client.calls[0][2]["timeout"]
+    assert timeout.kwargs == {
+        "connect": 11.0,
+        "read": 600.0,
+        "write": 71.0,
+        "pool": 21.0,
+    }
+
+
+def test_openai_compat_stream_uses_configured_stream_read_timeout_by_default():
+    post_response = _FakeResponse(payload={"choices": [{"message": {"content": "unused"}}]})
+    stream_response = _FakeResponse(lines=['data: {"choices":[{"delta":{"content":"a"}}]}', "data: [DONE]"])
+    fake_client = _FakeClient(post_response=post_response, stream_response=stream_response)
+    fake_httpx = _FakeHttpx(client=fake_client)
+    client = OpenAICompatClient(
+        httpx_module=fake_httpx,
+        endpoint="https://example.com/v1/chat/completions",
+        api_key="token",
+        connect_timeout_seconds=11.0,
+        read_timeout_seconds=65.0,
+        stream_read_timeout_seconds=444.0,
+        write_timeout_seconds=71.0,
+        pool_timeout_seconds=6.0,
+    )
+
+    list(client.chat.completions.create(model="m", messages=[{"role": "user", "content": "hi"}], stream=True))
+
+    timeout = fake_client.calls[0][2]["timeout"]
+    assert timeout.kwargs == {
+        "connect": 11.0,
+        "read": 444.0,
+        "write": 71.0,
+        "pool": 6.0,
+    }
+
+
+def test_openai_compat_success_does_not_overwrite_pool_wait_metric():
+    post_response = _FakeResponse(payload={"choices": [{"message": {"content": "answer"}}]})
+    stream_response = _FakeResponse(lines=["data: [DONE]"])
+    fake_client = _FakeClient(post_response=post_response, stream_response=stream_response)
+    pool_wait_calls: list[dict[str, float]] = []
+    setattr(
+        fake_client,
+        "_fastqa_shared_pool",
+        type(
+            "_Pool",
+            (),
+            {
+                "snapshot": lambda self: {
+                    "pool_owner": "app",
+                    "client_owner": "shared",
+                    "shared_client_id": "shared-1",
+                    "pid": 123,
+                    "bootstrap_source": "startup",
+                    "pool_timeout_count": 0,
+                    "pool_wait_ms": 0.0,
+                    "max_connections": 160,
+                    "max_keepalive_connections": 64,
+                    "keepalive_expiry_seconds": 90.0,
+                },
+                "record_pool_wait": lambda self, **kwargs: pool_wait_calls.append(dict(kwargs)),
+                "record_pool_timeout": lambda self, **kwargs: None,
+            },
+        )(),
+    )
+    fake_httpx = _FakeHttpx(client=fake_client)
+    client = OpenAICompatClient(
+        httpx_module=fake_httpx,
+        endpoint="https://example.com/v1/chat/completions",
+        api_key="token",
+        http_client=fake_client,
+    )
+
+    client.chat.completions.create(model="m", messages=[{"role": "user", "content": "hi"}], stream=False)
+
+    assert pool_wait_calls == []
+
+
+def test_openai_compat_client_does_not_close_injected_http_client():
+    post_response = _FakeResponse(payload={"choices": [{"message": {"content": "answer"}}]})
+    stream_response = _FakeResponse(lines=["data: [DONE]"])
+    injected_http_client = _FakeClient(post_response=post_response, stream_response=stream_response)
+    fake_httpx = _FakeHttpx(client=injected_http_client)
+    client = OpenAICompatClient(
+        httpx_module=fake_httpx,
+        endpoint="https://example.com/v1/chat/completions",
+        api_key="token",
+        http_client=injected_http_client,
+    )
+
+    client.close()
+
+    assert injected_http_client.closed is False
+    assert fake_httpx.client_kwargs == []
+
+
+def test_openai_compat_chat_adapter_does_not_close_injected_http_client():
+    post_response = _FakeResponse(payload={"choices": [{"message": {"content": "answer"}}]})
+    stream_response = _FakeResponse(lines=["data: [DONE]"])
+    injected_http_client = _FakeClient(post_response=post_response, stream_response=stream_response)
+    fake_httpx = _FakeHttpx(client=injected_http_client)
+    adapter = OpenAICompatChatAdapter(
+        httpx_module=fake_httpx,
+        endpoint="https://example.com/v1/chat/completions",
+        api_key="token",
+        model="m",
+        http_client=injected_http_client,
+    )
+
+    adapter.close()
+
+    assert injected_http_client.closed is False
+    assert fake_httpx.client_kwargs == []

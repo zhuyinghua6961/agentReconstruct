@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from app.core.config import SERVICE_ASSET_ROOT, SERVICE_STATE_ROOT
-from app.integrations.llm import build_chat_completions_client
+from app.integrations.llm import SharedHttpPoolConfig, build_chat_completions_client
 
 
 def _env_first(*names: str, default: str = "") -> str:
@@ -105,46 +105,23 @@ def resolve_generation_runtime_inputs(
     )
 
 
-def build_openai_client(*, api_key: str, base_url: str, logger: Any | None = None) -> Any:
-    connect_timeout_seconds = _env_float(
-        "OPENAI_CONNECT_TIMEOUT_SECONDS",
-        "DASHSCOPE_CONNECT_TIMEOUT_SECONDS",
-        "LLM_CONNECT_TIMEOUT_SECONDS",
-        default=15.0,
-        minimum=1.0,
-        maximum=300.0,
-    )
-    read_timeout_seconds = _env_float(
-        "OPENAI_READ_TIMEOUT_SECONDS",
-        "DASHSCOPE_READ_TIMEOUT_SECONDS",
-        "LLM_READ_TIMEOUT_SECONDS",
-        default=180.0,
-        minimum=5.0,
-        maximum=1800.0,
-    )
-    write_timeout_seconds = _env_float(
-        "OPENAI_WRITE_TIMEOUT_SECONDS",
-        "DASHSCOPE_WRITE_TIMEOUT_SECONDS",
-        "LLM_WRITE_TIMEOUT_SECONDS",
-        default=180.0,
-        minimum=5.0,
-        maximum=1800.0,
-    )
-    pool_timeout_seconds = _env_float(
-        "OPENAI_POOL_TIMEOUT_SECONDS",
-        "DASHSCOPE_POOL_TIMEOUT_SECONDS",
-        "LLM_POOL_TIMEOUT_SECONDS",
-        default=15.0,
-        minimum=1.0,
-        maximum=300.0,
-    )
+def build_openai_client(*, api_key: str, base_url: str, logger: Any | None = None, http_client: Any | None = None) -> Any:
+    transport_config = SharedHttpPoolConfig.from_env()
+    connect_timeout_seconds = transport_config.connect_timeout_seconds
+    read_timeout_seconds = transport_config.read_timeout_seconds
+    stream_read_timeout_seconds = transport_config.stream_read_timeout_seconds
+    write_timeout_seconds = transport_config.write_timeout_seconds
+    pool_timeout_seconds = transport_config.pool_timeout_seconds
     if logger is not None:
         logger.info(
-            "Generation pipeline使用OpenAI-compatible协议: connect=%ss read=%ss write=%ss pool=%ss",
+            "Generation pipeline使用OpenAI-compatible协议: connect=%ss read=%ss write=%ss pool=%ss max_connections=%s max_keepalive_connections=%s keepalive_expiry_seconds=%s",
             connect_timeout_seconds,
             read_timeout_seconds,
             write_timeout_seconds,
             pool_timeout_seconds,
+            transport_config.max_connections,
+            transport_config.max_keepalive_connections,
+            transport_config.keepalive_expiry_seconds,
         )
     return build_chat_completions_client(
         api_key=api_key,
@@ -152,8 +129,13 @@ def build_openai_client(*, api_key: str, base_url: str, logger: Any | None = Non
         logger=logger,
         connect_timeout_seconds=connect_timeout_seconds,
         read_timeout_seconds=read_timeout_seconds,
+        stream_read_timeout_seconds=stream_read_timeout_seconds,
         write_timeout_seconds=write_timeout_seconds,
         pool_timeout_seconds=pool_timeout_seconds,
+        keepalive_expiry_seconds=transport_config.keepalive_expiry_seconds,
+        max_connections=transport_config.max_connections,
+        max_keepalive_connections=transport_config.max_keepalive_connections,
+        http_client=http_client,
     )
 
 

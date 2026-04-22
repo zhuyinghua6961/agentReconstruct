@@ -11,7 +11,7 @@ from typing import Any, Callable, Iterator
 
 from app.core.config import get_settings
 from app.core.runtime import generation_runtime_is_ready
-from app.integrations.llm import build_chat_adapter
+from app.integrations.llm import SharedHttpPoolConfig, build_chat_adapter
 from app.modules.generation_pipeline.pdf_pipeline import find_pdf_path
 from app.modules.generation_pipeline.runtime_bootstrap import resolve_generation_runtime_inputs
 from app.modules.qa_kb.service import qa_kb_service
@@ -43,10 +43,60 @@ def _identity_log(**_kwargs: Any) -> None:
     return None
 
 
+def _has_invoke(value: Any) -> bool:
+    return value is not None and hasattr(value, "invoke")
+
+
+def resolve_app_owned_llm(*, app_state: Any, logger: Any) -> Any:
+    shared_llm = getattr(app_state, "shared_llm_adapter", None)
+    if _has_invoke(shared_llm):
+        return shared_llm
+
+    aux_llm = getattr(app_state, "aux_llm", None)
+    if _has_invoke(aux_llm):
+        app_state.shared_llm_adapter = aux_llm
+        return aux_llm
+
+    resolved = resolve_generation_runtime_inputs(api_key=None, base_url=None, model=None, config=None)
+    if not str(resolved.api_key or "").strip():
+        raise RuntimeError("OPENAI_API_KEY/DASHSCOPE_API_KEY is required for file QA")
+    if not str(resolved.base_url or "").strip():
+        raise RuntimeError("OPENAI_BASE_URL/DASHSCOPE_BASE_URL is required for file QA")
+
+    shared_http_client = None
+    shared_http_pool = getattr(app_state, "shared_llm_http_pool", None)
+    pool_client = getattr(shared_http_pool, "client", None)
+    if callable(pool_client):
+        shared_http_client = pool_client()
+    transport_config = SharedHttpPoolConfig.from_env()
+
+    llm = build_chat_adapter(
+        api_key=resolved.api_key,
+        base_url=resolved.base_url,
+        model=resolved.model,
+        temperature=0.3,
+        top_p=0.95,
+        max_tokens=max(1024, int(str(os.getenv("PDF_QA_MAX_TOKENS", "2500") or "2500").strip())),
+        logger=logger,
+        connect_timeout_seconds=transport_config.connect_timeout_seconds,
+        read_timeout_seconds=transport_config.read_timeout_seconds,
+        stream_read_timeout_seconds=transport_config.stream_read_timeout_seconds,
+        write_timeout_seconds=transport_config.write_timeout_seconds,
+        pool_timeout_seconds=transport_config.pool_timeout_seconds,
+        keepalive_expiry_seconds=transport_config.keepalive_expiry_seconds,
+        max_connections=transport_config.max_connections,
+        max_keepalive_connections=transport_config.max_keepalive_connections,
+        http_client=shared_http_client,
+    )
+    app_state.shared_llm_adapter = llm
+    app_state.shared_llm_adapter_ready = True
+    app_state.aux_llm = llm
+    return llm
+
+
 class FileRouteService:
     def __init__(self) -> None:
         self._logger = logging.getLogger(__name__)
-        self._llm = None
         self._llm_lock = Lock()
 
     def _max_pdf_chars(self) -> int:
@@ -55,27 +105,12 @@ class FileRouteService:
         except Exception:
             return 50000
 
-    def _resolve_llm(self):
-        if self._llm is not None:
-            return self._llm
+    def _resolve_llm(self, *, app_state: Any):
+        shared_llm = getattr(app_state, "shared_llm_adapter", None)
+        if _has_invoke(shared_llm):
+            return shared_llm
         with self._llm_lock:
-            if self._llm is not None:
-                return self._llm
-            resolved = resolve_generation_runtime_inputs(api_key=None, base_url=None, model=None, config=None)
-            if not str(resolved.api_key or "").strip():
-                raise RuntimeError("OPENAI_API_KEY/DASHSCOPE_API_KEY is required for file QA")
-            if not str(resolved.base_url or "").strip():
-                raise RuntimeError("OPENAI_BASE_URL/DASHSCOPE_BASE_URL is required for file QA")
-            self._llm = build_chat_adapter(
-                api_key=resolved.api_key,
-                base_url=resolved.base_url,
-                model=resolved.model,
-                temperature=0.3,
-                top_p=0.95,
-                max_tokens=max(1024, int(str(os.getenv("PDF_QA_MAX_TOKENS", "2500") or "2500").strip())),
-                logger=self._logger,
-            )
-            return self._llm
+            return resolve_app_owned_llm(app_state=app_state, logger=self._logger)
 
     def _extract_pdf_text(self, pdf_path: str, *, max_pages: int = 10, exclude_references: bool = True) -> str:
         try:
@@ -107,6 +142,7 @@ class FileRouteService:
         question: str,
         pdf_content: str,
         *,
+        app_state: Any,
         kb_verification: dict[str, Any] | None = None,
         stream: bool = False,
         first_token_timeout_sec: float | None = None,
@@ -115,7 +151,7 @@ class FileRouteService:
         return answer_from_pdf_impl(
             question,
             pdf_content,
-            llm=self._resolve_llm(),
+            llm=self._resolve_llm(app_state=app_state),
             max_pdf_chars=self._max_pdf_chars(),
             smart_truncate_fn=lambda content, max_chars, is_summary=False, question="": content[:max_chars],
             logger=self._logger,
@@ -132,7 +168,7 @@ class FileRouteService:
 
         class _PdfAgent:
             # Compatibility shim for legacy MaterialScienceAgent entrypoints kept during V2 rollout.
-            llm = service._resolve_llm()
+            llm = service._resolve_llm(app_state=app_state)
 
             def smart_query(self, question: str, use_dual_retrieval: bool = False) -> dict[str, Any]:
                 _ = use_dual_retrieval
@@ -162,6 +198,7 @@ class FileRouteService:
                 answer_output = service._answer_from_pdf(
                     user_question,
                     pdf_content,
+                    app_state=app_state,
                     kb_verification=None,
                     stream=False,
                 )
@@ -219,7 +256,12 @@ class FileRouteService:
                 executor=None,
                 timeout_error_cls=TimeoutError,
                 sse_event=lambda event: event,
-                answer_from_pdf_fn=self._answer_from_pdf,
+                answer_from_pdf_fn=lambda question, pdf_content, **kwargs: self._answer_from_pdf(
+                    question,
+                    pdf_content,
+                    app_state=app_state,
+                    **kwargs,
+                ),
                 clean_answer_for_frontend=_clean_answer_for_frontend,
                 filter_literature_markers_for_streaming=_filter_literature_markers_for_streaming,
                 log_qa_interaction=_identity_log,
@@ -244,7 +286,7 @@ class FileRouteService:
                 question=request.question,
                 used_files=request.execution_files or request.used_files,
                 route_hint=route,
-                agent=SimpleNamespace(llm=self._resolve_llm()),
+                agent=SimpleNamespace(llm=self._resolve_llm(app_state=app_state)),
                 sse_event=lambda event: event,
                 clean_answer_for_frontend=_clean_answer_for_frontend,
                 filter_literature_markers_for_streaming=_filter_literature_markers_for_streaming,

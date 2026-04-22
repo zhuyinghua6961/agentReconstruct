@@ -27,7 +27,7 @@ def test_generation_driven_rag_initializes_with_local_bootstrap(monkeypatch, tmp
     monkeypatch.setenv("TOPIC_INDEX_PATH", str(topic_index))
     monkeypatch.setattr(
         "app.modules.generation_pipeline.generation_driven_rag_facade.build_openai_client_impl",
-        lambda *, api_key, base_url, logger=None: {"api_key": api_key, "base_url": base_url},
+        lambda *, api_key, base_url, logger=None, http_client=None: {"api_key": api_key, "base_url": base_url},
     )
 
     rag = GenerationDrivenRAG()
@@ -47,7 +47,7 @@ def test_generation_driven_rag_extracts_unique_dois(monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", "https://example.com/v1")
     monkeypatch.setattr(
         "app.modules.generation_pipeline.generation_driven_rag_facade.build_openai_client_impl",
-        lambda *, api_key, base_url, logger=None: object(),
+        lambda *, api_key, base_url, logger=None, http_client=None: object(),
     )
 
     rag = GenerationDrivenRAG()
@@ -87,7 +87,7 @@ def test_generation_driven_rag_stage1_uses_stage1_planning(monkeypatch, tmp_path
 
     monkeypatch.setattr(
         "app.modules.generation_pipeline.generation_driven_rag_facade.build_openai_client_impl",
-        lambda *, api_key, base_url, logger=None: _Client(),
+        lambda *, api_key, base_url, logger=None, http_client=None: _Client(),
     )
 
     rag = GenerationDrivenRAG()
@@ -103,7 +103,7 @@ def test_generation_driven_rag_stage2_uses_stage2_retrieval(monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", "https://example.com/v1")
     monkeypatch.setattr(
         "app.modules.generation_pipeline.generation_driven_rag_facade.build_openai_client_impl",
-        lambda *, api_key, base_url, logger=None: object(),
+        lambda *, api_key, base_url, logger=None, http_client=None: object(),
     )
 
     captured: dict[str, object] = {}
@@ -145,7 +145,7 @@ def test_generation_driven_rag_stage3_uses_pdf_pipeline(monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", "https://example.com/v1")
     monkeypatch.setattr(
         "app.modules.generation_pipeline.generation_driven_rag_facade.build_openai_client_impl",
-        lambda *, api_key, base_url, logger=None: object(),
+        lambda *, api_key, base_url, logger=None, http_client=None: object(),
     )
 
     captured: dict[str, object] = {}
@@ -174,7 +174,7 @@ def test_generation_driven_rag_stage25_uses_md_expansion(monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", "https://example.com/v1")
     monkeypatch.setattr(
         "app.modules.generation_pipeline.generation_driven_rag_facade.build_openai_client_impl",
-        lambda *, api_key, base_url, logger=None: object(),
+        lambda *, api_key, base_url, logger=None, http_client=None: object(),
     )
 
     captured: dict[str, object] = {}
@@ -203,7 +203,7 @@ def test_generation_driven_rag_stage4_uses_synthesis_streaming(monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", "https://example.com/v1")
     monkeypatch.setattr(
         "app.modules.generation_pipeline.generation_driven_rag_facade.build_openai_client_impl",
-        lambda *, api_key, base_url, logger=None: object(),
+        lambda *, api_key, base_url, logger=None, http_client=None: object(),
     )
 
     captured: dict[str, object] = {}
@@ -236,7 +236,7 @@ def test_generation_driven_rag_forwards_graph_evidence_into_stage_calls(monkeypa
     monkeypatch.setenv("OPENAI_BASE_URL", "https://example.com/v1")
     monkeypatch.setattr(
         "app.modules.generation_pipeline.generation_driven_rag_facade.build_openai_client_impl",
-        lambda *, api_key, base_url, logger=None: object(),
+        lambda *, api_key, base_url, logger=None, http_client=None: object(),
     )
 
     captured: dict[str, object] = {}
@@ -300,7 +300,7 @@ def test_generation_driven_rag_uses_legacy_inline_stage_prompts_not_workspace_pr
     monkeypatch.setenv("MATERIAL_AGENT_PROMPTS_DIR", str(prompt_root))
     monkeypatch.setattr(
         "app.modules.generation_pipeline.generation_driven_rag_facade.build_openai_client_impl",
-        lambda *, api_key, base_url, logger=None: object(),
+        lambda *, api_key, base_url, logger=None, http_client=None: object(),
     )
 
     rag = GenerationDrivenRAG()

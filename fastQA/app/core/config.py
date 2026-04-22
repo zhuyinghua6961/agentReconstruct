@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from functools import lru_cache
@@ -31,6 +32,7 @@ load_workspace_env(override_existing=False)
 
 _CONVERSATION_AUTHORITY_TARGETS = frozenset({"legacy", "public_service", "shadow_public_service"})
 _PRODUCTION_APP_ENVS = frozenset({"prod", "production"})
+logger = logging.getLogger(__name__)
 
 
 def _get_bool(name: str, default: bool) -> bool:
@@ -43,14 +45,38 @@ def _get_bool(name: str, default: bool) -> bool:
 
 
 def _get_int(name: str, default: int, *, minimum: int | None = None, maximum: int | None = None) -> int:
+    raw = str(os.getenv(name, str(default))).strip()
     try:
-        value = int(str(os.getenv(name, str(default))).strip())
+        value = int(raw)
     except Exception:
+        if raw and raw != str(default):
+            logger.warning("invalid int env %s=%r; using default %s", name, raw, default)
         value = int(default)
+    original = value
     if minimum is not None:
         value = max(minimum, value)
     if maximum is not None:
         value = min(maximum, value)
+    if raw and raw != str(default) and value != original:
+        logger.warning("out-of-range int env %s=%r; clamped to %s", name, raw, value)
+    return value
+
+
+def _get_float(name: str, default: float, *, minimum: float | None = None, maximum: float | None = None) -> float:
+    raw = str(os.getenv(name, str(default))).strip()
+    try:
+        value = float(raw)
+    except Exception:
+        if raw and raw != str(default):
+            logger.warning("invalid float env %s=%r; using default %s", name, raw, default)
+        value = float(default)
+    original = value
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    if raw and raw != str(default) and value != original:
+        logger.warning("out-of-range float env %s=%r; clamped to %s", name, raw, value)
     return value
 
 
@@ -158,6 +184,15 @@ class Settings:
     file_context_fallback_enabled: bool
     ask_stream_max_concurrent: int
     sse_heartbeat_sec: int
+    llm_http_shared_pool_enabled: bool
+    llm_http_connect_timeout_seconds: float
+    llm_http_read_timeout_seconds: float
+    llm_http_stream_read_timeout_seconds: float
+    llm_http_write_timeout_seconds: float
+    llm_http_keepalive_expiry_seconds: float
+    llm_http_max_connections: int
+    llm_http_max_keepalive_connections: int
+    llm_http_pool_timeout_seconds: float
     chat_persist_enabled: bool
     chat_persist_async: bool
     conversation_execution_authority_target: str
@@ -208,6 +243,8 @@ class Settings:
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    from app.integrations.llm import SharedHttpPoolConfig
+
     cors_raw = str(os.getenv("BACKEND_CORS_ORIGINS", "*") or "*").strip()
     cors_origins = [item.strip() for item in cors_raw.split(",") if item.strip()] or ["*"]
     fastapi_host = str(os.getenv("FASTAPI_HOST", os.getenv("BACKEND_HOST", "0.0.0.0")) or "0.0.0.0").strip()
@@ -223,6 +260,7 @@ def get_settings() -> Settings:
     state_root = Path(SERVICE_STATE_ROOT)
     runtime_root = Path(SERVICE_RUNTIME_ROOT)
     asset_root = Path(SERVICE_ASSET_ROOT)
+    shared_http_pool_config = SharedHttpPoolConfig.from_env()
 
     return Settings(
         app_name=str(os.getenv("FASTAPI_APP_NAME", "fastQA FastAPI") or "fastQA FastAPI").strip(),
@@ -271,6 +309,20 @@ def get_settings() -> Settings:
             minimum=5,
             maximum=120,
         ),
+        llm_http_shared_pool_enabled=_get_bool("FASTQA_LLM_HTTP_SHARED_POOL_ENABLED", False),
+        llm_http_connect_timeout_seconds=shared_http_pool_config.connect_timeout_seconds,
+        llm_http_read_timeout_seconds=shared_http_pool_config.read_timeout_seconds,
+        llm_http_stream_read_timeout_seconds=_get_float(
+            "FASTQA_LLM_HTTP_STREAM_READ_TIMEOUT_SECONDS",
+            600.0,
+            minimum=5.0,
+            maximum=7200.0,
+        ),
+        llm_http_write_timeout_seconds=shared_http_pool_config.write_timeout_seconds,
+        llm_http_keepalive_expiry_seconds=shared_http_pool_config.keepalive_expiry_seconds,
+        llm_http_max_connections=shared_http_pool_config.max_connections,
+        llm_http_max_keepalive_connections=shared_http_pool_config.max_keepalive_connections,
+        llm_http_pool_timeout_seconds=shared_http_pool_config.pool_timeout_seconds,
         chat_persist_enabled=_get_bool("CHAT_PERSIST_ENABLED", True),
         chat_persist_async=_get_bool("CHAT_PERSIST_ASYNC", True),
         conversation_execution_authority_target=conversation_execution_authority_target,

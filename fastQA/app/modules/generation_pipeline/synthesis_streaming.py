@@ -5,6 +5,7 @@ import re
 import time
 from typing import Any, Callable, Dict, List, Set, Tuple
 
+from app.integrations.llm import raise_if_upstream_pool_timeout
 from app.modules.generation_pipeline.feature_flags import env_bool, env_int
 from app.modules.generation_pipeline.answer_summary import (
     apply_answer_summary_experiment,
@@ -177,6 +178,7 @@ def _extract_citable_facts_from_evidence(
         )
         raw = str(response.choices[0].message.content or "").strip()
     except Exception as exc:
+        raise_if_upstream_pool_timeout(exc)
         logger.warning("Stage4 two-stage fact extraction failed: %s", exc)
         return []
     start = raw.find("[")
@@ -665,6 +667,7 @@ def iter_stage4_synthesis_with_pdf_chunks(
             "source_count": len(pdf_chunks),
         }
     except Exception as exc:
+        raise_if_upstream_pool_timeout(exc)
         logger.error("stage4 synthesis failed: %s", exc, exc_info=True)
         yield {"success": False, "error": str(exc)}
 

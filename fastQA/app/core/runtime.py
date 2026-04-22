@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from typing import Any
 
+from app.integrations.llm import FastQASharedUpstreamHttpPool, SharedHttpPoolConfig
 from app.integrations.redis import RedisService, build_redis_bindings
 
 try:
@@ -13,6 +15,15 @@ except Exception:  # pragma: no cover
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, "1" if default else "0") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
 
 
 def _set_component_status(
@@ -73,12 +84,134 @@ def generation_runtime_is_ready(runtime: Any) -> bool:
     return str(status.get("status") or "").strip().lower() == "ok"
 
 
+def _shared_llm_pool_enabled(runtime: Any | None = None) -> bool:
+    settings = getattr(runtime, "settings", None) if runtime is not None else None
+    configured = getattr(settings, "llm_http_shared_pool_enabled", None)
+    if configured is not None:
+        return bool(configured)
+    return _env_bool("FASTQA_LLM_HTTP_SHARED_POOL_ENABLED", False)
+
+
+def _shared_llm_pool_config(runtime: Any) -> SharedHttpPoolConfig:
+    settings = getattr(runtime, "settings", None)
+    if settings is None:
+        return SharedHttpPoolConfig.from_env()
+    try:
+        return SharedHttpPoolConfig(
+            connect_timeout_seconds=float(getattr(settings, "llm_http_connect_timeout_seconds")),
+            read_timeout_seconds=float(getattr(settings, "llm_http_read_timeout_seconds")),
+            stream_read_timeout_seconds=float(getattr(settings, "llm_http_stream_read_timeout_seconds")),
+            write_timeout_seconds=float(getattr(settings, "llm_http_write_timeout_seconds")),
+            pool_timeout_seconds=float(getattr(settings, "llm_http_pool_timeout_seconds")),
+            keepalive_expiry_seconds=float(getattr(settings, "llm_http_keepalive_expiry_seconds")),
+            max_connections=int(getattr(settings, "llm_http_max_connections")),
+            max_keepalive_connections=int(getattr(settings, "llm_http_max_keepalive_connections")),
+        )
+    except Exception:
+        return SharedHttpPoolConfig.from_env()
+
+
+def _shared_llm_status_extra(
+    *,
+    runtime: Any,
+    status: str,
+    ready: bool,
+    client_owner: str,
+    bootstrap_source: str,
+    shared_pool: Any | None = None,
+) -> dict[str, Any]:
+    config = _shared_llm_pool_config(runtime)
+    snapshot = dict(getattr(shared_pool, "snapshot", lambda: {})() or {})
+    return {
+        "enabled": _shared_llm_pool_enabled(runtime),
+        "ready": bool(ready),
+        "pool_owner": "app",
+        "client_owner": str(client_owner or "private"),
+        "shared_client_id": snapshot.get("shared_client_id"),
+        "pid": int(snapshot.get("pid") or os.getpid()),
+        "bootstrap_source": str(snapshot.get("bootstrap_source") or bootstrap_source or "startup"),
+        "pool_timeout_count": int(snapshot.get("pool_timeout_count") or 0),
+        "pool_wait_ms": float(snapshot.get("pool_wait_ms") or 0.0),
+        "max_connections": int(snapshot.get("max_connections") or config.max_connections),
+        "max_keepalive_connections": int(
+            snapshot.get("max_keepalive_connections") or config.max_keepalive_connections
+        ),
+        "keepalive_expiry_seconds": float(
+            snapshot.get("keepalive_expiry_seconds") or config.keepalive_expiry_seconds
+        ),
+    }
+
+
+def _set_shared_llm_pool_status(
+    runtime: Any,
+    *,
+    status: str,
+    detail: str,
+    error: str = "",
+    client_owner: str,
+    bootstrap_source: str = "startup",
+    shared_pool: Any | None = None,
+) -> None:
+    extra = _shared_llm_status_extra(
+        runtime=runtime,
+        status=status,
+        ready=status == "ok",
+        client_owner=client_owner,
+        bootstrap_source=bootstrap_source,
+        shared_pool=shared_pool,
+    )
+    _set_component_status(
+        runtime,
+        "shared_llm_pool",
+        status=status,
+        detail=detail,
+        error=error,
+        extra=extra,
+    )
+    logger = getattr(runtime, "logger", None)
+    if logger is not None:
+        logger.info(
+            "fastqa shared llm pool status=%s ready=%s pool_owner=%s client_owner=%s shared_client_id=%s pid=%s bootstrap_source=%s pool_timeout_count=%s max_connections=%s max_keepalive_connections=%s keepalive_expiry_seconds=%s detail=%s error=%s",
+            status,
+            extra["ready"],
+            extra["pool_owner"],
+            extra["client_owner"],
+            extra["shared_client_id"],
+            extra["pid"],
+            extra["bootstrap_source"],
+            extra["pool_timeout_count"],
+            extra["max_connections"],
+            extra["max_keepalive_connections"],
+            extra["keepalive_expiry_seconds"],
+            detail,
+            error,
+        )
+
+
+def _ensure_shared_llm_http_pool(runtime: Any) -> Any | None:
+    existing = getattr(runtime, "shared_llm_http_pool", None)
+    existing_client = getattr(existing, "client", None)
+    if callable(existing_client) and existing_client() is not None:
+        return existing
+    pool = FastQASharedUpstreamHttpPool.from_env(bootstrap_source="startup")
+    runtime.shared_llm_http_pool = pool
+    return pool
+
+
 def bootstrap_generation_runtime(runtime: Any) -> None:
     settings = runtime.settings
     runtime.generation_runtime = None
     runtime.generation_runtime_ready = False
+    if not hasattr(runtime, "shared_llm_http_pool"):
+        runtime.shared_llm_http_pool = None
 
     if not bool(getattr(settings, "generation_runtime_enabled", False)):
+        _set_shared_llm_pool_status(
+            runtime,
+            status="skipped",
+            detail="shared llm pool skipped because generation runtime is disabled",
+            client_owner="private",
+        )
         _set_component_status(
             runtime,
             "generation_runtime",
@@ -103,7 +236,38 @@ def bootstrap_generation_runtime(runtime: Any) -> None:
         if not str(resolved.base_url or "").strip():
             raise ValueError("OPENAI_BASE_URL/DASHSCOPE_BASE_URL is required")
 
-        runtime.generation_runtime = GenerationDrivenRAG()
+        shared_http_client = None
+        if _shared_llm_pool_enabled(runtime):
+            try:
+                pool = _ensure_shared_llm_http_pool(runtime)
+                if pool is not None:
+                    shared_http_client = pool.client()
+                    _set_shared_llm_pool_status(
+                        runtime,
+                        status="ok",
+                        detail="shared llm pool initialized",
+                        client_owner="shared",
+                        shared_pool=pool,
+                    )
+            except Exception as exc:
+                runtime.shared_llm_http_pool = None
+                shared_http_client = None
+                _set_shared_llm_pool_status(
+                    runtime,
+                    status="degraded",
+                    detail="shared llm pool bootstrap failed; falling back to private client",
+                    error=str(exc),
+                    client_owner="private",
+                )
+        else:
+            _set_shared_llm_pool_status(
+                runtime,
+                status="skipped",
+                detail="shared llm pool disabled by config; using private app-owned client",
+                client_owner="private",
+            )
+
+        runtime.generation_runtime = GenerationDrivenRAG(http_client=shared_http_client)
         literature_expert = getattr(runtime.generation_runtime, "literature_expert", None)
         if getattr(literature_expert, "available", True) is False:
             detail = str(getattr(literature_expert, "availability_detail", "") or "literature expert unavailable")
@@ -119,9 +283,28 @@ def bootstrap_generation_runtime(runtime: Any) -> None:
                 "ready": True,
                 "model": str(getattr(runtime.generation_runtime, "model", "") or ""),
                 "base_url": str(getattr(runtime.generation_runtime, "base_url", "") or ""),
+                "client_owner": "shared" if shared_http_client is not None else "private",
+                "pool_owner": "app",
+                "shared_client_id": (
+                    getattr(getattr(runtime, "shared_llm_http_pool", None), "client_id", None)
+                    if shared_http_client is not None
+                    else None
+                ),
+                "bootstrap_source": "startup",
+                "pid": os.getpid(),
             },
         )
     except Exception as exc:
+        if "shared_llm_pool" not in getattr(runtime, "component_status", {}):
+            _set_shared_llm_pool_status(
+                runtime,
+                status="degraded" if _shared_llm_pool_enabled(runtime) else "skipped",
+                detail="shared llm pool unavailable during generation runtime bootstrap"
+                if _shared_llm_pool_enabled(runtime)
+                else "shared llm pool disabled by config; using private app-owned client",
+                error=str(exc) if _shared_llm_pool_enabled(runtime) else "",
+                client_owner="private",
+            )
         _set_component_status(
             runtime,
             "generation_runtime",
@@ -205,8 +388,13 @@ def close_generation_runtime(runtime: Any) -> None:
     close = getattr(generation_runtime, "close", None)
     if callable(close):
         close()
+    shared_llm_http_pool = getattr(runtime, "shared_llm_http_pool", None)
+    close_shared_pool = getattr(shared_llm_http_pool, "close", None)
+    if callable(close_shared_pool):
+        close_shared_pool()
     runtime.generation_runtime = None
     runtime.generation_runtime_ready = False
+    runtime.shared_llm_http_pool = None
 
 
 def close_graph_kb(runtime: Any) -> None:

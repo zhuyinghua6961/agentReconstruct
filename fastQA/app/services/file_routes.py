@@ -7,11 +7,11 @@ from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Iterator
 
 from app.modules.file_context.service import resolve_request_file_context
-from app.modules.qa_pdf.llm_factory import init_llm
 from app.modules.qa_pdf.service import pdf_qa_service
 from app.modules.qa_tabular.service import qa_tabular_service
 from app.modules.generation_pipeline.synthesis_postprocess import build_top_reference_context
 from app.modules.storage.uploaded_file_storage import materialize_uploaded_files
+from app.services.file_route_service import resolve_app_owned_llm
 from app.services.file_qa_helpers import (
     clean_answer_for_frontend,
     filter_literature_markers_for_streaming,
@@ -142,17 +142,22 @@ def _get_runtime_llm(app_state: Any) -> Any:
 def get_aux_llm(app_state: Any, logger: Any) -> Any:
     runtime_llm = _get_runtime_llm(app_state)
     if runtime_llm is not None:
+        if getattr(app_state, "shared_llm_adapter", None) is None and hasattr(runtime_llm, "invoke"):
+            app_state.shared_llm_adapter = runtime_llm
+        if getattr(app_state, "aux_llm", None) is None and hasattr(runtime_llm, "invoke"):
+            app_state.aux_llm = runtime_llm
         return runtime_llm
 
     llm = getattr(app_state, "aux_llm", None)
     if llm is not None and hasattr(llm, "invoke"):
+        if getattr(app_state, "shared_llm_adapter", None) is None:
+            app_state.shared_llm_adapter = llm
         return llm
 
     try:
-        llm = init_llm(logger)
+        llm = resolve_app_owned_llm(app_state=app_state, logger=logger)
     except Exception as exc:
         raise FileRouteRuntimeError(str(exc)) from exc
-    app_state.aux_llm = llm
     return llm
 
 

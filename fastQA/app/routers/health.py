@@ -8,6 +8,27 @@ from app.core.config import RESOURCE_ROOT, SERVICE_RUNTIME_ROOT, SERVICE_STATE_R
 router = APIRouter(tags=["health"])
 
 
+def _shared_llm_pool_status(request: Request) -> dict[str, object]:
+    status = dict(request.app.state.component_status.get("shared_llm_pool") or {})
+    shared_pool = getattr(request.app.state, "shared_llm_http_pool", None)
+    snapshot = dict(getattr(shared_pool, "snapshot", lambda: {})() or {})
+    if not snapshot:
+        return status
+    for field in (
+        "shared_client_id",
+        "pid",
+        "bootstrap_source",
+        "pool_timeout_count",
+        "pool_wait_ms",
+        "max_connections",
+        "max_keepalive_connections",
+        "keepalive_expiry_seconds",
+    ):
+        if field in snapshot:
+            status[field] = snapshot[field]
+    return status
+
+
 @router.get("/healthz")
 @router.get("/api/health")
 def healthz(request: Request) -> JSONResponse:
@@ -15,6 +36,7 @@ def healthz(request: Request) -> JSONResponse:
     redis_status = dict(request.app.state.component_status.get("redis") or {})
     generation_runtime_status = dict(request.app.state.component_status.get("generation_runtime") or {})
     graph_kb_status = dict(request.app.state.component_status.get("graph_kb") or {})
+    shared_llm_pool_status = _shared_llm_pool_status(request)
     generation_ready = bool(getattr(request.app.state, "generation_runtime_ready", False))
     graph_kb_ready = bool(getattr(request.app.state, "graph_kb_ready", False))
     is_readiness_probe = str(getattr(request.url, "path", "") or "").endswith("/api/health")
@@ -47,6 +69,7 @@ def healthz(request: Request) -> JSONResponse:
                 "redis": redis_status,
                 "generation_runtime": generation_runtime_status,
                 "graph_kb": graph_kb_status,
+                "shared_llm_pool": shared_llm_pool_status,
             },
         },
     )

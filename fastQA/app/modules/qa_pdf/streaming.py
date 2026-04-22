@@ -5,6 +5,8 @@ import re
 from collections.abc import Iterable, Iterator
 from typing import Any
 
+from app.integrations.llm import raise_if_upstream_pool_timeout
+
 
 def _emit(payload: dict[str, Any], sse_event: Any) -> Any:
     if callable(sse_event):
@@ -76,7 +78,8 @@ def _run_kb_verification(
                 return None
         else:
             result = agent.smart_query(question, use_dual_retrieval=use_dual)
-    except Exception:
+    except Exception as exc:
+        raise_if_upstream_pool_timeout(exc)
         return None
     if not isinstance(result, dict) or not result.get("success") or not result.get("final_answer"):
         return None
@@ -151,6 +154,7 @@ def iter_uploaded_pdf_answer_events(**kwargs: Any) -> Iterator[Any]:
             is_cancelled=is_cancelled,
         )
     except Exception as exc:
+        raise_if_upstream_pool_timeout(exc)
         if logger is not None:
             logger.warning("PDF QA invocation failed: %s", exc)
         yield _emit({"type": "error", "error": str(exc) or "pdf_qa_failed"}, sse_event)

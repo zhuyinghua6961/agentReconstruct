@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import httpx
 from types import SimpleNamespace
 
 from app.modules.generation_pipeline.stage1_planning import run_stage1_pre_answer_and_planning
@@ -28,6 +29,12 @@ class _AlwaysFailingClient(_FakeClient):
     def _create(self, **kwargs):
         self.calls.append(kwargs)
         raise RuntimeError("invalid api key")
+
+
+class _PoolTimeoutClient(_FakeClient):
+    def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        raise httpx.PoolTimeout("pool exhausted")
 
 
 class _Logger:
@@ -242,6 +249,27 @@ def test_stage1_planning_does_not_retry_without_response_format_for_unrelated_er
     )
 
     assert result["success"] is False
+    assert len(client.calls) == 1
+    assert client.calls[0]["response_format"] == {"type": "json_object"}
+
+
+def test_stage1_planning_propagates_pool_timeout_without_swallowing():
+    client = _PoolTimeoutClient("ignored")
+
+    try:
+        run_stage1_pre_answer_and_planning(
+            user_question="what is lfp?",
+            stage1_prompt="prompt",
+            vector_db_context="context",
+            client=client,
+            model="gpt-test",
+            logger=_Logger(),
+        )
+    except httpx.PoolTimeout:
+        pass
+    else:  # pragma: no cover - enforced by failing test before fix
+        raise AssertionError("expected PoolTimeout to propagate")
+
     assert len(client.calls) == 1
     assert client.calls[0]["response_format"] == {"type": "json_object"}
 

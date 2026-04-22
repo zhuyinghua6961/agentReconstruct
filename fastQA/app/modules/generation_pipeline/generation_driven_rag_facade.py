@@ -74,6 +74,7 @@ class GenerationDrivenRAG:
         model: str | None = None,
         literature_expert: Optional[MicroscopicSemanticExpert] = None,
         config: Optional[Dict[str, Any]] = None,
+        http_client: Any | None = None,
     ) -> None:
         logger.info("initializing GenerationDrivenRAG")
         runtime_inputs = resolve_generation_runtime_inputs_impl(
@@ -89,11 +90,13 @@ class GenerationDrivenRAG:
         self.embedding_api_url = runtime_inputs.embedding_api_url
         self.embedding_model_path = runtime_inputs.embedding_model_path
         self.chroma_db_path = runtime_inputs.chroma_db_path
+        self._http_client = http_client
 
         self.client = build_openai_client_impl(
             api_key=self.api_key,
             base_url=self.base_url,
             logger=logger,
+            http_client=http_client,
         )
         self.literature_expert = ensure_literature_expert_impl(
             existing_expert=literature_expert,
@@ -180,8 +183,18 @@ class GenerationDrivenRAG:
                 api_key=self.api_key,
                 base_url=self.base_url,
                 model=self.model,
+                http_client=self._http_client,
             )
         return self._query_expander
+
+    def close(self) -> None:
+        if self._query_expander is not None:
+            close_expander = getattr(self._query_expander, "close", None)
+            if callable(close_expander):
+                close_expander()
+        close_client = getattr(self.client, "close", None)
+        if callable(close_client):
+            close_client()
 
     def stage1_pre_answer_and_planning(
         self,
