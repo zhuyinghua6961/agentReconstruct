@@ -126,6 +126,38 @@ class AuthSettings:
 
 
 @dataclass(frozen=True)
+class LlmHttpSettings:
+    shared_pool_enabled: bool
+    connect_timeout_seconds: float
+    read_timeout_seconds: float
+    stream_read_timeout_seconds: float
+    write_timeout_seconds: float
+    pool_timeout_seconds: float
+    keepalive_expiry_seconds: float
+    max_keepalive_connections: int
+    max_connections: int
+
+
+@dataclass(frozen=True)
+class PlanningHotPoolSettings:
+    enabled: bool
+    lane_count: int
+    warmup_enabled: bool
+    warm_interval_seconds: float
+    warm_timeout_seconds: float
+    warm_jitter_seconds: float
+    lane_degraded_after_seconds: float
+    warm_active_start_hour: int
+    warm_active_end_hour: int
+
+
+@dataclass(frozen=True)
+class PlanningUpstreamGateSettings:
+    enabled: bool
+    limit: int
+
+
+@dataclass(frozen=True)
 class PatentGraphSettings:
     enabled: bool
     v2_enabled: bool
@@ -151,6 +183,9 @@ class Settings:
     redis: RedisSettings
     authority: AuthoritySettings
     auth: AuthSettings
+    llm_http: LlmHttpSettings
+    planning_hot_pool: PlanningHotPoolSettings
+    planning_upstream_gate: PlanningUpstreamGateSettings
     graph_kb: PatentGraphSettings
 
 
@@ -199,6 +234,35 @@ def get_settings() -> Settings:
             jwt_secret=str(os.getenv("JWT_SECRET", "") or "").strip(),
             jwt_expire_seconds=_read_int("JWT_EXPIRE_SECONDS", 86400),
             jwt_compatible_access_salts=compat_salts,
+        ),
+        llm_http=LlmHttpSettings(
+            shared_pool_enabled=_read_bool("PATENT_LLM_HTTP_SHARED_POOL_ENABLED", False),
+            connect_timeout_seconds=_read_float("PATENT_LLM_HTTP_CONNECT_TIMEOUT_SECONDS", 15.0),
+            read_timeout_seconds=_read_float("PATENT_LLM_HTTP_READ_TIMEOUT_SECONDS", 180.0),
+            stream_read_timeout_seconds=_read_float("PATENT_LLM_HTTP_STREAM_READ_TIMEOUT_SECONDS", 600.0),
+            write_timeout_seconds=_read_float("PATENT_LLM_HTTP_WRITE_TIMEOUT_SECONDS", 180.0),
+            pool_timeout_seconds=_read_float("PATENT_LLM_HTTP_POOL_TIMEOUT_SECONDS", 30.0),
+            keepalive_expiry_seconds=_read_float("PATENT_LLM_HTTP_KEEPALIVE_EXPIRY_SECONDS", 120.0),
+            max_keepalive_connections=max(1, _read_int("PATENT_LLM_HTTP_MAX_KEEPALIVE_CONNECTIONS", 20)),
+            max_connections=max(1, _read_int("PATENT_LLM_HTTP_MAX_CONNECTIONS", 100)),
+        ),
+        planning_hot_pool=PlanningHotPoolSettings(
+            enabled=_read_bool("PATENT_PLANNING_HOT_POOL_ENABLED", False),
+            lane_count=max(1, _read_int("PATENT_PLANNING_HOT_POOL_LANE_COUNT", 2)),
+            warmup_enabled=_read_bool("PATENT_PLANNING_HOT_POOL_WARMUP_ENABLED", False),
+            warm_interval_seconds=max(1.0, _read_float("PATENT_PLANNING_HOT_POOL_WARM_INTERVAL_SECONDS", 7200.0)),
+            warm_timeout_seconds=max(1.0, _read_float("PATENT_PLANNING_HOT_POOL_WARM_TIMEOUT_SECONDS", 30.0)),
+            warm_jitter_seconds=max(0.0, _read_float("PATENT_PLANNING_HOT_POOL_WARM_JITTER_SECONDS", 0.0)),
+            lane_degraded_after_seconds=max(
+                1.0,
+                _read_float("PATENT_PLANNING_HOT_POOL_LANE_DEGRADED_AFTER_SECONDS", 7200.0),
+            ),
+            warm_active_start_hour=max(0, min(23, _read_int("PATENT_PLANNING_HOT_POOL_WARM_ACTIVE_START_HOUR", 8))),
+            warm_active_end_hour=max(1, min(24, _read_int("PATENT_PLANNING_HOT_POOL_WARM_ACTIVE_END_HOUR", 18))),
+        ),
+        planning_upstream_gate=PlanningUpstreamGateSettings(
+            enabled=_read_bool("PATENT_PLANNING_UPSTREAM_GATE_ENABLED", False),
+            limit=max(1, _read_int("PATENT_PLANNING_UPSTREAM_GATE_LIMIT", 1)),
         ),
         graph_kb=PatentGraphSettings(
             enabled=_read_bool("PATENT_GRAPH_KB_ENABLED", False),

@@ -4488,7 +4488,7 @@ def test_dispatch_tabular_route_marks_empty_structured_execution_as_unavailable(
 
     assert result["metadata"]["answer_mode"] == "table_execution_unavailable"
     assert result["metadata"]["table_evidence_context"] == ""
-    assert "无法生成基于表格的回答" in result["answer_text"]
+    assert "当前已读取到表格文件，但未能生成可用的表格执行结果" in result["answer_text"]
 
 
 def test_dispatch_tabular_route_marks_structured_loader_failure_as_unavailable(monkeypatch, tmp_path):

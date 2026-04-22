@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
+
 import server.patent.tabular_service as tabular_service_module
 from server.patent.file_models import PatentExecutionFile, PatentFileContract
 from server.patent.tabular_service import PatentTabularAnswerClient, PatentTabularService
@@ -124,6 +126,84 @@ def test_tabular_answer_client_from_env_uses_injected_http_client_without_taking
 
     assert client is not None
     assert client._client is http_client
+    client.close()
+    assert http_client.closed is False
+
+
+def test_tabular_answer_client_uses_injected_http_client_and_preserves_timeout_dimensions():
+    class _FakeSharedPool:
+        def __init__(self) -> None:
+            self.config = type(
+                "_Config",
+                (),
+                {
+                    "connect_timeout_seconds": 1.5,
+                    "read_timeout_seconds": 2.5,
+                    "stream_read_timeout_seconds": 9.5,
+                    "write_timeout_seconds": 3.5,
+                    "pool_timeout_seconds": 4.5,
+                },
+            )()
+
+        def snapshot(self) -> dict[str, object]:
+            return {
+                "pool_owner": "app",
+                "client_owner": "shared",
+                "shared_client_id": "tabular-shared",
+                "pid": 1,
+                "bootstrap_source": "startup",
+                "pool_timeout_count": 0,
+                "pool_wait_ms": 0.0,
+            }
+
+        def record_pool_wait(self, **_kwargs) -> None:
+            return None
+
+        def record_pool_timeout(self, **_kwargs) -> None:
+            return None
+
+    class _FakeHttpClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+            self.closed = False
+            self._patent_shared_pool = _FakeSharedPool()
+
+        def post(self, url, *, headers=None, json=None, timeout=None):
+            self.calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", str(url)),
+                json={"choices": [{"message": {"content": "table answer"}}]},
+            )
+
+        def close(self) -> None:
+            self.closed = True
+
+    http_client = _FakeHttpClient()
+    client = PatentTabularAnswerClient(
+        api_key="key",
+        base_url="https://example.com",
+        model="model",
+        timeout_seconds=29.0,
+        http_client=http_client,
+    )
+
+    answer = client.answer(
+        question="哪个材料的容量更高",
+        table_text="文件: claims.csv\nLMFP 120mAh\nLFP 115mAh",
+        include_kb=False,
+        route_hint="tabular_qa",
+        source_scope="table",
+    )
+
+    assert answer == "table answer"
+    assert len(http_client.calls) == 1
+    timeout = http_client.calls[0]["timeout"]
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.connect == 1.5
+    assert timeout.read == 2.5
+    assert timeout.write == 3.5
+    assert timeout.pool == 4.5
     client.close()
     assert http_client.closed is False
 

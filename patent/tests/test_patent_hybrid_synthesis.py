@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 
@@ -143,10 +144,32 @@ def test_build_hybrid_synthesis_contract_uses_richer_pdf_context_than_public_pre
 
 
 def test_hybrid_synthesis_client_does_not_close_injected_http_client():
+    shared_pool = SimpleNamespace(
+        config=SimpleNamespace(
+            connect_timeout_seconds=1.5,
+            read_timeout_seconds=2.5,
+            stream_read_timeout_seconds=9.5,
+            write_timeout_seconds=3.5,
+            pool_timeout_seconds=4.5,
+        ),
+        snapshot=lambda: {
+            "pool_owner": "app",
+            "client_owner": "shared",
+            "shared_client_id": "hybrid-shared",
+            "pid": 1,
+            "bootstrap_source": "startup",
+            "pool_timeout_count": 0,
+            "pool_wait_ms": 0.0,
+        },
+        record_pool_wait=lambda **_kwargs: None,
+        record_pool_timeout=lambda **_kwargs: None,
+    )
+
     class _FakeHttpClient:
         def __init__(self) -> None:
             self.closed = False
             self.calls: list[dict[str, object]] = []
+            self._patent_shared_pool = shared_pool
 
         def post(self, url, *, headers=None, json=None, timeout=None):
             self.calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
@@ -170,6 +193,12 @@ def test_hybrid_synthesis_client_does_not_close_injected_http_client():
     answer = client.answer(synthesis_contract=_sample_contract())
 
     assert answer == "hybrid answer"
+    timeout = shared.calls[0]["timeout"]
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.connect == 1.5
+    assert timeout.read == 2.5
+    assert timeout.write == 3.5
+    assert timeout.pool == 4.5
     client.close()
     assert shared.closed is False
 

@@ -12,6 +12,12 @@ from typing import Any, Iterator
 import httpx
 
 from server.patent.retrieval_models import PatentEvidence, PatentRetrievalOutcome, PatentTableSupplement
+from server.patent.upstream_transport import (
+    build_patent_request_timeout,
+    describe_patent_transport,
+    record_patent_dispatch_error,
+    record_patent_dispatch_success,
+)
 
 _LOGGER = logging.getLogger("patent.answering")
 _PATENT_ID_CITATION_RE = re.compile(r"\(\s*patent_id\s*=\s*([A-Za-z0-9._/\-]+)\s*\)", re.IGNORECASE)
@@ -492,13 +498,14 @@ class PatentAnswerBuilder:
             raise ValueError("transport cannot be combined with http_client")
         self._owns_http_client = self.http_client is None
         self._client = self.http_client or httpx.Client(timeout=self.timeout_seconds, transport=self.transport)
+        transport = describe_patent_transport(http_client=self._client, owns_http_client=self._owns_http_client)
         _LOGGER.info(
             "patent answer builder initialized model=%s base_url=%s timeout_seconds=%s client_owner=%s shared_client_id=%s",
             self.model,
             self.base_url,
             self.timeout_seconds,
-            "private" if self._owns_http_client else "shared",
-            hex(id(self._client)),
+            transport.get("client_owner"),
+            transport.get("shared_client_id"),
         )
 
     def close(self) -> None:
@@ -547,8 +554,8 @@ class PatentAnswerBuilder:
             self.model,
             self.base_url,
             self.timeout_seconds,
-            "private" if self._owns_http_client else "shared",
-            hex(id(self._client)),
+            describe_patent_transport(http_client=self._client, owns_http_client=self._owns_http_client).get("client_owner"),
+            describe_patent_transport(http_client=self._client, owns_http_client=self._owns_http_client).get("shared_client_id"),
             allowed_patent_ids,
             int(prompt_metadata.get("evidence_item_count", 0)),
             int(prompt_metadata.get("evidence_chars", 0)),
@@ -597,30 +604,44 @@ class PatentAnswerBuilder:
                 (time.perf_counter() - request_started) * 1000,
                 "send" if request is not None and hasattr(self._client, "send") else "post",
             )
+            request_timeout = build_patent_request_timeout(
+                http_client=self._client,
+                timeout_seconds=self.timeout_seconds,
+            )
+            dispatch_started = time.perf_counter()
             if request is not None and hasattr(self._client, "send"):
                 try:
-                    response = self._client.send(request, stream=False, timeout=self.timeout_seconds)
+                    response = self._client.send(request, stream=False, timeout=request_timeout)
                 except TypeError as exc:
                     if "timeout" not in str(exc):
+                        record_patent_dispatch_error(http_client=self._client, started_at=dispatch_started, exc=exc)
                         raise
                     response = self._client.send(request, stream=False)
+                except Exception as exc:
+                    record_patent_dispatch_error(http_client=self._client, started_at=dispatch_started, exc=exc)
+                    raise
             else:
                 try:
                     response = self._client.post(
                         request_url,
                         headers=headers,
                         content=payload_body.encode("utf-8"),
-                        timeout=self.timeout_seconds,
+                        timeout=request_timeout,
                     )
                 except TypeError as exc:
                     if "content" not in str(exc):
+                        record_patent_dispatch_error(http_client=self._client, started_at=dispatch_started, exc=exc)
                         raise
                     response = self._client.post(
                         request_url,
                         headers=headers,
                         json=payload,
-                        timeout=self.timeout_seconds,
+                        timeout=request_timeout,
                     )
+                except Exception as exc:
+                    record_patent_dispatch_error(http_client=self._client, started_at=dispatch_started, exc=exc)
+                    raise
+            record_patent_dispatch_success(http_client=self._client, started_at=dispatch_started)
             _LOGGER.info(
                 "patent answer builder request dispatch returned status_code=%s elapsed_ms=%.3f",
                 getattr(response, "status_code", ""),
@@ -710,8 +731,8 @@ class PatentAnswerBuilder:
             self.model,
             self.base_url,
             self.timeout_seconds,
-            "private" if self._owns_http_client else "shared",
-            hex(id(self._client)),
+            describe_patent_transport(http_client=self._client, owns_http_client=self._owns_http_client).get("client_owner"),
+            describe_patent_transport(http_client=self._client, owns_http_client=self._owns_http_client).get("shared_client_id"),
             allowed_patent_ids,
             int(prompt_metadata.get("evidence_item_count", 0)),
             int(prompt_metadata.get("evidence_chars", 0)),
@@ -766,13 +787,23 @@ class PatentAnswerBuilder:
                 (time.perf_counter() - stream_started) * 1000,
                 "send" if request is not None and hasattr(self._client, "send") else "stream",
             )
+            request_timeout = build_patent_request_timeout(
+                http_client=self._client,
+                timeout_seconds=self.timeout_seconds,
+                stream=True,
+            )
+            dispatch_started = time.perf_counter()
             if request is not None and hasattr(self._client, "send"):
                 try:
-                    response_cm = self._client.send(request, stream=True, timeout=self.timeout_seconds)
+                    response_cm = self._client.send(request, stream=True, timeout=request_timeout)
                 except TypeError as exc:
                     if "timeout" not in str(exc):
+                        record_patent_dispatch_error(http_client=self._client, started_at=dispatch_started, exc=exc)
                         raise
                     response_cm = self._client.send(request, stream=True)
+                except Exception as exc:
+                    record_patent_dispatch_error(http_client=self._client, started_at=dispatch_started, exc=exc)
+                    raise
                 response_context = closing(response_cm)
             else:
                 try:
@@ -781,20 +812,25 @@ class PatentAnswerBuilder:
                         request_url,
                         headers=headers,
                         content=payload_body.encode("utf-8"),
-                        timeout=self.timeout_seconds,
+                        timeout=request_timeout,
                     )
                 except TypeError as exc:
                     if "content" not in str(exc):
+                        record_patent_dispatch_error(http_client=self._client, started_at=dispatch_started, exc=exc)
                         raise
                     response_cm = self._client.stream(
                         "POST",
                         request_url,
                         headers=headers,
                         json=payload,
-                        timeout=self.timeout_seconds,
+                        timeout=request_timeout,
                     )
+                except Exception as exc:
+                    record_patent_dispatch_error(http_client=self._client, started_at=dispatch_started, exc=exc)
+                    raise
                 response_context = response_cm
             with response_context as response:
+                record_patent_dispatch_success(http_client=self._client, started_at=dispatch_started)
                 _LOGGER.info(
                     "patent answer builder stream request dispatch returned status_code=%s elapsed_ms=%.3f",
                     getattr(response, "status_code", ""),

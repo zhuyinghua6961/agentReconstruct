@@ -25,6 +25,53 @@ def _copy_components(request: Request) -> dict:
         runtime.update(dynamic_runtime)
         runtime["ready"] = runtime_ready
         components["runtime"] = runtime
+    shared_llm_pool = getattr(request.app.state, "shared_llm_pool", None)
+    if shared_llm_pool is not None:
+        shared = dict(components.get("shared_llm_pool") or {})
+        dynamic_shared = dict(getattr(shared_llm_pool, "snapshot", lambda: {})() or {})
+        shared.update(dynamic_shared)
+        enabled = bool(shared.get("enabled", getattr(shared_llm_pool, "enabled", False)))
+        ready = bool(enabled and getattr(shared_llm_pool, "client", lambda: None)() is not None)
+        shared["enabled"] = enabled
+        shared["ready"] = ready
+        shared["status"] = "ok" if ready else ("disabled" if not enabled else "degraded")
+        if ready:
+            shared["detail"] = ""
+            shared["error"] = ""
+        elif not enabled:
+            shared["detail"] = "shared llm pool disabled"
+        else:
+            shared["detail"] = "shared llm pool client unavailable"
+        components["shared_llm_pool"] = shared
+    planning_hot_pool = getattr(request.app.state, "planning_hot_pool", None)
+    if planning_hot_pool is not None:
+        planning = dict(components.get("planning_hot_pool") or {})
+        dynamic_planning = dict(getattr(planning_hot_pool, "snapshot", lambda: {})() or {})
+        planning.update(dynamic_planning)
+        enabled = bool(planning.get("enabled", False))
+        ready = bool(enabled and int(planning.get("ready_lanes", 0) or 0) > 0)
+        planning["enabled"] = enabled
+        planning["ready"] = ready
+        planning["status"] = "ok" if ready else ("disabled" if not enabled else "degraded")
+        if ready:
+            planning["detail"] = ""
+            planning["error"] = ""
+        elif not enabled:
+            planning["detail"] = "planning hot pool disabled"
+        else:
+            planning["detail"] = "planning hot pool has no ready lanes"
+        components["planning_hot_pool"] = planning
+    planning_upstream_gate = getattr(request.app.state, "planning_upstream_gate", None)
+    if planning_upstream_gate is not None:
+        gate = dict(components.get("planning_upstream_gate") or {})
+        dynamic_gate = dict(getattr(planning_upstream_gate, "snapshot", lambda: {})() or {})
+        gate.update(dynamic_gate)
+        gate["enabled"] = True
+        gate["ready"] = True
+        gate["status"] = "ok"
+        gate["detail"] = ""
+        gate["error"] = ""
+        components["planning_upstream_gate"] = gate
     return components
 
 

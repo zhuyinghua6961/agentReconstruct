@@ -1440,6 +1440,160 @@ def test_runtime_stage2_targeted_retrieval_passes_parallel_workers_and_should_ca
     assert captured["parallel_workers"] == 6
 
 
+def test_patent_runtime_stage2_uses_planning_hot_pool_query_client(monkeypatch):
+    captured: dict[str, object] = {}
+    fallback_query_client = object()
+    hot_query_client = object()
+
+    class _PlanningHotPool:
+        def __init__(self) -> None:
+            self.proxy_calls: list[object] = []
+
+        def proxy_client(self, *, fallback_client=None):
+            self.proxy_calls.append(fallback_client)
+            return hot_query_client
+
+    def _fake_run_stage2_targeted_retrieval(**kwargs):
+        captured.update(kwargs)
+        return {
+            "references": ["CN123456789A"],
+            "reference_objects": [{"canonical_patent_id": "CN123456789A"}],
+            "metadata": {},
+        }
+
+    monkeypatch.setattr("server.patent.runtime.run_stage2_targeted_retrieval", _fake_run_stage2_targeted_retrieval)
+
+    hot_pool = _PlanningHotPool()
+    runtime = PatentRuntime(
+        retrieval_service=_service(identity_registry={"CN123456789A": "CN123456789A"}),
+        resources=[],
+        planning_client=fallback_query_client,
+        planning_hot_pool=hot_pool,
+        planning_model="planner-model",
+    )
+
+    runtime.stage2_targeted_retrieval(
+        [PatentRetrievalClaim(claim="claim-a", keywords=["a"])],
+        user_question="user question",
+    )
+
+    assert captured["query_client"] is hot_query_client
+    assert hot_pool.proxy_calls == [fallback_query_client]
+
+
+def test_patent_runtime_stage2_without_hot_pool_uses_configured_planning_client(monkeypatch):
+    captured: dict[str, object] = {}
+    configured_query_client = object()
+
+    def _fake_run_stage2_targeted_retrieval(**kwargs):
+        captured.update(kwargs)
+        return {
+            "references": ["CN123456789A"],
+            "reference_objects": [{"canonical_patent_id": "CN123456789A"}],
+            "metadata": {},
+        }
+
+    monkeypatch.setattr("server.patent.runtime.run_stage2_targeted_retrieval", _fake_run_stage2_targeted_retrieval)
+
+    runtime = PatentRuntime(
+        retrieval_service=_service(identity_registry={"CN123456789A": "CN123456789A"}),
+        resources=[],
+        planning_client=configured_query_client,
+        planning_model="planner-model",
+    )
+
+    runtime.stage2_targeted_retrieval(
+        [PatentRetrievalClaim(claim="claim-a", keywords=["a"])],
+        user_question="user question",
+    )
+
+    assert captured["query_client"] is configured_query_client
+
+
+def test_patent_runtime_stage2_enters_the_gate(monkeypatch):
+    captured: dict[str, object] = {}
+    configured_query_client = object()
+    should_cancel = object()
+
+    class _Gate:
+        def __init__(self) -> None:
+            self.proxy_calls: list[dict[str, object]] = []
+            self.query_client = object()
+
+        def proxy_client(self, *, base_client=None, trace_label="", should_cancel=None):
+            self.proxy_calls.append(
+                {
+                    "base_client": base_client,
+                    "trace_label": trace_label,
+                    "should_cancel": should_cancel,
+                }
+            )
+            return self.query_client
+
+    def _fake_run_stage2_targeted_retrieval(**kwargs):
+        captured.update(kwargs)
+        return {
+            "references": ["CN123456789A"],
+            "reference_objects": [{"canonical_patent_id": "CN123456789A"}],
+            "metadata": {},
+        }
+
+    monkeypatch.setattr("server.patent.runtime.run_stage2_targeted_retrieval", _fake_run_stage2_targeted_retrieval)
+
+    gate = _Gate()
+    runtime = PatentRuntime(
+        retrieval_service=_service(identity_registry={"CN123456789A": "CN123456789A"}),
+        resources=[],
+        planning_client=configured_query_client,
+        planning_upstream_gate=gate,
+        planning_model="planner-model",
+    )
+
+    runtime.stage2_targeted_retrieval(
+        [PatentRetrievalClaim(claim="claim-a", keywords=["a"])],
+        user_question="user question",
+        should_cancel=should_cancel,
+    )
+
+    assert gate.proxy_calls == [
+        {
+            "base_client": configured_query_client,
+            "trace_label": "stage2_query_generation",
+            "should_cancel": should_cancel,
+        }
+    ]
+    assert captured["query_client"] is gate.query_client
+
+
+def test_patent_runtime_stage2_bypass_the_gate_when_disabled(monkeypatch):
+    captured: dict[str, object] = {}
+    configured_query_client = object()
+
+    def _fake_run_stage2_targeted_retrieval(**kwargs):
+        captured.update(kwargs)
+        return {
+            "references": ["CN123456789A"],
+            "reference_objects": [{"canonical_patent_id": "CN123456789A"}],
+            "metadata": {},
+        }
+
+    monkeypatch.setattr("server.patent.runtime.run_stage2_targeted_retrieval", _fake_run_stage2_targeted_retrieval)
+
+    runtime = PatentRuntime(
+        retrieval_service=_service(identity_registry={"CN123456789A": "CN123456789A"}),
+        resources=[],
+        planning_client=configured_query_client,
+        planning_model="planner-model",
+    )
+
+    runtime.stage2_targeted_retrieval(
+        [PatentRetrievalClaim(claim="claim-a", keywords=["a"])],
+        user_question="user question",
+    )
+
+    assert captured["query_client"] is configured_query_client
+
+
 def test_run_stage2_targeted_retrieval_passes_active_stream_count_to_service():
     captured: dict[str, object] = {}
 

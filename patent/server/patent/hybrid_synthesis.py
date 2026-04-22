@@ -1,19 +1,28 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
+import time
 from typing import Any
 
 import httpx
 
 from server.patent.pdf_contract import is_summary_question
 from server.patent.summary_formatting import LITERATURE_SUMMARY_NOTE
+from server.patent.upstream_transport import (
+    build_patent_request_timeout,
+    describe_patent_transport,
+    record_patent_dispatch_error,
+    record_patent_dispatch_success,
+)
 
 
 _HYBRID_SYNTHESIS_SYSTEM_MESSAGE = (
     "You are a patent hybrid synthesis assistant. Use file evidence first and treat KB only as supporting validation."
 )
 HYBRID_SYNTHESIS_PROMPT_VERSION = "patent-hybrid-synthesis-v1"
+_LOGGER = logging.getLogger("patent.hybrid_synthesis")
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -238,6 +247,15 @@ class PatentHybridSynthesisClient:
         self._max_tokens = max(1, int(max_tokens))
         self._owns_http_client = http_client is None
         self._client = http_client or httpx.Client(timeout=self._timeout_seconds)
+        transport = describe_patent_transport(http_client=self._client, owns_http_client=self._owns_http_client)
+        _LOGGER.info(
+            "patent hybrid synthesis client initialized model=%s base_url=%s timeout_seconds=%s client_owner=%s shared_client_id=%s",
+            self._model,
+            self._base_url,
+            self._timeout_seconds,
+            transport.get("client_owner"),
+            transport.get("shared_client_id"),
+        )
 
     @classmethod
     def from_env(cls, *, http_client: Any | None = None) -> "PatentHybridSynthesisClient | None":
@@ -283,25 +301,46 @@ class PatentHybridSynthesisClient:
 
     def answer(self, *, synthesis_contract: dict[str, Any]) -> str:
         prompt = build_patent_hybrid_synthesis_prompt(synthesis_contract=synthesis_contract)
-        response = self._client.post(
-            f"{self._base_url.rstrip('/')}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": self._model,
-                "temperature": 0.2,
-                "top_p": self._top_p,
-                "max_tokens": self._max_tokens,
-                "stream": False,
-                "messages": [
-                    {"role": "system", "content": _HYBRID_SYNTHESIS_SYSTEM_MESSAGE},
-                    {"role": "user", "content": prompt},
-                ],
-            },
-            timeout=self._timeout_seconds,
+        transport = describe_patent_transport(http_client=self._client, owns_http_client=self._owns_http_client)
+        _LOGGER.info(
+            "patent hybrid synthesis request start model=%s base_url=%s timeout_seconds=%s client_owner=%s shared_client_id=%s source_scope=%s available_sources=%s",
+            self._model,
+            self._base_url,
+            self._timeout_seconds,
+            transport.get("client_owner"),
+            transport.get("shared_client_id"),
+            str(synthesis_contract.get("source_scope") or ""),
+            ",".join(_normalize_sources(synthesis_contract.get("available_sources") or [])),
         )
+        request_timeout = build_patent_request_timeout(
+            http_client=self._client,
+            timeout_seconds=self._timeout_seconds,
+        )
+        dispatch_started = time.perf_counter()
+        try:
+            response = self._client.post(
+                f"{self._base_url.rstrip('/')}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": self._model,
+                    "temperature": 0.2,
+                    "top_p": self._top_p,
+                    "max_tokens": self._max_tokens,
+                    "stream": False,
+                    "messages": [
+                        {"role": "system", "content": _HYBRID_SYNTHESIS_SYSTEM_MESSAGE},
+                        {"role": "user", "content": prompt},
+                    ],
+                },
+                timeout=request_timeout,
+            )
+        except Exception as exc:
+            record_patent_dispatch_error(http_client=self._client, started_at=dispatch_started, exc=exc)
+            raise
+        record_patent_dispatch_success(http_client=self._client, started_at=dispatch_started)
         response.raise_for_status()
         payload = response.json()
         choices = list(payload.get("choices") or [])

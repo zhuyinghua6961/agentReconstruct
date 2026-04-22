@@ -23,17 +23,28 @@ def _make_bearer_token(user_id: int, *, secret: str = TEST_JWT_SECRET) -> str:
 
 
 
-def test_create_app_exposes_patent_runtime_defaults():
+def test_create_app_exposes_patent_runtime_defaults(monkeypatch):
+    monkeypatch.setenv("PATENT_GRAPH_KB_ENABLED", "false")
+    monkeypatch.setenv("PATENT_GRAPH_KB_V2_ENABLED", "false")
+    monkeypatch.setenv("PATENT_GRAPH_KB_RAG_INJECTION_ENABLED", "false")
     app = create_app()
 
     assert app.state.service_name == "patent"
     assert "redis" in app.state.component_status
     assert "authority" in app.state.component_status
     assert "runtime" in app.state.component_status
+    assert "shared_llm_pool" in app.state.component_status
+    assert "planning_upstream_gate" in app.state.component_status
     assert "patent_graph_kb" in app.state.component_status
     assert app.state.component_status["redis"]["ready"] is False
     assert app.state.component_status["authority"]["ready"] is False
     assert app.state.component_status["runtime"]["ready"] is True
+    assert app.state.component_status["shared_llm_pool"]["ready"] is False
+    assert app.state.component_status["shared_llm_pool"]["enabled"] is False
+    assert app.state.component_status["shared_llm_pool"]["status"] == "disabled"
+    assert app.state.component_status["planning_upstream_gate"]["enabled"] is False
+    assert app.state.component_status["planning_upstream_gate"]["status"] == "disabled"
+    assert app.state.shared_llm_pool is app.state.patent_shared_upstream_provider
     assert app.state.component_status["patent_graph_kb"]["ready"] is False
     assert app.state.component_status["patent_graph_kb"]["enabled"] is False
     assert app.state.component_status["patent_graph_kb"]["v2_enabled"] is False
@@ -261,6 +272,9 @@ def test_health_contract_exposes_runtime_concurrency_and_trace(monkeypatch):
     monkeypatch.setenv("PATENT_ASK_STREAM_MAX_CONCURRENT", "2")
     monkeypatch.setenv("PATENT_ASK_EXECUTOR_MAX_WORKERS", "3")
     monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "false")
+    monkeypatch.setenv("PATENT_GRAPH_KB_ENABLED", "false")
+    monkeypatch.setenv("PATENT_GRAPH_KB_V2_ENABLED", "false")
+    monkeypatch.setenv("PATENT_GRAPH_KB_RAG_INJECTION_ENABLED", "false")
     app = create_app()
 
     with TestClient(app) as client:
@@ -276,8 +290,424 @@ def test_health_contract_exposes_runtime_concurrency_and_trace(monkeypatch):
     assert payload["patent_graph_kb_ready"] is False
     assert payload["patent_graph_kb_v2_enabled"] is False
     assert payload["patent_graph_kb_rag_injection_enabled"] is False
+    assert payload["components"]["shared_llm_pool"]["status"] == "disabled"
     assert payload["components"]["patent_graph_kb"]["status"] == "skipped"
     assert response.headers["X-Trace-ID"] == "req_contract"
+
+
+def test_health_exposes_shared_llm_pool_snapshot(monkeypatch):
+    monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "false")
+    monkeypatch.setenv("PATENT_LLM_HTTP_SHARED_POOL_ENABLED", "true")
+
+    class _SharedProvider:
+        enabled = True
+
+        def client(self):
+            return object()
+
+        def close(self):
+            return None
+
+        def snapshot(self) -> dict[str, object]:
+            return {
+                "pool_owner": "app",
+                "client_owner": "shared",
+                "shared_client_id": "shared-123",
+                "pid": 321,
+                "bootstrap_source": "startup",
+                "pool_timeout_count": 2,
+                "pool_wait_ms": 18.5,
+                "max_connections": 100,
+                "max_keepalive_connections": 20,
+                "keepalive_expiry_seconds": 120.0,
+            }
+
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentSharedUpstreamHttpProvider",
+        type("_ProviderFactory", (), {"from_env": staticmethod(lambda: _SharedProvider())}),
+        raising=False,
+    )
+
+    app = create_app()
+
+    with TestClient(app) as client:
+        response = client.get("/api/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    shared_llm_pool = payload["components"]["shared_llm_pool"]
+    assert shared_llm_pool["enabled"] is True
+    assert shared_llm_pool["ready"] is True
+    assert shared_llm_pool["status"] == "ok"
+    assert shared_llm_pool["client_owner"] == "shared"
+    assert shared_llm_pool["shared_client_id"] == "shared-123"
+    assert shared_llm_pool["pool_timeout_count"] == 2
+    assert shared_llm_pool["pool_wait_ms"] == 18.5
+
+
+def test_health_refreshes_shared_llm_pool_snapshot_at_request_time(monkeypatch):
+    monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "false")
+    monkeypatch.setenv("PATENT_LLM_HTTP_SHARED_POOL_ENABLED", "true")
+
+    class _SharedProvider:
+        enabled = True
+
+        def __init__(self) -> None:
+            self.pool_timeout_count = 1
+            self.pool_wait_ms = 12.5
+
+        def client(self):
+            return object()
+
+        def close(self):
+            return None
+
+        def snapshot(self) -> dict[str, object]:
+            return {
+                "pool_owner": "app",
+                "client_owner": "shared",
+                "shared_client_id": "shared-live",
+                "pid": 321,
+                "bootstrap_source": "startup",
+                "pool_timeout_count": self.pool_timeout_count,
+                "pool_wait_ms": self.pool_wait_ms,
+                "max_connections": 100,
+                "max_keepalive_connections": 20,
+                "keepalive_expiry_seconds": 120.0,
+            }
+
+    provider = _SharedProvider()
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentSharedUpstreamHttpProvider",
+        type("_ProviderFactory", (), {"from_env": staticmethod(lambda: provider)}),
+        raising=False,
+    )
+
+    app = create_app()
+    provider.pool_timeout_count = 4
+    provider.pool_wait_ms = 21.0
+
+    with TestClient(app) as client:
+        response = client.get("/api/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    shared_llm_pool = payload["components"]["shared_llm_pool"]
+    assert shared_llm_pool["shared_client_id"] == "shared-live"
+    assert shared_llm_pool["pool_timeout_count"] == 4
+    assert shared_llm_pool["pool_wait_ms"] == 21.0
+
+
+def test_health_refresh_sets_non_empty_detail_when_live_llm_components_degrade(monkeypatch):
+    monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "false")
+    monkeypatch.setenv("PATENT_LLM_HTTP_SHARED_POOL_ENABLED", "true")
+    monkeypatch.setenv("PATENT_PLANNING_HOT_POOL_ENABLED", "true")
+
+    class _SharedProvider:
+        enabled = True
+
+        def __init__(self) -> None:
+            self._client = object()
+
+        def client(self):
+            return self._client
+
+        def close(self):
+            return None
+
+        def snapshot(self) -> dict[str, object]:
+            return {
+                "pool_owner": "app",
+                "client_owner": "shared",
+                "shared_client_id": "shared-live",
+                "pid": 321,
+                "bootstrap_source": "startup",
+                "pool_timeout_count": 0,
+                "pool_wait_ms": 0.0,
+                "max_connections": 100,
+                "max_keepalive_connections": 20,
+                "keepalive_expiry_seconds": 120.0,
+            }
+
+    class _PlanningHotPool:
+        enabled = True
+
+        def __init__(self) -> None:
+            self.ready_lanes = 1
+
+        def close(self):
+            return None
+
+        def snapshot(self) -> dict[str, object]:
+            return {
+                "enabled": True,
+                "total_lanes": 1,
+                "ready_lanes": self.ready_lanes,
+                "warming_lanes": 0,
+                "degraded_lanes": 0,
+                "busy_lanes": 0,
+            }
+
+    provider = _SharedProvider()
+    hot_pool = _PlanningHotPool()
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentSharedUpstreamHttpProvider",
+        type("_ProviderFactory", (), {"from_settings": staticmethod(lambda settings: provider)}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentPlanningHotPool",
+        type("_PlanningHotPoolFactory", (), {"from_settings": staticmethod(lambda *args, **kwargs: hot_pool)}),
+        raising=False,
+    )
+
+    class _Runtime:
+        def close(self):
+            return None
+
+    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda **kwargs: _Runtime())
+
+    app = create_app()
+    provider._client = None
+    hot_pool.ready_lanes = 0
+
+    with TestClient(app) as client:
+        response = client.get("/api/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["components"]["shared_llm_pool"]["status"] == "degraded"
+    assert payload["components"]["shared_llm_pool"]["detail"] == "shared llm pool client unavailable"
+    assert payload["components"]["planning_hot_pool"]["status"] == "degraded"
+    assert payload["components"]["planning_hot_pool"]["detail"] == "planning hot pool has no ready lanes"
+
+
+def test_health_exposes_planning_hot_pool_snapshot(monkeypatch):
+    monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "false")
+    monkeypatch.setenv("PATENT_PLANNING_HOT_POOL_ENABLED", "true")
+
+    class _PlanningHotPool:
+        def client(self):
+            return object()
+
+        def close(self):
+            return None
+
+        def snapshot(self) -> dict[str, object]:
+            return {
+                "enabled": True,
+                "total_lanes": 2,
+                "ready_lanes": 2,
+                "warming_lanes": 0,
+                "degraded_lanes": 0,
+                "busy_lanes": 0,
+            }
+
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentPlanningHotPool",
+        type("_PlanningHotPoolFactory", (), {"from_env": staticmethod(lambda **kwargs: _PlanningHotPool())}),
+        raising=False,
+    )
+
+    class _Runtime:
+        def close(self):
+            return None
+
+    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda **kwargs: _Runtime())
+
+    app = create_app()
+
+    with TestClient(app) as client:
+        response = client.get("/api/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    planning_hot_pool = payload["components"]["planning_hot_pool"]
+    assert planning_hot_pool["enabled"] is True
+    assert planning_hot_pool["ready"] is True
+    assert planning_hot_pool["status"] == "ok"
+    assert planning_hot_pool["total_lanes"] == 2
+    assert planning_hot_pool["ready_lanes"] == 2
+    assert planning_hot_pool["warming_lanes"] == 0
+    assert planning_hot_pool["degraded_lanes"] == 0
+
+
+def test_create_app_passes_planning_warm_model_to_hot_pool(monkeypatch):
+    monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "false")
+    monkeypatch.setenv("PATENT_PLANNING_HOT_POOL_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE1_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("PATENT_STAGE1_OPENAI_BASE_URL", "http://example.invalid/v1")
+    monkeypatch.setenv("PATENT_STAGE1_OPENAI_MODEL", "planner-model")
+
+    captured: dict[str, object] = {}
+
+    class _PlanningHotPool:
+        def close(self):
+            return None
+
+        def snapshot(self) -> dict[str, object]:
+            return {
+                "enabled": True,
+                "total_lanes": 2,
+                "ready_lanes": 2,
+                "warming_lanes": 0,
+                "degraded_lanes": 0,
+                "busy_lanes": 0,
+            }
+
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentPlanningHotPool",
+        type(
+            "_PlanningHotPoolFactory",
+            (),
+            {
+                "from_settings": staticmethod(
+                    lambda *args, **kwargs: captured.update(kwargs) or _PlanningHotPool()
+                )
+            },
+        ),
+        raising=False,
+    )
+
+    class _Runtime:
+        def close(self):
+            return None
+
+    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda **kwargs: _Runtime())
+
+    app = create_app()
+
+    assert app.state.planning_hot_pool is not None
+    assert captured["warm_model"] == "planner-model"
+
+
+def test_health_exposes_planning_upstream_gate_snapshot(monkeypatch):
+    monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "false")
+    monkeypatch.setenv("PATENT_PLANNING_UPSTREAM_GATE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_PLANNING_UPSTREAM_GATE_LIMIT", "3")
+
+    class _Gate:
+        def snapshot(self) -> dict[str, object]:
+            return {
+                "name": "planning",
+                "limit": 3,
+                "effective_limit": 2,
+                "in_flight": 1,
+            }
+
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentPlanningUpstreamGate",
+        type("_GateFactory", (), {"from_settings": staticmethod(lambda *args, **kwargs: _Gate())}),
+        raising=False,
+    )
+
+    class _Runtime:
+        def close(self):
+            return None
+
+    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda **kwargs: _Runtime())
+
+    app = create_app()
+
+    with TestClient(app) as client:
+        response = client.get("/api/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    gate = payload["components"]["planning_upstream_gate"]
+    assert gate["enabled"] is True
+    assert gate["status"] == "ok"
+    assert gate["limit"] == 3
+    assert gate["effective_limit"] == 2
+    assert gate["in_flight"] == 1
+
+
+def test_planning_hot_pool_bootstrap_failure_closes_pool_resources(monkeypatch):
+    monkeypatch.setenv("PATENT_PLANNING_HOT_POOL_ENABLED", "true")
+    hot_pools = []
+
+    class _PlanningHotPool:
+        def __init__(self) -> None:
+            self.closed = False
+            hot_pools.append(self)
+
+        def close(self) -> None:
+            self.closed = True
+
+        def snapshot(self) -> dict[str, object]:
+            return {
+                "enabled": True,
+                "total_lanes": 2,
+                "ready_lanes": 2,
+                "warming_lanes": 0,
+                "degraded_lanes": 0,
+                "busy_lanes": 0,
+            }
+
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentPlanningHotPool",
+        type("_PlanningHotPoolFactory", (), {"from_env": staticmethod(lambda **kwargs: _PlanningHotPool())}),
+        raising=False,
+    )
+    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda **kwargs: None)
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "OriginalViewService",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        create_app()
+
+    assert len(hot_pools) == 1
+    assert hot_pools[0].closed is True
+
+
+def test_planning_hot_pool_shutdown_stops_scheduler_cleanly(monkeypatch):
+    monkeypatch.setenv("PATENT_PLANNING_HOT_POOL_ENABLED", "true")
+    hot_pools = []
+
+    class _PlanningHotPool:
+        def __init__(self) -> None:
+            self.closed = False
+            hot_pools.append(self)
+
+        def close(self) -> None:
+            self.closed = True
+
+        def snapshot(self) -> dict[str, object]:
+            return {
+                "enabled": True,
+                "total_lanes": 2,
+                "ready_lanes": 2,
+                "warming_lanes": 0,
+                "degraded_lanes": 0,
+                "busy_lanes": 0,
+            }
+
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "PatentPlanningHotPool",
+        type("_PlanningHotPoolFactory", (), {"from_env": staticmethod(lambda **kwargs: _PlanningHotPool())}),
+        raising=False,
+    )
+    monkeypatch.setattr("server_fastapi.app.build_default_patent_runtime", lambda **kwargs: None)
+
+    app = create_app()
+
+    with TestClient(app):
+        pass
+
+    assert len(hot_pools) == 1
+    assert hot_pools[0].closed is True
 
 
 def test_health_remains_200_when_patent_graph_kb_is_degraded_but_runtime_is_ready(monkeypatch):
@@ -361,6 +791,7 @@ def test_create_app_bootstraps_patent_graph_kb_client_when_enabled(monkeypatch):
     monkeypatch.setenv("PATENT_GRAPH_KB_ENABLED", "true")
     monkeypatch.setenv("PATENT_GRAPH_KB_V2_ENABLED", "true")
     monkeypatch.setenv("PATENT_GRAPH_KB_RAG_INJECTION_ENABLED", "true")
+    monkeypatch.setenv("PATENT_NEO4J_PASSWORD", "")
     captured = {}
 
     class _GraphClient:

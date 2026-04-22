@@ -226,26 +226,162 @@ def test_patent_runtime_stage1_uses_configured_planning_client():
     assert result["retrieval_claims"][0].claim == "runtime answer"
 
 
+def test_patent_runtime_stage1_uses_planning_hot_pool_proxy_client():
+    fallback_client = _FakeClient('{"deep_answer":"fallback answer","retrieval_claims":[]}')
+    hot_client = _FakeClient('{"deep_answer":"hot pool answer","retrieval_claims":[]}')
+
+    class _PlanningHotPool:
+        def __init__(self) -> None:
+            self.proxy_calls: list[object] = []
+
+        def proxy_client(self, *, fallback_client=None):
+            self.proxy_calls.append(fallback_client)
+            return hot_client
+
+    hot_pool = _PlanningHotPool()
+    runtime = PatentRuntime(
+        retrieval_service=object(),
+        resources=[],
+        planning_client=fallback_client,
+        planning_hot_pool=hot_pool,
+        planning_model="gpt-test",
+        stage1_prompt="prompt",
+    )
+
+    result = runtime.stage1_pre_answer_and_planning("Compare sodium ion and LFP")
+
+    assert result["success"] is True
+    assert result["deep_answer"] == "hot pool answer"
+    assert hot_pool.proxy_calls == [fallback_client]
+    assert len(hot_client.calls) == 1
+    assert fallback_client.calls == []
+
+
+def test_patent_runtime_stage1_without_hot_pool_uses_configured_planning_client():
+    client = _FakeClient('{"deep_answer":"runtime answer","retrieval_claims":[]}')
+    runtime = PatentRuntime(
+        retrieval_service=object(),
+        resources=[],
+        planning_client=client,
+        planning_model="gpt-test",
+        stage1_prompt="prompt",
+    )
+
+    result = runtime.stage1_pre_answer_and_planning("Compare sodium ion and LFP")
+
+    assert result["success"] is True
+    assert result["deep_answer"] == "runtime answer"
+    assert len(client.calls) == 1
+
+
+def test_patent_runtime_stage1_enters_the_gate():
+    client = _FakeClient('{"deep_answer":"runtime answer","retrieval_claims":[]}')
+
+    class _Gate:
+        def __init__(self) -> None:
+            self.proxy_calls: list[dict[str, object]] = []
+
+        def proxy_client(self, *, base_client=None, trace_label="", should_cancel=None):
+            self.proxy_calls.append(
+                {
+                    "base_client": base_client,
+                    "trace_label": trace_label,
+                    "should_cancel": should_cancel,
+                }
+            )
+            return base_client
+
+    gate = _Gate()
+    runtime = PatentRuntime(
+        retrieval_service=object(),
+        resources=[],
+        planning_client=client,
+        planning_upstream_gate=gate,
+        planning_model="gpt-test",
+        stage1_prompt="prompt",
+    )
+
+    result = runtime.stage1_pre_answer_and_planning("Compare sodium ion and LFP")
+
+    assert result["success"] is True
+    assert gate.proxy_calls == [
+        {
+            "base_client": client,
+            "trace_label": "stage1_planning",
+            "should_cancel": None,
+        }
+    ]
+
+
+def test_patent_runtime_stage1_bypass_the_gate_when_disabled():
+    client = _FakeClient('{"deep_answer":"runtime answer","retrieval_claims":[]}')
+    runtime = PatentRuntime(
+        retrieval_service=object(),
+        resources=[],
+        planning_client=client,
+        planning_model="gpt-test",
+        stage1_prompt="prompt",
+    )
+
+    result = runtime.stage1_pre_answer_and_planning("Compare sodium ion and LFP")
+
+    assert result["success"] is True
+    assert len(client.calls) == 1
+
+
 def test_patent_planning_client_uses_injected_http_client_and_request_timeout(caplog):
+    class _FakeSharedPool:
+        def __init__(self) -> None:
+            self.config = SimpleNamespace(
+                connect_timeout_seconds=1.5,
+                read_timeout_seconds=2.5,
+                stream_read_timeout_seconds=9.5,
+                write_timeout_seconds=3.5,
+                pool_timeout_seconds=4.5,
+            )
+            self.wait_calls: list[float] = []
+            self.timeout_calls: list[float] = []
+
+        def snapshot(self) -> dict[str, object]:
+            return {
+                "pool_owner": "app",
+                "client_owner": "shared",
+                "shared_client_id": "planner-shared",
+                "pid": 1,
+                "bootstrap_source": "startup",
+                "pool_timeout_count": len(self.timeout_calls),
+                "pool_wait_ms": self.wait_calls[-1] if self.wait_calls else 0.0,
+            }
+
+        def record_pool_wait(self, *, wait_ms: float) -> None:
+            self.wait_calls.append(wait_ms)
+
+        def record_pool_timeout(self, *, wait_ms: float) -> None:
+            self.timeout_calls.append(wait_ms)
+
     class _FakeHttpClient:
         def __init__(self) -> None:
             self.calls: list[dict[str, object]] = []
             self.closed = False
             self.requests: list[httpx.Request] = []
+            self._patent_shared_pool = _FakeSharedPool()
 
-        def build_request(self, method, url, *, headers=None, json=None):
+        def build_request(self, method, url, *, headers=None, json=None, timeout=None, extensions=None):
             request = httpx.Request(str(method), str(url), headers=headers, json=json)
+            request.extensions.update(dict(extensions or {}))
+            if timeout is not None:
+                request.extensions["timeout"] = timeout.as_dict()
             self.requests.append(request)
             return request
 
-        def send(self, request, *, stream=False, timeout=None):
+        def send(self, request, *, stream=False):
             self.calls.append(
                 {
                     "url": str(request.url),
                     "headers": dict(request.headers),
                     "json": request.read().decode("utf-8"),
                     "stream": stream,
-                    "timeout": timeout,
+                    "timeout": dict(request.extensions.get("timeout") or {}),
                 }
             )
             return httpx.Response(
@@ -276,8 +412,11 @@ def test_patent_planning_client_uses_injected_http_client_and_request_timeout(ca
 
     assert response.choices[0].message.content == "planner response"
     assert len(http_client.calls) == 1
-    assert http_client.calls[0]["timeout"] == 17.0
+    timeout = http_client.calls[0]["timeout"]
+    assert timeout == {"connect": 1.5, "read": 2.5, "write": 3.5, "pool": 4.5}
     assert http_client.calls[0]["stream"] is False
+    assert http_client._patent_shared_pool.wait_calls
+    assert http_client._patent_shared_pool.timeout_calls == []
     assert any(
         "Patent planning client request payload ready" in record.message and "message_count=1" in record.message
         for record in caplog.records

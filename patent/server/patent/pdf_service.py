@@ -5,6 +5,7 @@ import logging
 import os
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -35,6 +36,12 @@ from server.patent.summary_formatting import (
     extract_support_points,
 )
 from server.patent.streaming import emit_text_chunks, iter_text_output
+from server.patent.upstream_transport import (
+    build_patent_request_timeout,
+    describe_patent_transport,
+    record_patent_dispatch_error,
+    record_patent_dispatch_success,
+)
 from server.services.mode_profiles import get_patent_mode_profile
 
 try:
@@ -848,13 +855,14 @@ class PatentPdfAnswerClient:
         self._max_tokens = max(1, int(max_tokens))
         self._owns_http_client = http_client is None
         self._client = http_client or httpx.Client(timeout=self._timeout_seconds)
+        transport = describe_patent_transport(http_client=self._client, owns_http_client=self._owns_http_client)
         _LOGGER.info(
             "patent pdf answer client initialized model=%s base_url=%s timeout_seconds=%s client_owner=%s shared_client_id=%s",
             self._model,
             self._base_url,
             self._timeout_seconds,
-            "private" if self._owns_http_client else "shared",
-            hex(id(self._client)),
+            transport.get("client_owner"),
+            transport.get("shared_client_id"),
         )
 
     @classmethod
@@ -994,39 +1002,51 @@ class PatentPdfAnswerClient:
             self._model,
             self._base_url,
             self._timeout_seconds,
-            "private" if self._owns_http_client else "shared",
-            hex(id(self._client)),
+            describe_patent_transport(http_client=self._client, owns_http_client=self._owns_http_client).get("client_owner"),
+            describe_patent_transport(http_client=self._client, owns_http_client=self._owns_http_client).get("shared_client_id"),
             route_hint,
             source_scope,
         )
-        with self._client.stream(
-            "POST",
-            f"{self._base_url.rstrip('/')}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-            },
-            json=request_payload,
-            timeout=self._timeout_seconds,
-        ) as response:
-            response.raise_for_status()
-            for raw_line in response.iter_lines():
-                line = str(raw_line or "").strip()
-                if not line or not line.startswith("data:"):
-                    continue
-                body = line[5:].strip()
-                if not body or body == "[DONE]":
-                    continue
-                payload = json.loads(body)
-                if isinstance(payload, dict) and payload.get("error"):
-                    message = str(dict(payload.get("error") or {}).get("message") or "patent_pdf_stream_error").strip()
-                    raise RuntimeError(message)
-                if not isinstance(payload, dict):
-                    continue
-                text = self._extract_delta_text(payload)
-                if text:
-                    yield text
+        request_timeout = build_patent_request_timeout(
+            http_client=self._client,
+            timeout_seconds=self._timeout_seconds,
+            stream=True,
+        )
+        dispatch_started = time.perf_counter()
+        try:
+            response_context = self._client.stream(
+                "POST",
+                f"{self._base_url.rstrip('/')}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                },
+                json=request_payload,
+                timeout=request_timeout,
+            )
+            with response_context as response:
+                record_patent_dispatch_success(http_client=self._client, started_at=dispatch_started)
+                response.raise_for_status()
+                for raw_line in response.iter_lines():
+                    line = str(raw_line or "").strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    body = line[5:].strip()
+                    if not body or body == "[DONE]":
+                        continue
+                    payload = json.loads(body)
+                    if isinstance(payload, dict) and payload.get("error"):
+                        message = str(dict(payload.get("error") or {}).get("message") or "patent_pdf_stream_error").strip()
+                        raise RuntimeError(message)
+                    if not isinstance(payload, dict):
+                        continue
+                    text = self._extract_delta_text(payload)
+                    if text:
+                        yield text
+        except Exception as exc:
+            record_patent_dispatch_error(http_client=self._client, started_at=dispatch_started, exc=exc)
+            raise
 
     def answer(
         self,
@@ -1054,20 +1074,30 @@ class PatentPdfAnswerClient:
             self._model,
             self._base_url,
             self._timeout_seconds,
-            "private" if self._owns_http_client else "shared",
-            hex(id(self._client)),
+            describe_patent_transport(http_client=self._client, owns_http_client=self._owns_http_client).get("client_owner"),
+            describe_patent_transport(http_client=self._client, owns_http_client=self._owns_http_client).get("shared_client_id"),
             route_hint,
             source_scope,
         )
-        response = self._client.post(
-            f"{self._base_url.rstrip('/')}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            },
-            json=request_payload,
-            timeout=self._timeout_seconds,
+        request_timeout = build_patent_request_timeout(
+            http_client=self._client,
+            timeout_seconds=self._timeout_seconds,
         )
+        dispatch_started = time.perf_counter()
+        try:
+            response = self._client.post(
+                f"{self._base_url.rstrip('/')}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=request_payload,
+                timeout=request_timeout,
+            )
+        except Exception as exc:
+            record_patent_dispatch_error(http_client=self._client, started_at=dispatch_started, exc=exc)
+            raise
+        record_patent_dispatch_success(http_client=self._client, started_at=dispatch_started)
         response.raise_for_status()
         payload = response.json()
         choices = list(payload.get("choices") or [])

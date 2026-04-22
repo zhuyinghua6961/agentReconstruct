@@ -2280,6 +2280,23 @@ class _ResolvedTraceStreamAskService:
         )
 
 
+@pytest.fixture(autouse=True)
+def _lightweight_ask_contract_app_defaults(monkeypatch):
+    monkeypatch.setenv("PATENT_GRAPH_KB_ENABLED", "false")
+    monkeypatch.setenv("PATENT_GRAPH_KB_V2_ENABLED", "false")
+    monkeypatch.setenv("PATENT_GRAPH_KB_RAG_INJECTION_ENABLED", "false")
+    monkeypatch.setenv("PATENT_LLM_HTTP_SHARED_POOL_ENABLED", "false")
+    monkeypatch.setenv("PATENT_OPENAI_USE_SHARED_ENV", "false")
+    monkeypatch.setenv("PATENT_OPENAI_API_KEY", "")
+    monkeypatch.setenv("PATENT_OPENAI_BASE_URL", "")
+    monkeypatch.setenv("PATENT_OPENAI_MODEL", "")
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "build_default_patent_runtime",
+        lambda **kwargs: _StageRuntime(),
+        raising=False,
+    )
+
 
 def test_patent_route_aliases_all_dispatch_to_patent_ask():
     app = create_app()
@@ -2306,6 +2323,12 @@ def test_patent_route_aliases_all_dispatch_to_patent_ask():
     assert len(fake.sync_calls) == 4
     assert len(fake.stream_calls) == 4
     assert all(call["user_id"] is None for call in fake.sync_calls + fake.stream_calls)
+
+
+def test_ask_contract_default_create_app_uses_lightweight_staged_runtime():
+    app = create_app()
+
+    assert isinstance(app.state.patent_runtime, _StageRuntime)
 
 
 def test_create_app_bootstraps_patent_executor_with_staged_runtime(monkeypatch):
@@ -2373,6 +2396,7 @@ def test_create_app_bootstraps_app_owned_pdf_service_with_shared_upstream_client
     app = create_app()
 
     assert app.state.patent_runtime is runtime
+    assert app.state.shared_llm_pool is provider
     assert app.state.patent_shared_upstream_provider is provider
     assert app.state.patent_pdf_service is app.state.ask_service._patent_executor._pdf_service
     assert app.state.patent_pdf_service._client is captured["pdf_answer_client"]
@@ -2381,6 +2405,8 @@ def test_create_app_bootstraps_app_owned_pdf_service_with_shared_upstream_client
     assert captured["runtime_execution_cache"] is app.state.execution_cache
     assert app.state.ask_service._patent_executor._runtime is runtime
     assert provider.client_calls == 1
+    assert app.state.component_status["shared_llm_pool"]["ready"] is True
+    assert app.state.component_status["shared_llm_pool"]["status"] == "ok"
 
 
 def test_create_app_bootstraps_app_owned_tabular_service_with_shared_upstream_client(monkeypatch):
@@ -2529,6 +2555,7 @@ def test_create_app_bootstraps_tabular_service_with_env_context_budget(monkeypat
 
 
 def test_create_app_falls_back_to_private_pdf_service_when_shared_provider_bootstrap_fails(monkeypatch):
+    monkeypatch.setenv("PATENT_LLM_HTTP_SHARED_POOL_ENABLED", "true")
     captured: dict[str, object] = {}
 
     class _AnswerClient:
@@ -2569,10 +2596,14 @@ def test_create_app_falls_back_to_private_pdf_service_when_shared_provider_boots
     app = create_app()
 
     assert app.state.patent_runtime is None
+    assert app.state.shared_llm_pool is None
     assert app.state.patent_shared_upstream_provider is None
     assert app.state.patent_pdf_service is app.state.ask_service._patent_executor._pdf_service
     assert app.state.patent_pdf_service._client is captured["answer_client"]
     assert captured["http_clients"] == [None]
+    assert app.state.component_status["shared_llm_pool"]["enabled"] is True
+    assert app.state.component_status["shared_llm_pool"]["ready"] is False
+    assert app.state.component_status["shared_llm_pool"]["status"] == "degraded"
 
 
 def test_ephemeral_sync_ask_returns_success_without_authority_calls():

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import csv
-import os
 import logging
+import os
 import posixpath
 import re
+import time
 import zipfile
 from pathlib import Path
 from typing import Any, Callable
@@ -21,6 +22,12 @@ from server.patent.tabular.planner import plan_tabular_query
 from server.patent.tabular.renderer import has_usable_tabular_result
 from server.patent.tabular.schema_profiler import profile_workbook
 from server.patent.tabular.workbook_loader import load_workbook_cached
+from server.patent.upstream_transport import (
+    build_patent_request_timeout,
+    describe_patent_transport,
+    record_patent_dispatch_error,
+    record_patent_dispatch_success,
+)
 from server.services.mode_profiles import get_patent_mode_profile
 
 _XML_NS = {
@@ -504,6 +511,15 @@ class PatentTabularAnswerClient:
         self._max_tokens = max(1, int(max_tokens))
         self._owns_http_client = http_client is None
         self._client = http_client or httpx.Client(timeout=self._timeout_seconds)
+        transport = describe_patent_transport(http_client=self._client, owns_http_client=self._owns_http_client)
+        _LOGGER.info(
+            "patent tabular answer client initialized model=%s base_url=%s timeout_seconds=%s client_owner=%s shared_client_id=%s",
+            self._model,
+            self._base_url,
+            self._timeout_seconds,
+            transport.get("client_owner"),
+            transport.get("shared_client_id"),
+        )
 
     @classmethod
     def from_env(cls, *, http_client: Any | None = None) -> "PatentTabularAnswerClient | None":
@@ -564,25 +580,47 @@ class PatentTabularAnswerClient:
             include_kb=include_kb,
             operation_hint=operation_hint,
         )
-        response = self._client.post(
-            f"{self._base_url.rstrip('/')}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": self._model,
-                "temperature": 0.2,
-                "top_p": self._top_p,
-                "max_tokens": self._max_tokens,
-                "stream": False,
-                "messages": [
-                    {"role": "system", "content": _TABULAR_QA_SYSTEM_MESSAGE},
-                    {"role": "user", "content": prompt},
-                ],
-            },
-            timeout=self._timeout_seconds,
+        transport = describe_patent_transport(http_client=self._client, owns_http_client=self._owns_http_client)
+        _LOGGER.info(
+            "patent tabular answer client request start model=%s base_url=%s timeout_seconds=%s client_owner=%s shared_client_id=%s route=%s source_scope=%s operation_hint=%s",
+            self._model,
+            self._base_url,
+            self._timeout_seconds,
+            transport.get("client_owner"),
+            transport.get("shared_client_id"),
+            route_hint,
+            source_scope,
+            operation_hint,
         )
+        request_timeout = build_patent_request_timeout(
+            http_client=self._client,
+            timeout_seconds=self._timeout_seconds,
+        )
+        dispatch_started = time.perf_counter()
+        try:
+            response = self._client.post(
+                f"{self._base_url.rstrip('/')}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": self._model,
+                    "temperature": 0.2,
+                    "top_p": self._top_p,
+                    "max_tokens": self._max_tokens,
+                    "stream": False,
+                    "messages": [
+                        {"role": "system", "content": _TABULAR_QA_SYSTEM_MESSAGE},
+                        {"role": "user", "content": prompt},
+                    ],
+                },
+                timeout=request_timeout,
+            )
+        except Exception as exc:
+            record_patent_dispatch_error(http_client=self._client, started_at=dispatch_started, exc=exc)
+            raise
+        record_patent_dispatch_success(http_client=self._client, started_at=dispatch_started)
         response.raise_for_status()
         payload = response.json()
         choices = list(payload.get("choices") or [])

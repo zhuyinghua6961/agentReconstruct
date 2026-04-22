@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import httpx
 import pytest
+from types import SimpleNamespace
 
 from server.patent.answering import PatentAnswerBuilder, build_fallback_patent_answer
 from server.patent.retrieval_models import PatentEvidence, PatentRetrievalOutcome, PatentTableSupplement
@@ -628,10 +629,32 @@ def test_stage4_synthesis_unwraps_backticked_patent_citations_but_keeps_regular_
 
 
 def test_patent_answer_builder_uses_injected_http_client_and_request_timeout():
+    shared_pool = SimpleNamespace(
+        config=SimpleNamespace(
+            connect_timeout_seconds=1.5,
+            read_timeout_seconds=2.5,
+            stream_read_timeout_seconds=9.5,
+            write_timeout_seconds=3.5,
+            pool_timeout_seconds=4.5,
+        ),
+        snapshot=lambda: {
+            "pool_owner": "app",
+            "client_owner": "shared",
+            "shared_client_id": "answer-shared",
+            "pid": 1,
+            "bootstrap_source": "startup",
+            "pool_timeout_count": 0,
+            "pool_wait_ms": 0.0,
+        },
+        record_pool_wait=lambda **_kwargs: None,
+        record_pool_timeout=lambda **_kwargs: None,
+    )
+
     class _FakeHttpClient:
         def __init__(self) -> None:
             self.calls: list[dict[str, object]] = []
             self.closed = False
+            self._patent_shared_pool = shared_pool
 
         def post(self, url, *, headers=None, json=None, timeout=None):
             self.calls.append(
@@ -696,7 +719,12 @@ def test_patent_answer_builder_uses_injected_http_client_and_request_timeout():
 
     assert "(patent_id=CN115132975B)" in answer
     assert len(http_client.calls) == 1
-    assert http_client.calls[0]["timeout"] == 19.0
+    timeout = http_client.calls[0]["timeout"]
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.connect == 1.5
+    assert timeout.read == 2.5
+    assert timeout.write == 3.5
+    assert timeout.pool == 4.5
     builder.close()
     assert http_client.closed is False
 

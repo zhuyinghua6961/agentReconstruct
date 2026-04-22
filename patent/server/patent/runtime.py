@@ -24,6 +24,12 @@ from server.patent.stages.retrieval import (
     run_stage25_patent_evidence_expansion,
 )
 from server.patent.stages.synthesis import run_stage4_synthesis_with_patent_evidence
+from server.patent.upstream_transport import (
+    build_patent_request_timeout,
+    describe_patent_transport,
+    record_patent_dispatch_error,
+    record_patent_dispatch_success,
+)
 
 try:
     import chromadb
@@ -93,13 +99,14 @@ class PatentPlanningClient:
         self._timeout_seconds = float(timeout_seconds)
         self._owns_http_client = http_client is None
         self._http = http_client or httpx.Client(timeout=self._timeout_seconds)
+        transport = describe_patent_transport(http_client=self._http, owns_http_client=self._owns_http_client)
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
         _LOGGER.info(
             "Patent planning client initialized base_url=%s timeout_seconds=%s client_owner=%s shared_client_id=%s",
             self._base_url,
             self._timeout_seconds,
-            "private" if self._owns_http_client else "shared",
-            hex(id(self._http)),
+            transport.get("client_owner"),
+            transport.get("shared_client_id"),
         )
 
     def close(self) -> None:
@@ -114,7 +121,9 @@ class PatentPlanningClient:
         temperature: float,
         max_tokens: int,
         response_format: dict[str, Any] | None = None,
+        timeout_seconds: float | None = None,
     ) -> Any:
+        effective_timeout_seconds = self._timeout_seconds if timeout_seconds is None else max(0.001, float(timeout_seconds))
         request_url = f"{self._base_url.rstrip('/')}/chat/completions"
         payload: dict[str, Any] = {
             "model": str(model or "").strip(),
@@ -136,23 +145,43 @@ class PatentPlanningClient:
             "Patent planning client request start model=%s base_url=%s timeout_seconds=%s client_owner=%s shared_client_id=%s",
             str(model or "").strip(),
             self._base_url,
-            self._timeout_seconds,
-            "private" if self._owns_http_client else "shared",
-            hex(id(self._http)),
+            effective_timeout_seconds,
+            describe_patent_transport(http_client=self._http, owns_http_client=self._owns_http_client).get("client_owner"),
+            describe_patent_transport(http_client=self._http, owns_http_client=self._owns_http_client).get("shared_client_id"),
         )
         request_started = time.perf_counter()
+        request_timeout = build_patent_request_timeout(
+            http_client=self._http,
+            timeout_seconds=effective_timeout_seconds,
+            override_client_config=timeout_seconds is not None,
+        )
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
         request = None
         if hasattr(self._http, "build_request"):
-            request = self._http.build_request(
-                "POST",
-                request_url,
-                headers=headers,
-                json=payload,
-            )
+            try:
+                request = self._http.build_request(
+                    "POST",
+                    request_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=request_timeout,
+                )
+            except TypeError as exc:
+                if "timeout" not in str(exc):
+                    raise
+                request = self._http.build_request(
+                    "POST",
+                    request_url,
+                    headers=headers,
+                    json=payload,
+                )
+                try:
+                    request.extensions["timeout"] = request_timeout.as_dict()
+                except Exception:
+                    pass
             _LOGGER.info(
                 "Patent planning client request object built model=%s method=%s url=%s elapsed_ms=%.3f content_length=%s",
                 str(model or "").strip(),
@@ -164,24 +193,29 @@ class PatentPlanningClient:
         _LOGGER.info(
             "Patent planning client request dispatch start model=%s timeout_seconds=%s elapsed_ms=%.3f transport=%s",
             str(model or "").strip(),
-            self._timeout_seconds,
+            effective_timeout_seconds,
             (time.perf_counter() - request_started) * 1000,
             "send" if request is not None and hasattr(self._http, "send") else "post",
         )
+        dispatch_started = time.perf_counter()
         if request is not None and hasattr(self._http, "send"):
             try:
-                response = self._http.send(request, stream=False, timeout=self._timeout_seconds)
-            except TypeError as exc:
-                if "timeout" not in str(exc):
-                    raise
                 response = self._http.send(request, stream=False)
+            except Exception as exc:
+                record_patent_dispatch_error(http_client=self._http, started_at=dispatch_started, exc=exc)
+                raise
         else:
-            response = self._http.post(
-                request_url,
-                headers=headers,
-                json=payload,
-                timeout=self._timeout_seconds,
-            )
+            try:
+                response = self._http.post(
+                    request_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=request_timeout,
+                )
+            except Exception as exc:
+                record_patent_dispatch_error(http_client=self._http, started_at=dispatch_started, exc=exc)
+                raise
+        record_patent_dispatch_success(http_client=self._http, started_at=dispatch_started)
         _LOGGER.info(
             "Patent planning client request dispatch returned model=%s status_code=%s elapsed_ms=%.3f",
             str(model or "").strip(),
@@ -218,7 +252,7 @@ class PatentPlanningClient:
         )
 
 
-def _build_patent_planning_runtime_inputs(*, http_client: Any | None = None) -> tuple[Any | None, str]:
+def _resolve_patent_planning_runtime_config() -> tuple[str, str, str, float]:
     use_shared_env = _env_flag(
         "PATENT_STAGE1_OPENAI_USE_SHARED_ENV",
         default=_env_flag("PATENT_OPENAI_USE_SHARED_ENV", default=False),
@@ -251,18 +285,26 @@ def _build_patent_planning_runtime_inputs(*, http_client: Any | None = None) -> 
             or "30"
         ).strip()
     )
+    return api_key, base_url, model, timeout_seconds
+
+
+def resolve_patent_planning_runtime_model() -> str:
+    _, _, model, _ = _resolve_patent_planning_runtime_config()
+    return str(model or "").strip()
+
+
+def _build_patent_planning_runtime_inputs(*, http_client: Any | None = None) -> tuple[Any | None, str]:
+    api_key, base_url, model, timeout_seconds = _resolve_patent_planning_runtime_config()
     if not api_key or not base_url or not model:
         _LOGGER.warning(
-            "Patent planning client disabled use_shared_env=%s api_key_set=%s base_url_set=%s model=%s",
-            use_shared_env,
+            "Patent planning client disabled api_key_set=%s base_url_set=%s model=%s",
             bool(api_key),
             bool(base_url),
             model,
         )
         return None, ""
     _LOGGER.info(
-        "Patent planning client enabled use_shared_env=%s model=%s base_url=%s timeout_seconds=%s",
-        use_shared_env,
+        "Patent planning client enabled model=%s base_url=%s timeout_seconds=%s",
         model,
         base_url,
         timeout_seconds,
@@ -273,6 +315,10 @@ def _build_patent_planning_runtime_inputs(*, http_client: Any | None = None) -> 
         timeout_seconds=timeout_seconds,
         http_client=http_client,
     ), model
+
+
+def build_patent_planning_runtime_inputs(*, http_client: Any | None = None) -> tuple[Any | None, str]:
+    return _build_patent_planning_runtime_inputs(http_client=http_client)
 
 
 class PatentEmbeddingClient:
@@ -385,6 +431,8 @@ class PatentRuntime:
     archive_loader: PatentArchiveLoader | None = None
     answer_builder: Any | None = None
     planning_client: Any | None = None
+    planning_hot_pool: Any | None = None
+    planning_upstream_gate: Any | None = None
     planning_model: str = ""
     stage1_prompt: str = DEFAULT_PATENT_STAGE1_PROMPT
     stage25_is_noop: bool = True
@@ -398,9 +446,21 @@ class PatentRuntime:
         user_question: str,
         conversation_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        planning_client = self.planning_client
+        if self.planning_hot_pool is not None:
+            proxy_client = getattr(self.planning_hot_pool, "proxy_client", None)
+            if callable(proxy_client):
+                planning_client = proxy_client(fallback_client=self.planning_client)
+        if self.planning_upstream_gate is not None:
+            gate_proxy_client = getattr(self.planning_upstream_gate, "proxy_client", None)
+            if callable(gate_proxy_client):
+                planning_client = gate_proxy_client(
+                    base_client=planning_client,
+                    trace_label="stage1_planning",
+                )
         return run_stage1_pre_answer_and_planning(
             user_question=user_question,
-            client=self.planning_client,
+            client=planning_client,
             model=self.planning_model,
             logger=_LOGGER,
             conversation_context=conversation_context,
@@ -415,6 +475,19 @@ class PatentRuntime:
         should_cancel: Any | None = None,
         active_stream_count: int | None = None,
     ) -> dict[str, Any]:
+        query_client = self.planning_client
+        if self.planning_hot_pool is not None:
+            proxy_client = getattr(self.planning_hot_pool, "proxy_client", None)
+            if callable(proxy_client):
+                query_client = proxy_client(fallback_client=self.planning_client)
+        if self.planning_upstream_gate is not None:
+            gate_proxy_client = getattr(self.planning_upstream_gate, "proxy_client", None)
+            if callable(gate_proxy_client):
+                query_client = gate_proxy_client(
+                    base_client=query_client,
+                    trace_label="stage2_query_generation",
+                    should_cancel=should_cancel,
+                )
         if isinstance(retrieval_claims, PatentRetrievalPlan):
             queries = list(retrieval_claims.evidence_localization_queries or retrieval_claims.candidate_recall_queries or [])
             retrieval_claims = [
@@ -437,7 +510,7 @@ class PatentRuntime:
             retrieval_service=self.retrieval_service,
             retrieval_claims=list(retrieval_claims or []),
             user_question=user_question,
-            query_client=self.planning_client,
+            query_client=query_client,
             query_model=self.planning_model,
             logger=_LOGGER,
             should_cancel=should_cancel,
@@ -518,6 +591,8 @@ def build_default_patent_runtime(
     *,
     execution_cache: Any | None = None,
     http_client: Any | None = None,
+    planning_hot_pool: Any | None = None,
+    planning_upstream_gate: Any | None = None,
 ) -> PatentRuntime | None:
     registry = PatentResourceRegistry.discover()
     if not registry.archive_available():
@@ -610,6 +685,8 @@ def build_default_patent_runtime(
         archive_loader=archive_loader,
         answer_builder=answer_builder,
         planning_client=planning_client,
+        planning_hot_pool=planning_hot_pool,
+        planning_upstream_gate=planning_upstream_gate,
         planning_model=planning_model,
         stage3_force_pdf=_first_env("PATENT_STAGE3_FORCE_PDF", default="false").lower() in {"1", "true", "yes", "on"},
         stage2_parallel_workers=_positive_int_env("PATENT_STAGE2_PARALLEL_WORKERS", default=4),
