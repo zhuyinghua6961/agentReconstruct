@@ -165,16 +165,94 @@ def test_generation_runtime_degrades_to_private_path_when_shared_pool_bootstrap_
 
 
 def test_close_generation_runtime_closes_shared_pool_once():
-    calls = {"runtime": 0, "pool": 0}
+    calls = {"runtime": 0, "pool": 0, "chat_pool": 0, "rerank_pool": 0}
     runtime = SimpleNamespace(
         generation_runtime=SimpleNamespace(close=lambda: calls.__setitem__("runtime", calls["runtime"] + 1)),
         generation_runtime_ready=True,
+        stage2_chat_hot_pool=SimpleNamespace(close=lambda: calls.__setitem__("chat_pool", calls["chat_pool"] + 1)),
+        stage2_rerank_hot_pool=SimpleNamespace(close=lambda: calls.__setitem__("rerank_pool", calls["rerank_pool"] + 1)),
         shared_llm_http_pool=SimpleNamespace(close=lambda: calls.__setitem__("pool", calls["pool"] + 1)),
     )
 
     close_generation_runtime(runtime)
     close_generation_runtime(runtime)
 
-    assert calls == {"runtime": 1, "pool": 1}
+    assert calls == {"runtime": 1, "pool": 1, "chat_pool": 1, "rerank_pool": 1}
     assert runtime.generation_runtime is None
     assert runtime.generation_runtime_ready is False
+    assert runtime.stage2_chat_hot_pool is None
+    assert runtime.stage2_rerank_hot_pool is None
+
+
+def test_bootstrap_generation_runtime_closes_existing_runtime_and_hot_pools_before_rebootstrap(monkeypatch):
+    calls = {"runtime": 0, "chat_pool": 0, "rerank_pool": 0, "rag": 0}
+    runtime = SimpleNamespace(
+        settings=SimpleNamespace(generation_runtime_enabled=True, llm_http_shared_pool_enabled=False),
+        generation_runtime=SimpleNamespace(close=lambda: calls.__setitem__("runtime", calls["runtime"] + 1)),
+        generation_runtime_ready=True,
+        stage2_chat_hot_pool=SimpleNamespace(close=lambda: calls.__setitem__("chat_pool", calls["chat_pool"] + 1)),
+        stage2_rerank_hot_pool=SimpleNamespace(close=lambda: calls.__setitem__("rerank_pool", calls["rerank_pool"] + 1)),
+        shared_llm_http_pool=SimpleNamespace(client=lambda: object(), close=lambda: None),
+        component_status={},
+        health_flags={},
+    )
+
+    monkeypatch.setattr(
+        "app.modules.generation_pipeline.runtime_bootstrap.resolve_generation_runtime_inputs",
+        lambda **kwargs: SimpleNamespace(api_key="k", base_url="https://example.com/v1", model="m"),
+    )
+
+    def _fake_rag(**kwargs):
+        calls["rag"] += 1
+        return SimpleNamespace(model="m", base_url="https://example.com/v1", literature_expert=SimpleNamespace(available=True))
+
+    monkeypatch.setattr("app.modules.generation_pipeline.generation_driven_rag_facade.GenerationDrivenRAG", _fake_rag)
+
+    bootstrap_generation_runtime(runtime)
+
+    assert calls["runtime"] == 1
+    assert calls["chat_pool"] == 1
+    assert calls["rerank_pool"] == 1
+    assert calls["rag"] == 1
+
+
+def test_bootstrap_generation_runtime_initializes_chat_hot_pool_when_enabled(monkeypatch):
+    monkeypatch.setenv("FASTQA_LLM_HTTP_SHARED_POOL_ENABLED", "0")
+    runtime = SimpleNamespace(
+        settings=SimpleNamespace(
+            generation_runtime_enabled=True,
+            llm_http_shared_pool_enabled=False,
+            stage2_chat_hot_pool_enabled=True,
+            stage2_chat_hot_lane_count=3,
+            stage2_chat_hot_keepalive_expiry_seconds=1800.0,
+        ),
+        generation_runtime=None,
+        generation_runtime_ready=False,
+        component_status={},
+        health_flags={},
+        shared_llm_http_pool=None,
+    )
+    calls: dict[str, object] = {}
+    fake_pool = object()
+
+    monkeypatch.setattr(
+        "app.modules.generation_pipeline.runtime_bootstrap.resolve_generation_runtime_inputs",
+        lambda **kwargs: SimpleNamespace(api_key="k", base_url="https://example.com/v1", model="m"),
+    )
+
+    def _fake_chat_pool(**kwargs):
+        calls["chat_pool_kwargs"] = kwargs
+        return fake_pool
+
+    monkeypatch.setattr("app.core.runtime.ChatHotLanePool", _fake_chat_pool)
+
+    def _fake_rag(**kwargs):
+        calls["rag_kwargs"] = kwargs
+        return SimpleNamespace(model="m", base_url="https://example.com/v1", literature_expert=SimpleNamespace(available=True))
+
+    monkeypatch.setattr("app.modules.generation_pipeline.generation_driven_rag_facade.GenerationDrivenRAG", _fake_rag)
+
+    bootstrap_generation_runtime(runtime)
+
+    assert runtime.stage2_chat_hot_pool is fake_pool
+    assert calls["rag_kwargs"]["stage2_chat_hot_pool"] is fake_pool

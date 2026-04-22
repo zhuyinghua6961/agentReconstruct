@@ -193,6 +193,25 @@ class Settings:
     llm_http_max_connections: int
     llm_http_max_keepalive_connections: int
     llm_http_pool_timeout_seconds: float
+    stage2_chat_hot_pool_enabled: bool
+    stage2_rerank_hot_pool_enabled: bool
+    stage2_chat_hot_lane_count: int
+    stage2_rerank_hot_lane_count: int
+    stage2_chat_warmup_enabled: bool
+    stage2_rerank_warmup_enabled: bool
+    stage2_chat_warm_interval_seconds: int
+    stage2_rerank_warm_interval_seconds: int
+    stage2_chat_hot_keepalive_expiry_seconds: float
+    stage2_chat_warm_timeout_seconds: float
+    stage2_rerank_warm_timeout_seconds: float
+    stage2_bootstrap_warm_max_parallel: int
+    stage2_bootstrap_warm_jitter_seconds: int
+    stage2_chat_gate_max_in_flight: int
+    stage2_rerank_gate_max_in_flight: int
+    stage2_warm_jitter_seconds: int
+    stage2_lane_degraded_after_seconds: int
+    stage2_warm_active_start_hour: int
+    stage2_warm_active_end_hour: int
     chat_persist_enabled: bool
     chat_persist_async: bool
     conversation_execution_authority_target: str
@@ -323,6 +342,49 @@ def get_settings() -> Settings:
         llm_http_max_connections=shared_http_pool_config.max_connections,
         llm_http_max_keepalive_connections=shared_http_pool_config.max_keepalive_connections,
         llm_http_pool_timeout_seconds=shared_http_pool_config.pool_timeout_seconds,
+        stage2_chat_hot_pool_enabled=_get_bool("FASTQA_STAGE2_CHAT_HOT_POOL_ENABLED", True),
+        stage2_rerank_hot_pool_enabled=_get_bool("FASTQA_STAGE2_RERANK_HOT_POOL_ENABLED", True),
+        stage2_chat_hot_lane_count=_get_int("FASTQA_STAGE2_CHAT_HOT_LANE_COUNT", 3, minimum=0, maximum=16),
+        stage2_rerank_hot_lane_count=_get_int("FASTQA_STAGE2_RERANK_HOT_LANE_COUNT", 3, minimum=0, maximum=16),
+        stage2_chat_warmup_enabled=_get_bool("FASTQA_STAGE2_CHAT_WARMUP_ENABLED", True),
+        stage2_rerank_warmup_enabled=_get_bool("FASTQA_STAGE2_RERANK_WARMUP_ENABLED", True),
+        stage2_chat_warm_interval_seconds=_get_int(
+            "FASTQA_STAGE2_CHAT_WARM_INTERVAL_SECONDS", 300, minimum=30, maximum=7200
+        ),
+        stage2_rerank_warm_interval_seconds=_get_int(
+            "FASTQA_STAGE2_RERANK_WARM_INTERVAL_SECONDS", 300, minimum=30, maximum=7200
+        ),
+        stage2_chat_hot_keepalive_expiry_seconds=_get_float(
+            "FASTQA_STAGE2_CHAT_HOT_KEEPALIVE_EXPIRY_SECONDS", 1800.0, minimum=60.0, maximum=7200.0
+        ),
+        stage2_chat_warm_timeout_seconds=_get_float(
+            "FASTQA_STAGE2_CHAT_WARM_TIMEOUT_SECONDS", 420.0, minimum=420.0, maximum=1800.0
+        ),
+        stage2_rerank_warm_timeout_seconds=_get_float(
+            "FASTQA_STAGE2_RERANK_WARM_TIMEOUT_SECONDS", 420.0, minimum=420.0, maximum=1800.0
+        ),
+        stage2_bootstrap_warm_max_parallel=_get_int(
+            "FASTQA_STAGE2_BOOTSTRAP_WARM_MAX_PARALLEL", 1, minimum=1, maximum=16
+        ),
+        stage2_bootstrap_warm_jitter_seconds=_get_int(
+            "FASTQA_STAGE2_BOOTSTRAP_WARM_JITTER_SECONDS", 30, minimum=0, maximum=600
+        ),
+        stage2_chat_gate_max_in_flight=_get_int(
+            "FASTQA_STAGE2_CHAT_GATE_MAX_IN_FLIGHT", 3, minimum=0, maximum=16
+        ),
+        stage2_rerank_gate_max_in_flight=_get_int(
+            "FASTQA_STAGE2_RERANK_GATE_MAX_IN_FLIGHT", 3, minimum=0, maximum=16
+        ),
+        stage2_warm_jitter_seconds=_get_int("FASTQA_STAGE2_WARM_JITTER_SECONDS", 60, minimum=0, maximum=600),
+        stage2_lane_degraded_after_seconds=_get_int(
+            "FASTQA_STAGE2_LANE_DEGRADED_AFTER_SECONDS", 900, minimum=60, maximum=86400
+        ),
+        stage2_warm_active_start_hour=_get_int(
+            "FASTQA_STAGE2_WARM_ACTIVE_START_HOUR", 0, minimum=0, maximum=23
+        ),
+        stage2_warm_active_end_hour=_get_int(
+            "FASTQA_STAGE2_WARM_ACTIVE_END_HOUR", 24, minimum=1, maximum=24
+        ),
         chat_persist_enabled=_get_bool("CHAT_PERSIST_ENABLED", True),
         chat_persist_async=_get_bool("CHAT_PERSIST_ASYNC", True),
         conversation_execution_authority_target=conversation_execution_authority_target,

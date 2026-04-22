@@ -203,3 +203,103 @@ def test_healthz_prefers_live_shared_pool_snapshot_for_dynamic_metrics():
     assert shared["max_connections"] == 192
     assert shared["max_keepalive_connections"] == 96
     assert shared["keepalive_expiry_seconds"] == 120.0
+
+
+def test_healthz_exposes_stage2_hot_pool_components():
+    request = _make_health_request(
+        path="/healthz",
+        generation_runtime_ready=True,
+        shared_llm_pool_status={
+            "status": "ok",
+            "ready": True,
+        },
+    )
+    request.app.state.component_status["stage2_chat_hot_pool"] = {
+        "status": "skipped",
+        "enabled": False,
+        "ready": False,
+        "ready_lanes": 0,
+        "total_lanes": 0,
+    }
+    request.app.state.component_status["stage2_rerank_hot_pool"] = {
+        "status": "skipped",
+        "enabled": False,
+        "ready": False,
+        "ready_lanes": 0,
+        "total_lanes": 0,
+    }
+
+    payload = json.loads(healthz(request).body)
+
+    assert "stage2_chat_hot_pool" in payload["components"]
+    assert "stage2_rerank_hot_pool" in payload["components"]
+    assert payload["components"]["stage2_chat_hot_pool"]["ready_lanes"] == 0
+    assert payload["components"]["stage2_rerank_hot_pool"]["total_lanes"] == 0
+
+
+def test_healthz_prefers_live_stage2_hot_pool_snapshot_for_dynamic_metrics():
+    request = _make_health_request(
+        path="/healthz",
+        generation_runtime_ready=True,
+        shared_llm_pool_status={
+            "status": "ok",
+            "ready": True,
+        },
+    )
+    request.app.state.component_status["stage2_chat_hot_pool"] = {
+        "status": "pending",
+        "enabled": True,
+        "ready": False,
+        "ready_lanes": 0,
+        "total_lanes": 3,
+        "warming_lanes": 0,
+        "degraded_lanes": 0,
+    }
+    request.app.state.component_status["stage2_rerank_hot_pool"] = {
+        "status": "pending",
+        "enabled": True,
+        "ready": False,
+        "ready_lanes": 0,
+        "total_lanes": 2,
+        "warming_lanes": 0,
+        "degraded_lanes": 0,
+    }
+    request.app.state.stage2_chat_hot_pool = SimpleNamespace(
+        snapshot=lambda: {
+            "total_lanes": 3,
+            "ready_lanes": 2,
+            "warming_lanes": 1,
+            "degraded_lanes": 0,
+            "last_any_warm_success_at": "2026-04-22T12:00:00+08:00",
+            "last_any_error_at": "",
+            "last_error_summary": "",
+            "next_keepalive_at": "2026-04-22T12:05:00+08:00",
+        }
+    )
+    request.app.state.stage2_rerank_hot_pool = SimpleNamespace(
+        snapshot=lambda: {
+            "total_lanes": 2,
+            "ready_lanes": 0,
+            "warming_lanes": 0,
+            "degraded_lanes": 2,
+            "last_any_warm_success_at": "",
+            "last_any_error_at": "2026-04-22T12:01:00+08:00",
+            "last_error_summary": "warm failed",
+            "next_keepalive_at": "2026-04-22T12:06:00+08:00",
+        }
+    )
+
+    payload = json.loads(healthz(request).body)
+
+    chat = payload["components"]["stage2_chat_hot_pool"]
+    rerank = payload["components"]["stage2_rerank_hot_pool"]
+    assert chat["status"] == "ok"
+    assert chat["ready"] is True
+    assert chat["ready_lanes"] == 2
+    assert chat["warming_lanes"] == 1
+    assert chat["last_any_warm_success_at"] == "2026-04-22T12:00:00+08:00"
+    assert rerank["status"] == "degraded"
+    assert rerank["ready"] is False
+    assert rerank["degraded_lanes"] == 2
+    assert rerank["last_any_error_at"] == "2026-04-22T12:01:00+08:00"
+    assert rerank["last_error_summary"] == "warm failed"

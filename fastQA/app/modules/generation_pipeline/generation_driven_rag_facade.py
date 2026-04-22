@@ -75,6 +75,10 @@ class GenerationDrivenRAG:
         literature_expert: Optional[MicroscopicSemanticExpert] = None,
         config: Optional[Dict[str, Any]] = None,
         http_client: Any | None = None,
+        stage2_chat_hot_pool: Any | None = None,
+        rerank_session_pool: Any | None = None,
+        stage2_chat_gate: Any | None = None,
+        stage2_rerank_gate: Any | None = None,
     ) -> None:
         logger.info("initializing GenerationDrivenRAG")
         runtime_inputs = resolve_generation_runtime_inputs_impl(
@@ -91,6 +95,10 @@ class GenerationDrivenRAG:
         self.embedding_model_path = runtime_inputs.embedding_model_path
         self.chroma_db_path = runtime_inputs.chroma_db_path
         self._http_client = http_client
+        self.stage2_chat_hot_pool = stage2_chat_hot_pool
+        self.rerank_session_pool = rerank_session_pool
+        self.stage2_chat_gate = stage2_chat_gate
+        self.stage2_rerank_gate = stage2_rerank_gate
 
         self.client = build_openai_client_impl(
             api_key=self.api_key,
@@ -104,6 +112,11 @@ class GenerationDrivenRAG:
             runtime_inputs=runtime_inputs,
             logger=logger,
         )
+        if self.literature_expert is not None:
+            try:
+                setattr(self.literature_expert, "rerank_session_pool", rerank_session_pool)
+            except Exception:
+                pass
         self._query_expander: QueryExpander | None = None
         self._load_vector_db_topics()
         self._load_prompts()
@@ -228,6 +241,9 @@ class GenerationDrivenRAG:
             user_question=user_question,
             client=self.client,
             model=self.model,
+            chat_lane_pool=self.stage2_chat_hot_pool,
+            chat_gate=self.stage2_chat_gate,
+            rerank_gate=self.stage2_rerank_gate,
             literature_expert=self.literature_expert,
             preprocess_retrieval_query_fn=lambda query: preprocess_retrieval_query(query, logger=logger),
             validate_retrieval_relevance_fn=lambda results, query, claim_text: validate_retrieval_relevance(

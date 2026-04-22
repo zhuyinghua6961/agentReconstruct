@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import time
 from typing import Any, Callable
+
+from app.integrations.llm import Stage2UpstreamGateCancelled
 
 
 def normalize_chroma_query_result(results: dict[str, Any]) -> dict[str, list[Any]]:
@@ -27,9 +30,17 @@ def run_semantic_search(
     use_rerank: bool = False,
     rerank_candidates: int = 50,
     rerank_fn: Callable[..., dict[str, Any]] | None = None,
+    logger: Any | None = None,
+    trace_label: str | None = None,
 ) -> dict[str, Any]:
+    started_at = time.monotonic()
+    embedding_ms = 0.0
+    chroma_query_ms = 0.0
+    rerank_ms = 0.0
     try:
+        embedding_started_at = time.monotonic()
         query_embedding = embedding_model.encode([user_question]).tolist()
+        embedding_ms = (time.monotonic() - embedding_started_at) * 1000.0
     except Exception:
         return {"documents": [], "metadatas": [], "distances": [], "ids": []}
 
@@ -38,11 +49,13 @@ def run_semantic_search(
         candidate_count = max(candidate_count, int(rerank_candidates))
         candidate_count = min(candidate_count, max(collection.count(), 1))
 
+    chroma_started_at = time.monotonic()
     results = collection.query(
         query_embeddings=query_embedding,
         n_results=candidate_count,
         include=["metadatas", "distances", "documents"],
     )
+    chroma_query_ms = (time.monotonic() - chroma_started_at) * 1000.0
     flattened = normalize_chroma_query_result(results)
     documents = list(flattened["documents"])
     metadatas = list(flattened["metadatas"])
@@ -57,12 +70,14 @@ def run_semantic_search(
     }
     if use_rerank and rerank_fn and documents:
         try:
+            rerank_started_at = time.monotonic()
             reranked = rerank_fn(
                 query=user_question,
                 documents=documents,
                 metadatas=metadatas,
                 top_n=max(int(n_results), 1),
             )
+            rerank_ms = (time.monotonic() - rerank_started_at) * 1000.0
             rerank_docs = list(reranked.get("documents", []))
             rerank_metas = list(reranked.get("metadatas", []))
             rerank_scores = list(reranked.get("rerank_scores", []))
@@ -90,6 +105,8 @@ def run_semantic_search(
                     "reason": "empty_rerank_output",
                 }
         except Exception as exc:
+            if isinstance(exc, Stage2UpstreamGateCancelled):
+                raise
             rerank_meta = {
                 "enabled": True,
                 "applied": False,
@@ -116,4 +133,18 @@ def run_semantic_search(
     }
     if translate and translator:
         payload["translated_documents"] = [translator.translate(doc, show_progress=False) for doc in documents]
+    if logger is not None:
+        logger.info(
+            "stage2 semantic search timing trace_label=%s embedding_ms=%.2f chroma_query_ms=%.2f rerank_ms=%.2f total_ms=%.2f candidate_count=%s final_docs=%s rerank_enabled=%s rerank_applied=%s rerank_fallback=%s",
+            str(trace_label or ""),
+            embedding_ms,
+            chroma_query_ms,
+            rerank_ms,
+            (time.monotonic() - started_at) * 1000.0,
+            candidate_count,
+            len(documents),
+            int(bool(use_rerank)),
+            int(bool(rerank_meta.get("applied"))),
+            int(bool(rerank_meta.get("fallback"))),
+        )
     return payload

@@ -47,6 +47,7 @@ def rerank_documents(
     timeout_seconds: float = 20.0,
     logger: Any = None,
     requests_module: Any = None,
+    session: Any = None,
 ) -> Dict[str, Any]:
     """Rerank candidate docs with graceful fallback."""
     if not documents:
@@ -68,7 +69,7 @@ def rerank_documents(
             provider=provider_norm,
         )
 
-    req = requests_module or requests
+    req = session or requests_module or requests
     if req is None:
         return _fallback_result(
             documents=documents,

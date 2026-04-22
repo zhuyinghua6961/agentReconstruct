@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from threading import Event, Thread
 from typing import Any
 
 try:
@@ -31,9 +32,54 @@ except Exception:
 from app.modules.generation_pipeline.rerank_service import rerank_documents as rerank_documents_impl
 from app.modules.microscopic_runtime import init_embedding_model, init_vector_collection
 from app.modules.microscopic_search import run_semantic_search
+from app.integrations.llm.upstream_gate import Stage2UpstreamGateCancelled
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _run_cancelable_upstream_call(
+    *,
+    call,
+    should_cancel,
+    abort=None,
+    cancel_message: str,
+):
+    if should_cancel is None:
+        return call()
+
+    done = Event()
+    result_box: dict[str, Any] = {}
+    error_box: dict[str, BaseException] = {}
+
+    def _runner() -> None:
+        try:
+            result_box["value"] = call()
+        except BaseException as exc:  # pragma: no cover - propagated below
+            error_box["error"] = exc
+        finally:
+            done.set()
+
+    worker = Thread(target=_runner, daemon=True)
+    worker.start()
+    while not done.wait(0.05):
+        try:
+            cancelled = bool(should_cancel())
+        except Exception:
+            cancelled = False
+        if not cancelled:
+            continue
+        if abort is not None:
+            try:
+                abort()
+            except Exception:
+                pass
+        done.wait(0.2)
+        raise Stage2UpstreamGateCancelled(cancel_message)
+
+    if "error" in error_box:
+        raise error_box["error"]
+    return result_box.get("value")
 
 
 class MicroscopicSemanticExpert:
@@ -52,6 +98,7 @@ class MicroscopicSemanticExpert:
         self.client = None
         self.collection = None
         self.translator = None
+        self.rerank_session_pool = _kwargs.get("rerank_session_pool")
 
         if not CHROMADB_AVAILABLE:
             self.availability_detail = "chromadb unavailable"
@@ -99,6 +146,11 @@ class MicroscopicSemanticExpert:
         documents: list[str],
         metadatas: list[dict[str, Any]] | None = None,
         top_n: int = 20,
+        rerank_gate: Any | None = None,
+        rerank_gate_limit: int | None = None,
+        trace_label: str | None = None,
+        logger: Any | None = None,
+        should_cancel: Any | None = None,
     ) -> dict[str, Any]:
         provider = str(os.getenv("QA_RETRIEVAL_RERANK_PROVIDER", "dashscope") or "dashscope").strip()
         api_key = (
@@ -115,19 +167,73 @@ class MicroscopicSemanticExpert:
         except Exception:
             timeout_seconds = 20.0
 
-        return rerank_documents_impl(
-            query=query,
-            documents=documents,
-            metadatas=metadatas,
-            top_n=top_n,
-            provider=provider,
-            api_key=api_key,
-            model=model,
-            base_url=base_url,
-            timeout_seconds=timeout_seconds,
-        )
+        def _call_rerank(*, session: Any | None = None) -> dict[str, Any]:
+            return rerank_documents_impl(
+                query=query,
+                documents=documents,
+                metadatas=metadatas,
+                top_n=top_n,
+                provider=provider,
+                api_key=api_key,
+                model=model,
+                base_url=base_url,
+                timeout_seconds=timeout_seconds,
+                logger=logger,
+                session=session,
+            )
 
-    def search(self, user_question, n_results=5, translate=False, use_rerank=False, rerank_candidates=50):
+        rerank_session_pool = getattr(self, "rerank_session_pool", None)
+
+        def _run() -> dict[str, Any]:
+            if rerank_session_pool is not None:
+                with rerank_session_pool.lease_lane(trace_label=trace_label or "rerank") as lane:
+                    if lane is not None and getattr(lane, "session", None) is not None:
+                        leased_session = lane.session
+                        leased_lane_id = int(getattr(lane, "lane_id", -1))
+                        if logger is not None:
+                            logger.info(
+                                "stage2 rerank lane lease trace_label=%s lane=%s ready=true",
+                                str(trace_label or ""),
+                                leased_lane_id,
+                            )
+                        return _run_cancelable_upstream_call(
+                            call=lambda: _call_rerank(session=leased_session),
+                            should_cancel=should_cancel,
+                            abort=(
+                                (lambda: rerank_session_pool.abort_lane(leased_lane_id, error_summary="cancelled"))
+                                if hasattr(rerank_session_pool, "abort_lane")
+                                else None
+                            ),
+                            cancel_message="stage2 rerank upstream call cancelled",
+                        )
+            return _call_rerank()
+
+        if rerank_gate is not None:
+            try:
+                gate_ctx = rerank_gate.enter(
+                    trace_label=trace_label,
+                    request_limit=rerank_gate_limit,
+                    should_cancel=should_cancel,
+                )
+            except TypeError:
+                gate_ctx = rerank_gate.enter(trace_label=trace_label)
+            with gate_ctx:
+                return _run()
+        return _run()
+
+    def search(
+        self,
+        user_question,
+        n_results=5,
+        translate=False,
+        use_rerank=False,
+        rerank_candidates=50,
+        logger: Any | None = None,
+        trace_label: str | None = None,
+        rerank_gate: Any | None = None,
+        rerank_gate_limit: int | None = None,
+        should_cancel: Any | None = None,
+    ):
         if not self.available or self.embedding_model is None or self.collection is None:
             return {
                 "documents": [],
@@ -150,7 +256,16 @@ class MicroscopicSemanticExpert:
             translate=translate,
             use_rerank=use_rerank,
             rerank_candidates=rerank_candidates,
-            rerank_fn=self._rerank_documents,
+            rerank_fn=lambda **kwargs: self._rerank_documents(
+                **kwargs,
+                rerank_gate=rerank_gate,
+                rerank_gate_limit=rerank_gate_limit,
+                trace_label=trace_label,
+                logger=logger,
+                should_cancel=should_cancel,
+            ),
+            logger=logger,
+            trace_label=trace_label,
         )
 
     def close(self) -> None:

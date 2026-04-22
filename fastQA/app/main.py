@@ -61,6 +61,10 @@ def create_app() -> FastAPI:
     app.state.shared_llm_http_pool = None
     app.state.shared_llm_adapter = None
     app.state.shared_llm_adapter_ready = False
+    app.state.stage2_chat_hot_pool = None
+    app.state.stage2_rerank_hot_pool = None
+    app.state.stage2_chat_upstream_gate = None
+    app.state.stage2_rerank_upstream_gate = None
     app.state.pdf_web_bindings = None
     app.state.persist_user_message_hook = partial(persist_user_message, async_enabled=False) if settings.chat_persist_enabled else None
     app.state.load_conversation_context_hook = load_conversation_context if settings.chat_persist_enabled else None

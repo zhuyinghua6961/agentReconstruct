@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from dataclasses import dataclass
 import re
+from threading import Event, Thread
+import time
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-from app.integrations.llm import raise_if_upstream_pool_timeout
+from app.integrations.llm import Stage2UpstreamGateCancelled, raise_if_upstream_pool_timeout
 from app.modules.graph_kb.models import GraphRagPayload
 from app.modules.generation_pipeline.feature_flags import env_bool, env_int
 from app.modules.generation_pipeline.retrieval_validation import validate_retrieval_relevance
@@ -114,6 +117,88 @@ def resolve_stage2_parallel_workers(
         "step": step,
         "effective_workers": effective,
     }
+
+
+def resolve_stage2_upstream_gate_limit(
+    *,
+    configured_limit: int,
+    ready_lanes: int,
+    effective_parallel_workers: int,
+) -> int | None:
+    configured = max(0, int(configured_limit or 0))
+    ready = max(0, int(ready_lanes or 0))
+    effective = max(0, int(effective_parallel_workers or 0))
+    if configured <= 0 or ready <= 0 or effective <= 0:
+        return None
+    return min(configured, ready, effective)
+
+
+@contextmanager
+def _noop_context() -> Any:
+    yield
+
+
+def _gate_context(
+    gate: Any | None,
+    *,
+    trace_label: str | None,
+    request_limit: int | None,
+    should_cancel: Callable[[], bool] | None,
+):
+    if gate is None:
+        return _noop_context()
+    try:
+        return gate.enter(
+            trace_label=trace_label,
+            request_limit=request_limit,
+            should_cancel=should_cancel,
+        )
+    except TypeError:
+        return gate.enter(trace_label=trace_label)
+
+
+def _run_cancelable_upstream_call(
+    *,
+    call: Callable[[], Any],
+    should_cancel: Callable[[], bool] | None,
+    abort: Callable[[], None] | None = None,
+    cancel_message: str,
+) -> Any:
+    if should_cancel is None:
+        return call()
+
+    done = Event()
+    result_box: dict[str, Any] = {}
+    error_box: dict[str, BaseException] = {}
+
+    def _runner() -> None:
+        try:
+            result_box["value"] = call()
+        except BaseException as exc:  # pragma: no cover - propagated below
+            error_box["error"] = exc
+        finally:
+            done.set()
+
+    worker = Thread(target=_runner, daemon=True)
+    worker.start()
+    while not done.wait(0.05):
+        try:
+            cancelled = bool(should_cancel())
+        except Exception:
+            cancelled = False
+        if not cancelled:
+            continue
+        if abort is not None:
+            try:
+                abort()
+            except Exception:
+                pass
+        done.wait(0.2)
+        raise Stage2UpstreamGateCancelled(cancel_message)
+
+    if "error" in error_box:
+        raise error_box["error"]
+    return result_box.get("value")
 
 
 def _contains_keyword(text: str, keyword: str) -> bool:
@@ -293,25 +378,50 @@ def _search_with_optional_rerank(
     combined_query: str,
     n_results: int,
     toggles: Stage2RuntimeToggles,
+    logger: Any | None = None,
+    trace_label: str | None = None,
+    rerank_gate: Any | None = None,
+    rerank_gate_limit: int | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> Dict[str, Any]:
     search_kwargs = {
         "n_results": n_results,
         "translate": False,
         "use_rerank": toggles.use_rerank,
         "rerank_candidates": toggles.rerank_candidates,
+        "logger": logger,
+        "trace_label": trace_label,
+        "rerank_gate": rerank_gate,
+        "rerank_gate_limit": rerank_gate_limit,
+        "should_cancel": should_cancel,
     }
     try:
         return literature_expert.search(combined_query, **search_kwargs)
     except TypeError:
-        search_kwargs.pop("use_rerank", None)
-        search_kwargs.pop("rerank_candidates", None)
-        return literature_expert.search(combined_query, **search_kwargs)
+        reduced_kwargs = dict(search_kwargs)
+        reduced_kwargs.pop("logger", None)
+        reduced_kwargs.pop("trace_label", None)
+        try:
+            return literature_expert.search(combined_query, **reduced_kwargs)
+        except TypeError:
+            reduced_kwargs.pop("rerank_gate_limit", None)
+            reduced_kwargs.pop("should_cancel", None)
+            reduced_kwargs.pop("rerank_gate", None)
+            reduced_kwargs.pop("use_rerank", None)
+            reduced_kwargs.pop("rerank_candidates", None)
+            return literature_expert.search(combined_query, **reduced_kwargs)
 
 
 def _generate_ai_query(
     *,
     client: Any | None,
     model: str | None,
+    chat_lane_pool: Any | None,
+    chat_gate: Any | None,
+    chat_gate_limit: int | None,
+    trace_label: str | None,
+    logger: Any | None,
+    should_cancel: Callable[[], bool] | None,
     normalized_user_question: str,
     claim_text: str,
     keywords: list[str],
@@ -360,7 +470,45 @@ def _generate_ai_query(
 请根据【原始用户问题】生成查询（必须紧密围绕问题核心）：
 """
 
-    response = client.chat.completions.create(
+    active_client = client
+    if chat_lane_pool is not None:
+        gate_ctx = _gate_context(
+            chat_gate,
+            trace_label=trace_label,
+            request_limit=chat_gate_limit,
+            should_cancel=should_cancel,
+        )
+        with gate_ctx:
+            with chat_lane_pool.lease_lane(trace_label=trace_label) as leased_lane:
+                if leased_lane is not None and getattr(leased_lane, "client", None) is not None:
+                    active_client = leased_lane.client
+                    if logger is not None:
+                        logger.info(
+                            "stage2 chat lane lease trace_label=%s lane=%s ready=true",
+                            str(trace_label or ""),
+                            int(getattr(leased_lane, "lane_id", -1)),
+                        )
+                response = _run_cancelable_upstream_call(
+                    call=lambda: active_client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": "你是一个学术检索专家，擅长根据研究内容生成精准的文献检索查询。"},
+                            {"role": "user", "content": prompt},
+                        ],
+                        temperature=0.3,
+                        max_tokens=150,
+                    ),
+                    should_cancel=should_cancel,
+                    abort=(
+                        (lambda: chat_lane_pool.abort_lane(int(getattr(leased_lane, "lane_id", -1)), error_summary="cancelled"))
+                        if leased_lane is not None and hasattr(chat_lane_pool, "abort_lane")
+                        else None
+                    ),
+                    cancel_message="stage2 chat upstream call cancelled",
+                )
+                return str(response.choices[0].message.content or "").strip()
+
+    response = active_client.chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": "你是一个学术检索专家，擅长根据研究内容生成精准的文献检索查询。"},
@@ -446,6 +594,9 @@ def run_stage2_targeted_retrieval(
     logger: Any,
     client: Any | None = None,
     model: str | None = None,
+    chat_lane_pool: Any | None = None,
+    chat_gate: Any | None = None,
+    rerank_gate: Any | None = None,
     preprocess_retrieval_query_fn: Callable[[str], str] | None = None,
     validate_retrieval_relevance_fn: Callable[[Dict[str, Any], str, str], Dict[str, Any]] | None = None,
     current_answer_context: Optional[str] = None,
@@ -466,6 +617,8 @@ def run_stage2_targeted_retrieval(
             return bool(should_cancel())
         except Exception:
             return False
+
+    cancel_check = _cancelled if should_cancel is not None else None
 
     preprocess_fn = preprocess_retrieval_query_fn or (lambda query: preprocess_retrieval_query(query, logger=logger))
     validate_fn = validate_retrieval_relevance_fn or (
@@ -499,6 +652,19 @@ def run_stage2_targeted_retrieval(
         active_stream_count=active_stream_count,
     )
     query_expansion_enabled = env_bool("QA_STAGE2_QUERY_EXPANSION_ENABLED", False)
+    chat_ready_lanes = int(dict(getattr(chat_lane_pool, "snapshot", lambda: {})() or {}).get("ready_lanes") or 0)
+    rerank_session_pool = getattr(literature_expert, "rerank_session_pool", None)
+    rerank_ready_lanes = int(dict(getattr(rerank_session_pool, "snapshot", lambda: {})() or {}).get("ready_lanes") or 0)
+    chat_gate_limit = resolve_stage2_upstream_gate_limit(
+        configured_limit=env_int("FASTQA_STAGE2_CHAT_GATE_MAX_IN_FLIGHT", 3, minimum=0, maximum=16),
+        ready_lanes=chat_ready_lanes,
+        effective_parallel_workers=parallel_workers,
+    )
+    rerank_gate_limit = resolve_stage2_upstream_gate_limit(
+        configured_limit=env_int("FASTQA_STAGE2_RERANK_GATE_MAX_IN_FLIGHT", 3, minimum=0, maximum=16),
+        ready_lanes=rerank_ready_lanes,
+        effective_parallel_workers=parallel_workers,
+    )
     logger.info(
         "Stage2 并发: workers=%s (configured=%s, dynamic=%s)",
         parallel_workers,
@@ -545,6 +711,7 @@ def run_stage2_targeted_retrieval(
         logger.info("🧹 Stage2 已移除对话背景包装，仅使用当前问题进行检索约束")
 
     def _process_claim(index: int, claim: Any) -> Dict[str, Any]:
+        claim_started_at = time.monotonic()
         if _cancelled():
             return {
                 "index": index,
@@ -556,6 +723,13 @@ def run_stage2_targeted_retrieval(
                 "query_guardrail": {"injected_keywords": [], "injected_entities": []},
                 "rerank": {},
                 "relevance_validation": {"before": 0, "after": 0},
+                "timing": {
+                    "ai_query_ms": 0.0,
+                    "query_expansion_ms": 0.0,
+                    "search_total_ms": 0.0,
+                    "relevance_validation_ms": 0.0,
+                    "claim_total_ms": (time.monotonic() - claim_started_at) * 1000.0,
+                },
                 "ok": False,
                 "cancelled": True,
             }
@@ -574,11 +748,22 @@ def run_stage2_targeted_retrieval(
         claim_key = claim_text or f"claim_{index}"
         query_guardrail_details = {"injected_keywords": [], "injected_entities": []}
         combined_query = ""
+        ai_query_ms = 0.0
+        query_expansion_ms = 0.0
+        search_total_ms = 0.0
+        relevance_validation_ms = 0.0
 
         try:
+            ai_query_started_at = time.monotonic()
             ai_generated_query = _generate_ai_query(
                 client=client,
                 model=model,
+                chat_lane_pool=chat_lane_pool,
+                chat_gate=chat_gate,
+                chat_gate_limit=chat_gate_limit,
+                trace_label=f"claim_{index}",
+                logger=logger,
+                should_cancel=cancel_check,
                 normalized_user_question=normalized_user_question,
                 claim_text=claim_text,
                 keywords=keywords,
@@ -586,9 +771,31 @@ def run_stage2_targeted_retrieval(
                 filters=filters,
                 entity_lock_enabled=toggles.entity_lock_enabled,
             )
+            ai_query_ms = (time.monotonic() - ai_query_started_at) * 1000.0
             if ai_generated_query:
                 combined_query = preprocess_fn(ai_generated_query)
                 logger.info("[%s/%s] AI生成检索查询: %s...", index, len(claims), combined_query[:200])
+        except Stage2UpstreamGateCancelled:
+            return {
+                "index": index,
+                "claim_key": claim_key,
+                "documents": [],
+                "metadatas": [],
+                "distances": [],
+                "query": combined_query,
+                "query_guardrail": query_guardrail_details,
+                "rerank": {},
+                "relevance_validation": {"before": 0, "after": 0},
+                "timing": {
+                    "ai_query_ms": ai_query_ms,
+                    "query_expansion_ms": query_expansion_ms,
+                    "search_total_ms": search_total_ms,
+                    "relevance_validation_ms": relevance_validation_ms,
+                    "claim_total_ms": (time.monotonic() - claim_started_at) * 1000.0,
+                },
+                "ok": False,
+                "cancelled": True,
+            }
         except Exception as exc:
             raise_if_upstream_pool_timeout(exc)
             logger.warning("AI查询生成失败，使用传统方法: %s", exc)
@@ -602,7 +809,9 @@ def run_stage2_targeted_retrieval(
 
         if query_expansion_enabled and expand_query_fn is not None:
             try:
+                query_expansion_started_at = time.monotonic()
                 expanded_query = str(expand_query_fn(combined_query) or "").strip()
+                query_expansion_ms = (time.monotonic() - query_expansion_started_at) * 1000.0
                 if expanded_query:
                     combined_query = preprocess_fn(expanded_query)
                     logger.info("[%s/%s] 查询扩展后: %s...", index, len(claims), combined_query[:200])
@@ -633,19 +842,29 @@ def run_stage2_targeted_retrieval(
             )
 
         try:
+            search_started_at = time.monotonic()
             raw_results = _search_with_optional_rerank(
                 literature_expert=literature_expert,
                 combined_query=combined_query,
                 n_results=max(n_results_per_claim * 3, 8),
                 toggles=toggles,
+                logger=logger,
+                trace_label=f"claim_{index}",
+                rerank_gate=rerank_gate,
+                rerank_gate_limit=rerank_gate_limit,
+                should_cancel=cancel_check,
             )
+            search_total_ms = (time.monotonic() - search_started_at) * 1000.0
             before_count = len(list(raw_results.get("documents") or []))
             rerank_meta = dict(raw_results.get("rerank") or {})
+            relevance_started_at = time.monotonic()
             validated_results = validate_fn(raw_results, combined_query, claim_text) if raw_results and "documents" in raw_results else raw_results
+            relevance_validation_ms = (time.monotonic() - relevance_started_at) * 1000.0
             documents = list(validated_results.get("documents") or [])
             metadatas = list(validated_results.get("metadatas") or [])
             distances = list(validated_results.get("distances") or [])
             after_count = len(documents)
+            claim_total_ms = (time.monotonic() - claim_started_at) * 1000.0
             logger.info(
                 "[%s/%s] 检索完成: hits_before=%s hits_after=%s rerank_enabled=%s rerank_applied=%s rerank_fallback=%s rerank_reason=%s rerank_provider=%s",
                 index,
@@ -658,6 +877,19 @@ def run_stage2_targeted_retrieval(
                 str(rerank_meta.get("reason") or ""),
                 str(rerank_meta.get("provider") or ""),
             )
+            logger.info(
+                "stage2 claim timing claim=%s trace_label=claim_%s ai_query_ms=%.2f query_expansion_ms=%.2f search_total_ms=%.2f relevance_validation_ms=%.2f claim_total_ms=%.2f query_chars=%s hits_before=%s hits_after=%s",
+                claim_key[:120],
+                index,
+                ai_query_ms,
+                query_expansion_ms,
+                search_total_ms,
+                relevance_validation_ms,
+                claim_total_ms,
+                len(combined_query),
+                before_count,
+                after_count,
+            )
             return {
                 "index": index,
                 "claim_key": claim_key,
@@ -668,10 +900,50 @@ def run_stage2_targeted_retrieval(
                 "query_guardrail": query_guardrail_details,
                 "rerank": rerank_meta,
                 "relevance_validation": {"before": before_count, "after": after_count},
+                "timing": {
+                    "ai_query_ms": ai_query_ms,
+                    "query_expansion_ms": query_expansion_ms,
+                    "search_total_ms": search_total_ms,
+                    "relevance_validation_ms": relevance_validation_ms,
+                    "claim_total_ms": claim_total_ms,
+                },
                 "ok": True,
+            }
+        except Stage2UpstreamGateCancelled:
+            return {
+                "index": index,
+                "claim_key": claim_key,
+                "documents": [],
+                "metadatas": [],
+                "distances": [],
+                "query": combined_query,
+                "query_guardrail": query_guardrail_details,
+                "rerank": {},
+                "relevance_validation": {"before": 0, "after": 0},
+                "timing": {
+                    "ai_query_ms": ai_query_ms,
+                    "query_expansion_ms": query_expansion_ms,
+                    "search_total_ms": search_total_ms,
+                    "relevance_validation_ms": relevance_validation_ms,
+                    "claim_total_ms": (time.monotonic() - claim_started_at) * 1000.0,
+                },
+                "ok": False,
+                "cancelled": True,
             }
         except Exception as exc:
             raise_if_upstream_pool_timeout(exc)
+            claim_total_ms = (time.monotonic() - claim_started_at) * 1000.0
+            logger.info(
+                "stage2 claim timing claim=%s trace_label=claim_%s ai_query_ms=%.2f query_expansion_ms=%.2f search_total_ms=%.2f relevance_validation_ms=%.2f claim_total_ms=%.2f status=error error=%s",
+                claim_key[:120],
+                index,
+                ai_query_ms,
+                query_expansion_ms,
+                search_total_ms,
+                relevance_validation_ms,
+                claim_total_ms,
+                exc,
+            )
             logger.warning("[%s/%s] 检索失败: %s", index, len(claims), exc)
             return {
                 "index": index,
@@ -683,6 +955,13 @@ def run_stage2_targeted_retrieval(
                 "query_guardrail": query_guardrail_details,
                 "rerank": {},
                 "relevance_validation": {"before": 0, "after": 0},
+                "timing": {
+                    "ai_query_ms": ai_query_ms,
+                    "query_expansion_ms": query_expansion_ms,
+                    "search_total_ms": search_total_ms,
+                    "relevance_validation_ms": relevance_validation_ms,
+                    "claim_total_ms": claim_total_ms,
+                },
                 "ok": False,
                 "error": str(exc),
             }
@@ -697,12 +976,15 @@ def run_stage2_targeted_retrieval(
             claim_outputs.append(_process_claim(index, claim))
     else:
         max_workers = min(parallel_workers, len(claim_jobs))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        cancelled_early = False
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        try:
             future_map = {executor.submit(_process_claim, index, claim): index for index, claim in claim_jobs}
             pending = set(future_map)
             while pending:
                 if _cancelled():
                     logger.info("🛑 Stage2 并行检索已取消，回收未完成任务")
+                    cancelled_early = True
                     for future in pending:
                         future.cancel()
                     return {
@@ -723,6 +1005,8 @@ def run_stage2_targeted_retrieval(
                     except Exception as exc:
                         raise_if_upstream_pool_timeout(exc)
                         logger.warning("[%s/%s] 并行任务异常: %s", idx, len(claims), exc)
+        finally:
+            executor.shutdown(wait=not cancelled_early, cancel_futures=cancelled_early)
 
     if _cancelled():
         logger.info("🛑 Stage2 结果聚合前已取消")
@@ -775,6 +1059,30 @@ def run_stage2_targeted_retrieval(
         "applied_claims": sum(1 for output in claim_outputs if bool((output.get("rerank") or {}).get("applied"))),
         "fallback_claims": sum(1 for output in claim_outputs if bool((output.get("rerank") or {}).get("fallback"))),
     }
+    completed_outputs = [output for output in claim_outputs if output.get("ok")]
+    if completed_outputs:
+        slowest_output = max(
+            completed_outputs,
+            key=lambda item: float(dict(item.get("timing") or {}).get("claim_total_ms") or 0.0),
+        )
+        avg_ai_query_ms = sum(float(dict(item.get("timing") or {}).get("ai_query_ms") or 0.0) for item in completed_outputs) / len(completed_outputs)
+        avg_search_ms = sum(float(dict(item.get("timing") or {}).get("search_total_ms") or 0.0) for item in completed_outputs) / len(completed_outputs)
+        avg_validation_ms = sum(
+            float(dict(item.get("timing") or {}).get("relevance_validation_ms") or 0.0) for item in completed_outputs
+        ) / len(completed_outputs)
+        avg_claim_total_ms = sum(
+            float(dict(item.get("timing") or {}).get("claim_total_ms") or 0.0) for item in completed_outputs
+        ) / len(completed_outputs)
+        logger.info(
+            "Stage2 timing summary: claim_count=%s slowest_claim=%s slowest_claim_ms=%.2f avg_ai_query_ms=%.2f avg_search_ms=%.2f avg_relevance_validation_ms=%.2f avg_claim_total_ms=%.2f",
+            len(completed_outputs),
+            str(slowest_output.get("claim_key") or "")[:120],
+            float(dict(slowest_output.get("timing") or {}).get("claim_total_ms") or 0.0),
+            avg_ai_query_ms,
+            avg_search_ms,
+            avg_validation_ms,
+            avg_claim_total_ms,
+        )
     logger.info(
         "Stage2 汇总: claims=%s unique_docs=%s total_docs=%s rerank_enabled_claims=%s rerank_applied_claims=%s rerank_fallback_claims=%s",
         len(claim_to_results),
@@ -805,6 +1113,7 @@ __all__ = [
     "normalize_user_question_for_stage2",
     "resolve_stage2_parallel_workers",
     "resolve_stage2_runtime_toggles",
+    "resolve_stage2_upstream_gate_limit",
     "run_single_claim_retrieval",
     "run_stage2_targeted_retrieval",
     "select_force_keywords",

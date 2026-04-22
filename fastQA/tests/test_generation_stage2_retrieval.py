@@ -2,9 +2,18 @@ from __future__ import annotations
 
 import httpx
 import logging
+from contextlib import contextmanager
+from threading import Event
+import time
+from types import SimpleNamespace
 
 from app.modules.graph_kb.models import GraphRagPayload
-from app.modules.generation_pipeline.stage2_retrieval import run_stage2_targeted_retrieval
+from app.integrations.llm.upstream_gate import Stage2UpstreamGateCancelled
+from app.modules.generation_pipeline.stage2_retrieval import (
+    resolve_stage2_upstream_gate_limit,
+    run_stage2_targeted_retrieval,
+)
+from app.modules.microscopic_expert import MicroscopicSemanticExpert
 
 
 class _Expert:
@@ -49,6 +58,22 @@ class _PoolTimeoutClient(_FakeClient):
         raise httpx.PoolTimeout("pool exhausted")
 
 
+class _LanePool:
+    def __init__(self, lane_client) -> None:
+        self.lane_client = lane_client
+        self.lease_called = False
+        self.used_trace_labels: list[str | None] = []
+
+    @contextmanager
+    def lease_lane(self, *, trace_label: str | None = None):
+        self.lease_called = True
+        self.used_trace_labels.append(trace_label)
+        yield SimpleNamespace(client=self.lane_client, lane_id=0)
+
+    def snapshot(self):
+        return {"ready_lanes": 1}
+
+
 def test_stage2_targeted_retrieval_applies_keyword_and_entity_guardrails(monkeypatch):
     monkeypatch.setenv("QA_STAGE2_FORCE_KEYWORD_INJECTION", "true")
     monkeypatch.setenv("QA_STAGE2_ENTITY_LOCK_ENABLED", "true")
@@ -82,6 +107,292 @@ def test_stage2_targeted_retrieval_applies_keyword_and_entity_guardrails(monkeyp
     assert result["claim_to_results"]["claim one"]["query_guardrail"]["injected_entities"] == ["Ti"]
     assert expert.calls[0]["query"] == query
     assert client.calls[0]["model"] == "gpt-test"
+
+
+def test_stage2_query_generation_uses_leased_chat_lane(monkeypatch):
+    monkeypatch.setenv("QA_STAGE2_FORCE_KEYWORD_INJECTION", "false")
+    monkeypatch.setenv("QA_STAGE2_ENTITY_LOCK_ENABLED", "false")
+    expert = _Expert(
+        responses={
+            "lane generated query": {
+                "documents": ["doc-a"],
+                "metadatas": [{"doi": "10.2/a"}],
+                "distances": [0.1],
+            }
+        }
+    )
+    fallback_client = _FakeClient("fallback query")
+    lane_client = _FakeClient("lane generated query")
+    lane_pool = _LanePool(lane_client)
+
+    result = run_stage2_targeted_retrieval(
+        retrieval_claims=[{"claim": "claim one", "keywords": []}],
+        n_results_per_claim=1,
+        user_question="battery cycle life",
+        literature_expert=expert,
+        logger=logging.getLogger("test.stage2"),
+        client=fallback_client,
+        model="gpt-test",
+        preprocess_retrieval_query_fn=lambda query: query,
+        validate_retrieval_relevance_fn=lambda results, query, claim: results,
+        chat_lane_pool=lane_pool,
+    )
+
+    assert result["success"] is True
+    assert lane_pool.lease_called is True
+    assert lane_pool.used_trace_labels == ["claim_1"]
+    assert fallback_client.calls == []
+    assert lane_client.calls[0]["model"] == "gpt-test"
+    assert result["claim_to_results"]["claim one"]["query"] == "lane generated query"
+
+
+def test_stage2_query_generation_logs_chat_lane_lease(monkeypatch, caplog):
+    monkeypatch.setenv("QA_STAGE2_FORCE_KEYWORD_INJECTION", "false")
+    monkeypatch.setenv("QA_STAGE2_ENTITY_LOCK_ENABLED", "false")
+    expert = _Expert(
+        responses={
+            "lane generated query": {
+                "documents": ["doc-a"],
+                "metadatas": [{"doi": "10.2/a"}],
+                "distances": [0.1],
+            }
+        }
+    )
+    lane_pool = _LanePool(_FakeClient("lane generated query"))
+    test_logger = logging.getLogger("test.stage2.lease")
+
+    with caplog.at_level(logging.INFO, logger="test.stage2.lease"):
+        result = run_stage2_targeted_retrieval(
+            retrieval_claims=[{"claim": "claim one", "keywords": []}],
+            n_results_per_claim=1,
+            user_question="battery cycle life",
+            literature_expert=expert,
+            logger=test_logger,
+            client=_FakeClient("fallback query"),
+            model="gpt-test",
+            preprocess_retrieval_query_fn=lambda query: query,
+            validate_retrieval_relevance_fn=lambda results, query, claim: results,
+            chat_lane_pool=lane_pool,
+        )
+
+    assert result["success"] is True
+    assert "stage2 chat lane lease trace_label=claim_1 lane=0 ready=true" in caplog.text
+
+
+def test_stage2_chat_gate_uses_ready_lane_count():
+    assert resolve_stage2_upstream_gate_limit(configured_limit=5, ready_lanes=2, effective_parallel_workers=5) == 2
+
+
+def test_stage2_rerank_gate_uses_ready_lane_count():
+    assert resolve_stage2_upstream_gate_limit(configured_limit=5, ready_lanes=3, effective_parallel_workers=4) == 3
+
+
+def test_stage2_bypasses_gate_when_no_ready_lanes():
+    assert resolve_stage2_upstream_gate_limit(configured_limit=5, ready_lanes=0, effective_parallel_workers=5) is None
+
+
+def test_stage2_query_generation_passes_request_limit_and_cancel_to_shared_gate(monkeypatch):
+    monkeypatch.setenv("QA_STAGE2_FORCE_KEYWORD_INJECTION", "false")
+    monkeypatch.setenv("QA_STAGE2_ENTITY_LOCK_ENABLED", "false")
+    monkeypatch.setenv("FASTQA_STAGE2_CHAT_GATE_MAX_IN_FLIGHT", "3")
+    expert = _Expert(
+        responses={
+            "lane generated query": {
+                "documents": ["doc-a"],
+                "metadatas": [{"doi": "10.2/a"}],
+                "distances": [0.1],
+            }
+        }
+    )
+    lane_pool = _LanePool(_FakeClient("lane generated query"))
+    gate_calls: list[dict[str, object]] = []
+
+    class _Gate:
+        @contextmanager
+        def enter(self, *, trace_label=None, request_limit=None, should_cancel=None):
+            gate_calls.append(
+                {
+                    "trace_label": trace_label,
+                    "request_limit": request_limit,
+                    "cancelled": bool(should_cancel and should_cancel()),
+                }
+            )
+            yield
+
+    result = run_stage2_targeted_retrieval(
+        retrieval_claims=[{"claim": "claim one", "keywords": []}],
+        n_results_per_claim=1,
+        user_question="battery cycle life",
+        literature_expert=expert,
+        logger=logging.getLogger("test.stage2"),
+        client=_FakeClient("fallback query"),
+        model="gpt-test",
+        preprocess_retrieval_query_fn=lambda query: query,
+        validate_retrieval_relevance_fn=lambda results, query, claim: results,
+        chat_lane_pool=lane_pool,
+        chat_gate=_Gate(),
+    )
+
+    assert result["success"] is True
+    assert gate_calls == [{"trace_label": "claim_1", "request_limit": 1, "cancelled": False}]
+
+
+def test_stage2_targeted_retrieval_returns_cancelled_payload_when_gate_wait_is_cancelled(monkeypatch):
+    monkeypatch.setenv("QA_STAGE2_FORCE_KEYWORD_INJECTION", "false")
+    monkeypatch.setenv("QA_STAGE2_ENTITY_LOCK_ENABLED", "false")
+    expert = _Expert()
+
+    class _Gate:
+        def enter(self, *, trace_label=None, request_limit=None, should_cancel=None):
+            raise Stage2UpstreamGateCancelled("stage2 chat gate wait cancelled")
+
+    result = run_stage2_targeted_retrieval(
+        retrieval_claims=[{"claim": "claim one", "keywords": []}],
+        n_results_per_claim=1,
+        user_question="battery cycle life",
+        literature_expert=expert,
+        logger=logging.getLogger("test.stage2"),
+        client=_FakeClient("fallback query"),
+        model="gpt-test",
+        preprocess_retrieval_query_fn=lambda query: query,
+        validate_retrieval_relevance_fn=lambda results, query, claim: results,
+        chat_lane_pool=_LanePool(_FakeClient("lane generated query")),
+        chat_gate=_Gate(),
+        should_cancel=lambda: False,
+    )
+
+    assert result["success"] is True
+    assert result["claim_to_results"] == {}
+
+
+def test_stage2_targeted_retrieval_aborts_chat_lane_when_cancelled_mid_call(monkeypatch):
+    monkeypatch.setenv("QA_STAGE2_FORCE_KEYWORD_INJECTION", "false")
+    monkeypatch.setenv("QA_STAGE2_ENTITY_LOCK_ENABLED", "false")
+    expert = _Expert()
+    started = Event()
+    cancel_request = Event()
+
+    class _BlockingClient(_FakeClient):
+        def _create(self, **kwargs):
+            self.calls.append(kwargs)
+            started.set()
+            while not cancel_request.is_set():
+                time.sleep(0.01)
+            time.sleep(0.2)
+            return super()._create(**kwargs)
+
+    class _AbortableLanePool(_LanePool):
+        def __init__(self, lane_client) -> None:
+            super().__init__(lane_client)
+            self.abort_calls: list[tuple[int, str]] = []
+
+        def abort_lane(self, lane_id: int, *, error_summary: str = "cancelled") -> None:
+            self.abort_calls.append((lane_id, error_summary))
+
+    lane_pool = _AbortableLanePool(_BlockingClient("lane generated query"))
+
+    def _should_cancel() -> bool:
+        if started.is_set():
+            cancel_request.set()
+        return cancel_request.is_set()
+
+    result = run_stage2_targeted_retrieval(
+        retrieval_claims=[{"claim": "claim one", "keywords": []}],
+        n_results_per_claim=1,
+        user_question="battery cycle life",
+        literature_expert=expert,
+        logger=logging.getLogger("test.stage2"),
+        client=_FakeClient("fallback query"),
+        model="gpt-test",
+        preprocess_retrieval_query_fn=lambda query: query,
+        validate_retrieval_relevance_fn=lambda results, query, claim: results,
+        chat_lane_pool=lane_pool,
+        should_cancel=_should_cancel,
+    )
+
+    assert result["success"] is False
+    assert result["cancelled"] is True
+    assert lane_pool.abort_calls == [(0, "cancelled")]
+
+
+def test_stage2_targeted_retrieval_propagates_rerank_cancellation_from_real_microscopic_expert(monkeypatch):
+    monkeypatch.setenv("QA_RETRIEVAL_RERANK_ENABLED", "true")
+    monkeypatch.setenv("QA_RETRIEVAL_RERANK_CANDIDATES", "8")
+    monkeypatch.setenv("QA_STAGE2_FORCE_KEYWORD_INJECTION", "false")
+    monkeypatch.setenv("QA_STAGE2_ENTITY_LOCK_ENABLED", "false")
+    started = Event()
+    cancel_request = Event()
+
+    class _Embedding:
+        def encode(self, _values):
+            return type("Array", (), {"tolist": lambda self: [[0.1, 0.2]]})()
+
+    class _Collection:
+        def count(self):
+            return 8
+
+        def query(self, **_kwargs):
+            return {
+                "documents": [["doc-1", "doc-2"]],
+                "distances": [[0.1, 0.2]],
+                "metadatas": [[{"doi": "10.1/a"}, {"doi": "10.2/b"}]],
+                "ids": [["id-1", "id-2"]],
+            }
+
+    class _LanePool:
+        def __init__(self) -> None:
+            self.abort_calls: list[tuple[int, str]] = []
+
+        @contextmanager
+        def lease_lane(self, *, trace_label=None):
+            yield SimpleNamespace(session=object(), lane_id=0)
+
+        def abort_lane(self, lane_id: int, *, error_summary: str = "cancelled") -> None:
+            self.abort_calls.append((lane_id, error_summary))
+
+    def _fake_rerank_documents(**kwargs):
+        started.set()
+        while not cancel_request.is_set():
+            time.sleep(0.01)
+        return {
+            "documents": ["doc-1"],
+            "metadatas": [{"doi": "10.1/a"}],
+            "rerank_scores": [0.9],
+            "fallback": False,
+            "provider": "test",
+        }
+
+    monkeypatch.setattr("app.modules.microscopic_expert.rerank_documents_impl", _fake_rerank_documents)
+
+    expert = MicroscopicSemanticExpert.__new__(MicroscopicSemanticExpert)
+    expert.available = True
+    expert.embedding_model = _Embedding()
+    expert.collection = _Collection()
+    expert.translator = None
+    expert.client = None
+    expert.rerank_session_pool = _LanePool()
+
+    def _should_cancel() -> bool:
+        if started.is_set():
+            cancel_request.set()
+        return cancel_request.is_set()
+
+    result = run_stage2_targeted_retrieval(
+        retrieval_claims=[{"claim": "claim one", "keywords": []}],
+        n_results_per_claim=1,
+        user_question="battery cycle life",
+        literature_expert=expert,
+        logger=logging.getLogger("test.stage2"),
+        client=None,
+        model=None,
+        preprocess_retrieval_query_fn=lambda query: query,
+        validate_retrieval_relevance_fn=lambda results, query, claim: results,
+        should_cancel=_should_cancel,
+    )
+
+    assert result["success"] is False
+    assert result["cancelled"] is True
+    assert expert.rerank_session_pool.abort_calls == [(0, "cancelled")]
 
 
 def test_stage2_targeted_retrieval_uses_query_expansion_when_enabled(monkeypatch):
@@ -304,3 +615,39 @@ def test_stage2_targeted_retrieval_propagates_pool_timeout_from_query_expansion(
         raise AssertionError("expected PoolTimeout to propagate")
 
     assert expert.calls == []
+
+
+def test_stage2_targeted_retrieval_logs_claim_timing_breakdown(monkeypatch, caplog):
+    monkeypatch.setenv("QA_STAGE2_FORCE_KEYWORD_INJECTION", "false")
+    monkeypatch.setenv("QA_STAGE2_ENTITY_LOCK_ENABLED", "false")
+    monkeypatch.setenv("QA_STAGE2_QUERY_EXPANSION_ENABLED", "false")
+    expert = _Expert(
+        default_response={
+            "documents": ["doc-1"],
+            "metadatas": [{"doi": "10.1/a"}],
+            "distances": [0.1],
+        }
+    )
+    client = _FakeClient("cycle life")
+    logger = logging.getLogger("test.stage2.timing")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        result = run_stage2_targeted_retrieval(
+            retrieval_claims=[{"claim": "claim one", "keywords": []}],
+            n_results_per_claim=1,
+            user_question="battery cycle life",
+            literature_expert=expert,
+            logger=logger,
+            client=client,
+            model="gpt-test",
+            preprocess_retrieval_query_fn=lambda query: query,
+            validate_retrieval_relevance_fn=lambda results, query, claim: results,
+        )
+
+    assert result["success"] is True
+    claim_message = next(message for message in caplog.messages if "stage2 claim timing" in message)
+    assert "claim=claim one" in claim_message
+    assert "ai_query_ms=" in claim_message
+    assert "search_total_ms=" in claim_message
+    assert "relevance_validation_ms=" in claim_message
+    assert "claim_total_ms=" in claim_message

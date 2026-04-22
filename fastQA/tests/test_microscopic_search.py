@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+
+from app.integrations.llm.upstream_gate import Stage2UpstreamGateCancelled
 from app.modules.microscopic_search import normalize_chroma_query_result, run_semantic_search
 
 
@@ -97,3 +100,59 @@ def test_run_semantic_search_marks_empty_rerank_output_as_fallback():
     assert result["rerank"]["enabled"] is True
     assert result["rerank"]["fallback"] is True
     assert result["rerank"]["reason"] == "empty_rerank_output"
+
+
+def test_run_semantic_search_propagates_rerank_cancellation():
+    def _cancelled_rerank(**kwargs):
+        raise Stage2UpstreamGateCancelled("stage2 rerank upstream call cancelled")
+
+    try:
+        run_semantic_search(
+            user_question="lfp",
+            n_results=2,
+            embedding_model=_Embedding(),
+            collection=_Collection(),
+            translator=None,
+            translate=False,
+            use_rerank=True,
+            rerank_candidates=4,
+            rerank_fn=_cancelled_rerank,
+        )
+    except Stage2UpstreamGateCancelled as exc:
+        assert str(exc) == "stage2 rerank upstream call cancelled"
+    else:  # pragma: no cover - enforced by failing test before fix
+        raise AssertionError("expected rerank cancellation to propagate")
+
+
+def test_run_semantic_search_logs_timing_breakdown(caplog):
+    logger = logging.getLogger("test.microscopic_search.timing")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        result = run_semantic_search(
+            user_question="lfp",
+            n_results=2,
+            embedding_model=_Embedding(),
+            collection=_Collection(),
+            translator=None,
+            translate=False,
+            use_rerank=True,
+            rerank_candidates=4,
+            rerank_fn=lambda **kwargs: {
+                "documents": ["doc2", "doc1"],
+                "metadatas": [{"doi": "10.2/b"}, {"doi": "10.1/a"}],
+                "rerank_scores": [0.9, 0.8],
+                "fallback": False,
+                "fallback_reason": "",
+                "provider": "test",
+            },
+            logger=logger,
+            trace_label="claim_1",
+        )
+
+    assert result["documents"] == ["doc2", "doc1"]
+    timing_message = next(message for message in caplog.messages if "stage2 semantic search timing" in message)
+    assert "trace_label=claim_1" in timing_message
+    assert "embedding_ms=" in timing_message
+    assert "chroma_query_ms=" in timing_message
+    assert "rerank_ms=" in timing_message
+    assert "total_ms=" in timing_message

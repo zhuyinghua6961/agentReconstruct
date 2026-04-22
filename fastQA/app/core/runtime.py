@@ -4,7 +4,13 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
-from app.integrations.llm import FastQASharedUpstreamHttpPool, SharedHttpPoolConfig
+from app.integrations.llm import (
+    ChatHotLanePool,
+    FastQASharedUpstreamHttpPool,
+    RerankSessionPool,
+    SharedHttpPoolConfig,
+    SharedStage2UpstreamGate,
+)
 from app.integrations.redis import RedisService, build_redis_bindings
 
 try:
@@ -45,6 +51,45 @@ def _set_component_status(
         payload.update(extra)
     runtime.component_status[component] = payload
     runtime.health_flags[component] = payload["status"]
+
+
+def _set_stage2_hot_pool_component_defaults(runtime: Any) -> None:
+    settings = getattr(runtime, "settings", None)
+    generation_enabled = bool(getattr(settings, "generation_runtime_enabled", False))
+
+    for component_name, enabled_attr, lanes_attr in (
+        ("stage2_chat_hot_pool", "stage2_chat_hot_pool_enabled", "stage2_chat_hot_lane_count"),
+        ("stage2_rerank_hot_pool", "stage2_rerank_hot_pool_enabled", "stage2_rerank_hot_lane_count"),
+    ):
+        pool_enabled = bool(getattr(settings, enabled_attr, False))
+        total_lanes = int(getattr(settings, lanes_attr, 0) or 0)
+        if generation_enabled and pool_enabled:
+            status = "pending"
+            detail = "stage2 hot pool not initialized yet"
+        elif generation_enabled:
+            status = "skipped"
+            detail = "stage2 hot pool disabled by config"
+        else:
+            status = "skipped"
+            detail = "generation runtime disabled"
+        _set_component_status(
+            runtime,
+            component_name,
+            status=status,
+            detail=detail,
+            extra={
+                "enabled": bool(generation_enabled and pool_enabled),
+                "ready": False,
+                "total_lanes": total_lanes,
+                "ready_lanes": 0,
+                "warming_lanes": 0,
+                "degraded_lanes": 0,
+                "last_any_warm_success_at": "",
+                "last_any_error_at": "",
+                "last_error_summary": "",
+                "next_keepalive_at": "",
+            },
+        )
 
 
 def bootstrap_redis(runtime: Any) -> None:
@@ -198,12 +243,174 @@ def _ensure_shared_llm_http_pool(runtime: Any) -> Any | None:
     return pool
 
 
+def _pool_ready_lanes(pool: Any | None) -> int:
+    return int(dict(getattr(pool, "snapshot", lambda: {})() or {}).get("ready_lanes") or 0)
+
+
+def _build_shared_stage2_upstream_gate(
+    *,
+    name: str,
+    configured_limit: int,
+    pool_getter: Any,
+    logger: Any | None,
+) -> SharedStage2UpstreamGate | None:
+    limit = max(0, int(configured_limit or 0))
+    if limit <= 0:
+        return None
+    return SharedStage2UpstreamGate(
+        name=name,
+        limit=limit,
+        logger=logger,
+        limit_provider=lambda: _pool_ready_lanes(pool_getter()),
+    )
+
+
+def _set_stage2_chat_hot_pool_status(
+    runtime: Any,
+    *,
+    status: str,
+    detail: str,
+    error: str = "",
+    pool: Any | None = None,
+) -> None:
+    snapshot = dict(getattr(pool, "snapshot", lambda: {})() or {})
+    total_lanes = int(
+        snapshot.get("total_lanes")
+        or getattr(getattr(runtime, "settings", None), "stage2_chat_hot_lane_count", 0)
+        or 0
+    )
+    _set_component_status(
+        runtime,
+        "stage2_chat_hot_pool",
+        status=status,
+        detail=detail,
+        error=error,
+        extra={
+            "enabled": bool(getattr(getattr(runtime, "settings", None), "stage2_chat_hot_pool_enabled", False)),
+            "ready": int(snapshot.get("ready_lanes") or 0) > 0 and str(status).strip().lower() != "degraded",
+            "total_lanes": total_lanes,
+            "ready_lanes": int(snapshot.get("ready_lanes") or 0),
+            "warming_lanes": int(snapshot.get("warming_lanes") or 0),
+            "degraded_lanes": int(snapshot.get("degraded_lanes") or 0),
+            "last_any_warm_success_at": str(snapshot.get("last_any_warm_success_at") or ""),
+            "last_any_error_at": str(snapshot.get("last_any_error_at") or ""),
+            "last_error_summary": str(snapshot.get("last_error_summary") or ""),
+            "next_keepalive_at": str(snapshot.get("next_keepalive_at") or ""),
+        },
+    )
+
+
+def _set_stage2_rerank_hot_pool_status(
+    runtime: Any,
+    *,
+    status: str,
+    detail: str,
+    error: str = "",
+    pool: Any | None = None,
+) -> None:
+    snapshot = dict(getattr(pool, "snapshot", lambda: {})() or {})
+    total_lanes = int(
+        snapshot.get("total_lanes")
+        or getattr(getattr(runtime, "settings", None), "stage2_rerank_hot_lane_count", 0)
+        or 0
+    )
+    _set_component_status(
+        runtime,
+        "stage2_rerank_hot_pool",
+        status=status,
+        detail=detail,
+        error=error,
+        extra={
+            "enabled": bool(getattr(getattr(runtime, "settings", None), "stage2_rerank_hot_pool_enabled", False)),
+            "ready": str(status).strip().lower() == "ok",
+            "total_lanes": total_lanes,
+            "ready_lanes": int(snapshot.get("ready_lanes") or 0),
+            "warming_lanes": int(snapshot.get("warming_lanes") or 0),
+            "degraded_lanes": int(snapshot.get("degraded_lanes") or 0),
+            "last_any_warm_success_at": str(snapshot.get("last_any_warm_success_at") or ""),
+            "last_any_error_at": str(snapshot.get("last_any_error_at") or ""),
+            "last_error_summary": str(snapshot.get("last_error_summary") or ""),
+            "next_keepalive_at": str(snapshot.get("next_keepalive_at") or ""),
+        },
+    )
+
+
+def _warm_stage2_chat_lane(
+    *,
+    lane: Any,
+    model: str,
+    timeout_seconds: float,
+    reason: str = "manual",
+) -> None:
+    _ = reason
+    client = getattr(lane, "client", None)
+    if client is None:
+        raise RuntimeError("chat lane client unavailable")
+    client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": "warm"}],
+        temperature=0.0,
+        max_tokens=1,
+        timeout=timeout_seconds,
+    )
+
+
+def _warm_stage2_rerank_lane(
+    *,
+    lane: Any,
+    api_key: str,
+    model: str,
+    base_url: str,
+    timeout_seconds: float,
+    reason: str = "manual",
+) -> None:
+    _ = reason
+    session = getattr(lane, "session", None)
+    if session is None:
+        raise RuntimeError("rerank lane session unavailable")
+    endpoint = str(base_url or "https://dashscope.aliyuncs.com").rstrip("/")
+    endpoint = endpoint + "/api/v1/services/rerank/text-rerank/text-rerank"
+    response = session.post(
+        endpoint,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "input": {
+                "query": "warm",
+                "documents": ["warm doc one", "warm doc two"],
+            },
+            "parameters": {
+                "return_documents": False,
+                "top_n": 1,
+            },
+        },
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+    parse_json = getattr(response, "json", None)
+    if callable(parse_json):
+        parse_json()
+
+
 def bootstrap_generation_runtime(runtime: Any) -> None:
     settings = runtime.settings
+    close_generation_runtime(runtime, close_shared_pool=False)
     runtime.generation_runtime = None
     runtime.generation_runtime_ready = False
     if not hasattr(runtime, "shared_llm_http_pool"):
         runtime.shared_llm_http_pool = None
+    if not hasattr(runtime, "stage2_chat_hot_pool"):
+        runtime.stage2_chat_hot_pool = None
+    if not hasattr(runtime, "stage2_rerank_hot_pool"):
+        runtime.stage2_rerank_hot_pool = None
+    if not hasattr(runtime, "stage2_chat_upstream_gate"):
+        runtime.stage2_chat_upstream_gate = None
+    if not hasattr(runtime, "stage2_rerank_upstream_gate"):
+        runtime.stage2_rerank_upstream_gate = None
+    _set_stage2_hot_pool_component_defaults(runtime)
 
     if not bool(getattr(settings, "generation_runtime_enabled", False)):
         _set_shared_llm_pool_status(
@@ -219,6 +426,8 @@ def bootstrap_generation_runtime(runtime: Any) -> None:
             detail="generation runtime disabled by config",
             extra={"enabled": False, "ready": False},
         )
+        runtime.stage2_chat_upstream_gate = None
+        runtime.stage2_rerank_upstream_gate = None
         return
 
     try:
@@ -237,6 +446,8 @@ def bootstrap_generation_runtime(runtime: Any) -> None:
             raise ValueError("OPENAI_BASE_URL/DASHSCOPE_BASE_URL is required")
 
         shared_http_client = None
+        stage2_chat_hot_pool = None
+        stage2_rerank_hot_pool = None
         if _shared_llm_pool_enabled(runtime):
             try:
                 pool = _ensure_shared_llm_http_pool(runtime)
@@ -267,7 +478,151 @@ def bootstrap_generation_runtime(runtime: Any) -> None:
                 client_owner="private",
             )
 
-        runtime.generation_runtime = GenerationDrivenRAG(http_client=shared_http_client)
+        if bool(getattr(settings, "stage2_chat_hot_pool_enabled", False)):
+            try:
+                transport_config = _shared_llm_pool_config(runtime)
+                stage2_chat_hot_pool = ChatHotLanePool(
+                    lane_count=int(getattr(settings, "stage2_chat_hot_lane_count", 0) or 0),
+                    api_key=str(resolved.api_key or ""),
+                    base_url=str(resolved.base_url or ""),
+                    connect_timeout_seconds=transport_config.connect_timeout_seconds,
+                    read_timeout_seconds=transport_config.read_timeout_seconds,
+                    write_timeout_seconds=transport_config.write_timeout_seconds,
+                    pool_timeout_seconds=transport_config.pool_timeout_seconds,
+                    keepalive_expiry_seconds=float(
+                        getattr(settings, "stage2_chat_hot_keepalive_expiry_seconds", transport_config.keepalive_expiry_seconds)
+                    ),
+                    logger=getattr(runtime, "logger", None),
+                    warmup_enabled=bool(getattr(settings, "stage2_chat_warmup_enabled", True)),
+                    warm_interval_seconds=float(getattr(settings, "stage2_chat_warm_interval_seconds", 300) or 300),
+                    warm_timeout_seconds=float(getattr(settings, "stage2_chat_warm_timeout_seconds", 420.0) or 420.0),
+                    warm_jitter_seconds=float(getattr(settings, "stage2_warm_jitter_seconds", 60) or 60),
+                    lane_degraded_after_seconds=float(
+                        getattr(settings, "stage2_lane_degraded_after_seconds", 900) or 900
+                    ),
+                    warm_active_start_hour=int(getattr(settings, "stage2_warm_active_start_hour", 0) or 0),
+                    warm_active_end_hour=int(getattr(settings, "stage2_warm_active_end_hour", 24) or 24),
+                    bootstrap_warm_max_parallel=int(
+                        getattr(settings, "stage2_bootstrap_warm_max_parallel", 1) or 1
+                    ),
+                    bootstrap_warm_jitter_seconds=float(
+                        getattr(settings, "stage2_bootstrap_warm_jitter_seconds", 30) or 30
+                    ),
+                    warm_lane_fn=lambda *, lane, timeout_seconds, reason="manual": _warm_stage2_chat_lane(
+                        lane=lane,
+                        model=str(resolved.model or ""),
+                        timeout_seconds=float(timeout_seconds),
+                        reason=reason,
+                    ),
+                )
+                runtime.stage2_chat_hot_pool = stage2_chat_hot_pool
+                runtime.stage2_chat_upstream_gate = _build_shared_stage2_upstream_gate(
+                    name="chat",
+                    configured_limit=int(getattr(settings, "stage2_chat_gate_max_in_flight", 0) or 0),
+                    pool_getter=lambda: getattr(runtime, "stage2_chat_hot_pool", None),
+                    logger=getattr(runtime, "logger", None),
+                )
+                _set_stage2_chat_hot_pool_status(
+                    runtime,
+                    status="pending",
+                    detail="stage2 chat hot pool initialized",
+                    pool=stage2_chat_hot_pool,
+                )
+            except Exception as exc:
+                runtime.stage2_chat_hot_pool = None
+                _set_stage2_chat_hot_pool_status(
+                    runtime,
+                    status="degraded",
+                    detail="stage2 chat hot pool bootstrap failed",
+                    error=str(exc),
+                )
+        else:
+            runtime.stage2_chat_hot_pool = None
+            runtime.stage2_chat_upstream_gate = None
+            _set_stage2_chat_hot_pool_status(
+                runtime,
+                status="skipped",
+                detail="stage2 chat hot pool disabled by config",
+            )
+
+        if bool(getattr(settings, "stage2_rerank_hot_pool_enabled", False)):
+            try:
+                rerank_api_key = (
+                    str(os.getenv("QA_RETRIEVAL_RERANK_API_KEY", "") or "").strip()
+                    or str(os.getenv("DASHSCOPE_API_KEY", "") or "").strip()
+                    or str(resolved.api_key or "").strip()
+                )
+                rerank_base_url = str(
+                    os.getenv("QA_RETRIEVAL_RERANK_BASE_URL", "https://dashscope.aliyuncs.com")
+                    or "https://dashscope.aliyuncs.com"
+                ).strip()
+                rerank_model = str(
+                    os.getenv("QA_RETRIEVAL_RERANK_MODEL", "qwen3-vl-rerank") or "qwen3-vl-rerank"
+                ).strip()
+                stage2_rerank_hot_pool = RerankSessionPool(
+                    lane_count=int(getattr(settings, "stage2_rerank_hot_lane_count", 0) or 0),
+                    logger=getattr(runtime, "logger", None),
+                    warmup_enabled=bool(getattr(settings, "stage2_rerank_warmup_enabled", True)),
+                    warm_interval_seconds=float(getattr(settings, "stage2_rerank_warm_interval_seconds", 300) or 300),
+                    warm_timeout_seconds=float(getattr(settings, "stage2_rerank_warm_timeout_seconds", 420.0) or 420.0),
+                    warm_jitter_seconds=float(getattr(settings, "stage2_warm_jitter_seconds", 60) or 60),
+                    lane_degraded_after_seconds=float(
+                        getattr(settings, "stage2_lane_degraded_after_seconds", 900) or 900
+                    ),
+                    warm_active_start_hour=int(getattr(settings, "stage2_warm_active_start_hour", 0) or 0),
+                    warm_active_end_hour=int(getattr(settings, "stage2_warm_active_end_hour", 24) or 24),
+                    bootstrap_warm_max_parallel=int(
+                        getattr(settings, "stage2_bootstrap_warm_max_parallel", 1) or 1
+                    ),
+                    bootstrap_warm_jitter_seconds=float(
+                        getattr(settings, "stage2_bootstrap_warm_jitter_seconds", 30) or 30
+                    ),
+                    warm_lane_fn=lambda *, lane, timeout_seconds, reason="manual": _warm_stage2_rerank_lane(
+                        lane=lane,
+                        api_key=rerank_api_key,
+                        model=rerank_model,
+                        base_url=rerank_base_url,
+                        timeout_seconds=float(timeout_seconds),
+                        reason=reason,
+                    ),
+                )
+                runtime.stage2_rerank_hot_pool = stage2_rerank_hot_pool
+                runtime.stage2_rerank_upstream_gate = _build_shared_stage2_upstream_gate(
+                    name="rerank",
+                    configured_limit=int(getattr(settings, "stage2_rerank_gate_max_in_flight", 0) or 0),
+                    pool_getter=lambda: getattr(runtime, "stage2_rerank_hot_pool", None),
+                    logger=getattr(runtime, "logger", None),
+                )
+                _set_stage2_rerank_hot_pool_status(
+                    runtime,
+                    status="pending",
+                    detail="stage2 rerank hot pool initialized",
+                    pool=stage2_rerank_hot_pool,
+                )
+            except Exception as exc:
+                runtime.stage2_rerank_hot_pool = None
+                _set_stage2_rerank_hot_pool_status(
+                    runtime,
+                    status="degraded",
+                    detail="stage2 rerank hot pool bootstrap failed",
+                    error=str(exc),
+                )
+        else:
+            runtime.stage2_rerank_hot_pool = None
+            runtime.stage2_rerank_upstream_gate = None
+            _set_stage2_rerank_hot_pool_status(
+                runtime,
+                status="skipped",
+                detail="stage2 rerank hot pool disabled by config",
+            )
+
+        runtime.generation_runtime = GenerationDrivenRAG(
+            http_client=shared_http_client,
+            stage2_chat_hot_pool=stage2_chat_hot_pool,
+            rerank_session_pool=stage2_rerank_hot_pool,
+            stage2_chat_gate=getattr(runtime, "stage2_chat_upstream_gate", None),
+            stage2_rerank_gate=getattr(runtime, "stage2_rerank_upstream_gate", None),
+        )
         literature_expert = getattr(runtime.generation_runtime, "literature_expert", None)
         if getattr(literature_expert, "available", True) is False:
             detail = str(getattr(literature_expert, "availability_detail", "") or "literature expert unavailable")
@@ -295,6 +650,23 @@ def bootstrap_generation_runtime(runtime: Any) -> None:
             },
         )
     except Exception as exc:
+        close_generation_runtime(runtime, close_shared_pool=False)
+        _set_stage2_chat_hot_pool_status(
+            runtime,
+            status="degraded" if bool(getattr(settings, "stage2_chat_hot_pool_enabled", False)) else "skipped",
+            detail="stage2 chat hot pool unavailable after generation runtime bootstrap failure"
+            if bool(getattr(settings, "stage2_chat_hot_pool_enabled", False))
+            else "stage2 chat hot pool disabled by config",
+            error=str(exc) if bool(getattr(settings, "stage2_chat_hot_pool_enabled", False)) else "",
+        )
+        _set_stage2_rerank_hot_pool_status(
+            runtime,
+            status="degraded" if bool(getattr(settings, "stage2_rerank_hot_pool_enabled", False)) else "skipped",
+            detail="stage2 rerank hot pool unavailable after generation runtime bootstrap failure"
+            if bool(getattr(settings, "stage2_rerank_hot_pool_enabled", False))
+            else "stage2 rerank hot pool disabled by config",
+            error=str(exc) if bool(getattr(settings, "stage2_rerank_hot_pool_enabled", False)) else "",
+        )
         if "shared_llm_pool" not in getattr(runtime, "component_status", {}):
             _set_shared_llm_pool_status(
                 runtime,
@@ -383,18 +755,32 @@ def bootstrap_graph_kb(runtime: Any) -> None:
         )
 
 
-def close_generation_runtime(runtime: Any) -> None:
+def close_generation_runtime(runtime: Any, *, close_shared_pool: bool = True) -> None:
     generation_runtime = getattr(runtime, "generation_runtime", None)
     close = getattr(generation_runtime, "close", None)
     if callable(close):
         close()
-    shared_llm_http_pool = getattr(runtime, "shared_llm_http_pool", None)
-    close_shared_pool = getattr(shared_llm_http_pool, "close", None)
-    if callable(close_shared_pool):
-        close_shared_pool()
+    stage2_chat_hot_pool = getattr(runtime, "stage2_chat_hot_pool", None)
+    close_chat_pool = getattr(stage2_chat_hot_pool, "close", None)
+    if callable(close_chat_pool):
+        close_chat_pool()
+    stage2_rerank_hot_pool = getattr(runtime, "stage2_rerank_hot_pool", None)
+    close_rerank_pool = getattr(stage2_rerank_hot_pool, "close", None)
+    if callable(close_rerank_pool):
+        close_rerank_pool()
+    if close_shared_pool:
+        shared_llm_http_pool = getattr(runtime, "shared_llm_http_pool", None)
+        close_shared_pool_fn = getattr(shared_llm_http_pool, "close", None)
+        if callable(close_shared_pool_fn):
+            close_shared_pool_fn()
     runtime.generation_runtime = None
     runtime.generation_runtime_ready = False
-    runtime.shared_llm_http_pool = None
+    runtime.stage2_chat_hot_pool = None
+    runtime.stage2_rerank_hot_pool = None
+    runtime.stage2_chat_upstream_gate = None
+    runtime.stage2_rerank_upstream_gate = None
+    if close_shared_pool:
+        runtime.shared_llm_http_pool = None
 
 
 def close_graph_kb(runtime: Any) -> None:

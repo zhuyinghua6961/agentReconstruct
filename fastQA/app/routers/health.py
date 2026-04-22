@@ -29,6 +29,40 @@ def _shared_llm_pool_status(request: Request) -> dict[str, object]:
     return status
 
 
+def _stage2_hot_pool_status(request: Request, *, component_name: str, state_attr: str) -> dict[str, object]:
+    status = dict(request.app.state.component_status.get(component_name) or {})
+    pool = getattr(request.app.state, state_attr, None)
+    snapshot = dict(getattr(pool, "snapshot", lambda: {})() or {})
+    if not snapshot:
+        return status
+    for field in (
+        "total_lanes",
+        "ready_lanes",
+        "warming_lanes",
+        "degraded_lanes",
+        "last_any_warm_success_at",
+        "last_any_error_at",
+        "last_error_summary",
+        "next_keepalive_at",
+    ):
+        if field in snapshot:
+            status[field] = snapshot[field]
+    enabled = bool(status.get("enabled", False))
+    ready_lanes = int(status.get("ready_lanes") or 0)
+    warming_lanes = int(status.get("warming_lanes") or 0)
+    degraded_lanes = int(status.get("degraded_lanes") or 0)
+    if enabled and ready_lanes > 0:
+        status["status"] = "ok"
+        status["ready"] = True
+    elif enabled and warming_lanes > 0:
+        status["status"] = "pending"
+        status["ready"] = False
+    elif enabled and degraded_lanes > 0:
+        status["status"] = "degraded"
+        status["ready"] = False
+    return status
+
+
 @router.get("/healthz")
 @router.get("/api/health")
 def healthz(request: Request) -> JSONResponse:
@@ -37,6 +71,16 @@ def healthz(request: Request) -> JSONResponse:
     generation_runtime_status = dict(request.app.state.component_status.get("generation_runtime") or {})
     graph_kb_status = dict(request.app.state.component_status.get("graph_kb") or {})
     shared_llm_pool_status = _shared_llm_pool_status(request)
+    stage2_chat_hot_pool_status = _stage2_hot_pool_status(
+        request,
+        component_name="stage2_chat_hot_pool",
+        state_attr="stage2_chat_hot_pool",
+    )
+    stage2_rerank_hot_pool_status = _stage2_hot_pool_status(
+        request,
+        component_name="stage2_rerank_hot_pool",
+        state_attr="stage2_rerank_hot_pool",
+    )
     generation_ready = bool(getattr(request.app.state, "generation_runtime_ready", False))
     graph_kb_ready = bool(getattr(request.app.state, "graph_kb_ready", False))
     is_readiness_probe = str(getattr(request.url, "path", "") or "").endswith("/api/health")
@@ -70,6 +114,8 @@ def healthz(request: Request) -> JSONResponse:
                 "generation_runtime": generation_runtime_status,
                 "graph_kb": graph_kb_status,
                 "shared_llm_pool": shared_llm_pool_status,
+                "stage2_chat_hot_pool": stage2_chat_hot_pool_status,
+                "stage2_rerank_hot_pool": stage2_rerank_hot_pool_status,
             },
         },
     )

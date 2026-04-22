@@ -1,4 +1,7 @@
 from app.integrations.llm.shared_http_pool import FastQASharedUpstreamHttpPool, SharedHttpPoolConfig
+from app.integrations.llm.hot_lane_pool import ChatHotLane, ChatHotLanePool
+from app.integrations.llm.rerank_session_pool import RerankSessionLane, RerankSessionPool
+from app.integrations.llm.upstream_gate import SharedStage2UpstreamGate, Stage2UpstreamGateCancelled
 from app.integrations.llm.openai_compat import (
     OpenAICompatChatAdapter,
     OpenAICompatClient,
@@ -41,6 +44,12 @@ def should_use_dashscope_native(*, api_key: str | None, base_url: str | None, tr
 
 __all__ = [
     "FastQASharedUpstreamHttpPool",
+    "ChatHotLane",
+    "ChatHotLanePool",
+    "RerankSessionLane",
+    "RerankSessionPool",
+    "SharedStage2UpstreamGate",
+    "Stage2UpstreamGateCancelled",
     "OpenAICompatChatAdapter",
     "OpenAICompatClient",
     "SharedHttpPoolConfig",
