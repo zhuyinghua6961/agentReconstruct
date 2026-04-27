@@ -34,6 +34,17 @@ def _fallback_result(
     }
 
 
+def _clamp_top_n(top_n: int, document_count: int) -> int:
+    return min(max(int(top_n), 1), document_count)
+
+
+def _build_headers(*, api_key: str, include_auth: bool) -> Dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if include_auth and api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
 def rerank_documents(
     *,
     query: str,
@@ -43,7 +54,7 @@ def rerank_documents(
     provider: str = "dashscope",
     api_key: str = "",
     model: str = "qwen3-vl-rerank",
-    base_url: str = "https://dashscope.aliyuncs.com",
+    base_url: str = "",
     timeout_seconds: float = 20.0,
     logger: Any = None,
     requests_module: Any = None,
@@ -79,7 +90,7 @@ def rerank_documents(
             provider=provider_norm,
         )
 
-    if provider_norm != "dashscope":
+    if provider_norm not in {"dashscope", "local"}:
         return _fallback_result(
             documents=documents,
             metadatas=metadatas,
@@ -88,7 +99,7 @@ def rerank_documents(
             provider=provider_norm,
         )
 
-    if not api_key:
+    if provider_norm == "dashscope" and not api_key:
         return _fallback_result(
             documents=documents,
             metadatas=metadatas,
@@ -99,40 +110,56 @@ def rerank_documents(
 
     docs_to_rerank = list(documents)
     metas_to_rerank = list(metadatas or [])
-    endpoint = str(base_url or "https://dashscope.aliyuncs.com").rstrip("/") + "/api/v1/services/rerank/text-rerank/text-rerank"
-    payload = {
-        "model": model,
-        "input": {
+    requested_top_n = _clamp_top_n(top_n, len(docs_to_rerank))
+    if provider_norm == "local":
+        endpoint = str(base_url or "http://localhost:8084").rstrip("/") + "/v1/rerank"
+        payload = {
+            "model": model,
             "query": query,
             "documents": docs_to_rerank,
-        },
-        "parameters": {
-            "return_documents": False,
-            "top_n": min(max(int(top_n), 1), len(docs_to_rerank)),
-        },
-    }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+            "top_n": requested_top_n,
+        }
+        headers = _build_headers(api_key=api_key, include_auth=bool(api_key))
+    else:
+        endpoint = (
+            str(base_url or "https://dashscope.aliyuncs.com").rstrip("/")
+            + "/api/v1/services/rerank/text-rerank/text-rerank"
+        )
+        payload = {
+            "model": model,
+            "input": {
+                "query": query,
+                "documents": docs_to_rerank,
+            },
+            "parameters": {
+                "return_documents": False,
+                "top_n": requested_top_n,
+            },
+        }
+        headers = _build_headers(api_key=api_key, include_auth=True)
 
     try:
         response = req.post(endpoint, headers=headers, json=payload, timeout=timeout_seconds)
         response.raise_for_status()
         data = response.json() if hasattr(response, "json") else {}
-        items = data.get("output", {}).get("results", [])
+        items = data.get("results", []) if provider_norm == "local" else data.get("output", {}).get("results", [])
 
         ranked_docs: List[str] = []
         ranked_metas: List[Dict[str, Any]] = []
         ranked_scores: List[float] = []
         for item in items:
-            idx = int(item.get("index", -1))
+            try:
+                idx = int(item.get("index", -1))
+            except Exception:
+                continue
             if idx < 0 or idx >= len(docs_to_rerank):
                 continue
             ranked_docs.append(docs_to_rerank[idx])
             if idx < len(metas_to_rerank):
                 ranked_metas.append(metas_to_rerank[idx])
             ranked_scores.append(float(item.get("relevance_score", 0.0)))
+            if len(ranked_docs) >= requested_top_n:
+                break
 
         if not ranked_docs:
             return _fallback_result(

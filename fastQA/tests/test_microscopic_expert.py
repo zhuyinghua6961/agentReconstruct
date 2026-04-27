@@ -75,6 +75,30 @@ def test_microscopic_expert_leases_rerank_session_when_pool_available(monkeypatc
     assert calls["session"] == "leased-session"
 
 
+def test_microscopic_expert_local_rerank_does_not_inherit_dashscope_key_or_url(monkeypatch):
+    calls = {}
+
+    def _fake_rerank_documents(**kwargs):
+        calls.update(kwargs)
+        return {"documents": ["doc"], "metadatas": [], "rerank_scores": [0.9], "fallback": False, "provider": "local"}
+
+    monkeypatch.setattr("app.modules.microscopic_expert.rerank_documents_impl", _fake_rerank_documents)
+    monkeypatch.setenv("QA_RETRIEVAL_RERANK_PROVIDER", "local")
+    monkeypatch.delenv("QA_RETRIEVAL_RERANK_API_KEY", raising=False)
+    monkeypatch.delenv("QA_RETRIEVAL_RERANK_BASE_URL", raising=False)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-key")
+
+    expert = MicroscopicSemanticExpert.__new__(MicroscopicSemanticExpert)
+    expert.rerank_session_pool = None
+
+    result = expert._rerank_documents(query="lfp", documents=["doc1"], metadatas=[], top_n=1)
+
+    assert result["provider"] == "local"
+    assert calls["provider"] == "local"
+    assert calls["api_key"] == ""
+    assert calls["base_url"] == "http://localhost:8084"
+
+
 def test_microscopic_expert_wraps_rerank_http_call_with_gate(monkeypatch):
     calls = {}
 

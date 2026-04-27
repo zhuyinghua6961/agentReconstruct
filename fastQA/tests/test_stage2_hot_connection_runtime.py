@@ -94,6 +94,7 @@ def test_bootstrap_generation_runtime_uses_dedicated_rerank_api_key_for_warmup(m
     )
     calls: dict[str, object] = {}
 
+    monkeypatch.setenv("QA_RETRIEVAL_RERANK_PROVIDER", "dashscope")
     monkeypatch.setenv("QA_RETRIEVAL_RERANK_API_KEY", "rerank-key")
     monkeypatch.setenv("QA_RETRIEVAL_RERANK_BASE_URL", "https://rerank.example.com")
     monkeypatch.setenv("QA_RETRIEVAL_RERANK_MODEL", "rerank-model")
@@ -124,6 +125,123 @@ def test_bootstrap_generation_runtime_uses_dedicated_rerank_api_key_for_warmup(m
 
     assert calls["headers"]["Authorization"] == "Bearer rerank-key"
     assert calls["endpoint"] == "https://rerank.example.com/api/v1/services/rerank/text-rerank/text-rerank"
+
+
+def test_bootstrap_generation_runtime_uses_local_rerank_warmup_protocol(monkeypatch):
+    runtime = SimpleNamespace(
+        settings=SimpleNamespace(
+            generation_runtime_enabled=True,
+            llm_http_shared_pool_enabled=False,
+            stage2_rerank_hot_pool_enabled=True,
+            stage2_rerank_hot_lane_count=1,
+            stage2_rerank_warmup_enabled=True,
+            stage2_rerank_warm_interval_seconds=300,
+            stage2_rerank_warm_timeout_seconds=420.0,
+            stage2_bootstrap_warm_max_parallel=1,
+            stage2_bootstrap_warm_jitter_seconds=0,
+            stage2_warm_jitter_seconds=0,
+            stage2_lane_degraded_after_seconds=900,
+        ),
+        generation_runtime=None,
+        generation_runtime_ready=False,
+        component_status={},
+        health_flags={},
+        shared_llm_http_pool=None,
+    )
+    calls: dict[str, object] = {}
+
+    monkeypatch.setenv("QA_RETRIEVAL_RERANK_PROVIDER", "local")
+    monkeypatch.delenv("QA_RETRIEVAL_RERANK_API_KEY", raising=False)
+    monkeypatch.delenv("QA_RETRIEVAL_RERANK_BASE_URL", raising=False)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-key")
+    monkeypatch.setenv("QA_RETRIEVAL_RERANK_MODEL", "rerank-model")
+    monkeypatch.setattr(
+        "app.modules.generation_pipeline.runtime_bootstrap.resolve_generation_runtime_inputs",
+        lambda **kwargs: SimpleNamespace(api_key="chat-key", base_url="https://example.com/v1", model="m"),
+    )
+
+    def _fake_rerank_pool(**kwargs):
+        calls.update(kwargs)
+        return SimpleNamespace(snapshot=lambda: {})
+
+    monkeypatch.setattr("app.core.runtime.RerankSessionPool", _fake_rerank_pool)
+    monkeypatch.setattr(
+        "app.modules.generation_pipeline.generation_driven_rag_facade.GenerationDrivenRAG",
+        lambda **kwargs: SimpleNamespace(model="m", base_url="https://example.com/v1", literature_expert=SimpleNamespace(available=True)),
+    )
+
+    bootstrap_generation_runtime(runtime)
+
+    response = SimpleNamespace(raise_for_status=lambda: None, json=lambda: {"ok": True})
+    fake_session = SimpleNamespace(
+        post=lambda endpoint, headers, json, timeout: (
+            calls.update({"endpoint": endpoint, "headers": headers, "payload": json, "timeout": timeout}) or response
+        )
+    )
+    calls["warm_lane_fn"](lane=SimpleNamespace(session=fake_session), timeout_seconds=12.0, reason="bootstrap")
+
+    assert calls["endpoint"] == "http://localhost:8084/v1/rerank"
+    assert calls["headers"] == {"Content-Type": "application/json"}
+    assert calls["payload"] == {
+        "model": "rerank-model",
+        "query": "warm",
+        "documents": ["warm doc one", "warm doc two"],
+        "top_n": 1,
+    }
+
+
+def test_stage2_rerank_warmup_skips_disabled_provider_without_http_call():
+    from app.core.runtime import _warm_stage2_rerank_lane
+
+    class _Session:
+        def post(self, endpoint, headers, json, timeout):
+            raise AssertionError("disabled provider should not call upstream")
+
+    _warm_stage2_rerank_lane(
+        lane=SimpleNamespace(session=_Session()),
+        provider="disabled",
+        api_key="",
+        model="m",
+        base_url="http://reranker",
+        timeout_seconds=1.0,
+        reason="test",
+    )
+
+
+def test_stage2_rerank_warmup_skips_unsupported_provider_without_http_call():
+    from app.core.runtime import _warm_stage2_rerank_lane
+
+    class _Session:
+        def post(self, endpoint, headers, json, timeout):
+            raise AssertionError("unsupported provider should not call upstream")
+
+    _warm_stage2_rerank_lane(
+        lane=SimpleNamespace(session=_Session()),
+        provider="bogus",
+        api_key="",
+        model="m",
+        base_url="http://reranker",
+        timeout_seconds=1.0,
+        reason="test",
+    )
+
+
+def test_stage2_rerank_warmup_skips_dashscope_without_api_key():
+    from app.core.runtime import _warm_stage2_rerank_lane
+
+    class _Session:
+        def post(self, endpoint, headers, json, timeout):
+            raise AssertionError("dashscope warmup without api key should not call upstream")
+
+    _warm_stage2_rerank_lane(
+        lane=SimpleNamespace(session=_Session()),
+        provider="dashscope",
+        api_key="",
+        model="m",
+        base_url="https://dashscope.example",
+        timeout_seconds=1.0,
+        reason="test",
+    )
 
 
 def test_bootstrap_generation_runtime_marks_hot_pool_status_degraded_when_runtime_bootstrap_fails(monkeypatch):

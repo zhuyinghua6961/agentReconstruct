@@ -358,6 +358,7 @@ def _warm_stage2_chat_lane(
 def _warm_stage2_rerank_lane(
     *,
     lane: Any,
+    provider: str,
     api_key: str,
     model: str,
     base_url: str,
@@ -365,18 +366,35 @@ def _warm_stage2_rerank_lane(
     reason: str = "manual",
 ) -> None:
     _ = reason
+    provider_norm = str(provider or "dashscope").strip().lower()
     session = getattr(lane, "session", None)
     if session is None:
         raise RuntimeError("rerank lane session unavailable")
-    endpoint = str(base_url or "https://dashscope.aliyuncs.com").rstrip("/")
-    endpoint = endpoint + "/api/v1/services/rerank/text-rerank/text-rerank"
-    response = session.post(
-        endpoint,
-        headers={
+    if provider_norm in {"none", "off", "disabled"}:
+        return
+    if provider_norm not in {"dashscope", "local"}:
+        return
+    if provider_norm == "local":
+        endpoint = str(base_url or "http://localhost:8084").rstrip("/") + "/v1/rerank"
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        payload = {
+            "model": model,
+            "query": "warm",
+            "documents": ["warm doc one", "warm doc two"],
+            "top_n": 1,
+        }
+    else:
+        if not api_key:
+            return
+        endpoint = str(base_url or "https://dashscope.aliyuncs.com").rstrip("/")
+        endpoint = endpoint + "/api/v1/services/rerank/text-rerank/text-rerank"
+        headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
-        },
-        json={
+        }
+        payload = {
             "model": model,
             "input": {
                 "query": "warm",
@@ -386,7 +404,11 @@ def _warm_stage2_rerank_lane(
                 "return_documents": False,
                 "top_n": 1,
             },
-        },
+        }
+    response = session.post(
+        endpoint,
+        headers=headers,
+        json=payload,
         timeout=timeout_seconds,
     )
     response.raise_for_status()
@@ -547,14 +569,23 @@ def bootstrap_generation_runtime(runtime: Any) -> None:
 
         if bool(getattr(settings, "stage2_rerank_hot_pool_enabled", False)):
             try:
-                rerank_api_key = (
-                    str(os.getenv("QA_RETRIEVAL_RERANK_API_KEY", "") or "").strip()
-                    or str(os.getenv("DASHSCOPE_API_KEY", "") or "").strip()
-                    or str(resolved.api_key or "").strip()
-                )
+                rerank_provider = str(
+                    os.getenv("QA_RETRIEVAL_RERANK_PROVIDER", "dashscope") or "dashscope"
+                ).strip()
+                rerank_provider_norm = rerank_provider.lower()
+                raw_rerank_api_key = str(os.getenv("QA_RETRIEVAL_RERANK_API_KEY", "") or "").strip()
+                if rerank_provider_norm == "local":
+                    rerank_api_key = raw_rerank_api_key
+                    rerank_default_base_url = "http://localhost:8084"
+                else:
+                    rerank_api_key = (
+                        raw_rerank_api_key
+                        or str(os.getenv("DASHSCOPE_API_KEY", "") or "").strip()
+                        or str(resolved.api_key or "").strip()
+                    )
+                    rerank_default_base_url = "https://dashscope.aliyuncs.com"
                 rerank_base_url = str(
-                    os.getenv("QA_RETRIEVAL_RERANK_BASE_URL", "https://dashscope.aliyuncs.com")
-                    or "https://dashscope.aliyuncs.com"
+                    os.getenv("QA_RETRIEVAL_RERANK_BASE_URL", rerank_default_base_url) or rerank_default_base_url
                 ).strip()
                 rerank_model = str(
                     os.getenv("QA_RETRIEVAL_RERANK_MODEL", "qwen3-vl-rerank") or "qwen3-vl-rerank"
@@ -579,6 +610,7 @@ def bootstrap_generation_runtime(runtime: Any) -> None:
                     ),
                     warm_lane_fn=lambda *, lane, timeout_seconds, reason="manual": _warm_stage2_rerank_lane(
                         lane=lane,
+                        provider=rerank_provider,
                         api_key=rerank_api_key,
                         model=rerank_model,
                         base_url=rerank_base_url,
