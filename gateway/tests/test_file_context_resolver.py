@@ -87,6 +87,20 @@ def test_selected_files_with_explicit_file_action_routes_to_file_qa():
     assert decision.selected_file_ids == [11]
 
 
+def test_doi_lookup_with_singular_literature_word_stays_kb_with_available_files():
+    decision = resolver.resolve(
+        question="10.1021/jp1005692 这篇文献是什么？",
+        pdf_context={"selected_ids": [11, 22]},
+        available_files=[PDF, PDF_2],
+    )
+
+    assert decision.route == "kb_qa"
+    assert decision.turn_mode == "kb_only"
+    assert decision.needs_clarification is False
+    assert decision.selected_file_ids == [11, 22]
+    assert decision.strategy == "selected_ids_no_file_intent"
+
+
 def test_classifier_is_not_called_for_deterministic_explicit_route():
     from app.services.route_classifier import ClassifierDecision
 

@@ -156,6 +156,7 @@ _TABLE_OPERATION_PATTERNS = (
     re.compile(r"(?:输出|查看|显示|保留|返回)?后\s*\d+\s*行"),
     re.compile(r"第\s*\d+\s*行"),
 )
+_DOI_PATTERN = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+\b", re.IGNORECASE)
 
 
 class FileContextResolver:
@@ -227,6 +228,18 @@ class FileContextResolver:
             lower=lower,
             mixed_intent=mixed_intent,
         )
+        literature_identifier = self._has_literature_identifier(text)
+
+        if literature_identifier and not (
+            explicit_refs
+            or has_ordinal_reference
+            or deictic_count_selection
+            or selected_scope_action
+            or table_singular_ref
+            or table_focus
+            or file_name_focus
+        ):
+            return self._kb_only(selected_ids=selected_ids)
 
         strong_file_intent = bool(
             explicit_refs
@@ -996,6 +1009,9 @@ class FileContextResolver:
 
     def _contains_any(self, text: str, tokens: tuple[str, ...]) -> bool:
         return any(token in text for token in tokens)
+
+    def _has_literature_identifier(self, text: str) -> bool:
+        return bool(_DOI_PATTERN.search(text or ""))
 
     def _detect_mixed_intent(self, text: str) -> bool:
         if self._contains_any(text, _MIXED_HINTS):

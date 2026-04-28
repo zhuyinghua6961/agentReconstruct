@@ -2036,6 +2036,91 @@ def test_mode_ask_keeps_requested_backend_for_plain_question_with_selected_scope
     assert response.headers["x-gateway-backend"] == "thinking"
 
 
+def test_mode_ask_doi_lookup_with_single_selected_file_stays_kb_route():
+    original = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub(
+        [
+            ConversationFileRow(
+                file_id=11,
+                file_type="pdf",
+                file_name="battery-paper.pdf",
+            )
+        ]
+    )
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            response = client.post(
+                "/api/fast/ask",
+                json={
+                    "question": "10.1021/jp1005692 这篇文献是什么？",
+                    "requested_mode": "fast",
+                    "conversation_id": 42,
+                    "pdf_context": {"selected_ids": [11]},
+                },
+            )
+    finally:
+        app.state.conversation_file_service = original
+
+    assert response.status_code == 200
+    assert captured["url"].endswith("/api/fast/ask")
+    assert captured["body"]["actual_mode"] == "fast"
+    assert captured["body"]["route"] == "kb_qa"
+    assert captured["body"]["source_scope"] == "kb"
+    assert captured["body"]["turn_mode"] == "kb_only"
+    assert captured["body"]["needs_clarification"] is False
+    assert captured["body"]["selected_file_ids"] == []
+    assert captured["body"]["file_selection"] == {}
+    assert captured["body"]["execution_files"] == []
+
+
+def test_mode_ask_doi_lookup_with_multiple_selected_files_does_not_clarify():
+    original = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub(
+        [
+            ConversationFileRow(file_id=11, file_type="pdf", file_name="solid-state-review.pdf"),
+            ConversationFileRow(file_id=22, file_type="pdf", file_name="battery-paper.pdf"),
+        ]
+    )
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
+
+    try:
+        with _TransportGuard(handler):
+            client = TestClient(app)
+            response = client.post(
+                "/api/fast/ask",
+                json={
+                    "question": "10.1021/jp1005692 这篇文献是什么？",
+                    "requested_mode": "fast",
+                    "conversation_id": 42,
+                    "pdf_context": {"selected_ids": [11, 22]},
+                },
+            )
+    finally:
+        app.state.conversation_file_service = original
+
+    assert response.status_code == 200
+    assert captured["url"].endswith("/api/fast/ask")
+    assert captured["body"]["route"] == "kb_qa"
+    assert captured["body"]["source_scope"] == "kb"
+    assert captured["body"]["needs_clarification"] is False
+    assert captured["body"]["selected_file_ids"] == []
+    assert captured["body"]["file_selection"] == {}
+    assert captured["body"]["execution_files"] == []
+
+
 def test_mode_ask_keeps_patent_backend_for_plain_question_with_selected_scope_without_forwarding_file_fields():
     original = app.state.conversation_file_service
     app.state.conversation_file_service = _ConversationFilesStub(

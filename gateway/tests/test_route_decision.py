@@ -59,6 +59,24 @@ def test_generic_literature_topic_does_not_force_file_route():
     assert decision.route == "kb_qa"
 
 
+def test_doi_lookup_with_singular_literature_word_routes_to_kb_not_file_scope():
+    decision = resolver.resolve(
+        question="10.1021/jp1005692 这篇文献是什么？",
+        pdf_context={"selected_ids": [11]},
+        available_files=[PDF],
+    )
+    routed = router.decide(requested_mode="fast", file_context=decision)
+
+    assert decision.route == "kb_qa"
+    assert decision.needs_clarification is False
+    assert routed.route == "kb_qa"
+    assert routed.turn_mode == "kb_only"
+    assert routed.source_scope == "kb"
+    assert routed.selected_file_ids == []
+    assert routed.file_selection == {}
+    assert "NO_FILE_INTENT" in routed.route_reasons
+
+
 def test_file_question_forces_fast_mode():
     decision = resolver.resolve(
         question="请总结这篇文献",
