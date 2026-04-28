@@ -39,12 +39,12 @@ def test_settings_default_graph_kb_disabled(monkeypatch):
     get_settings.cache_clear()
 
 
-def test_fastqa_shared_config_disables_graph_kb_by_default():
+def test_fastqa_shared_config_enables_graph_kb_by_default():
     repo_root = Path(__file__).resolve().parents[2]
     shared_env = repo_root / "resource/config/services/fastQA/config.shared.env"
     content = shared_env.read_text(encoding="utf-8")
 
-    assert "FASTQA_GRAPH_KB_ENABLED=0" in content
+    assert "FASTQA_GRAPH_KB_ENABLED=1" in content
 
 
 def test_bootstrap_graph_kb_skips_when_disabled():

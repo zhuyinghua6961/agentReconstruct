@@ -31,13 +31,48 @@ def test_iter_workspace_env_files_uses_service_config_root(tmp_path, monkeypatch
 
     result = reloaded.iter_workspace_env_files()
 
-    assert result[:4] == (
+    assert result[:3] == reloaded._iter_resource_shared_env_files()
+    assert result[3:7] == (
         (config_root / "config.env").resolve(),
         (config_root / "config.shared.env").resolve(),
         (config_root / "config.secret.env").resolve(),
         (config_root / ".env").resolve(),
     )
-    assert result[4:] == reloaded.ENV_FILE_CANDIDATES
+    assert result[7:] == reloaded.ENV_FILE_CANDIDATES
+
+
+def test_iter_workspace_env_files_includes_resource_shared_before_service_files(tmp_path, monkeypatch):
+    resource_root = tmp_path / "resource"
+    shared_root = resource_root / "config" / "shared"
+    config_root = resource_root / "config" / "services" / "fastQA"
+    shared_root.mkdir(parents=True)
+    config_root.mkdir(parents=True)
+    for name in ("infrastructure.shared.env", "model-endpoints.shared.env", "infrastructure.secret.env"):
+        (shared_root / name).write_text(f"{name}=1\n", encoding="utf-8")
+    for name in ("config.env", "config.shared.env", "config.secret.env", ".env"):
+        (config_root / name).write_text(f"{name}=1\n", encoding="utf-8")
+
+    monkeypatch.setenv("RESOURCE_ROOT", str(resource_root))
+    monkeypatch.delenv("FASTQA_SERVICE_CONFIG_ROOT", raising=False)
+    monkeypatch.delenv("SERVICE_CONFIG_ROOT", raising=False)
+    monkeypatch.delenv("FASTQA_ENV_FILE", raising=False)
+    monkeypatch.delenv("FASTQA_ENV_FILES", raising=False)
+    monkeypatch.delenv("SERVICE_ENV_FILE", raising=False)
+    monkeypatch.delenv("SERVICE_ENV_FILES", raising=False)
+
+    reloaded = importlib.reload(env_loader)
+
+    result = reloaded.iter_workspace_env_files()
+
+    assert result[:7] == (
+        (shared_root / "infrastructure.shared.env").resolve(),
+        (shared_root / "model-endpoints.shared.env").resolve(),
+        (shared_root / "infrastructure.secret.env").resolve(),
+        (config_root / "config.env").resolve(),
+        (config_root / "config.shared.env").resolve(),
+        (config_root / "config.secret.env").resolve(),
+        (config_root / ".env").resolve(),
+    )
 
 
 def test_config_derives_service_roots_from_resource_root(tmp_path, monkeypatch):

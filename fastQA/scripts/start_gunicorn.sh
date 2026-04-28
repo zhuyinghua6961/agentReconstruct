@@ -3,14 +3,20 @@ set -euo pipefail
 
 PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 RESOURCE_DIR="$(cd "$PROJECT_ROOT/../resource" 2>/dev/null && pwd || true)"
+source "$PROJECT_ROOT/../scripts/env_file_loader.sh"
+capture_env_file_loader_process_keys
 RUNTIME_DIR_DEFAULT="$PROJECT_ROOT/.runtime"
 LOG_DIR_DEFAULT="$PROJECT_ROOT/.runtime/logs"
 CONFIG_DIR_DEFAULT="$PROJECT_ROOT"
 STATE_DIR_DEFAULT="$PROJECT_ROOT"
 ASSET_DIR_DEFAULT="$PROJECT_ROOT"
+SHARED_CONFIG_DIR_DEFAULT=""
+FASTQA_SHARED_ENV_FILES_DEFAULT=""
 
 if [[ -n "${RESOURCE_DIR:-}" ]]; then
   CONFIG_DIR_DEFAULT="$RESOURCE_DIR/config/services/fastQA"
+  SHARED_CONFIG_DIR_DEFAULT="$RESOURCE_DIR/config/shared"
+  FASTQA_SHARED_ENV_FILES_DEFAULT="$SHARED_CONFIG_DIR_DEFAULT/infrastructure.shared.env:$SHARED_CONFIG_DIR_DEFAULT/model-endpoints.shared.env:$SHARED_CONFIG_DIR_DEFAULT/infrastructure.secret.env"
   STATE_DIR_DEFAULT="$RESOURCE_DIR/state/dev/fastQA"
   RUNTIME_DIR_DEFAULT="$RESOURCE_DIR/runtime/dev/fastQA"
   LOG_DIR_DEFAULT="$RESOURCE_DIR/logs/dev/fastQA"
@@ -22,42 +28,14 @@ export FASTQA_SERVICE_STATE_ROOT="${FASTQA_SERVICE_STATE_ROOT:-$STATE_DIR_DEFAUL
 export FASTQA_SERVICE_RUNTIME_ROOT="${FASTQA_SERVICE_RUNTIME_ROOT:-$RUNTIME_DIR_DEFAULT}"
 export FASTQA_SERVICE_ASSET_ROOT="${FASTQA_SERVICE_ASSET_ROOT:-$ASSET_DIR_DEFAULT}"
 export FASTQA_SERVICE_LOG_ROOT="${FASTQA_SERVICE_LOG_ROOT:-$LOG_DIR_DEFAULT}"
-export FASTQA_ENV_FILES="${FASTQA_ENV_FILES:-$FASTQA_SERVICE_CONFIG_ROOT/config.env:$FASTQA_SERVICE_CONFIG_ROOT/config.shared.env:$FASTQA_SERVICE_CONFIG_ROOT/config.secret.env:$PROJECT_ROOT/.env}"
+export FASTQA_SHARED_ENV_FILES="${FASTQA_SHARED_ENV_FILES:-$FASTQA_SHARED_ENV_FILES_DEFAULT}"
+export FASTQA_ENV_FILES="${FASTQA_ENV_FILES:-$FASTQA_SHARED_ENV_FILES:$FASTQA_SERVICE_CONFIG_ROOT/config.env:$FASTQA_SERVICE_CONFIG_ROOT/config.shared.env:$FASTQA_SERVICE_CONFIG_ROOT/config.secret.env:$PROJECT_ROOT/.env}"
 export APP_PORT="${APP_PORT:-8008}"
 export FASTAPI_PORT="${FASTAPI_PORT:-$APP_PORT}"
 export BACKEND_PORT="${BACKEND_PORT:-$FASTAPI_PORT}"
 export FASTQA_GUNICORN_WORKERS="${FASTQA_GUNICORN_WORKERS:-4}"
 
-load_env_files() {
-  local env_files="$1"
-  IFS=':' read -r -a files <<< "$env_files"
-  for file in "${files[@]}"; do
-    [[ -n "${file:-}" ]] || continue
-    [[ -f "$file" ]] || continue
-    while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
-      line="${raw_line%$'\r'}"
-      [[ "$line" =~ ^[[:space:]]*$ ]] && continue
-      [[ "$line" =~ ^[[:space:]]*# ]] && continue
-      if [[ "$line" =~ ^[[:space:]]*export[[:space:]]+ ]]; then
-        line="${line#export }"
-      fi
-      [[ "$line" == *=* ]] || continue
-      name="${line%%=*}"
-      value="${line#*=}"
-      name="${name#"${name%%[![:space:]]*}"}"
-      name="${name%"${name##*[![:space:]]}"}"
-      [[ -n "${name:-}" ]] || continue
-      if [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]]; then
-        value="${value:1:${#value}-2}"
-      elif [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
-        value="${value:1:${#value}-2}"
-      fi
-      export "${name}=${value}"
-    done < "$file"
-  done
-}
-
-load_env_files "$FASTQA_ENV_FILES"
+load_env_files_preserving_process_env "$FASTQA_ENV_FILES"
 
 PID_FILE="$FASTQA_SERVICE_RUNTIME_ROOT/fastqa-gunicorn.pid"
 STARTUP_LOG_FILE="$FASTQA_SERVICE_LOG_ROOT/fastqa-startup.log"

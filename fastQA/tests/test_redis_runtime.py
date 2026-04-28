@@ -46,11 +46,13 @@ def test_settings_resolve_redis_defaults(monkeypatch):
 
 def test_fastqa_shared_config_enables_redis_by_default():
     repo_root = Path(__file__).resolve().parents[2]
-    shared_env = repo_root / "resource/config/services/fastQA/config.shared.env"
-    content = shared_env.read_text(encoding="utf-8")
+    infrastructure_env = repo_root / "resource/config/shared/infrastructure.shared.env"
+    service_env = repo_root / "resource/config/services/fastQA/config.shared.env"
+    infrastructure_content = infrastructure_env.read_text(encoding="utf-8")
+    service_content = service_env.read_text(encoding="utf-8")
 
-    assert "REDIS_ENABLED=1" in content
-    assert "REDIS_KEY_PREFIX=fastqa" in content
+    assert "REDIS_ENABLED=1" in infrastructure_content
+    assert "REDIS_KEY_PREFIX=fastqa" in service_content
 
 
 def test_fastqa_shared_config_defines_shared_llm_pool_defaults():
@@ -58,7 +60,7 @@ def test_fastqa_shared_config_defines_shared_llm_pool_defaults():
     shared_env = repo_root / "resource/config/services/fastQA/config.shared.env"
     content = shared_env.read_text(encoding="utf-8")
 
-    assert "FASTQA_LLM_HTTP_SHARED_POOL_ENABLED=0" in content
+    assert "FASTQA_LLM_HTTP_SHARED_POOL_ENABLED=1" in content
     assert "FASTQA_LLM_HTTP_CONNECT_TIMEOUT_SECONDS=15" in content
     assert "FASTQA_LLM_HTTP_READ_TIMEOUT_SECONDS=180" in content
     assert "FASTQA_LLM_HTTP_STREAM_READ_TIMEOUT_SECONDS=600" in content

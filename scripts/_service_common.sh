@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RESOURCE_DIR="$ROOT_DIR/resource"
+source "$ROOT_DIR/scripts/env_file_loader.sh"
+capture_env_file_loader_process_keys
 
 SERVICES=(public-service fastQA highThinkingQA patent gateway)
 
@@ -14,10 +16,11 @@ env_bool() {
 
 gateway_env_files() {
   local config_dir_default="$ROOT_DIR/gateway"
+  local shared_env_files="$RESOURCE_DIR/config/shared/infrastructure.shared.env:$RESOURCE_DIR/config/shared/model-endpoints.shared.env:$RESOURCE_DIR/config/shared/infrastructure.secret.env"
   if [[ -d "$RESOURCE_DIR/config/services/gateway" ]]; then
     config_dir_default="$RESOURCE_DIR/config/services/gateway"
   fi
-  echo "${GATEWAY_ENV_FILES:-$config_dir_default/config.env:$config_dir_default/config.shared.env:$config_dir_default/config.secret.env:$ROOT_DIR/gateway/.env}"
+  echo "${GATEWAY_ENV_FILES:-$shared_env_files:$config_dir_default/config.env:$config_dir_default/config.shared.env:$config_dir_default/config.secret.env:$ROOT_DIR/gateway/.env}"
 }
 
 load_gateway_env_files() {
@@ -26,30 +29,7 @@ load_gateway_env_files() {
   fi
   local env_files
   env_files="$(gateway_env_files)"
-  local -a preserved_names=()
-  local -A preserved_values=()
-  while IFS='=' read -r name value; do
-    [[ -n "${name:-}" ]] || continue
-    preserved_names+=("$name")
-    preserved_values["$name"]="$value"
-  done < <(env)
-  local old_allexport
-  old_allexport="$(set +o | rg '^set \\+o allexport$' || true)"
-  set -a
-  IFS=':' read -r -a files <<< "$env_files"
-  for file in "${files[@]}"; do
-    [[ -n "${file:-}" ]] || continue
-    [[ -f "$file" ]] || continue
-    # shellcheck disable=SC1090
-    source "$file"
-  done
-  set +a
-  if [[ -n "$old_allexport" ]]; then
-    eval "$old_allexport"
-  fi
-  for name in "${preserved_names[@]}"; do
-    export "$name=${preserved_values[$name]}"
-  done
+  load_env_files_preserving_process_env "$env_files"
   _GATEWAY_ENV_FILES_LOADED=1
 }
 
@@ -102,7 +82,7 @@ run_service_script() {
       ;;
     public-service:start)
       PUBLIC_SERVICE_PORT=8102 \
-      PUBLIC_SERVICE_ENV_FILES="$ROOT_DIR/public-service/config.shared.env:$ROOT_DIR/public-service/config.secret.env" \
+      PUBLIC_SERVICE_ENV_FILES="${PUBLIC_SERVICE_ENV_FILES:-$RESOURCE_DIR/config/shared/infrastructure.shared.env:$RESOURCE_DIR/config/shared/model-endpoints.shared.env:$RESOURCE_DIR/config/shared/infrastructure.secret.env:$ROOT_DIR/public-service/config.shared.env:$ROOT_DIR/public-service/config.secret.env}" \
       bash "$ROOT_DIR/public-service/scripts/start_gunicorn.sh"
       ;;
     public-service:stop)

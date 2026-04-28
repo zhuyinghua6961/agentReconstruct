@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RESOURCE_DIR="$(cd "$ROOT_DIR/../resource" 2>/dev/null && pwd || true)"
 PUBLIC_SERVICE_ROOT="$(cd "$ROOT_DIR/../public-service" 2>/dev/null && pwd || true)"
+source "$ROOT_DIR/../scripts/env_file_loader.sh"
+capture_env_file_loader_process_keys
 CONFIG_DIR_DEFAULT="$ROOT_DIR"
 
 if [[ -n "${RESOURCE_DIR:-}" ]]; then
@@ -11,38 +13,13 @@ if [[ -n "${RESOURCE_DIR:-}" ]]; then
 fi
 
 cd "$ROOT_DIR"
-export PATENT_ENV_FILES="${PATENT_ENV_FILES:-$CONFIG_DIR_DEFAULT/config.env:$CONFIG_DIR_DEFAULT/config.shared.env:$CONFIG_DIR_DEFAULT/config.secret.env:$ROOT_DIR/config.shared.env:$ROOT_DIR/config.secret.env:$PUBLIC_SERVICE_ROOT/config.shared.env:$PUBLIC_SERVICE_ROOT/config.secret.env:$ROOT_DIR/.env}"
+PATENT_SHARED_ENV_FILES=""
+if [[ -n "${RESOURCE_DIR:-}" ]]; then
+  PATENT_SHARED_ENV_FILES="$RESOURCE_DIR/config/shared/infrastructure.shared.env:$RESOURCE_DIR/config/shared/model-endpoints.shared.env:$RESOURCE_DIR/config/shared/infrastructure.secret.env"
+fi
+export PATENT_ENV_FILES="${PATENT_ENV_FILES:-$PATENT_SHARED_ENV_FILES:$CONFIG_DIR_DEFAULT/config.env:$CONFIG_DIR_DEFAULT/config.shared.env:$CONFIG_DIR_DEFAULT/config.secret.env:$PUBLIC_SERVICE_ROOT/config.shared.env:$PUBLIC_SERVICE_ROOT/config.secret.env:$ROOT_DIR/.env}"
 
-load_env_files() {
-  local env_files="$1"
-  IFS=':' read -r -a files <<< "$env_files"
-  for file in "${files[@]}"; do
-    [[ -n "${file:-}" ]] || continue
-    [[ -f "$file" ]] || continue
-    while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
-      line="${raw_line%$'\r'}"
-      [[ "$line" =~ ^[[:space:]]*$ ]] && continue
-      [[ "$line" =~ ^[[:space:]]*# ]] && continue
-      if [[ "$line" =~ ^[[:space:]]*export[[:space:]]+ ]]; then
-        line="${line#export }"
-      fi
-      [[ "$line" == *=* ]] || continue
-      name="${line%%=*}"
-      value="${line#*=}"
-      name="${name#"${name%%[![:space:]]*}"}"
-      name="${name%"${name##*[![:space:]]}"}"
-      [[ -n "${name:-}" ]] || continue
-      if [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]]; then
-        value="${value:1:${#value}-2}"
-      elif [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
-        value="${value:1:${#value}-2}"
-      fi
-      export "${name}=${value}"
-    done < "$file"
-  done
-}
-
-load_env_files "$PATENT_ENV_FILES"
+load_env_files_preserving_process_env "$PATENT_ENV_FILES"
 
 export PATENT_PORT="${PATENT_PORT:-8010}"
 export PATENT_DURABLE_MODE_ENABLED="${PATENT_DURABLE_MODE_ENABLED:-true}"

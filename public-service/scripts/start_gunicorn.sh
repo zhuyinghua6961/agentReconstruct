@@ -3,6 +3,8 @@ set -euo pipefail
 
 PROJECT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 RESOURCE_DIR="$(cd "$PROJECT_ROOT/../resource" 2>/dev/null && pwd || true)"
+source "$PROJECT_ROOT/../scripts/env_file_loader.sh"
+capture_env_file_loader_process_keys
 APP_DIR="$PROJECT_ROOT/backend"
 RUNTIME_DIR="$PROJECT_ROOT/.runtime"
 LOG_DIR_DEFAULT="$PROJECT_ROOT/.runtime/logs"
@@ -15,40 +17,16 @@ ACCESS_LOG_FILE="$LOG_DIR_DEFAULT/public-service-access.log"
 ERROR_LOG_FILE="$LOG_DIR_DEFAULT/public-service-error.log"
 mkdir -p "$RUNTIME_DIR" "$LOG_DIR_DEFAULT"
 
+PUBLIC_SERVICE_SHARED_ENV_FILES=""
+if [[ -n "${RESOURCE_DIR:-}" ]]; then
+  PUBLIC_SERVICE_SHARED_ENV_FILES="$RESOURCE_DIR/config/shared/infrastructure.shared.env:$RESOURCE_DIR/config/shared/model-endpoints.shared.env:$RESOURCE_DIR/config/shared/infrastructure.secret.env"
+fi
+
 export PUBLIC_SERVICE_PORT="${PUBLIC_SERVICE_PORT:-8102}"
-export PUBLIC_SERVICE_ENV_FILES="${PUBLIC_SERVICE_ENV_FILES:-$PROJECT_ROOT/config.shared.env:$PROJECT_ROOT/config.secret.env}"
+export PUBLIC_SERVICE_ENV_FILES="${PUBLIC_SERVICE_ENV_FILES:-$PUBLIC_SERVICE_SHARED_ENV_FILES:$PROJECT_ROOT/config.shared.env:$PROJECT_ROOT/config.secret.env}"
 export PUBLIC_SERVICE_GUNICORN_WORKERS="${PUBLIC_SERVICE_GUNICORN_WORKERS:-4}"
 
-load_env_files() {
-  local env_files="$1"
-  IFS=':' read -r -a files <<< "$env_files"
-  for file in "${files[@]}"; do
-    [[ -n "${file:-}" ]] || continue
-    [[ -f "$file" ]] || continue
-    while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
-      line="${raw_line%$'\r'}"
-      [[ "$line" =~ ^[[:space:]]*$ ]] && continue
-      [[ "$line" =~ ^[[:space:]]*# ]] && continue
-      if [[ "$line" =~ ^[[:space:]]*export[[:space:]]+ ]]; then
-        line="${line#export }"
-      fi
-      [[ "$line" == *=* ]] || continue
-      name="${line%%=*}"
-      value="${line#*=}"
-      name="${name#"${name%%[![:space:]]*}"}"
-      name="${name%"${name##*[![:space:]]}"}"
-      [[ -n "${name:-}" ]] || continue
-      if [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]]; then
-        value="${value:1:${#value}-2}"
-      elif [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
-        value="${value:1:${#value}-2}"
-      fi
-      export "${name}=${value}"
-    done < "$file"
-  done
-}
-
-load_env_files "$PUBLIC_SERVICE_ENV_FILES"
+load_env_files_preserving_process_env "$PUBLIC_SERVICE_ENV_FILES"
 
 print_logs() {
   echo "startup_log=$STARTUP_LOG_FILE"
