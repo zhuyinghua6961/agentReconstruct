@@ -1,0 +1,22 @@
+from __future__ import annotations
+
+from app.modules.graph_kb.metadata import build_graph_route_metadata
+
+
+def test_metadata_exposes_canonical_and_compatibility_route_keys():
+    metadata = build_graph_route_metadata(
+        route_family="community",
+        tri_state_mode="graph_for_rag",
+        strategy="community_representatives",
+        intent="community_representatives",
+        result_count=3,
+        rag_injection_enabled=True,
+    )
+
+    assert metadata["knowledge_route_family"] == "community"
+    assert metadata["legacy_route_family"] == "community"
+    assert metadata["tri_state_mode"] == "graph_for_rag"
+    assert metadata["graph_strategy"] == "community_representatives"
+    assert metadata["graph_intent"] == "community_representatives"
+    assert metadata["graph_result_count"] == 3
+    assert metadata["graph_rag_injection_enabled"] is True

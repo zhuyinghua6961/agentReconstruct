@@ -1,6 +1,25 @@
 from __future__ import annotations
 
-from app.modules.graph_kb.models import GraphConstraint, GraphRagPayload, GraphRoutingResult
+from app.modules.graph_kb.models import (
+    GraphConstraint,
+    GraphExecutionMode,
+    GraphRagPayload,
+    GraphRouteFamily,
+    GraphRoutingResult,
+)
+
+
+def test_graph_route_family_values_are_stable():
+    assert GraphRouteFamily.PRECISE.value == "precise"
+    assert GraphRouteFamily.SEMANTIC.value == "semantic"
+    assert GraphRouteFamily.HYBRID.value == "hybrid"
+    assert GraphRouteFamily.COMMUNITY.value == "community"
+
+
+def test_graph_execution_mode_values_are_stable():
+    assert GraphExecutionMode.DIRECT_ANSWER.value == "direct_answer"
+    assert GraphExecutionMode.GRAPH_FOR_RAG.value == "graph_for_rag"
+    assert GraphExecutionMode.SKIP_GRAPH.value == "skip_graph"
 
 
 def test_graph_rag_payload_has_stable_cache_fingerprint():

@@ -14,13 +14,13 @@ def test_classifier_v2_preserves_legacy_community_branch_before_semantic_fallbac
     decision = classify_graph_question_v2(question="请分析该数据集里材料关系网络的机制关联", conversation_context={})
 
     assert decision.legacy_route == "community"
-    assert decision.mode == "skip_graph"
+    assert decision.mode == "graph_for_rag"
 
 
 def test_classifier_v2_preserves_semantic_keyword_priority_over_graph_enumeration():
     decision = classify_graph_question_v2(question="为什么 LFP 的循环性能更稳定？", conversation_context={})
 
-    assert decision.legacy_route == "semantic"
+    assert decision.legacy_route == "hybrid"
     assert decision.mode == "graph_for_rag"
 
 
@@ -40,7 +40,7 @@ def test_classifier_v2_preserves_entity_keyword_fallback():
 def test_classifier_v2_doi_semantic_overlap_prefers_semantic_graph_for_rag():
     decision = classify_graph_question_v2(question="10.1000/test 这篇文献为什么循环性能更稳定？", conversation_context={})
 
-    assert decision.legacy_route == "semantic"
+    assert decision.legacy_route == "hybrid"
     assert decision.mode == "graph_for_rag"
 
 
@@ -65,3 +65,24 @@ def test_classifier_v2_followup_requires_context_resolution_instead_of_skip():
 
     assert decision.mode == "graph_for_rag"
     assert decision.diagnostics["requires_context_resolution"] is True
+
+
+def test_classifier_routes_community_to_graph_for_rag_not_skip():
+    decision = classify_graph_question_v2(question="LiFePO4的关系网络和机制关联是什么？", conversation_context={})
+
+    assert decision.legacy_route == "community"
+    assert decision.mode == "graph_for_rag"
+
+
+def test_classifier_routes_hybrid_capacity_analysis():
+    decision = classify_graph_question_v2(question="放电容量超过150 mAh/g的LFP有哪些特点？", conversation_context={})
+
+    assert decision.legacy_route == "hybrid"
+    assert decision.mode == "graph_for_rag"
+
+
+def test_classifier_routes_semantic_without_graph_slots_to_skip():
+    decision = classify_graph_question_v2(question="为什么电池安全性很重要？", conversation_context={})
+
+    assert decision.legacy_route == "semantic"
+    assert decision.mode == "skip_graph"

@@ -24,6 +24,11 @@ def _collect_entity_hints(bundle: GraphEvidenceBundle) -> dict[str, tuple[str, .
     hints: dict[str, list[str]] = {
         "materials": [],
         "titles": [],
+        "raw_materials": [],
+        "carbon_sources": [],
+        "process_methods": [],
+        "performance_fields": [],
+        "community_labels": [],
     }
 
     def _append(bucket: str, value: Any) -> None:
@@ -42,8 +47,20 @@ def _collect_entity_hints(bundle: GraphEvidenceBundle) -> dict[str, tuple[str, .
         _append("materials", row.get("raw_materials"))
         _append("materials", row.get("matched_raw_materials"))
         _append("titles", row.get("title"))
+        _append("raw_materials", row.get("raw_materials"))
+        _append("raw_materials", row.get("matched_raw_materials"))
+        _append("carbon_sources", row.get("carbon_source"))
+        _append("carbon_sources", row.get("carbon_sources"))
+        _append("process_methods", row.get("preparation_methods"))
+        _append("performance_fields", row.get("parsed_unit"))
 
-    return {key: tuple(values) for key, values in hints.items() if values}
+    for key, values in dict(bundle.entity_hints or {}).items():
+        for value in tuple(values or ()):
+            if key not in hints:
+                hints[key] = []
+            _append(key, value)
+
+    return {key: tuple(values[:5]) for key, values in hints.items() if values}
 
 
 def _render_stage1_context(*, decision: SemanticDecision, plan: GraphQueryPlanV2, bundle: GraphEvidenceBundle) -> str:

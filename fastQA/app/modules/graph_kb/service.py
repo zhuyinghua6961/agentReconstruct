@@ -10,6 +10,7 @@ from app.modules.graph_kb.client import execute_graph_kb_plan, plan_graph_kb_que
 from app.modules.graph_kb.canonicalizer import canonicalize_graph_rows
 from app.modules.graph_kb.direct_renderer import render_direct_answer
 from app.modules.graph_kb.executor_v2 import execute_prepared_query
+from app.modules.graph_kb.metadata import build_graph_route_metadata
 from app.modules.graph_kb.rag_adapter import build_graph_rag_payload
 from app.modules.graph_kb.models import GraphKbExecutionResult, GraphKbQueryPlan, GraphRoutingResult
 from app.modules.graph_kb.planner_v2 import build_graph_query_plan_v2
@@ -390,14 +391,33 @@ def route_graph_kb_v2(
         schema_registry=build_default_schema_registry(),
     )
     diagnostics = dict(decision.diagnostics)
+    route_family = str(decision.route_family or decision.legacy_route or "")
     diagnostics["legacy_route"] = decision.legacy_route
-    diagnostics["legacy_route_family"] = decision.legacy_route
+    diagnostics["legacy_route_family"] = route_family
+    diagnostics["knowledge_route_family"] = route_family
     diagnostics["graph_pipeline_version"] = "v2"
     diagnostics["tri_state_mode"] = decision.mode
     diagnostics["neo4j_client"] = "neo4jgraph"
     diagnostics["doi_source"] = "none"
     diagnostics["legacy_template_fallback_used"] = False
     diagnostics["strategy"] = plan.strategy if plan is not None else ""
+    diagnostics["graph_strategy"] = plan.strategy if plan is not None else ""
+    diagnostics["graph_intent"] = plan.intent if plan is not None else ""
+    diagnostics["graph_confidence"] = float(decision.confidence or 0.0)
+    diagnostics["graph_direct_answer_eligible"] = bool(decision.direct_answer_eligible)
+    diagnostics.update(
+        build_graph_route_metadata(
+            route_family=route_family,
+            tri_state_mode=decision.mode,
+            strategy=plan.strategy if plan is not None else "",
+            intent=plan.intent if plan is not None else "",
+            confidence=float(decision.confidence or 0.0),
+            fallback_reason=str(decision.fallback_reason or ""),
+            direct_answer_eligible=bool(decision.direct_answer_eligible),
+            doi_source="none",
+            graph_pipeline_version="v2",
+        )
+    )
 
     if decision.mode == "skip_graph" or plan is None:
         return GraphRoutingResult(mode="skip_graph", diagnostics=diagnostics)
@@ -415,8 +435,14 @@ def route_graph_kb_v2(
     diagnostics["neo4j_client"] = execution.trace.neo4j_client
     if execution.trace.fallback_reason:
         diagnostics["fallback_reason"] = execution.trace.fallback_reason
+        diagnostics["graph_fallback_reason"] = execution.trace.fallback_reason
 
     bundle = canonicalize_graph_rows(plan=plan, rows=execution.rows)
+    result_count = len(tuple(bundle.render_slots.get("rows") or execution.rows or ()))
+    diagnostics["graph_result_count"] = result_count
+    diagnostics["graph_doi_candidates_count"] = len(tuple(bundle.doi_candidates or ()))
+    diagnostics["graph_filtered_doi_count"] = int(bundle.diagnostics.get("filtered_doi_count") or 0)
+    diagnostics["graph_suspicious_doi_count"] = int(bundle.diagnostics.get("suspicious_doi_count") or 0)
     rag_payload = build_graph_rag_payload(
         decision=decision,
         plan=plan,
@@ -431,12 +457,12 @@ def route_graph_kb_v2(
                 references=direct.references,
                 query_mode="graph_kb",
                 template_id=plan.legacy_template_id,
-                result_count=len(tuple(bundle.render_slots.get("rows") or ())),
+                result_count=result_count,
                 fallback_reason="",
             )
             return GraphRoutingResult(mode="direct_answer", direct_result=direct_result, diagnostics=diagnostics)
         diagnostics["direct_fallback_reason"] = str(direct.metadata.get("reason") or execution.trace.fallback_reason or "render_unavailable")
-        diagnostics["legacy_template_fallback_used"] = True
+        diagnostics["legacy_template_fallback_used"] = bool(plan.legacy_template_plan is not None)
         return GraphRoutingResult(mode="graph_for_rag", rag_payload=rag_payload, diagnostics=diagnostics)
 
     return GraphRoutingResult(mode=decision.mode, rag_payload=rag_payload, diagnostics=diagnostics)

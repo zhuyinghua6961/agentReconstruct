@@ -23,7 +23,7 @@ public-service/data/runtime/
 public-service/uploads/
 public-service/papers/
 public-service/vector_database/
-
+archive/oldCode
 config.secret.env
 .env
 **/config.secret.env

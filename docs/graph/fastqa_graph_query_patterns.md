@@ -1,6 +1,6 @@
 # fastQA Graph Query Patterns
 
-> Status: draft query patterns from read-only exploration. These are schema notes, not production query contracts.
+> Status: V1 query contract notes for refactored fastQA graph routing. Production code centralizes these patterns in `fastQA/app/modules/graph_kb/query_templates.py` and validates them through `guardrail.py`.
 
 ## Purpose
 
@@ -25,6 +25,7 @@ All graph execution intended for user questions should apply these guardrails:
 - suspicious DOI filtering before graph-seeded RAG
 - original text preservation for any parsed numeric values
 - place filtering `WHERE` clauses on the mandatory `MATCH`/`WITH` that owns the value being filtered; avoid accidentally attaching a filter only to a later `OPTIONAL MATCH`
+- avoid unbounded `type(r)` routing in direct-answer paths; V1 templates use explicit relationship names where possible
 
 Recommended initial suspicious DOI signals:
 
@@ -51,7 +52,7 @@ RETURN d.name AS doi, collect(DISTINCT t.name)[0..5] AS titles
 LIMIT 1
 ```
 
-One-hop expansion:
+One-hop expansion is useful for exploration, but V1 direct-answer templates prefer explicit bucket paths.
 
 ```cypher
 MATCH (d:doi {name: $doi})-[r]->(x)
@@ -293,6 +294,8 @@ LIMIT 50
 
 Application code should parse serialized dictionary-like values in `additives` and `doping_elements` before rendering them.
 
+Production V1 carbon-source list/count templates use explicit `[:recipe]` and `[:carbon_source]` paths rather than dynamic recipe relationship dispatch. Dynamic `type(r) IN [...]` forms are treated as exploratory unless every literal relation is allowlisted and the result is not used for direct rendering.
+
 ## Community Patterns
 
 Use for:
@@ -418,7 +421,7 @@ Recommended first implementation:
    - Stage2 query prefixes
    - Stage4 supplemental facts
 
-The current `GraphRagPayload` already matches this direction, but it needs richer graph planning and field coverage.
+`GraphRagPayload` now carries canonicalized graph evidence through Stage1, Stage2, and Stage4. Metadata also exposes route family, tri-state mode, strategy, intent, result count, confidence, DOI filtering counts, and RAG injection status.
 
 Concrete first-pass hybrid graph seed:
 

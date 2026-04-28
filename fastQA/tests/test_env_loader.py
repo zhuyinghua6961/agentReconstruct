@@ -191,6 +191,24 @@ def test_config_chat_persist_enabled_defaults_to_true(monkeypatch):
     assert settings.chat_persist_enabled is True
 
 
+def test_graph_four_route_flags_have_conservative_defaults(monkeypatch):
+    monkeypatch.delenv("FASTQA_GRAPH_DIRECT_ANSWER_MIN_CONFIDENCE", raising=False)
+    monkeypatch.delenv("FASTQA_GRAPH_MAX_DOI_CANDIDATES", raising=False)
+    monkeypatch.delenv("FASTQA_GRAPH_ALLOW_SUSPICIOUS_DOI_FOR_RAG", raising=False)
+    monkeypatch.delenv("FASTQA_GRAPH_COMMUNITY_ROUTE_ENABLED", raising=False)
+    monkeypatch.delenv("FASTQA_GRAPH_PRECISE_NUMERIC_ENABLED", raising=False)
+
+    config = _reload_config_module()
+    settings = config.get_settings()
+
+    assert settings.graph_kb_enabled is True
+    assert settings.graph_kb_v2_enabled is True
+    assert settings.graph_kb_rag_injection_enabled is True
+    assert settings.graph_direct_answer_min_confidence >= 0.0
+    assert settings.graph_max_doi_candidates > 0
+    assert settings.graph_community_route_enabled is True
+
+
 def test_config_split_execution_authority_is_rejected_in_production(monkeypatch):
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv("CONVERSATION_USER_WRITE_TARGET", "legacy")

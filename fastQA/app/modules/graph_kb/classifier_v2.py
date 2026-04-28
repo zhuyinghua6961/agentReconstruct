@@ -5,28 +5,12 @@ from typing import Any
 
 from app.modules.graph_kb.client import plan_graph_kb_query
 from app.modules.graph_kb.models import SemanticDecision
+from app.modules.graph_kb.slots import extract_graph_slots
 
 
 _FILE_ROUTE_HINTS = {"pdf_qa", "tabular_qa", "hybrid_qa"}
 _FOLLOWUP_HINTS = ("它", "这个", "那篇", "前者", "后者", "上面那个", "最高的是哪篇")
-_NUMERIC_ATTRIBUTES = (
-    "压实密度",
-    "比容量",
-    "容量",
-    "电压",
-    "倍率",
-    "循环性能",
-    "循环寿命",
-    "粒径",
-    "放电容量",
-)
-_PRECISE_KEYWORDS = ("大于", "小于", "高于", "低于", "超过", "最高", "最低", "最大", "最小", "统计", "top")
-_COMMUNITY_KEYWORDS = ("关系网络", "关系", "网络", "社区", "数据质量", "机制关联")
-_SEMANTIC_KEYWORDS = ("如何", "为什么", "影响", "方法", "总结", "介绍", "趋势", "稳定")
-_GRAPH_NON_NUMERIC_ATTRIBUTES = ("原料", "工艺", "方法", "设备", "配方", "文献", "论文", "测试", "表征", "描述")
-_ENUMERATION_HINTS = ("有哪些", "哪些", "列出", "给出", "多少篇", "包含")
-_ENTITY_KEYWORDS = ("lfp", "lifepo4", "ncm", "磷酸铁锂", "石墨", "三元")
-_ANALYSIS_HINTS = ("分析", "趋势", "对比", "差异", "特点", "稳定", "机制")
+_SEMANTIC_KEYWORDS = ("如何", "为什么", "影响", "方法", "总结", "介绍", "趋势", "稳定", "重要")
 _RANKING_PATTERN = re.compile(r"(?:前\s*\d+|排名前|top\s*\d+)", re.IGNORECASE)
 
 
@@ -41,26 +25,6 @@ def _normalized_question(question: str) -> str:
 def _contains_any(text: str, hints: tuple[str, ...]) -> bool:
     lowered = text.lower()
     return any(hint.lower() in lowered for hint in hints)
-
-
-def _has_numeric_attribute(text: str) -> bool:
-    return _contains_any(text, _NUMERIC_ATTRIBUTES)
-
-
-def _has_precise_keyword(text: str) -> bool:
-    return _contains_any(text, _PRECISE_KEYWORDS) or bool(_RANKING_PATTERN.search(text))
-
-
-def _has_entity_keyword(text: str) -> bool:
-    return _contains_any(text, _ENTITY_KEYWORDS)
-
-
-def _has_graph_non_numeric_attribute(text: str) -> bool:
-    return _contains_any(text, _GRAPH_NON_NUMERIC_ATTRIBUTES) and not _has_numeric_attribute(text)
-
-
-def _has_enumeration_hint(text: str) -> bool:
-    return _contains_any(text, _ENUMERATION_HINTS)
 
 
 def _has_file_context(conversation_context: dict[str, Any] | None) -> bool:
@@ -79,120 +43,178 @@ def _has_file_context(conversation_context: dict[str, Any] | None) -> bool:
     )
 
 
-def _legacy_hybrid_rule(text: str) -> bool:
-    return _has_numeric_attribute(text) and _has_precise_keyword(text) and _contains_any(text, _ANALYSIS_HINTS)
+def _has_useful_graph_slots(slots: Any) -> bool:
+    return bool(
+        slots.doi
+        or slots.entities
+        or slots.title_terms
+        or slots.material_terms
+        or slots.raw_material_terms
+        or slots.recipe_terms
+        or slots.process_terms
+        or slots.property_field
+        or slots.community_signal
+        or slots.count_signal
+    )
 
 
-def _precise_keywords_and_numeric_attributes(text: str) -> bool:
-    return _has_numeric_attribute(text) and _has_precise_keyword(text) and _has_entity_keyword(text)
-
-
-def _community_keywords(text: str) -> bool:
-    return _contains_any(text, _COMMUNITY_KEYWORDS)
-
-
-def _semantic_keywords(text: str) -> bool:
-    return _contains_any(text, _SEMANTIC_KEYWORDS)
-
-
-def _graph_non_numeric_attributes_with_enumeration(text: str) -> bool:
-    return _has_graph_non_numeric_attribute(text) and _has_enumeration_hint(text)
-
-
-def _numeric_attribute_only(text: str) -> bool:
-    return _has_numeric_attribute(text) and not _has_entity_keyword(text)
-
-
-def _entity_keywords(text: str) -> bool:
-    return _has_entity_keyword(text)
-
-
-def map_legacy_route_to_tri_state(
+def _decision(
     *,
+    mode: str,
     legacy_route: str,
-    question: str,
-    conversation_context: dict[str, Any] | None,
     matched_rule: str,
     standalone: bool,
+    slots: Any,
+    confidence: float,
+    direct_answer_eligible: bool,
+    fallback_reason: str = "",
 ) -> SemanticDecision:
-    legacy_template_plan = plan_graph_kb_query(question)
-    if legacy_route == "community":
-        mode = "skip_graph"
-    elif legacy_route == "precise":
-        mode = "direct_answer" if legacy_template_plan is not None else "graph_for_rag"
-    elif legacy_route == "hybrid":
-        mode = "graph_for_rag"
-    else:
-        mode = "graph_for_rag" if (_has_entity_keyword(question) or _has_numeric_attribute(question) or _has_graph_non_numeric_attribute(question)) else "skip_graph"
-
     diagnostics = {
         "matched_rule": matched_rule,
-        "legacy_template_id": legacy_template_plan.template_id if legacy_template_plan is not None else "",
+        "legacy_template_id": (plan_graph_kb_query(slots.doi or "") or plan_graph_kb_query(str(slots.doi or ""))).template_id
+        if slots.doi and plan_graph_kb_query(slots.doi or "") is not None
+        else "",
+        "slot_summary": slots.as_dict(),
     }
-    if _has_file_context(conversation_context):
-        diagnostics["override"] = "file_context_present"
-        diagnostics["requires_context_resolution"] = True
-        return SemanticDecision(
-            mode="graph_for_rag",
-            legacy_route=legacy_route,
-            standalone=False,
-            diagnostics=diagnostics,
-        )
-
-    if any(hint in question for hint in _FOLLOWUP_HINTS):
-        diagnostics["override"] = "ambiguous_followup"
-        diagnostics["requires_context_resolution"] = True
-        return SemanticDecision(
-            mode="graph_for_rag",
-            legacy_route=legacy_route,
-            standalone=False,
-            diagnostics=diagnostics,
-        )
-
     return SemanticDecision(
         mode=mode,
         legacy_route=legacy_route,
         standalone=standalone,
         diagnostics=diagnostics,
+        route_family=legacy_route,
+        confidence=confidence,
+        slots=slots.as_dict(),
+        direct_answer_eligible=direct_answer_eligible,
+        fallback_reason=fallback_reason,
+    )
+
+
+def _base_route_for_slots(question: str, slots: Any, *, standalone: bool) -> SemanticDecision:
+    legacy_template_plan = plan_graph_kb_query(question)
+
+    if slots.doi:
+        if slots.analysis_signal and (slots.property_field or _contains_any(question, _SEMANTIC_KEYWORDS)):
+            return _decision(
+                mode="graph_for_rag",
+                legacy_route="hybrid",
+                matched_rule="doi_contextual_analysis",
+                standalone=standalone,
+                slots=slots,
+                confidence=0.86,
+                direct_answer_eligible=False,
+            )
+        direct_answer_eligible = legacy_template_plan is not None
+        return _decision(
+            mode="direct_answer" if direct_answer_eligible else "graph_for_rag",
+            legacy_route="precise",
+            matched_rule="doi_expand" if slots.doi_intent == "expand" else "doi_lookup",
+            standalone=standalone,
+            slots=slots,
+            confidence=0.95,
+            direct_answer_eligible=direct_answer_eligible,
+        )
+    if slots.community_signal:
+        return _decision(
+            mode="graph_for_rag",
+            legacy_route="community",
+            matched_rule="community_signal",
+            standalone=standalone,
+            slots=slots,
+            confidence=0.85,
+            direct_answer_eligible=False,
+        )
+    if slots.property_field and slots.analysis_signal:
+        return _decision(
+            mode="graph_for_rag",
+            legacy_route="hybrid",
+            matched_rule="hybrid_property_analysis",
+            standalone=standalone,
+            slots=slots,
+            confidence=0.82,
+            direct_answer_eligible=False,
+        )
+    if slots.property_field:
+        matched_rule = "numeric_attribute_only"
+        if slots.ranking or _RANKING_PATTERN.search(question):
+            matched_rule = "numeric_ranking"
+        return _decision(
+            mode="direct_answer" if legacy_template_plan is not None else "graph_for_rag",
+            legacy_route="precise",
+            matched_rule=matched_rule,
+            standalone=standalone,
+            slots=slots,
+            confidence=0.78,
+            direct_answer_eligible=legacy_template_plan is not None,
+        )
+    if slots.count_signal or slots.enumeration_signal or slots.recipe_terms or slots.process_terms or slots.entities:
+        return _decision(
+            mode="direct_answer" if legacy_template_plan is not None else "graph_for_rag",
+            legacy_route="precise",
+            matched_rule="legacy_template_signal" if legacy_template_plan is not None else "graph_slot_signal",
+            standalone=standalone,
+            slots=slots,
+            confidence=0.76,
+            direct_answer_eligible=legacy_template_plan is not None,
+        )
+    if _contains_any(question, _SEMANTIC_KEYWORDS) and not _has_useful_graph_slots(slots):
+        return _decision(
+            mode="skip_graph",
+            legacy_route="semantic",
+            matched_rule="semantic_without_graph_slots",
+            standalone=standalone,
+            slots=slots,
+            confidence=0.7,
+            direct_answer_eligible=False,
+            fallback_reason="no_useful_graph_slots",
+        )
+    return _decision(
+        mode="skip_graph",
+        legacy_route="semantic",
+        matched_rule="default_semantic",
+        standalone=standalone,
+        slots=slots,
+        confidence=0.55,
+        direct_answer_eligible=False,
+        fallback_reason="no_useful_graph_slots",
     )
 
 
 def classify_graph_question_v2(*, question: str, conversation_context: dict[str, Any] | None = None) -> SemanticDecision:
     text = _normalized_question(question)
     standalone = not bool(conversation_context)
+    slots = extract_graph_slots(text)
+    decision = _base_route_for_slots(text, slots, standalone=standalone)
 
-    if _legacy_hybrid_rule(text):
-        legacy_route = "hybrid"
-        matched_rule = "hybrid_rule"
-    elif _precise_keywords_and_numeric_attributes(text):
-        legacy_route = "precise"
-        matched_rule = "precise_keywords_and_numeric_attributes"
-    elif _community_keywords(text):
-        legacy_route = "community"
-        matched_rule = "community_keywords"
-    elif _semantic_keywords(text):
-        legacy_route = "semantic"
-        matched_rule = "semantic_keywords"
-    elif plan_graph_kb_query(text) is not None:
-        legacy_route = "precise"
-        matched_rule = "legacy_template_signal"
-    elif _graph_non_numeric_attributes_with_enumeration(text):
-        legacy_route = "precise"
-        matched_rule = "graph_enumeration"
-    elif _numeric_attribute_only(text):
-        legacy_route = "precise"
-        matched_rule = "numeric_attribute_only"
-    elif _entity_keywords(text):
-        legacy_route = "precise"
-        matched_rule = "entity_keywords"
-    else:
-        legacy_route = "semantic"
-        matched_rule = "default_semantic"
+    if _has_file_context(conversation_context):
+        diagnostics = dict(decision.diagnostics)
+        diagnostics["override"] = "file_context_present"
+        diagnostics["requires_context_resolution"] = True
+        return SemanticDecision(
+            mode="graph_for_rag",
+            legacy_route=decision.legacy_route,
+            standalone=False,
+            diagnostics=diagnostics,
+            route_family=decision.route_family,
+            confidence=decision.confidence,
+            slots=decision.slots,
+            direct_answer_eligible=False,
+            fallback_reason="file_context_present",
+        )
 
-    return map_legacy_route_to_tri_state(
-        legacy_route=legacy_route,
-        question=text,
-        conversation_context=conversation_context,
-        matched_rule=matched_rule,
-        standalone=standalone,
-    )
+    if any(hint in text for hint in _FOLLOWUP_HINTS):
+        diagnostics = dict(decision.diagnostics)
+        diagnostics["override"] = "ambiguous_followup"
+        diagnostics["requires_context_resolution"] = True
+        return SemanticDecision(
+            mode="graph_for_rag",
+            legacy_route=decision.legacy_route,
+            standalone=False,
+            diagnostics=diagnostics,
+            route_family=decision.route_family,
+            confidence=decision.confidence,
+            slots=decision.slots,
+            direct_answer_eligible=False,
+            fallback_reason="requires_context_resolution",
+        )
+
+    return decision

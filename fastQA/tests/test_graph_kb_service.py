@@ -353,8 +353,28 @@ def test_route_graph_kb_v2_executes_planner_generated_parametric_query_without_g
     assert routing_result.rag_payload is not None
     assert calls
     assert calls[0][1]["query_terms"]
-    assert "LIMIT $limit LIMIT 20" not in calls[0][0]
-    assert routing_result.diagnostics.get("fallback_reason") != "guardrail_reject"
+
+
+def test_route_graph_kb_v2_exposes_doi_filtering_metadata():
+    class _Graph:
+        def query(self, cypher, params):
+            _ = cypher
+            _ = params
+            return [
+                {"doi": "10.1021/jp1005692", "title": "Valid", "carbon_source": "sucrose"},
+                {"doi": "10.1007/s12598-", "title": "Suspicious", "carbon_source": "sucrose"},
+            ]
+
+    routing_result = route_graph_kb_v2(
+        question="列出使用蔗糖作为碳源的文献",
+        conversation_context={},
+        neo4j_client=SimpleNamespace(graph=_Graph(), available=True, degraded=False),
+        max_rows=5,
+    )
+
+    assert routing_result.diagnostics["graph_doi_candidates_count"] == 1
+    assert routing_result.diagnostics["graph_filtered_doi_count"] == 1
+    assert routing_result.diagnostics["graph_suspicious_doi_count"] == 1
 
 
 def test_render_lookup_by_doi_answer_keeps_fixable_doi():

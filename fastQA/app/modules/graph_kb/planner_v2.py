@@ -1,86 +1,97 @@
 from __future__ import annotations
 
-import re
+from typing import Any
 
 from app.modules.graph_kb.client import build_legacy_template_query_plan
-from app.modules.graph_kb.models import GraphQueryPlanV2, SemanticDecision
-from app.modules.graph_kb.query_strategy import can_build_parametric_query, select_query_strategy
+from app.modules.graph_kb.models import GraphQueryPath, GraphQueryPlanV2, SemanticDecision
+from app.modules.graph_kb.query_templates import build_v1_query_paths
 from app.modules.graph_kb.schema_registry import SchemaRegistry
 
 
-_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9._+\-/]*|[\u4e00-\u9fff]{2,8}")
-_STOPWORDS = {
-    "请",
-    "哪些",
-    "有哪些",
-    "什么",
-    "为什么",
-    "如何",
-    "以及",
-    "文献",
-    "论文",
-    "材料",
-    "方法",
-    "测试",
-    "表征",
-}
-
-_PRIMARY_SEARCH_CYPHER = (
-    "MATCH (d:doi) "
-    "OPTIONAL MATCH (d)-[:title]->(t:title) "
-    "OPTIONAL MATCH (d)-[:raw_materials]->(:raw_materials)-[:raw_materials]->(rm:raw_materials) "
-    "OPTIONAL MATCH (s:name)-[:name]->(d) "
-    "WITH d, t, collect(DISTINCT rm.name) AS raw_materials, collect(DISTINCT s.name) AS sample_names "
-    "WHERE any(term IN $query_terms WHERE "
-    "toLower(d.name) CONTAINS term OR "
-    "toLower(coalesce(t.name, '')) CONTAINS term OR "
-    "any(item IN raw_materials WHERE toLower(coalesce(item, '')) CONTAINS term) OR "
-    "any(item IN sample_names WHERE toLower(coalesce(item, '')) CONTAINS term)) "
-    "RETURN d.name AS doi, t.name AS title, raw_materials, sample_names LIMIT $limit"
-)
-
-_SUPPORT_SEARCH_CYPHER = (
-    "MATCH (d:doi) "
-    "OPTIONAL MATCH (d)-[:title]->(t:title) "
-    "OPTIONAL MATCH (d)-[:testing]->(:testing)-[:testing]->(tv:testing) "
-    "OPTIONAL MATCH (d)-[:description]->(:description)-[:description]->(dv:description) "
-    "OPTIONAL MATCH (d)-[:process]->(:process)-[:preparation_method]->(pm:preparation_method) "
-    "WITH d, t, collect(DISTINCT tv.name) AS testing_items, collect(DISTINCT dv.name) AS description_items, collect(DISTINCT pm.name) AS preparation_methods "
-    "WHERE any(term IN $query_terms WHERE "
-    "toLower(coalesce(t.name, '')) CONTAINS term OR "
-    "any(item IN testing_items WHERE toLower(coalesce(item, '')) CONTAINS term) OR "
-    "any(item IN description_items WHERE toLower(coalesce(item, '')) CONTAINS term) OR "
-    "any(item IN preparation_methods WHERE toLower(coalesce(item, '')) CONTAINS term)) "
-    "RETURN d.name AS doi, t.name AS title, testing_items, description_items, preparation_methods LIMIT $limit"
-)
+def _tuple_values(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return (value.strip().lower(),) if value.strip() else ()
+    return tuple(str(item).strip().lower() for item in tuple(value or ()) if str(item or "").strip())
 
 
-def _extract_query_terms(question: str) -> list[str]:
-    terms: list[str] = []
-    seen: set[str] = set()
-    for token in _TOKEN_RE.findall(str(question or "")):
-        normalized = str(token or "").strip().lower()
-        if not normalized or normalized in seen or normalized in _STOPWORDS:
-            continue
-        seen.add(normalized)
-        terms.append(normalized)
-        if len(terms) >= 8:
-            break
+def _candidate_queries(paths: tuple[GraphQueryPath, ...]) -> list[dict[str, Any]]:
+    return [path.as_candidate_query() for path in paths]
+
+
+def _recipe_terms(slots: dict[str, Any], key: str) -> tuple[str, ...]:
+    recipe_terms = slots.get("recipe_terms") if isinstance(slots.get("recipe_terms"), dict) else {}
+    return _tuple_values(recipe_terms.get(key))
+
+
+def _process_terms(slots: dict[str, Any]) -> tuple[str, ...]:
+    process_terms = slots.get("process_terms") if isinstance(slots.get("process_terms"), dict) else {}
+    values: list[str] = []
+    for item in process_terms.values():
+        values.extend(_tuple_values(item))
+    return tuple(values)
+
+
+def _terms_from_slots(slots: dict[str, Any]) -> tuple[str, ...]:
+    values: list[str] = []
+    for key in ("entities", "title_terms", "material_terms", "raw_material_terms"):
+        values.extend(_tuple_values(slots.get(key)))
+    return tuple(dict.fromkeys(values))
+
+
+def _intent_and_template_slots(question: str, decision: SemanticDecision) -> tuple[str, dict[str, Any]]:
+    slots = dict(decision.slots or {})
+    legacy_template_plan = build_legacy_template_query_plan(question)
+    doi = str(slots.get("doi") or "").strip()
+    if doi:
+        if str(slots.get("doi_intent") or "") == "expand":
+            return "expand_doi_context", {"doi": doi}
+        return "lookup_by_doi", {"doi": doi}
+    if legacy_template_plan is not None:
+        if legacy_template_plan.template_id == "list_by_raw_material":
+            return "list_by_raw_material", {"raw_material_terms": (legacy_template_plan.params.get("material_name"),)}
+        if legacy_template_plan.template_id == "list_by_material":
+            return "list_by_title_or_material", {"terms": (legacy_template_plan.params.get("material_name"),)}
+        if legacy_template_plan.template_id == "count_by_filter":
+            return "count_by_structured_field", {
+                "field": "raw_material.name",
+                "terms": (legacy_template_plan.params.get("material_name"),),
+            }
+
+    carbon_source_terms = _recipe_terms(slots, "carbon_source")
+    if decision.legacy_route == "community":
+        return "community_find_by_term", {"terms": _terms_from_slots(slots)}
+    if bool(slots.get("count_signal")) and carbon_source_terms:
+        return "count_by_structured_field", {"field": "recipe.carbon_source", "carbon_source_terms": carbon_source_terms}
+    if carbon_source_terms:
+        return "list_by_carbon_source", {"carbon_source_terms": carbon_source_terms}
+
+    process_terms = _process_terms(slots)
+    if process_terms:
+        return "list_by_process_method", {"process_terms": process_terms}
+
+    property_field = str(slots.get("property_field") or "").strip()
+    if property_field:
+        return "numeric_property_query", {"property_field": property_field, "title_terms": _terms_from_slots(slots)}
+
+    raw_material_terms = _tuple_values(slots.get("raw_material_terms"))
+    if raw_material_terms:
+        return "list_by_raw_material", {"raw_material_terms": raw_material_terms}
+
+    terms = _terms_from_slots(slots)
     if terms:
-        return terms
-    fallback = str(question or "").strip().lower()
-    return [fallback] if fallback else ["lfp"]
+        return "list_by_title_or_material", {"terms": terms}
+
+    return "", {}
 
 
-def _build_candidate_queries(question: str) -> list[dict[str, object]]:
-    params = {
-        "query_terms": _extract_query_terms(question),
-        "limit": 20,
-    }
-    return [
-        {"path_id": "schema.primary", "cypher": _PRIMARY_SEARCH_CYPHER, "params": params},
-        {"path_id": "schema.support", "cypher": _SUPPORT_SEARCH_CYPHER, "params": params},
-    ]
+def _legacy_template_id(intent: str) -> str:
+    return {
+        "lookup_by_doi": "lookup_by_doi",
+        "expand_doi_context": "expand_doi_context_by_doi",
+        "list_by_title_or_material": "list_by_material",
+        "list_by_raw_material": "list_by_raw_material",
+        "count_by_structured_field": "count_by_filter",
+    }.get(intent, "")
 
 
 def build_graph_query_plan_v2(
@@ -89,48 +100,34 @@ def build_graph_query_plan_v2(
     decision: SemanticDecision,
     schema_registry: SchemaRegistry,
 ) -> GraphQueryPlanV2 | None:
-    strategy = select_query_strategy(question=question, decision=decision)
-    if strategy is None:
+    _ = schema_registry
+    if decision.mode == "skip_graph":
         return None
 
-    if strategy == "template":
-        legacy_template_plan = build_legacy_template_query_plan(question)
-        if legacy_template_plan is None:
-            return None
-        return GraphQueryPlanV2(
-            strategy="template",
-            intent=legacy_template_plan.template_id,
-            question=question,
-            legacy_template_id=legacy_template_plan.template_id,
-            legacy_template_plan=legacy_template_plan,
-            diagnostics={"legacy_route": decision.legacy_route},
-        )
+    intent, template_slots = _intent_and_template_slots(question, decision)
+    if not intent:
+        return None
 
-    summary = schema_registry.summarize_for_planner(intent=decision.legacy_route)
-    if strategy == "parametric" and can_build_parametric_query(question=question, decision=decision):
-        return GraphQueryPlanV2(
-            strategy="parametric",
-            intent="legacy_precise_parametric",
-            question=question,
-            parametric_slots={
-                "question": question,
-                "allowed_labels": summary.allowed_labels,
-                "allowed_relations": summary.allowed_relations,
-                "candidate_queries": _build_candidate_queries(question),
-            },
-            diagnostics={"legacy_route": decision.legacy_route},
-        )
+    paths = build_v1_query_paths(intent=intent, slots=template_slots, limit=20)
+    if not paths:
+        return None
+
+    legacy_template_plan = build_legacy_template_query_plan(question)
+    legacy_template_id = legacy_template_plan.template_id if legacy_template_plan is not None else _legacy_template_id(intent)
+    direct_paths = any(path.direct_answer_eligible for path in paths)
+    strategy = "template" if legacy_template_plan is not None else ("parametric" if intent == "numeric_property_query" else "v1_template")
 
     return GraphQueryPlanV2(
-        strategy="llm_cypher",
-        intent="legacy_route_llm_cypher",
+        strategy=strategy,
+        intent=intent,
         question=question,
+        legacy_template_id=legacy_template_id,
+        legacy_template_plan=legacy_template_plan,
         parametric_slots={
             "question": question,
-            "schema_fields": summary.fields,
-            "allowed_labels": summary.allowed_labels,
-            "allowed_relations": summary.allowed_relations,
-            "candidate_queries": _build_candidate_queries(question),
+            "slots": template_slots,
+            "candidate_queries": _candidate_queries(paths),
+            "direct_answer_eligible": direct_paths,
         },
-        diagnostics={"legacy_route": decision.legacy_route},
+        diagnostics={"legacy_route": decision.legacy_route, "route_family": decision.route_family or decision.legacy_route},
     )

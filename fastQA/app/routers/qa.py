@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from app.core.runtime import generation_runtime_is_ready
 from app.core.sse import sse_response
+from app.modules.graph_kb.metadata import build_graph_route_metadata
 from app.modules.graph_kb.models import GraphKbExecutionResult, GraphRagPayload
 from app.modules.graph_kb.service import route_graph_kb_v2, try_graph_kb_answer
 from app.modules.qa_kb.models import QaKbRequest
@@ -737,6 +738,7 @@ def _iter_route_events(
                     generation_runtime=getattr(request.app.state, "generation_runtime", None),
                 )
                 graph_v2_metadata = _graph_v2_metadata(routing_result.diagnostics, tri_state_mode=routing_result.mode)
+                graph_v2_metadata["graph_rag_injection_enabled"] = graph_rag_injection_enabled
                 if routing_result.mode == "direct_answer" and routing_result.direct_result is not None and routing_result.direct_result.handled:
                     yield from _iter_graph_kb_events(
                         result=routing_result.direct_result,
@@ -878,14 +880,34 @@ def _iter_route_events(
 
 def _graph_v2_metadata(diagnostics: dict[str, Any] | None, *, tri_state_mode: str | None = None) -> dict[str, Any]:
     source = dict(diagnostics or {})
-    return {
-        "graph_pipeline_version": str(source.get("graph_pipeline_version") or "v2"),
-        "legacy_route_family": str(source.get("legacy_route_family") or source.get("legacy_route") or ""),
-        "tri_state_mode": str(source.get("tri_state_mode") or tri_state_mode or ""),
+    route_family = str(source.get("knowledge_route_family") or source.get("legacy_route_family") or source.get("legacy_route") or "")
+    metadata = build_graph_route_metadata(
+        route_family=route_family,
+        tri_state_mode=str(source.get("tri_state_mode") or tri_state_mode or ""),
+        strategy=str(source.get("graph_strategy") or source.get("strategy") or ""),
+        intent=str(source.get("graph_intent") or ""),
+        result_count=source.get("graph_result_count") if source.get("graph_result_count") is not None else None,
+        confidence=source.get("graph_confidence") if source.get("graph_confidence") is not None else None,
+        doi_candidates_count=source.get("graph_doi_candidates_count") if source.get("graph_doi_candidates_count") is not None else None,
+        filtered_doi_count=source.get("graph_filtered_doi_count") if source.get("graph_filtered_doi_count") is not None else None,
+        suspicious_doi_count=source.get("graph_suspicious_doi_count") if source.get("graph_suspicious_doi_count") is not None else None,
+        fallback_reason=str(source.get("graph_fallback_reason") or source.get("fallback_reason") or ""),
+        direct_answer_eligible=source.get("graph_direct_answer_eligible")
+        if source.get("graph_direct_answer_eligible") is not None
+        else None,
+        rag_injection_enabled=source.get("graph_rag_injection_enabled")
+        if source.get("graph_rag_injection_enabled") is not None
+        else None,
+        doi_source=str(source.get("doi_source") or "none"),
+        graph_pipeline_version=str(source.get("graph_pipeline_version") or "v2"),
+    )
+    metadata.update(
+        {
         "neo4j_client": str(source.get("neo4j_client") or "neo4jgraph"),
-        "doi_source": str(source.get("doi_source") or "none"),
         "legacy_template_fallback_used": bool(source.get("legacy_template_fallback_used", False)),
-    }
+        }
+    )
+    return metadata
 
 
 def _merge_graph_v2_event(event: dict[str, Any], graph_v2_metadata: dict[str, Any] | None) -> dict[str, Any]:

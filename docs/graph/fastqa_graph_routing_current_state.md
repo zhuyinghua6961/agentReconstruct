@@ -1,6 +1,6 @@
 # fastQA Graph Routing Current State
 
-> Status: exploratory notes. This document compares the current refactored code path with the desired four-route graph experience. It does not prescribe reverting to the old code shape.
+> Status: V1 implementation notes for the refactored fastQA graph path. Gateway still owns file-vs-KB routing; fastQA `kb_qa` owns the internal `precise` / `semantic` / `hybrid` / `community` knowledge route.
 
 ## Target Experience
 
@@ -62,7 +62,7 @@ This means the current system already has a tri-state graph adapter:
 | `graph_for_rag` | Graph result becomes hints/evidence for RAG. |
 | `skip_graph` | RAG proceeds without graph evidence. |
 
-This tri-state is a useful refactored foundation for the four-route experience.
+This tri-state remains the V1 execution contract for the four-route experience.
 
 ## Graph V2 Classifier
 
@@ -70,7 +70,7 @@ Relevant file:
 
 - `fastQA/app/modules/graph_kb/classifier_v2.py`
 
-Current classifier still uses legacy route names internally:
+Current classifier uses canonical route families internally:
 
 - `precise`
 - `semantic`
@@ -81,17 +81,16 @@ But it maps them into tri-state execution:
 
 | Legacy Route Family | Current Tri-State Mapping |
 | --- | --- |
-| `precise` | `direct_answer` only if an old template plan exists; otherwise `graph_for_rag`. |
-| `semantic` | `graph_for_rag` only if graph signals are present; otherwise `skip_graph`. |
+| `precise` | `direct_answer` for DOI and safe list/count plans, otherwise `graph_for_rag`. |
+| `semantic` | `skip_graph` when no graph slots exist; graph slots may seed RAG. |
 | `hybrid` | `graph_for_rag`. |
-| `community` | currently `skip_graph`. |
+| `community` | `graph_for_rag`; simple representative/profile answers may be directly rendered when explicitly direct-answer eligible. |
 
 Important current gap:
 
-- `community` is recognized but intentionally skipped.
-- Numeric precise questions without old template support usually become graph-for-RAG, not true direct structured ranking/filtering.
-- Entity detection is small and hard-coded.
-- The route family is diagnostic metadata more than a complete user-facing route.
+- DOI lookup and DOI expansion are prioritized before semantic keywords.
+- Numeric precise questions without tested parser confidence remain graph-for-RAG rather than direct rankings.
+- Route family, tri-state, strategy, intent, confidence, result count, and RAG injection status are emitted as graph metadata.
 
 ## Graph V2 Planner And Execution
 
@@ -103,29 +102,33 @@ Relevant files:
 - `fastQA/app/modules/graph_kb/guardrail.py`
 - `fastQA/app/modules/graph_kb/schema_registry.py`
 
-Current strategy selection:
+Current V1 planning:
 
-| Strategy | Current Meaning |
+| Strategy | Meaning |
 | --- | --- |
-| `template` | Use older hard-coded graph templates when available. |
-| `parametric` | Use built-in candidate queries for precise numeric signals. |
-| `llm_cypher` | Strategy name exists, but current planner still supplies built-in candidate queries; this is not a fully restored free-form LLM Cypher path. |
+| `template` | Use older proven legacy template execution when still available. |
+| `v1_template` | Use explicit route-specific Cypher paths from `query_templates.py`. |
+| `parametric` | Use explicit numeric-property V1 templates for graph-for-RAG evidence. |
 
-Current built-in candidate queries are broad search queries over:
+V1 explicit query templates cover:
 
-- DOI/title
-- raw materials
-- sample names
-- testing
-- description
-- preparation method
+- DOI lookup and DOI context expansion
+- title/material listing
+- raw material listing
+- carbon source listing and count
+- process method listing
+- numeric property graph evidence for capacity/density/conductivity-style fields
+- community term lookup and representative/profile paths
 
-Current schema registry is much smaller than the actual graph:
+The schema registry now covers the observed field-bucket graph:
 
-- Covers DOI, title, raw materials, process method, equipment, testing, recipe, description.
-- Does not cover performance fields, recipe subfields, process parameter subfields, or `louvainCommunityId`.
+- DOI, title, sample/material names, raw materials
+- process method and process parameter child buckets
+- recipe subfields such as carbon source and doping elements
+- performance fields such as discharge capacity and compaction density
+- `louvainCommunityId` community property
 
-Implication: the current Graph V2 scaffold is structurally suitable, but its schema registry and query planner are not yet rich enough for the desired four-route behavior.
+Free-form LLM Cypher is intentionally out of scope for V1. Guardrail accepts explicit allowlisted labels/relations and rejects unbounded or unallowlisted dynamic relationship shapes.
 
 ## Current Classifier Examples
 
@@ -133,15 +136,13 @@ Read-only local checks against `classify_graph_question_v2` and `build_graph_que
 
 | Question | Legacy Route Family | Tri-State Mode | Strategy | Notes |
 | --- | --- | --- | --- | --- |
-| `压实密度最高的LFP材料有哪些？` | `precise` | `graph_for_rag` | `parametric` | Recognizes precise numeric intent, but no direct density ranking answer. |
-| `请总结LiFePO4的制备方法和测试表征` | `semantic` | `graph_for_rag` | `llm_cypher` | Graph hints may be attached, final path remains RAG. |
-| `LiFePO4的关系网络和机制关联是什么？` | `community` | `skip_graph` | none | Community route is recognized but not executed against Neo4j. |
-| `为什么碳包覆会影响LFP倍率性能？` | `semantic` | `graph_for_rag` | `llm_cypher` | Semantic question with graph/entity hints. |
-| `列出使用蔗糖作为碳源的文献` | `precise` | `graph_for_rag` | `llm_cypher` | Should target `carbon_source`, but current candidate queries are generic. |
+| `压实密度最高的LFP材料有哪些？` | `precise` | `graph_for_rag` | `parametric` | Numeric evidence is parsed/canonicalized for RAG; direct ranking remains gated. |
+| `请总结LiFePO4的制备方法和测试表征` | `precise` | `graph_for_rag` | `v1_template` | Structured graph slots seed RAG. |
+| `LiFePO4的关系网络和机制关联是什么？` | `community` | `graph_for_rag` | `v1_template` | Community route now executes graph evidence instead of unconditional skip. |
+| `为什么碳包覆会影响LFP倍率性能？` | `hybrid` | `graph_for_rag` | `parametric`/`v1_template` | Graph evidence enriches vector synthesis. |
+| `列出使用蔗糖作为碳源的文献` | `precise` | `graph_for_rag` or safe direct | `v1_template` | Targets explicit `recipe.carbon_source` path. |
 | `10.1021/jp1005692 这篇文献是什么？` | `precise` | `direct_answer` | `template` | DOI template still supports direct graph answer. |
-| `放电容量超过150 mAh/g的LFP有哪些特点？` | `hybrid` | `graph_for_rag` | `llm_cypher` | Good target for graph filter + RAG synthesis, but current planner lacks numeric capacity parsing. |
-
-The practical gap is not classification vocabulary; the names are already present. The gap is that most non-template routes do not yet have route-specific graph plans and renderers.
+| `放电容量超过150 mAh/g的LFP有哪些特点？` | `hybrid` | `graph_for_rag` | `parametric` | Capacity rows preserve original text and parser output for synthesis. |
 
 ## Graph-To-RAG Injection
 
@@ -163,7 +164,7 @@ Current injection points:
 
 There is also a graph-seeded DOI fallback in the generation orchestrator: if Stage2 vector retrieval produces no DOI but graph evidence has DOI candidates, those graph DOI candidates can seed later PDF/MD loading.
 
-Implication: the current hybrid path has the right insertion points. The main missing piece is richer, higher-confidence graph evidence.
+The hybrid/community paths now use these insertion points with richer graph evidence and route metadata.
 
 ## Current Vector Stores
 
@@ -187,10 +188,10 @@ Current route implication:
 
 | Desired Route | Current Support | Gap |
 | --- | --- | --- |
-| `precise` | Partial. Template and broad graph queries exist. | Missing field-specific planners/parsers for performance, process, recipe, and ranked numeric answers. |
-| `semantic` | Strong. Generation-driven RAG is the default KB path. | Needs cleaner handoff so semantic questions skip unnecessary graph work unless graph hints are useful. |
-| `hybrid` | Partial. `GraphRagPayload` injection exists. | Graph candidate generation is too shallow and does not yet express structured constraints well. |
-| `community` | Data exists via `louvainCommunityId`; classifier recognizes keywords. | Current V2 maps `community` to `skip_graph`; no community planner/renderer yet. |
+| `precise` | V1 implemented for DOI, list, count, recipe/process paths. | Numeric direct ranking remains gated by parser confidence and tests. |
+| `semantic` | Generation-driven RAG remains default. | Pure semantic no-slot questions skip graph. |
+| `hybrid` | V1 graph-for-RAG evidence implemented. | Final synthesis still depends on Chroma/PDF evidence. |
+| `community` | V1 graph-for-RAG community evidence implemented. | Mechanism/network explanations are synthesized by RAG, not directly rendered. |
 
 ## Feasibility Assessment
 

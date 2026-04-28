@@ -8,8 +8,11 @@ class LogicalFieldSpec:
     logical_name: str
     label: str
     relation_path: tuple[str, ...] = ()
+    property_name: str = "name"
     value_kind: str = "text"
     description: str = ""
+    direct_answer_eligible: bool = False
+    rag_eligible: bool = True
 
 
 @dataclass(frozen=True)
@@ -58,11 +61,41 @@ def build_default_schema_registry() -> SchemaRegistry:
                 relation_path=("raw_materials", "raw_materials"),
                 description="Raw material values linked through the raw_materials bucket.",
             ),
+            "material.sample_name": LogicalFieldSpec(
+                logical_name="material.sample_name",
+                label="name",
+                relation_path=("name",),
+                description="Material or sample name nodes linked to DOI nodes.",
+            ),
             "process.method": LogicalFieldSpec(
                 logical_name="process.method",
                 label="preparation_method",
                 relation_path=("process", "preparation_method"),
                 description="Preparation or process method values.",
+            ),
+            "process.calcination": LogicalFieldSpec(
+                logical_name="process.calcination",
+                label="calcination",
+                relation_path=("process", "key_process_parameters", "calcination"),
+                description="Calcination parameter values under process key parameter buckets.",
+            ),
+            "process.milling": LogicalFieldSpec(
+                logical_name="process.milling",
+                label="milling",
+                relation_path=("process", "key_process_parameters", "milling"),
+                description="Milling parameter values under process key parameter buckets.",
+            ),
+            "process.sintering": LogicalFieldSpec(
+                logical_name="process.sintering",
+                label="sintering",
+                relation_path=("process", "key_process_parameters", "sintering"),
+                description="Sintering parameter values under process key parameter buckets.",
+            ),
+            "process.drying": LogicalFieldSpec(
+                logical_name="process.drying",
+                label="drying",
+                relation_path=("process", "key_process_parameters", "drying"),
+                description="Drying parameter values under process key parameter buckets.",
             ),
             "equipment.name": LogicalFieldSpec(
                 logical_name="equipment.name",
@@ -82,6 +115,53 @@ def build_default_schema_registry() -> SchemaRegistry:
                 relation_path=("recipe", "recipe"),
                 description="Recipe or composition values stored in the graph.",
             ),
+            "recipe.carbon_source": LogicalFieldSpec(
+                logical_name="recipe.carbon_source",
+                label="carbon_source",
+                relation_path=("recipe", "carbon_source"),
+                description="Carbon source values linked through the recipe bucket.",
+                direct_answer_eligible=True,
+            ),
+            "recipe.carbon_content": LogicalFieldSpec(
+                logical_name="recipe.carbon_content",
+                label="carbon_content",
+                relation_path=("recipe", "carbon_content"),
+                description="Carbon content values linked through the recipe bucket.",
+            ),
+            "recipe.dopant": LogicalFieldSpec(
+                logical_name="recipe.dopant",
+                label="dopant",
+                relation_path=("recipe", "dopant"),
+                description="Dopant values linked through the recipe bucket.",
+            ),
+            "recipe.doping_elements": LogicalFieldSpec(
+                logical_name="recipe.doping_elements",
+                label="doping_elements",
+                relation_path=("recipe", "doping_elements"),
+                description="Doping element values linked through the recipe bucket.",
+            ),
+            "performance.discharge_capacity_child": LogicalFieldSpec(
+                logical_name="performance.discharge_capacity_child",
+                label="discharge_capacity",
+                relation_path=("name", "discharge_capacity", "discharge_capacity"),
+                value_kind="numeric_text",
+                description="Child discharge capacity values under sample-name capacity buckets.",
+            ),
+            "performance.compaction_density": LogicalFieldSpec(
+                logical_name="performance.compaction_density",
+                label="compaction_density",
+                relation_path=("name", "compaction_density"),
+                value_kind="numeric_text",
+                description="Compaction density values linked from sample-name nodes.",
+            ),
+            "community.id": LogicalFieldSpec(
+                logical_name="community.id",
+                label="",
+                property_name="louvainCommunityId",
+                value_kind="integer",
+                description="Louvain community identifier stored as a node property.",
+                direct_answer_eligible=True,
+            ),
             "description.name": LogicalFieldSpec(
                 logical_name="description.name",
                 label="description",
@@ -96,20 +176,42 @@ def build_default_schema_registry() -> SchemaRegistry:
             "raw_materials",
             "process",
             "preparation_method",
+            "key_process_parameters",
+            "calcination",
+            "milling",
+            "sintering",
+            "drying",
             "recipe",
+            "carbon_source",
+            "carbon_content",
+            "dopant",
+            "doping_elements",
             "equipment",
             "testing",
             "description",
+            "discharge_capacity",
+            "compaction_density",
         ),
         allowed_relations=(
             "title",
             "raw_materials",
             "process",
             "preparation_method",
+            "key_process_parameters",
+            "calcination",
+            "milling",
+            "sintering",
+            "drying",
             "recipe",
+            "carbon_source",
+            "carbon_content",
+            "dopant",
+            "doping_elements",
             "equipment",
             "testing",
             "description",
             "name",
+            "discharge_capacity",
+            "compaction_density",
         ),
     )

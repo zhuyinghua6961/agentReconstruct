@@ -180,6 +180,11 @@ class Settings:
     graph_kb_timeout_ms: int
     graph_kb_max_rows: int
     graph_kb_query_logging: bool
+    graph_direct_answer_min_confidence: float
+    graph_max_doi_candidates: int
+    graph_allow_suspicious_doi_for_rag: bool
+    graph_community_route_enabled: bool
+    graph_precise_numeric_enabled: bool
     allow_placeholder_fallback: bool
     file_context_fallback_enabled: bool
     ask_stream_max_concurrent: int
@@ -319,6 +324,16 @@ def get_settings() -> Settings:
         graph_kb_timeout_ms=_get_int("FASTQA_GRAPH_KB_TIMEOUT_MS", 3000, minimum=100, maximum=60000),
         graph_kb_max_rows=_get_int("FASTQA_GRAPH_KB_MAX_ROWS", 20, minimum=1, maximum=200),
         graph_kb_query_logging=_get_bool("FASTQA_GRAPH_KB_QUERY_LOGGING", False),
+        graph_direct_answer_min_confidence=_get_float(
+            "FASTQA_GRAPH_DIRECT_ANSWER_MIN_CONFIDENCE",
+            0.8,
+            minimum=0.0,
+            maximum=1.0,
+        ),
+        graph_max_doi_candidates=_get_int("FASTQA_GRAPH_MAX_DOI_CANDIDATES", 20, minimum=1, maximum=100),
+        graph_allow_suspicious_doi_for_rag=_get_bool("FASTQA_GRAPH_ALLOW_SUSPICIOUS_DOI_FOR_RAG", False),
+        graph_community_route_enabled=_get_bool("FASTQA_GRAPH_COMMUNITY_ROUTE_ENABLED", True),
+        graph_precise_numeric_enabled=_get_bool("FASTQA_GRAPH_PRECISE_NUMERIC_ENABLED", True),
         allow_placeholder_fallback=_get_bool("FASTQA_ALLOW_PLACEHOLDER_FALLBACK", True),
         file_context_fallback_enabled=_get_bool("FASTQA_ENABLE_FILE_CONTEXT_FALLBACK", True),
         ask_stream_max_concurrent=_get_int("ASK_STREAM_MAX_CONCURRENT", 20, minimum=1, maximum=500),

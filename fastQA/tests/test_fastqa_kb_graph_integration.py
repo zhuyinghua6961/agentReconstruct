@@ -142,9 +142,56 @@ def test_sync_ask_graph_v2_metadata_exposes_pipeline_version_and_legacy_route_fa
     assert response.status_code == 200
     payload = response.json()
     assert payload["metadata"]["graph_pipeline_version"] == "v2"
+    assert payload["metadata"]["knowledge_route_family"] == "precise"
     assert payload["metadata"]["legacy_route_family"] == "precise"
     assert payload["metadata"]["tri_state_mode"] == "direct_answer"
+    assert payload["metadata"]["graph_rag_injection_enabled"] is True
     assert payload["metadata"]["legacy_template_fallback_used"] is False
+
+
+def test_sync_ask_graph_v2_metadata_exposes_strategy_and_intent(monkeypatch):
+    _enable_graph_kb(monkeypatch)
+    monkeypatch.setattr(app.state, "settings", replace(app.state.settings, graph_kb_enabled=True, graph_kb_v2_enabled=True))
+    monkeypatch.setattr(qa_router_module, "generation_runtime_is_ready", lambda runtime: True)
+    app.state.generation_runtime = object()
+
+    monkeypatch.setattr(
+        qa_router_module,
+        "route_graph_kb_v2",
+        lambda **kwargs: GraphRoutingResult(
+            mode="direct_answer",
+            direct_result=GraphKbExecutionResult(
+                handled=True,
+                answer="graph v2 answer",
+                references=("10.1000/test",),
+                query_mode="graph_kb",
+                template_id="lookup_by_doi",
+                result_count=1,
+            ),
+            diagnostics={
+                "graph_pipeline_version": "v2",
+                "knowledge_route_family": "precise",
+                "legacy_route_family": "precise",
+                "tri_state_mode": "direct_answer",
+                "graph_strategy": "template",
+                "graph_intent": "lookup_by_doi",
+                "graph_result_count": 1,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        qa_router_module.qa_kb_service,
+        "iter_answer_events",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("generation path should not run")),
+    )
+
+    response = client.post("/api/ask", json=_payload())
+
+    assert response.status_code == 200
+    metadata = response.json()["metadata"]
+    assert metadata["graph_strategy"] == "template"
+    assert metadata["graph_intent"] == "lookup_by_doi"
+    assert metadata["graph_result_count"] == 1
 
 
 def test_sync_ask_graph_v2_metadata_exposes_neo4j_client_choice(monkeypatch):
@@ -288,6 +335,50 @@ def test_sync_ask_passes_graph_payload_into_generation_when_mode_is_graph_for_ra
     assert response.status_code == 200
     assert response.json()["query_mode"] == "生成驱动检索"
     assert captured["request"].graph_evidence is not None
+
+
+def test_community_route_attaches_graph_payload_to_generation(monkeypatch):
+    _enable_graph_kb(monkeypatch)
+    monkeypatch.setattr(app.state, "settings", replace(app.state.settings, graph_kb_enabled=True, graph_kb_v2_enabled=True, graph_kb_rag_injection_enabled=True))
+    monkeypatch.setattr(qa_router_module, "generation_runtime_is_ready", lambda runtime: True)
+    app.state.generation_runtime = object()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        qa_router_module,
+        "route_graph_kb_v2",
+        lambda **kwargs: GraphRoutingResult(
+            mode="graph_for_rag",
+            rag_payload=qa_router_module.GraphRagPayload(
+                stage1_context_block="graph_route: community",
+                stage2_entity_hints={"community_labels": ("LiFePO4 synthesis cluster",)},
+                stage4_fact_block="community graph facts",
+                cache_fingerprint="graph:community",
+            ),
+            diagnostics={
+                "knowledge_route_family": "community",
+                "legacy_route_family": "community",
+                "tri_state_mode": "graph_for_rag",
+                "graph_strategy": "v1_template",
+                "graph_intent": "community_find_by_term",
+            },
+        ),
+    )
+
+    def _fake_generation(**kwargs):
+        captured["request"] = kwargs["request"]
+        yield {"type": "metadata", "query_mode": "生成驱动检索", "route": "kb_qa"}
+        yield {"type": "content", "content": "community generation"}
+        yield {"type": "done", "route": "kb_qa", "references": []}
+
+    monkeypatch.setattr(qa_router_module.qa_kb_service, "iter_answer_events", _fake_generation)
+
+    response = client.post("/api/ask", json={**_payload(), "question": "LiFePO4的关系网络和机制关联是什么？"})
+
+    assert response.status_code == 200
+    assert captured["request"].graph_evidence is not None
+    assert captured["request"].graph_evidence.stage2_entity_hints["community_labels"] == ("LiFePO4 synthesis cluster",)
+    assert response.json()["metadata"]["knowledge_route_family"] == "community"
 
 
 def test_sync_ask_falls_back_to_generation_when_graph_not_handled(monkeypatch):

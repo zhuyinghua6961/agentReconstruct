@@ -9,6 +9,9 @@ from app.modules.graph_kb.schema_registry import SchemaRegistry
 _WRITE_CLAUSE_RE = re.compile(r"\b(CREATE|MERGE|DELETE|SET|REMOVE|DROP|CALL)\b", re.IGNORECASE)
 _LABEL_RE = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)")
 _REL_RE = re.compile(r"\[:([A-Za-z_][A-Za-z0-9_]*)\]")
+_DYNAMIC_REL_RE = re.compile(r"-\[\s*[A-Za-z_][A-Za-z0-9_]*\s*\]->")
+_TYPE_IN_RE = re.compile(r"type\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\)\s+IN\s*\[([^\]]*)\]", re.IGNORECASE)
+_STRING_LITERAL_RE = re.compile(r"['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]")
 
 
 def _contains_write_clause(cypher: str) -> bool:
@@ -32,6 +35,18 @@ def _find_unapproved_tokens(cypher: str, registry: SchemaRegistry) -> tuple[str,
         issues.append("label_not_allowed")
     if any(rel not in allowed_relations for rel in relations):
         issues.append("relation_not_allowed")
+    if _DYNAMIC_REL_RE.search(cypher):
+        type_lists = _TYPE_IN_RE.findall(cypher)
+        dynamic_relations = {
+            item
+            for type_list in type_lists
+            for item in _STRING_LITERAL_RE.findall(type_list)
+            if item
+        }
+        if not dynamic_relations:
+            issues.append("dynamic_relation_unbounded")
+        elif any(rel not in allowed_relations for rel in dynamic_relations):
+            issues.append("dynamic_relation_not_allowed")
     return tuple(issues)
 
 
