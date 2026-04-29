@@ -145,7 +145,9 @@ def test_sync_ask_graph_v2_metadata_exposes_pipeline_version_and_legacy_route_fa
     assert payload["metadata"]["knowledge_route_family"] == "precise"
     assert payload["metadata"]["legacy_route_family"] == "precise"
     assert payload["metadata"]["tri_state_mode"] == "direct_answer"
+    assert payload["metadata"]["graph_execution_mode"] == "direct_answer"
     assert payload["metadata"]["graph_rag_injection_enabled"] is True
+    assert payload["metadata"]["graph_rag_injected"] is False
     assert payload["metadata"]["legacy_template_fallback_used"] is False
 
 
@@ -298,6 +300,8 @@ def test_sync_ask_goes_straight_to_generation_when_mode_is_skip_graph(monkeypatc
     payload = response.json()
     assert payload["final_answer"] == "generation after skip_graph"
     assert payload["query_mode"] == "生成驱动检索"
+    assert payload["metadata"]["graph_rag_injection_enabled"] is True
+    assert payload["metadata"]["graph_rag_injected"] is False
 
 
 def test_sync_ask_passes_graph_payload_into_generation_when_mode_is_graph_for_rag(monkeypatch):
@@ -333,8 +337,54 @@ def test_sync_ask_passes_graph_payload_into_generation_when_mode_is_graph_for_ra
     response = client.post("/api/ask", json=_payload())
 
     assert response.status_code == 200
-    assert response.json()["query_mode"] == "生成驱动检索"
+    payload = response.json()
+    assert payload["query_mode"] == "生成驱动检索"
+    assert payload["metadata"]["graph_rag_injection_enabled"] is True
+    assert payload["metadata"]["graph_rag_injected"] is True
     assert captured["request"].graph_evidence is not None
+
+
+def test_sync_ask_reports_graph_payload_not_injected_when_rag_injection_disabled(monkeypatch):
+    _enable_graph_kb(monkeypatch)
+    monkeypatch.setattr(
+        app.state,
+        "settings",
+        replace(app.state.settings, graph_kb_enabled=True, graph_kb_v2_enabled=True, graph_kb_rag_injection_enabled=False),
+    )
+    monkeypatch.setattr(qa_router_module, "generation_runtime_is_ready", lambda runtime: True)
+    app.state.generation_runtime = object()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        qa_router_module,
+        "route_graph_kb_v2",
+        lambda **kwargs: GraphRoutingResult(
+            mode="graph_for_rag",
+            rag_payload=qa_router_module.GraphRagPayload(
+                stage1_context_block="doi:10.1000/test",
+                stage2_doi_candidates=("10.1000/test",),
+                stage4_fact_block="structured graph facts",
+                cache_fingerprint="graph:abc",
+            ),
+            diagnostics={"legacy_route": "semantic"},
+        ),
+    )
+
+    def _fake_generation(**kwargs):
+        captured["request"] = kwargs["request"]
+        yield {"type": "metadata", "query_mode": "生成驱动检索", "route": "kb_qa"}
+        yield {"type": "content", "content": "generation without graph evidence"}
+        yield {"type": "done", "route": "kb_qa", "references": []}
+
+    monkeypatch.setattr(qa_router_module.qa_kb_service, "iter_answer_events", _fake_generation)
+
+    response = client.post("/api/ask", json=_payload())
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert captured["request"].graph_evidence is None
+    assert payload["metadata"]["graph_rag_injection_enabled"] is False
+    assert payload["metadata"]["graph_rag_injected"] is False
 
 
 def test_community_route_attaches_graph_payload_to_generation(monkeypatch):

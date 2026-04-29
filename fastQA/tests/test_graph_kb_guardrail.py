@@ -12,6 +12,25 @@ def test_guardrail_rejects_write_cypher():
     assert "write_clause" in result.issues
 
 
+def test_guardrail_rejects_destructive_and_injection_clauses():
+    registry = build_default_schema_registry()
+    cases = [
+        ("MATCH (n) DETACH DELETE n", "write_clause"),
+        ("MATCH (n) SET n.name = 'x' RETURN n", "write_clause"),
+        ("LOAD CSV FROM 'file:///x' AS row RETURN row", "write_clause"),
+        ("CALL dbms.components() YIELD name RETURN name", "write_clause"),
+        ("MATCH (d:doi) RETURN d; MATCH (n) RETURN n", "multi_statement"),
+        ("MATCH (d:doi) RETURN d -- comment", "comment"),
+        ("MATCH (d:doi) RETURN d /* comment */", "comment"),
+    ]
+
+    for cypher, issue in cases:
+        result = inspect_cypher(cypher=cypher, registry=registry)
+
+        assert result.verdict == "reject"
+        assert issue in result.issues
+
+
 def test_guardrail_rejects_disallowed_label():
     result = inspect_cypher(
         cypher="MATCH (d:forbidden) RETURN d",
@@ -70,6 +89,7 @@ def test_all_v1_templates_pass_guardrail():
         ("list_by_process_method", {"process_terms": ("milling",)}),
         ("count_by_structured_field", {"field": "recipe.carbon_source", "carbon_source_terms": ("sucrose",)}),
         ("numeric_property_query", {"property_field": "discharge_capacity", "title_terms": ("lifepo4",)}),
+        ("hybrid_property_analysis", {"property_field": "discharge_capacity", "title_terms": ("lifepo4",)}),
         ("community_find_by_term", {"terms": ("lifepo4",)}),
         ("community_representative_titles", {"community_id": 1}),
         ("community_representative_methods", {"community_id": 1}),

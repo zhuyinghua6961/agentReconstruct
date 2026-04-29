@@ -118,7 +118,57 @@ def test_planner_community_has_community_paths():
 
     assert plan is not None
     assert plan.intent.startswith("community")
+    assert plan.strategy == "community"
     assert any("community" in path["path_id"] for path in plan.parametric_slots["candidate_queries"])
+
+
+def test_planner_hybrid_property_analysis_uses_multi_stage_strategy():
+    question = "放电容量超过150 mAh/g的LFP有哪些特点？"
+    decision = classify_graph_question_v2(question=question, conversation_context={})
+
+    plan = build_graph_query_plan_v2(question=question, decision=decision, schema_registry=build_default_schema_registry())
+
+    assert plan is not None
+    assert plan.strategy == "multi_stage"
+    assert plan.intent == "hybrid_property_analysis"
+    assert any(path["path_id"].startswith("hybrid.") for path in plan.parametric_slots["candidate_queries"])
+
+
+def test_planner_hybrid_property_analysis_preserves_ranking_and_limit_slots():
+    question = "请分析压实密度最高的前10个LiFePO4样品有哪些特点？"
+    decision = classify_graph_question_v2(question=question, conversation_context={})
+
+    plan = build_graph_query_plan_v2(question=question, decision=decision, schema_registry=build_default_schema_registry())
+
+    assert plan is not None
+    assert plan.strategy == "multi_stage"
+    slots = plan.parametric_slots["slots"]
+    assert slots["ranking"] == "top"
+    assert slots["limit"] == 10
+    assert slots["unit"] == ""
+    assert plan.parametric_slots["candidate_queries"][0]["params"]["limit"] == 50
+
+
+def test_planner_process_method_preserves_material_terms_for_target_filtering():
+    question = "LiFePO4 的制备方法有哪些？"
+    decision = classify_graph_question_v2(question=question, conversation_context={})
+
+    plan = build_graph_query_plan_v2(question=question, decision=decision, schema_registry=build_default_schema_registry())
+
+    assert plan is not None
+    assert plan.intent == "list_by_process_method"
+    slots = plan.parametric_slots["slots"]
+    assert "lifepo4" in slots["material_terms"]
+    assert plan.parametric_slots["candidate_queries"][0]["params"]["target_terms"]
+
+
+def test_planner_deferred_numeric_field_does_not_build_unverified_template():
+    question = "能量密度最高的 LFP 有哪些？"
+    decision = classify_graph_question_v2(question=question, conversation_context={})
+
+    plan = build_graph_query_plan_v2(question=question, decision=decision, schema_registry=build_default_schema_registry())
+
+    assert plan is None
 
 
 def test_semantic_no_graph_slots_returns_none():

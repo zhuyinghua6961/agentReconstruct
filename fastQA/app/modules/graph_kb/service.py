@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 import re
 from typing import Any
@@ -16,6 +17,8 @@ from app.modules.graph_kb.models import GraphKbExecutionResult, GraphKbQueryPlan
 from app.modules.graph_kb.planner_v2 import build_graph_query_plan_v2
 from app.modules.graph_kb.schema_registry import build_default_schema_registry
 
+
+logger = logging.getLogger(__name__)
 
 _GRAPH_ROW_DOI_START_RE = re.compile(r"^10\.\d{1,9}[/_]", re.IGNORECASE)
 _GRAPH_ROW_TRAILING_PUNCT_RE = re.compile(r"[.,;:]+$")
@@ -384,11 +387,52 @@ def route_graph_kb_v2(
     timeout_ms: int = 3000,
     generation_runtime: Any | None = None,
 ) -> GraphRoutingResult:
+    started = time.perf_counter()
+    logger.info(
+        "graph_kb_v2 route_start question_chars=%s max_rows=%s timeout_ms=%s graph_available=%s",
+        len(str(question or "")),
+        max_rows,
+        timeout_ms,
+        bool(getattr(neo4j_client, "graph", None) is not None and getattr(neo4j_client, "available", False)),
+    )
+
+    def _with_actual_mode(payload: dict[str, Any], mode: str) -> dict[str, Any]:
+        updated = dict(payload)
+        updated["graph_execution_mode"] = mode
+        updated["tri_state_mode"] = mode
+        return updated
+
+    classify_started = time.perf_counter()
     decision = classify_graph_question_v2(question=question, conversation_context=conversation_context or {})
+    logger.info(
+        "graph_kb_v2 classify_done mode=%s route_family=%s matched_rule=%s confidence=%.3f standalone=%s direct_eligible=%s "
+        "fallback_reason=%s slot_keys=%s latency_ms=%.3f",
+        decision.mode,
+        decision.route_family or decision.legacy_route,
+        decision.diagnostics.get("matched_rule") or "",
+        float(decision.confidence or 0.0),
+        bool(decision.standalone),
+        bool(decision.direct_answer_eligible),
+        decision.fallback_reason or "",
+        sorted([key for key, value in (decision.slots or {}).items() if value]),
+        (time.perf_counter() - classify_started) * 1000.0,
+    )
+    plan_started = time.perf_counter()
     plan = build_graph_query_plan_v2(
         question=question,
         decision=decision,
         schema_registry=build_default_schema_registry(),
+    )
+    candidate_queries = list((plan.parametric_slots.get("candidate_queries") if plan is not None else ()) or ())
+    logger.info(
+        "graph_kb_v2 plan_done strategy=%s intent=%s legacy_template_id=%s candidate_count=%s candidate_paths=%s "
+        "latency_ms=%.3f",
+        plan.strategy if plan is not None else "",
+        plan.intent if plan is not None else "",
+        plan.legacy_template_id if plan is not None else "",
+        len(candidate_queries),
+        [str(candidate.get("path_id") or "") for candidate in candidate_queries[:5]],
+        (time.perf_counter() - plan_started) * 1000.0,
     )
     diagnostics = dict(decision.diagnostics)
     route_family = str(decision.route_family or decision.legacy_route or "")
@@ -399,6 +443,8 @@ def route_graph_kb_v2(
     diagnostics["tri_state_mode"] = decision.mode
     diagnostics["neo4j_client"] = "neo4jgraph"
     diagnostics["doi_source"] = "none"
+    diagnostics["graph_attempted"] = decision.mode != "skip_graph"
+    diagnostics["graph_ready"] = bool(getattr(neo4j_client, "graph", None) is not None and getattr(neo4j_client, "available", False))
     diagnostics["legacy_template_fallback_used"] = False
     diagnostics["strategy"] = plan.strategy if plan is not None else ""
     diagnostics["graph_strategy"] = plan.strategy if plan is not None else ""
@@ -420,8 +466,14 @@ def route_graph_kb_v2(
     )
 
     if decision.mode == "skip_graph" or plan is None:
-        return GraphRoutingResult(mode="skip_graph", diagnostics=diagnostics)
+        logger.info(
+            "graph_kb_v2 route_end mode=skip_graph reason=%s latency_ms=%.3f",
+            decision.fallback_reason or ("no_plan" if plan is None else "decision_skip"),
+            (time.perf_counter() - started) * 1000.0,
+        )
+        return GraphRoutingResult(mode="skip_graph", diagnostics=_with_actual_mode(diagnostics, "skip_graph"))
 
+    execute_started = time.perf_counter()
     execution = execute_prepared_query(
         plan=plan,
         neo4j_client=neo4j_client,
@@ -429,16 +481,44 @@ def route_graph_kb_v2(
         timeout_ms=timeout_ms,
         max_path_attempts=2,
     )
+    logger.info(
+        "graph_kb_v2 executor_done strategy=%s matched_path=%s attempted_paths=%s row_count=%s fallback_reason=%s "
+        "guardrail_verdict=%s latency_ms=%.3f",
+        execution.trace.strategy,
+        execution.trace.matched_path,
+        execution.trace.attempted_paths,
+        len(tuple(execution.rows or ())),
+        execution.trace.fallback_reason,
+        execution.trace.guardrail_verdict,
+        (time.perf_counter() - execute_started) * 1000.0,
+    )
     diagnostics["matched_path"] = execution.trace.matched_path
     diagnostics["attempted_paths"] = execution.trace.attempted_paths
     diagnostics["guardrail_verdict"] = execution.trace.guardrail_verdict
     diagnostics["neo4j_client"] = execution.trace.neo4j_client
     if execution.trace.fallback_reason:
-        diagnostics["fallback_reason"] = execution.trace.fallback_reason
-        diagnostics["graph_fallback_reason"] = execution.trace.fallback_reason
+        fallback_reason = execution.trace.fallback_reason
+        if route_family == "community" and fallback_reason == "empty_result":
+            fallback_reason = "community_id_unavailable"
+        diagnostics["fallback_reason"] = fallback_reason
+        diagnostics["graph_fallback_reason"] = fallback_reason
 
+    canonicalize_started = time.perf_counter()
     bundle = canonicalize_graph_rows(plan=plan, rows=execution.rows)
     result_count = len(tuple(bundle.render_slots.get("rows") or execution.rows or ()))
+    logger.info(
+        "graph_kb_v2 canonicalize_done intent=%s result_count=%s doi_candidates=%s facts=%s constraints=%s "
+        "filtered_doi_count=%s suspicious_doi_count=%s direct_answerable=%s latency_ms=%.3f",
+        plan.intent,
+        result_count,
+        len(tuple(bundle.doi_candidates or ())),
+        len(tuple(bundle.facts or ())),
+        len(tuple(bundle.constraints_for_rag or ())),
+        int(bundle.diagnostics.get("filtered_doi_count") or 0),
+        int(bundle.diagnostics.get("suspicious_doi_count") or 0),
+        bool(bundle.direct_answerable),
+        (time.perf_counter() - canonicalize_started) * 1000.0,
+    )
     diagnostics["graph_result_count"] = result_count
     diagnostics["graph_doi_candidates_count"] = len(tuple(bundle.doi_candidates or ()))
     diagnostics["graph_filtered_doi_count"] = int(bundle.diagnostics.get("filtered_doi_count") or 0)
@@ -448,6 +528,23 @@ def route_graph_kb_v2(
         plan=plan,
         bundle=bundle,
     )
+    logger.info(
+        "graph_kb_v2 rag_payload_done context_chars=%s fact_block_chars=%s doi_candidates=%s constraints=%s "
+        "entity_hint_keys=%s cache_fingerprint=%s",
+        len(rag_payload.stage1_context_block or ""),
+        len(rag_payload.stage4_fact_block or ""),
+        len(tuple(rag_payload.stage2_doi_candidates or ())),
+        len(tuple(rag_payload.stage2_constraints or ())),
+        sorted((rag_payload.stage2_entity_hints or {}).keys()),
+        (rag_payload.cache_fingerprint or "")[:16],
+    )
+    diagnostics["latency_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
+    if execution.trace.fallback_reason == "neo4j_unavailable" and result_count == 0 and not bundle.doi_candidates and not bundle.facts:
+        logger.info(
+            "graph_kb_v2 route_end mode=skip_graph reason=neo4j_unavailable latency_ms=%.3f",
+            (time.perf_counter() - started) * 1000.0,
+        )
+        return GraphRoutingResult(mode="skip_graph", diagnostics=_with_actual_mode(diagnostics, "skip_graph"))
     if decision.mode == "direct_answer":
         direct = render_direct_answer(decision=decision, plan=plan, bundle=bundle)
         if direct.handled:
@@ -460,9 +557,38 @@ def route_graph_kb_v2(
                 result_count=result_count,
                 fallback_reason="",
             )
-            return GraphRoutingResult(mode="direct_answer", direct_result=direct_result, diagnostics=diagnostics)
+            logger.info(
+                "graph_kb_v2 direct_answer_done handled=true references=%s answer_chars=%s latency_ms=%.3f",
+                len(tuple(direct.references or ())),
+                len(direct.answer or ""),
+                (time.perf_counter() - started) * 1000.0,
+            )
+            logger.info(
+                "graph_kb_v2 route_end mode=direct_answer result_count=%s latency_ms=%.3f",
+                result_count,
+                (time.perf_counter() - started) * 1000.0,
+            )
+            return GraphRoutingResult(mode="direct_answer", direct_result=direct_result, diagnostics=_with_actual_mode(diagnostics, "direct_answer"))
         diagnostics["direct_fallback_reason"] = str(direct.metadata.get("reason") or execution.trace.fallback_reason or "render_unavailable")
         diagnostics["legacy_template_fallback_used"] = bool(plan.legacy_template_plan is not None)
-        return GraphRoutingResult(mode="graph_for_rag", rag_payload=rag_payload, diagnostics=diagnostics)
+        logger.info(
+            "graph_kb_v2 direct_answer_done handled=false reason=%s downgraded_mode=graph_for_rag latency_ms=%.3f",
+            diagnostics["direct_fallback_reason"],
+            (time.perf_counter() - started) * 1000.0,
+        )
+        logger.info(
+            "graph_kb_v2 route_end mode=graph_for_rag result_count=%s doi_candidates=%s latency_ms=%.3f",
+            result_count,
+            len(tuple(bundle.doi_candidates or ())),
+            (time.perf_counter() - started) * 1000.0,
+        )
+        return GraphRoutingResult(mode="graph_for_rag", rag_payload=rag_payload, diagnostics=_with_actual_mode(diagnostics, "graph_for_rag"))
 
-    return GraphRoutingResult(mode=decision.mode, rag_payload=rag_payload, diagnostics=diagnostics)
+    logger.info(
+        "graph_kb_v2 route_end mode=%s result_count=%s doi_candidates=%s latency_ms=%.3f",
+        decision.mode,
+        result_count,
+        len(tuple(bundle.doi_candidates or ())),
+        (time.perf_counter() - started) * 1000.0,
+    )
+    return GraphRoutingResult(mode=decision.mode, rag_payload=rag_payload, diagnostics=_with_actual_mode(diagnostics, decision.mode))

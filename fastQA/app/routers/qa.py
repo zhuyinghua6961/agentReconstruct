@@ -737,8 +737,21 @@ def _iter_route_events(
                     timeout_ms=int(getattr(getattr(request.app.state, "settings", None), "graph_kb_timeout_ms", 3000) or 3000),
                     generation_runtime=getattr(request.app.state, "generation_runtime", None),
                 )
+                logger.info(
+                    "fastqa graph kb v2 route result mode=%s intent=%s matched_rule=%s strategy=%s result_count=%s "
+                    "doi_candidates=%s latency_ms=%s fallback_reason=%s",
+                    routing_result.mode,
+                    routing_result.diagnostics.get("graph_intent") or "",
+                    routing_result.diagnostics.get("matched_rule") or "",
+                    routing_result.diagnostics.get("graph_strategy") or "",
+                    routing_result.diagnostics.get("graph_result_count"),
+                    routing_result.diagnostics.get("graph_doi_candidates_count"),
+                    routing_result.diagnostics.get("latency_ms"),
+                    routing_result.diagnostics.get("graph_fallback_reason") or routing_result.diagnostics.get("fallback_reason") or "",
+                )
                 graph_v2_metadata = _graph_v2_metadata(routing_result.diagnostics, tri_state_mode=routing_result.mode)
                 graph_v2_metadata["graph_rag_injection_enabled"] = graph_rag_injection_enabled
+                graph_v2_metadata["graph_rag_injected"] = False
                 if routing_result.mode == "direct_answer" and routing_result.direct_result is not None and routing_result.direct_result.handled:
                     yield from _iter_graph_kb_events(
                         result=routing_result.direct_result,
@@ -750,6 +763,7 @@ def _iter_route_events(
                 if routing_result.mode == "graph_for_rag" and routing_result.rag_payload is not None:
                     if graph_rag_injection_enabled:
                         graph_rag_payload = routing_result.rag_payload
+                        graph_v2_metadata["graph_rag_injected"] = True
                         logger.info("fastqa graph kb v2 attached graph_for_rag evidence to generation request")
                     else:
                         logger.info("fastqa graph kb v2 produced graph_for_rag evidence but rag injection is disabled")
@@ -880,10 +894,17 @@ def _iter_route_events(
 
 def _graph_v2_metadata(diagnostics: dict[str, Any] | None, *, tri_state_mode: str | None = None) -> dict[str, Any]:
     source = dict(diagnostics or {})
-    route_family = str(source.get("knowledge_route_family") or source.get("legacy_route_family") or source.get("legacy_route") or "")
+    route_family = str(
+        source.get("graph_route_family")
+        or source.get("knowledge_route_family")
+        or source.get("legacy_route_family")
+        or source.get("legacy_route")
+        or ""
+    )
+    execution_mode = str(source.get("graph_execution_mode") or source.get("tri_state_mode") or tri_state_mode or "")
     metadata = build_graph_route_metadata(
         route_family=route_family,
-        tri_state_mode=str(source.get("tri_state_mode") or tri_state_mode or ""),
+        tri_state_mode=execution_mode,
         strategy=str(source.get("graph_strategy") or source.get("strategy") or ""),
         intent=str(source.get("graph_intent") or ""),
         result_count=source.get("graph_result_count") if source.get("graph_result_count") is not None else None,
@@ -895,7 +916,10 @@ def _graph_v2_metadata(diagnostics: dict[str, Any] | None, *, tri_state_mode: st
         direct_answer_eligible=source.get("graph_direct_answer_eligible")
         if source.get("graph_direct_answer_eligible") is not None
         else None,
-        rag_injection_enabled=source.get("graph_rag_injection_enabled")
+        rag_injection_enabled=source.get("graph_rag_injected")
+        if source.get("graph_rag_injection_enabled") is None
+        else source.get("graph_rag_injection_enabled"),
+        rag_injected=source.get("graph_rag_injected")
         if source.get("graph_rag_injection_enabled") is not None
         else None,
         doi_source=str(source.get("doi_source") or "none"),

@@ -17,14 +17,17 @@ def build_graph_route_metadata(
     fallback_reason: str = "",
     direct_answer_eligible: bool | None = None,
     rag_injection_enabled: bool | None = None,
+    rag_injected: bool | None = None,
     doi_source: str = "none",
     graph_pipeline_version: str = "v2",
 ) -> dict[str, Any]:
     route = str(route_family or "").strip()
     payload: dict[str, Any] = {
         "graph_pipeline_version": str(graph_pipeline_version or "v2"),
+        "graph_route_family": route,
         "knowledge_route_family": route,
         "legacy_route_family": route,
+        "graph_execution_mode": str(tri_state_mode or ""),
         "tri_state_mode": str(tri_state_mode or ""),
         "graph_strategy": str(strategy or ""),
         "graph_intent": str(intent or ""),
@@ -45,4 +48,8 @@ def build_graph_route_metadata(
         payload["graph_direct_answer_eligible"] = bool(direct_answer_eligible)
     if rag_injection_enabled is not None:
         payload["graph_rag_injection_enabled"] = bool(rag_injection_enabled)
+        if rag_injected is None:
+            payload["graph_rag_injected"] = bool(rag_injection_enabled)
+    if rag_injected is not None:
+        payload["graph_rag_injected"] = bool(rag_injected)
     return payload

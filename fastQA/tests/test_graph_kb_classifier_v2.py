@@ -1,6 +1,32 @@
 from __future__ import annotations
 
+import pytest
+
 from app.modules.graph_kb.classifier_v2 import classify_graph_question_v2
+
+
+@pytest.mark.parametrize(
+    ("question", "route", "mode"),
+    [
+        ("10.1021/jp1005692 这篇文献是什么？", "precise", "direct_answer"),
+        ("10.1021/jp1005692 这篇文献的实验条件是什么？", "hybrid", "graph_for_rag"),
+        ("列出使用蔗糖作为碳源的文献", "precise", "direct_answer"),
+        ("使用 glucose 的文献有多少篇？", "precise", "direct_answer"),
+        ("LiFePO4 的制备方法有哪些？", "precise", "graph_for_rag"),
+        ("放电容量超过150 mAh/g的LFP有哪些特点？", "hybrid", "graph_for_rag"),
+        ("压实密度最高的前10个样品，它们的碳源有什么规律？", "hybrid", "graph_for_rag"),
+        ("为什么碳包覆会影响倍率性能？", "semantic", "skip_graph"),
+        ("使用葡萄糖作为碳源的文献中，哪些工艺参数影响容量？", "hybrid", "graph_for_rag"),
+        ("LFP 的关系网络和机制关联是什么？", "community", "graph_for_rag"),
+        ("按社区总结 LFP 制备路线和性能关系", "community", "graph_for_rag"),
+    ],
+)
+def test_classifier_v2_acceptance_matrix(question, route, mode):
+    decision = classify_graph_question_v2(question=question, conversation_context={})
+
+    assert decision.legacy_route == route
+    assert decision.route_family == route
+    assert decision.mode == mode
 
 
 def test_classifier_v2_preserves_commander_numeric_precise_order():

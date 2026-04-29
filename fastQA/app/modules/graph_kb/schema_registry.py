@@ -13,6 +13,9 @@ class LogicalFieldSpec:
     description: str = ""
     direct_answer_eligible: bool = False
     rag_eligible: bool = True
+    numeric_parse_supported: bool = False
+    support_tier: str = "graph_for_rag"
+    default_limit: int = 20
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,7 @@ def build_default_schema_registry() -> SchemaRegistry:
                 logical_name="paper.doi",
                 label="doi",
                 description="Primary DOI node in the legacy field-bucket graph.",
+                support_tier="direct-capable",
             ),
             "paper.title": LogicalFieldSpec(
                 logical_name="paper.title",
@@ -121,6 +125,7 @@ def build_default_schema_registry() -> SchemaRegistry:
                 relation_path=("recipe", "carbon_source"),
                 description="Carbon source values linked through the recipe bucket.",
                 direct_answer_eligible=True,
+                support_tier="direct-capable",
             ),
             "recipe.carbon_content": LogicalFieldSpec(
                 logical_name="recipe.carbon_content",
@@ -140,12 +145,25 @@ def build_default_schema_registry() -> SchemaRegistry:
                 relation_path=("recipe", "doping_elements"),
                 description="Doping element values linked through the recipe bucket.",
             ),
+            "recipe.additives": LogicalFieldSpec(
+                logical_name="recipe.additives",
+                label="additives",
+                relation_path=("recipe", "additives"),
+                description="Additive values linked through the recipe bucket when present.",
+            ),
+            "recipe.ratios": LogicalFieldSpec(
+                logical_name="recipe.ratios",
+                label="ratios",
+                relation_path=("recipe", "ratios"),
+                description="Recipe ratio values linked through the recipe bucket when present.",
+            ),
             "performance.discharge_capacity_child": LogicalFieldSpec(
                 logical_name="performance.discharge_capacity_child",
                 label="discharge_capacity",
                 relation_path=("name", "discharge_capacity", "discharge_capacity"),
                 value_kind="numeric_text",
                 description="Child discharge capacity values under sample-name capacity buckets.",
+                numeric_parse_supported=True,
             ),
             "performance.compaction_density": LogicalFieldSpec(
                 logical_name="performance.compaction_density",
@@ -153,6 +171,63 @@ def build_default_schema_registry() -> SchemaRegistry:
                 relation_path=("name", "compaction_density"),
                 value_kind="numeric_text",
                 description="Compaction density values linked from sample-name nodes.",
+                numeric_parse_supported=True,
+            ),
+            "performance.tap_density": LogicalFieldSpec(
+                logical_name="performance.tap_density",
+                label="tap_density",
+                relation_path=("name", "tap_density"),
+                value_kind="numeric_text",
+                description="Tap density values linked from sample-name nodes when present.",
+                numeric_parse_supported=True,
+            ),
+            "performance.conductivity": LogicalFieldSpec(
+                logical_name="performance.conductivity",
+                label="conductivity",
+                relation_path=("name", "conductivity"),
+                value_kind="numeric_text",
+                description="Conductivity values linked from sample-name nodes when present.",
+                numeric_parse_supported=True,
+            ),
+            "performance.cycling_stability": LogicalFieldSpec(
+                logical_name="performance.cycling_stability",
+                label="cycling_stability",
+                relation_path=("name", "cycling_stability"),
+                value_kind="numeric_text",
+                description="Cycling stability values linked from sample-name nodes.",
+                numeric_parse_supported=True,
+            ),
+            "performance.coulombic_efficiency": LogicalFieldSpec(
+                logical_name="performance.coulombic_efficiency",
+                label="coulombic_efficiency",
+                relation_path=("name", "coulombic_efficiency"),
+                value_kind="numeric_text",
+                description="Coulombic efficiency values linked from sample-name nodes when present.",
+                numeric_parse_supported=True,
+            ),
+            "performance.energy_density": LogicalFieldSpec(
+                logical_name="performance.energy_density",
+                label="energy_density",
+                relation_path=("name", "energy_density"),
+                value_kind="numeric_text",
+                description="Deferred until live schema coverage is verified.",
+                support_tier="deferred",
+            ),
+            "performance.power_density": LogicalFieldSpec(
+                logical_name="performance.power_density",
+                label="power_density",
+                relation_path=("name", "power_density"),
+                value_kind="numeric_text",
+                description="Deferred until live schema coverage is verified.",
+                support_tier="deferred",
+            ),
+            "performance.surface_area": LogicalFieldSpec(
+                logical_name="performance.surface_area",
+                label="surface_area",
+                relation_path=("name", "surface_area"),
+                value_kind="numeric_text",
+                description="Deferred until live schema coverage is verified.",
+                support_tier="deferred",
             ),
             "community.id": LogicalFieldSpec(
                 logical_name="community.id",
@@ -186,11 +261,17 @@ def build_default_schema_registry() -> SchemaRegistry:
             "carbon_content",
             "dopant",
             "doping_elements",
+            "additives",
+            "ratios",
             "equipment",
             "testing",
             "description",
             "discharge_capacity",
             "compaction_density",
+            "tap_density",
+            "conductivity",
+            "cycling_stability",
+            "coulombic_efficiency",
         ),
         allowed_relations=(
             "title",
@@ -207,11 +288,17 @@ def build_default_schema_registry() -> SchemaRegistry:
             "carbon_content",
             "dopant",
             "doping_elements",
+            "additives",
+            "ratios",
             "equipment",
             "testing",
             "description",
             "name",
             "discharge_capacity",
             "compaction_density",
+            "tap_density",
+            "conductivity",
+            "cycling_stability",
+            "coulombic_efficiency",
         ),
     )

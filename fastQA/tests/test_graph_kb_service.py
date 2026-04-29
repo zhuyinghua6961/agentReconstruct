@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
+
+import pytest
 
 from app.modules.graph_kb.models import GraphKbQueryPlan
 import app.modules.graph_kb.service as graph_kb_service
@@ -281,7 +284,7 @@ def test_route_graph_kb_v2_renders_direct_answer_for_legacy_template():
     assert routing_result.direct_result.references == ("10.1000/test",)
 
 
-def test_route_graph_kb_v2_preserves_expand_doi_context_direct_rendering():
+def test_route_graph_kb_v2_doi_content_question_uses_graph_for_rag():
     class _Graph:
         def query(self, cypher, params):
             _ = cypher
@@ -303,11 +306,10 @@ def test_route_graph_kb_v2_preserves_expand_doi_context_direct_rendering():
         max_rows=5,
     )
 
-    assert routing_result.mode == "direct_answer"
-    assert routing_result.direct_result is not None
-    assert "## 📄 文献信息" in routing_result.direct_result.answer
-    assert "## 🔬 测试/表征" in routing_result.direct_result.answer
-    assert "## ⚙️ 制备/工艺" in routing_result.direct_result.answer
+    assert routing_result.mode == "graph_for_rag"
+    assert routing_result.rag_payload is not None
+    assert "Context Paper" in routing_result.rag_payload.stage4_fact_block
+    assert routing_result.diagnostics["graph_route_family"] == "hybrid"
 
 
 def test_route_graph_kb_v2_preserves_raw_material_list_direct_rendering():
@@ -375,6 +377,321 @@ def test_route_graph_kb_v2_exposes_doi_filtering_metadata():
     assert routing_result.diagnostics["graph_doi_candidates_count"] == 1
     assert routing_result.diagnostics["graph_filtered_doi_count"] == 1
     assert routing_result.diagnostics["graph_suspicious_doi_count"] == 1
+
+
+def test_route_graph_kb_v2_skips_when_graph_unavailable():
+    routing_result = route_graph_kb_v2(
+        question="列出使用蔗糖作为碳源的文献",
+        conversation_context={},
+        neo4j_client=SimpleNamespace(graph=None, available=False, degraded=True),
+        max_rows=5,
+    )
+
+    assert routing_result.mode == "skip_graph"
+    assert routing_result.diagnostics["graph_fallback_reason"] == "neo4j_unavailable"
+    assert routing_result.diagnostics["graph_ready"] is False
+    assert routing_result.diagnostics["graph_execution_mode"] == "skip_graph"
+    assert routing_result.diagnostics["tri_state_mode"] == "skip_graph"
+
+
+def test_route_graph_kb_v2_direct_decline_downgrades_to_graph_for_rag():
+    class _Graph:
+        def query(self, cypher, params):
+            _ = cypher
+            _ = params
+            return [{"doi": "10.1007/s12598-", "title": "Broken", "carbon_sources": ["sucrose"]}]
+
+    routing_result = route_graph_kb_v2(
+        question="列出使用蔗糖作为碳源的文献",
+        conversation_context={},
+        neo4j_client=SimpleNamespace(graph=_Graph(), available=True, degraded=False),
+        max_rows=5,
+    )
+
+    assert routing_result.mode == "graph_for_rag"
+    assert routing_result.rag_payload is not None
+    assert routing_result.diagnostics["direct_fallback_reason"] == "suspicious_doi"
+    assert routing_result.diagnostics["graph_execution_mode"] == "graph_for_rag"
+    assert routing_result.diagnostics["tri_state_mode"] == "graph_for_rag"
+
+
+def test_route_graph_kb_v2_community_without_id_records_fallback_reason():
+    class _Graph:
+        def query(self, cypher, params):
+            _ = cypher
+            _ = params
+            return []
+
+    routing_result = route_graph_kb_v2(
+        question="LFP 的关系网络和机制关联是什么？",
+        conversation_context={},
+        neo4j_client=SimpleNamespace(graph=_Graph(), available=True, degraded=False),
+        max_rows=5,
+    )
+
+    assert routing_result.mode == "graph_for_rag"
+    assert routing_result.rag_payload is not None
+    assert routing_result.diagnostics["graph_route_family"] == "community"
+    assert routing_result.diagnostics["graph_fallback_reason"] == "community_id_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("question", "rows", "expected_route", "expected_mode"),
+    [
+        (
+            "10.1021/jp1005692 这篇文献是什么？",
+            [{"doi": "10.1021/jp1005692", "title": "Lookup Paper"}],
+            "precise",
+            "direct_answer",
+        ),
+        (
+            "列出使用蔗糖作为碳源的文献",
+            [{"doi": "10.1021/jp1005692", "title": "Carbon Paper", "carbon_sources": ["sucrose"]}],
+            "precise",
+            "direct_answer",
+        ),
+        (
+            "放电容量超过150 mAh/g的LFP有哪些特点？",
+            [{"doi": "10.1021/jp1005692", "title": "Capacity Paper", "sample_name": "LFP/C", "value": "155 mAh/g"}],
+            "hybrid",
+            "graph_for_rag",
+        ),
+        (
+            "LFP 的关系网络和机制关联是什么？",
+            [
+                {
+                    "community_id": 7,
+                    "dois": ["10.1021/jp1005692"],
+                    "titles": ["Community Paper"],
+                    "materials": ["LFP/C"],
+                    "preparation_methods": ["solid-state synthesis"],
+                }
+            ],
+            "community",
+            "graph_for_rag",
+        ),
+    ],
+)
+def test_route_graph_kb_v2_acceptance_fixture_matrix(question, rows, expected_route, expected_mode):
+    class _Graph:
+        def query(self, cypher, params):
+            _ = cypher
+            _ = params
+            return [dict(row) for row in rows]
+
+    routing_result = route_graph_kb_v2(
+        question=question,
+        conversation_context={},
+        neo4j_client=SimpleNamespace(graph=_Graph(), available=True, degraded=False),
+        max_rows=5,
+    )
+
+    assert routing_result.mode == expected_mode
+    assert routing_result.diagnostics["graph_route_family"] == expected_route
+    if expected_mode == "direct_answer":
+        assert routing_result.direct_result is not None
+        assert routing_result.direct_result.handled is True
+    else:
+        assert routing_result.rag_payload is not None
+
+
+def test_route_graph_kb_v2_hybrid_payload_includes_candidate_and_expansion_facts():
+    class _Graph:
+        def query(self, cypher, params):
+            _ = params
+            if "preparation_methods" in str(cypher) or "carbon_sources" in str(cypher):
+                return [{"doi": "10.1021/jp1005692", "preparation_methods": ["solid-state"], "carbon_sources": ["sucrose"]}]
+            return [{"doi": "10.1021/jp1005692", "title": "Capacity Paper", "sample_name": "LFP/C", "value": "155 mAh/g"}]
+
+    routing_result = route_graph_kb_v2(
+        question="放电容量超过150 mAh/g的LFP有哪些特点？",
+        conversation_context={},
+        neo4j_client=SimpleNamespace(graph=_Graph(), available=True, degraded=False),
+        max_rows=5,
+    )
+
+    assert routing_result.mode == "graph_for_rag"
+    assert routing_result.rag_payload is not None
+    fact_block = routing_result.rag_payload.stage4_fact_block
+    assert "155 mAh/g" in fact_block
+    assert "solid-state" in fact_block
+    assert "sucrose" in fact_block
+
+
+def test_route_graph_kb_v2_hybrid_filters_expansion_to_numeric_passing_dois():
+    class _Graph:
+        def query(self, cypher, params):
+            if "preparation_methods" in str(cypher) or "carbon_sources" in str(cypher):
+                return [
+                    {"doi": "10.1021/high", "preparation_methods": ["solid-state"]},
+                    {"doi": "10.1021/low", "preparation_methods": ["low-temp"]},
+                    {"doi": "10.1021/unrelated", "preparation_methods": ["unrelated"]},
+                ]
+            return [
+                {"doi": "10.1021/high", "title": "High Capacity", "sample_name": "LFP/C", "value": "155 mAh/g"},
+                {"doi": "10.1021/low", "title": "Low Capacity", "sample_name": "LFP", "value": "145 mAh/g"},
+            ]
+
+    routing_result = route_graph_kb_v2(
+        question="放电容量超过150 mAh/g的LFP有哪些特点？",
+        conversation_context={},
+        neo4j_client=SimpleNamespace(graph=_Graph(), available=True, degraded=False),
+        max_rows=10,
+    )
+
+    assert routing_result.mode == "graph_for_rag"
+    assert routing_result.rag_payload is not None
+    assert routing_result.rag_payload.stage2_doi_candidates == ("10.1021/high",)
+    fact_block = routing_result.rag_payload.stage4_fact_block
+    assert "solid-state" in fact_block
+    assert "low-temp" not in fact_block
+    assert "unrelated" not in fact_block
+
+
+def test_route_graph_kb_v2_hybrid_top_limit_orders_promoted_dois():
+    class _Graph:
+        def query(self, cypher, params):
+            _ = cypher
+            _ = params
+            return [
+                {"doi": "10.1021/mid", "title": "Mid Density", "sample_name": "LFP-2", "value": "2.4 g/cm3"},
+                {"doi": "10.1021/high", "title": "High Density", "sample_name": "LFP-1", "value": "2.6 g/cm3"},
+                {"doi": "10.1021/low", "title": "Low Density", "sample_name": "LFP-3", "value": "2.1 g/cm3"},
+            ]
+
+    routing_result = route_graph_kb_v2(
+        question="请分析压实密度最高的前2个LiFePO4样品有哪些特点？",
+        conversation_context={},
+        neo4j_client=SimpleNamespace(graph=_Graph(), available=True, degraded=False),
+        max_rows=10,
+    )
+
+    assert routing_result.mode == "graph_for_rag"
+    assert routing_result.rag_payload is not None
+    assert routing_result.rag_payload.stage2_doi_candidates == ("10.1021/high", "10.1021/mid")
+
+
+def test_route_graph_kb_v2_hybrid_top_limit_fetches_broader_candidate_pool_before_ranking():
+    captured_limits: list[int] = []
+
+    class _Graph:
+        def query(self, cypher, params):
+            captured_limits.append(int(params.get("limit") or 0))
+            rows = [
+                {"doi": "10.1021/low", "title": "Low Density", "sample_name": "LFP-3", "value": "2.1 g/cm3"},
+                {"doi": "10.1021/mid", "title": "Mid Density", "sample_name": "LFP-2", "value": "2.4 g/cm3"},
+            ]
+            if int(params.get("limit") or 0) > 2:
+                rows.append({"doi": "10.1021/high", "title": "High Density", "sample_name": "LFP-1", "value": "2.6 g/cm3"})
+            return rows
+
+    routing_result = route_graph_kb_v2(
+        question="请分析压实密度最高的前2个LiFePO4样品有哪些特点？",
+        conversation_context={},
+        neo4j_client=SimpleNamespace(graph=_Graph(), available=True, degraded=False),
+        max_rows=10,
+    )
+
+    assert captured_limits
+    assert captured_limits[0] > 2
+    assert routing_result.mode == "graph_for_rag"
+    assert routing_result.rag_payload is not None
+    assert routing_result.rag_payload.stage2_doi_candidates == ("10.1021/high", "10.1021/mid")
+
+
+def test_route_graph_kb_v2_hybrid_ranking_uses_rows_beyond_service_max_rows():
+    class _Graph:
+        def query(self, cypher, params):
+            if "candidate_dois" in params and params.get("candidate_dois"):
+                return []
+            rows = [
+                {
+                    "doi": f"10.1021/low-{index}",
+                    "title": f"Low Density {index}",
+                    "sample_name": f"LFP-{index}",
+                    "value": "2.1 g/cm3",
+                }
+                for index in range(20)
+            ]
+            rows.append({"doi": "10.1021/high", "title": "High Density", "sample_name": "LFP-high", "value": "2.8 g/cm3"})
+            return rows
+
+    routing_result = route_graph_kb_v2(
+        question="请分析压实密度最高的前2个LiFePO4样品有哪些特点？",
+        conversation_context={},
+        neo4j_client=SimpleNamespace(graph=_Graph(), available=True, degraded=False),
+        max_rows=10,
+    )
+
+    assert routing_result.mode == "graph_for_rag"
+    assert routing_result.rag_payload is not None
+    assert routing_result.rag_payload.stage2_doi_candidates[0] == "10.1021/high"
+
+
+def test_route_graph_kb_v2_process_method_uses_material_target_terms():
+    captured_params: list[dict] = []
+
+    class _Graph:
+        def query(self, cypher, params):
+            _ = cypher
+            captured_params.append(dict(params))
+            return [
+                {
+                    "doi": "10.1021/lfp",
+                    "title": "LiFePO4 process paper",
+                    "preparation_methods": ["solid-state synthesis"],
+                }
+            ]
+
+    routing_result = route_graph_kb_v2(
+        question="LiFePO4 的制备方法有哪些？",
+        conversation_context={},
+        neo4j_client=SimpleNamespace(graph=_Graph(), available=True, degraded=False),
+        max_rows=5,
+    )
+
+    assert routing_result.mode == "graph_for_rag"
+    assert routing_result.rag_payload is not None
+    assert captured_params[0]["target_terms"]
+    assert "lifepo4" in captured_params[0]["target_terms"]
+    assert "solid-state synthesis" in routing_result.rag_payload.stage4_fact_block
+
+
+def test_route_graph_kb_v2_logs_each_graph_stage_for_process_question(caplog):
+    class _Graph:
+        def query(self, cypher, params):
+            _ = cypher
+            _ = params
+            return [
+                {
+                    "doi": "10.1021/lfp",
+                    "title": "LiFePO4 process paper",
+                    "preparation_methods": ["solid-state synthesis"],
+                }
+            ]
+
+    with caplog.at_level(logging.INFO, logger="app.modules.graph_kb"):
+        routing_result = route_graph_kb_v2(
+            question="LiFePO4 的制备方法有哪些？",
+            conversation_context={},
+            neo4j_client=SimpleNamespace(graph=_Graph(), available=True, degraded=False),
+            max_rows=5,
+        )
+
+    assert routing_result.mode == "graph_for_rag"
+    assert "graph_kb_v2 route_start" in caplog.text
+    assert "graph_kb_v2 classify_done" in caplog.text
+    assert "matched_rule=process_slot_signal" in caplog.text
+    assert "graph_kb_v2 plan_done" in caplog.text
+    assert "intent=list_by_process_method" in caplog.text
+    assert "graph_kb_v2 executor_start" in caplog.text
+    assert "graph_kb_v2 candidate_execute_start" in caplog.text
+    assert "path_id=process.method" in caplog.text
+    assert "graph_kb_v2 candidate_execute_done" in caplog.text
+    assert "graph_kb_v2 executor_done" in caplog.text
+    assert "graph_kb_v2 canonicalize_done" in caplog.text
+    assert "graph_kb_v2 rag_payload_done" in caplog.text
+    assert "graph_kb_v2 route_end mode=graph_for_rag" in caplog.text
 
 
 def test_render_lookup_by_doi_answer_keeps_fixable_doi():

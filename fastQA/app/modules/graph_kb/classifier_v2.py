@@ -11,6 +11,19 @@ from app.modules.graph_kb.slots import extract_graph_slots
 _FILE_ROUTE_HINTS = {"pdf_qa", "tabular_qa", "hybrid_qa"}
 _FOLLOWUP_HINTS = ("它", "这个", "那篇", "前者", "后者", "上面那个", "最高的是哪篇")
 _SEMANTIC_KEYWORDS = ("如何", "为什么", "影响", "方法", "总结", "介绍", "趋势", "稳定", "重要")
+_DOI_CONTENT_HINTS = (
+    "实验条件",
+    "条件",
+    "测试",
+    "工艺",
+    "原料",
+    "配方",
+    "设备",
+    "容量",
+    "性能",
+    "数据",
+    "参数",
+)
 _RANKING_PATTERN = re.compile(r"(?:前\s*\d+|排名前|top\s*\d+)", re.IGNORECASE)
 
 
@@ -91,9 +104,14 @@ def _decision(
 
 def _base_route_for_slots(question: str, slots: Any, *, standalone: bool) -> SemanticDecision:
     legacy_template_plan = plan_graph_kb_query(question)
+    carbon_source_terms = tuple((slots.recipe_terms or {}).get("carbon_source") or ())
+    process_terms_present = bool(slots.process_terms)
 
     if slots.doi:
-        if slots.analysis_signal and (slots.property_field or _contains_any(question, _SEMANTIC_KEYWORDS)):
+        if (
+            (slots.analysis_signal and (slots.property_field or _contains_any(question, _SEMANTIC_KEYWORDS)))
+            or _contains_any(question, _DOI_CONTENT_HINTS)
+        ):
             return _decision(
                 mode="graph_for_rag",
                 legacy_route="hybrid",
@@ -131,6 +149,26 @@ def _base_route_for_slots(question: str, slots: Any, *, standalone: bool) -> Sem
             standalone=standalone,
             slots=slots,
             confidence=0.82,
+            direct_answer_eligible=False,
+        )
+    if carbon_source_terms and (slots.count_signal or slots.enumeration_signal):
+        return _decision(
+            mode="direct_answer",
+            legacy_route="precise",
+            matched_rule="direct_recipe_carbon_source",
+            standalone=standalone,
+            slots=slots,
+            confidence=0.82,
+            direct_answer_eligible=True,
+        )
+    if process_terms_present:
+        return _decision(
+            mode="graph_for_rag",
+            legacy_route="precise",
+            matched_rule="process_slot_signal",
+            standalone=standalone,
+            slots=slots,
+            confidence=0.78,
             direct_answer_eligible=False,
         )
     if slots.property_field:

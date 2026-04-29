@@ -31,6 +31,27 @@ def _process_terms(slots: dict[str, Any]) -> tuple[str, ...]:
     return tuple(values)
 
 
+def _numeric_policy_slots(slots: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "operator": str(slots.get("operator") or ""),
+        "threshold": slots.get("threshold"),
+        "unit": str(slots.get("unit") or ""),
+        "ranking": str(slots.get("ranking") or ""),
+        "limit": slots.get("limit"),
+    }
+
+
+def _fetch_limit(template_slots: dict[str, Any]) -> int:
+    requested_limit = template_slots.get("limit")
+    if str(template_slots.get("ranking") or "") == "top" and requested_limit is not None:
+        try:
+            parsed_limit = max(1, int(requested_limit))
+        except (TypeError, ValueError):
+            parsed_limit = 20
+        return min(max(parsed_limit * 5, 50), 100)
+    return 20
+
+
 def _terms_from_slots(slots: dict[str, Any]) -> tuple[str, ...]:
     values: list[str] = []
     for key in ("entities", "title_terms", "material_terms", "raw_material_terms"):
@@ -43,6 +64,8 @@ def _intent_and_template_slots(question: str, decision: SemanticDecision) -> tup
     legacy_template_plan = build_legacy_template_query_plan(question)
     doi = str(slots.get("doi") or "").strip()
     if doi:
+        if decision.legacy_route == "hybrid":
+            return "expand_doi_context", {"doi": doi}
         if str(slots.get("doi_intent") or "") == "expand":
             return "expand_doi_context", {"doi": doi}
         return "lookup_by_doi", {"doi": doi}
@@ -67,11 +90,18 @@ def _intent_and_template_slots(question: str, decision: SemanticDecision) -> tup
 
     process_terms = _process_terms(slots)
     if process_terms:
-        return "list_by_process_method", {"process_terms": process_terms}
+        return "list_by_process_method", {"process_terms": process_terms, "material_terms": _terms_from_slots(slots)}
 
     property_field = str(slots.get("property_field") or "").strip()
     if property_field:
-        return "numeric_property_query", {"property_field": property_field, "title_terms": _terms_from_slots(slots)}
+        numeric_slots = _numeric_policy_slots(slots)
+        if decision.legacy_route == "hybrid":
+            return "hybrid_property_analysis", {
+                "property_field": property_field,
+                "title_terms": _terms_from_slots(slots),
+                **numeric_slots,
+            }
+        return "numeric_property_query", {"property_field": property_field, "title_terms": _terms_from_slots(slots), **numeric_slots}
 
     raw_material_terms = _tuple_values(slots.get("raw_material_terms"))
     if raw_material_terms:
@@ -108,14 +138,23 @@ def build_graph_query_plan_v2(
     if not intent:
         return None
 
-    paths = build_v1_query_paths(intent=intent, slots=template_slots, limit=20)
+    paths = build_v1_query_paths(intent=intent, slots=template_slots, limit=_fetch_limit(template_slots))
     if not paths:
         return None
 
     legacy_template_plan = build_legacy_template_query_plan(question)
     legacy_template_id = legacy_template_plan.template_id if legacy_template_plan is not None else _legacy_template_id(intent)
     direct_paths = any(path.direct_answer_eligible for path in paths)
-    strategy = "template" if legacy_template_plan is not None else ("parametric" if intent == "numeric_property_query" else "v1_template")
+    if decision.legacy_route == "community":
+        strategy = "community"
+    elif decision.legacy_route == "hybrid":
+        strategy = "multi_stage"
+    elif legacy_template_plan is not None:
+        strategy = "template"
+    elif intent == "numeric_property_query":
+        strategy = "parametric"
+    else:
+        strategy = "v1_template"
 
     return GraphQueryPlanV2(
         strategy=strategy,

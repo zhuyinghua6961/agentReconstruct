@@ -72,3 +72,81 @@ def test_canonicalizer_promotes_community_representative_dois_to_candidates():
     assert bundle.doi_candidates == ("10.1039/c4ra15767b",)
     assert bundle.direct_render_dois == ("10.1039/c4ra15767b",)
     assert bundle.diagnostics["suspicious_doi_count"] == 1
+
+
+def test_canonicalizer_builds_rag_constraints_from_numeric_plan_slots():
+    plan = GraphQueryPlanV2(
+        strategy="multi_stage",
+        intent="hybrid_property_analysis",
+        parametric_slots={
+            "slots": {
+                "property_field": "discharge_capacity",
+                "operator": ">",
+                "threshold": 150,
+            }
+        },
+    )
+
+    bundle = canonicalize_graph_rows(
+        plan=plan,
+        rows=[{"doi": "10.1021/jp1005692", "title": "Valid", "value": "155 mAh/g"}],
+    )
+
+    assert any(
+        constraint.field == "performance.discharge_capacity" and constraint.operator == ">" and constraint.value == 150
+        for constraint in bundle.constraints_for_rag
+    )
+    assert bundle.entity_hints["titles"] == ("Valid",)
+
+
+def test_canonicalizer_filters_hybrid_numeric_rows_before_promoting_dois():
+    plan = GraphQueryPlanV2(
+        strategy="multi_stage",
+        intent="hybrid_property_analysis",
+        parametric_slots={
+            "slots": {
+                "property_field": "discharge_capacity",
+                "operator": ">",
+                "threshold": 150,
+            }
+        },
+    )
+
+    bundle = canonicalize_graph_rows(
+        plan=plan,
+        rows=[
+            {"doi": "10.1021/above", "title": "Above", "value": "155 mAh/g"},
+            {"doi": "10.1021/below", "title": "Below", "value": "120 mAh/g"},
+        ],
+    )
+
+    assert bundle.doi_candidates == ("10.1021/above",)
+    assert "Above" in bundle.entity_hints["titles"]
+    assert "Below" not in bundle.entity_hints["titles"]
+    assert all("below" not in fact for fact in bundle.facts)
+
+
+def test_canonicalizer_applies_top_ranking_limit_after_numeric_parse():
+    plan = GraphQueryPlanV2(
+        strategy="multi_stage",
+        intent="hybrid_property_analysis",
+        parametric_slots={
+            "slots": {
+                "property_field": "compaction_density",
+                "ranking": "top",
+                "limit": 2,
+            }
+        },
+    )
+
+    bundle = canonicalize_graph_rows(
+        plan=plan,
+        rows=[
+            {"doi": "10.1021/mid", "title": "Middle", "value": "2.4 g/cm3"},
+            {"doi": "10.1021/high", "title": "High", "value": "2.8 g/cm3"},
+            {"doi": "10.1021/low", "title": "Low", "value": "2.1 g/cm3"},
+        ],
+    )
+
+    assert bundle.doi_candidates == ("10.1021/high", "10.1021/mid")
+    assert bundle.entity_hints["titles"] == ("High", "Middle")

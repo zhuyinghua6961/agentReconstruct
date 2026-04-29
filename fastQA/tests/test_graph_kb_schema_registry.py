@@ -42,9 +42,34 @@ def test_registry_covers_v1_field_bucket_schema():
         "recipe.doping_elements",
         "performance.discharge_capacity_child",
         "performance.compaction_density",
+        "performance.tap_density",
+        "performance.conductivity",
+        "performance.cycling_stability",
+        "performance.coulombic_efficiency",
+        "recipe.carbon_content",
+        "recipe.dopant",
+        "recipe.additives",
+        "recipe.ratios",
         "community.id",
     ]:
         assert registry.get_field(field) is not None
+
+
+def test_registry_marks_direct_and_deferred_support_tiers():
+    registry = build_default_schema_registry()
+
+    carbon_source = registry.get_field("recipe.carbon_source")
+    compaction_density = registry.get_field("performance.compaction_density")
+    energy_density = registry.get_field("performance.energy_density")
+
+    assert carbon_source is not None
+    assert carbon_source.direct_answer_eligible is True
+    assert getattr(carbon_source, "support_tier") == "direct-capable"
+    assert compaction_density is not None
+    assert compaction_density.direct_answer_eligible is False
+    assert getattr(compaction_density, "numeric_parse_supported") is True
+    assert energy_density is not None
+    assert getattr(energy_density, "support_tier") == "deferred"
 
 
 def test_registry_allowlist_contains_v1_labels_and_relations():

@@ -73,7 +73,7 @@ def parse_density(value: str) -> ParsedGraphValue:
     text = _text(value)
     if _is_placeholder(text):
         return _empty(text, "placeholder")
-    match = re.search(_FLOAT_RE + r"\s*g\s*/\s*cm(?:\^?3|³)", text, re.IGNORECASE)
+    match = re.search(_FLOAT_RE + r"\s*g\s*(?:/|\s+)\s*cm\s*(?:\^?3|³|-3)", text, re.IGNORECASE)
     if match is None:
         return _empty(text)
     return ParsedGraphValue(original=text, value=_parse_float(match.group(1)), unit="g/cm3", confidence=0.9)

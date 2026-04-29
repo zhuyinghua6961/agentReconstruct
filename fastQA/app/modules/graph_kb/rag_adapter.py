@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from typing import Any
 
 from app.modules.graph_kb.models import GraphEvidenceBundle, GraphQueryPlanV2, GraphRagPayload, SemanticDecision
+
+
+logger = logging.getLogger(__name__)
 
 
 def _dedupe_preserve_order(values: list[str] | tuple[str, ...]) -> tuple[str, ...]:
@@ -65,12 +69,19 @@ def _collect_entity_hints(bundle: GraphEvidenceBundle) -> dict[str, tuple[str, .
 
 def _render_stage1_context(*, decision: SemanticDecision, plan: GraphQueryPlanV2, bundle: GraphEvidenceBundle) -> str:
     lines: list[str] = []
-    if decision.legacy_route:
-        lines.append(f"graph_route: {decision.legacy_route}")
+    route_family = str(decision.route_family or decision.legacy_route or "").strip()
+    if route_family:
+        lines.append(f"graph_route_family: {route_family}")
+    if decision.mode:
+        lines.append(f"graph_execution_mode: {decision.mode}")
     if plan.intent:
         lines.append(f"graph_intent: {plan.intent}")
     if bundle.doi_candidates:
         lines.append("graph_dois: " + ", ".join(bundle.doi_candidates[:10]))
+    if bundle.constraints_for_rag:
+        lines.append("graph_constraints:")
+        for constraint in bundle.constraints_for_rag[:10]:
+            lines.append(f"- {constraint.field} {constraint.operator} {constraint.value}")
     if bundle.facts:
         lines.append("graph_facts:")
         lines.extend(f"- {fact}" for fact in bundle.facts[:5])
@@ -81,7 +92,12 @@ def _render_stage4_fact_block(bundle: GraphEvidenceBundle) -> str:
     facts = [str(item or "").strip() for item in list(bundle.facts or []) if str(item or "").strip()]
     if not facts:
         return ""
-    return "\n".join(f"- {fact}" for fact in facts[:20])
+    return "\n".join(
+        [
+            "Graph structured facts (supplemental; cite DOI only if source evidence is loaded):",
+            *[f"- {fact}" for fact in facts[:20]],
+        ]
+    )
 
 
 def _fingerprint_payload(*, decision: SemanticDecision, plan: GraphQueryPlanV2, payload: GraphRagPayload) -> str:
@@ -117,11 +133,25 @@ def build_graph_rag_payload(
         stage4_fact_block=_render_stage4_fact_block(bundle),
         cache_fingerprint="pending",
     )
+    fingerprint = _fingerprint_payload(decision=decision, plan=plan, payload=payload)
+    logger.info(
+        "graph_kb_v2 rag_adapter_build mode=%s route_family=%s intent=%s doi_candidates=%s constraints=%s "
+        "entity_hint_keys=%s stage1_context_chars=%s stage4_fact_chars=%s cache_fingerprint=%s",
+        decision.mode,
+        decision.route_family or decision.legacy_route,
+        plan.intent,
+        len(tuple(payload.stage2_doi_candidates or ())),
+        len(tuple(payload.stage2_constraints or ())),
+        sorted((payload.stage2_entity_hints or {}).keys()),
+        len(payload.stage1_context_block or ""),
+        len(payload.stage4_fact_block or ""),
+        fingerprint[:16],
+    )
     return GraphRagPayload(
         stage1_context_block=payload.stage1_context_block,
         stage2_doi_candidates=payload.stage2_doi_candidates,
         stage2_constraints=payload.stage2_constraints,
         stage2_entity_hints=payload.stage2_entity_hints,
         stage4_fact_block=payload.stage4_fact_block,
-        cache_fingerprint=_fingerprint_payload(decision=decision, plan=plan, payload=payload),
+        cache_fingerprint=fingerprint,
     )

@@ -38,3 +38,19 @@ def test_parse_conductivity_s_cm():
 
     assert parsed.value == 1.2e-3
     assert parsed.unit == "S/cm"
+
+
+def test_parse_density_space_separated_g_cm_minus_three():
+    parsed = parse_density("2.41 g cm-3")
+
+    assert parsed.value == 2.41
+    assert parsed.unit == "g/cm3"
+    assert parsed.confidence >= 0.8
+
+
+def test_parse_high_capacity_without_numeric_value_has_warning():
+    parsed = parse_capacity("high capacity")
+
+    assert parsed.value is None
+    assert parsed.confidence == 0
+    assert "unparsed" in parsed.warnings

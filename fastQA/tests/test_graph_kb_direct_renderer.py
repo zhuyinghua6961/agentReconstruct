@@ -81,3 +81,89 @@ def test_doi_lookup_with_suspicious_doi_does_not_render_directly():
 
     assert not result.handled
     assert result.metadata["reason"] == "suspicious_doi"
+
+
+def test_renders_process_method_bounded_list_direct_answer():
+    decision = SemanticDecision(mode="direct_answer", legacy_route="precise")
+    plan = GraphQueryPlanV2(strategy="route_template", intent="list_by_process_method")
+    bundle = GraphEvidenceBundle(
+        doi_candidates=("10.1021/jp1005692",),
+        direct_render_dois=("10.1021/jp1005692",),
+        render_slots={
+            "rows": [
+                {
+                    "doi": "10.1021/jp1005692",
+                    "title": "Example title",
+                    "preparation_methods": ["solid-state synthesis"],
+                }
+            ]
+        },
+    )
+
+    result = render_direct_answer(decision=decision, plan=plan, bundle=bundle)
+
+    assert result.handled
+    assert "solid-state synthesis" in result.answer
+    assert "按工艺查文献" in result.answer
+
+
+def test_numeric_high_confidence_rows_render_preserving_original_value():
+    decision = SemanticDecision(mode="direct_answer", legacy_route="precise")
+    plan = GraphQueryPlanV2(strategy="route_template", intent="numeric_property_query")
+    bundle = GraphEvidenceBundle(
+        doi_candidates=("10.1021/jp1005692",),
+        direct_render_dois=("10.1021/jp1005692",),
+        render_slots={
+            "rows": [
+                {
+                    "doi": "10.1021/jp1005692",
+                    "title": "Example title",
+                    "sample_name": "LFP/C",
+                    "original_value": "0.5C_initial_155 mAh/g",
+                    "parsed_value": 155,
+                    "parsed_unit": "mAh/g",
+                    "parser_confidence": 0.9,
+                }
+            ]
+        },
+    )
+
+    result = render_direct_answer(decision=decision, plan=plan, bundle=bundle)
+
+    assert result.handled
+    assert "0.5C_initial_155 mAh/g" in result.answer
+    assert "LFP/C" in result.answer
+
+
+def test_numeric_mixed_confidence_rows_downgrade_direct_answer():
+    decision = SemanticDecision(mode="direct_answer", legacy_route="precise")
+    plan = GraphQueryPlanV2(strategy="route_template", intent="numeric_property_query")
+    bundle = GraphEvidenceBundle(
+        doi_candidates=("10.1021/jp1005692", "10.1021/jp1005693"),
+        direct_render_dois=("10.1021/jp1005692", "10.1021/jp1005693"),
+        render_slots={
+            "rows": [
+                {
+                    "doi": "10.1021/jp1005692",
+                    "title": "High confidence",
+                    "original_value": "0.5C_initial_155 mAh/g",
+                    "parsed_value": 155,
+                    "parsed_unit": "mAh/g",
+                    "parser_confidence": 0.9,
+                },
+                {
+                    "doi": "10.1021/jp1005693",
+                    "title": "Low confidence",
+                    "original_value": "capacity around 150",
+                    "parsed_value": 150,
+                    "parsed_unit": "",
+                    "parser_confidence": 0.3,
+                },
+            ]
+        },
+    )
+
+    result = render_direct_answer(decision=decision, plan=plan, bundle=bundle)
+
+    assert not result.handled
+    assert result.metadata["reason"] == "direct_renderer_unavailable"

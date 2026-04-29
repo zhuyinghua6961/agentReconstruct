@@ -237,6 +237,24 @@ def test_stage1_planning_includes_graph_context_in_user_message():
     assert "doi:10.1000/test" in user_message
 
 
+def test_stage1_planning_graph_context_supplements_original_question():
+    client = _FakeClient('{"deep_answer":"answer","retrieval_claims":[]}')
+    run_stage1_pre_answer_and_planning(
+        user_question="放电容量超过150 mAh/g的LFP有哪些特点？",
+        stage1_prompt="prompt",
+        vector_db_context="context",
+        client=client,
+        model="gpt-test",
+        logger=_Logger(),
+        graph_context="graph_route_family: hybrid\ngraph_execution_mode: graph_for_rag",
+    )
+
+    user_message = client.calls[0]["messages"][1]["content"]
+    assert "图谱结构化线索" in user_message
+    assert "graph_route_family: hybrid" in user_message
+    assert "用户问题：放电容量超过150 mAh/g的LFP有哪些特点？" in user_message
+
+
 def test_stage1_planning_does_not_retry_without_response_format_for_unrelated_errors():
     client = _AlwaysFailingClient('ignored')
     result = run_stage1_pre_answer_and_planning(

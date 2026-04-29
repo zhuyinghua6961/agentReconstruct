@@ -351,6 +351,47 @@ def test_orchestrator_uses_graph_seeded_doi_fallback_when_stage2_has_no_doi():
     assert result.raw["dois"] == ["10.1000/test"]
 
 
+def test_orchestrator_graph_seeded_doi_can_use_md_only_source_evidence():
+    runtime = _Runtime(
+        stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]},
+        stage2_payload={"success": True, "documents": [], "metadatas": [], "distances": []},
+        doi_payload=[],
+        stage25_payload={
+            "enabled": True,
+            "applied": True,
+            "md_chunks_by_doi": {"10.1000/test": [{"doi": "10.1000/test", "text": "md evidence"}]},
+            "stats": {"hit_doi_count": 1, "total_md_chunks": 1},
+        },
+        stage3_payload={},
+        stage4_payload=[{"success": True, "final_answer": "final", "references": [{"doi": "10.1000/test"}]}],
+    )
+    orchestrator = GenerationPipelineOrchestrator(
+        evaluate_stage3_pdf_skip_fn=lambda **_kwargs: {
+            "should_skip": True,
+            "reason": "md_evidence_threshold",
+            "hit_doi_count": 1,
+            "total_md_chunks": 1,
+        }
+    )
+
+    result = orchestrator.run(
+        question="hello",
+        runtime=runtime,
+        redis_service=None,
+        n_results_per_claim=5,
+        should_cancel=None,
+        active_stream_count=None,
+        logger=_logger(),
+        graph_evidence=GraphRagPayload(stage2_doi_candidates=("10.1000/test",), cache_fingerprint="graph:abc"),
+    )
+
+    assert result.success is True
+    assert result.raw["doi_source"] == "graph_seeded"
+    assert result.raw["pdf_chunks"] == {"10.1000/test": [{"doi": "10.1000/test", "text": "md evidence"}]}
+    assert result.metadata.stage3_pdf_skipped is True
+    assert result.metadata.query_mode == "生成驱动检索（MD直读）"
+
+
 def test_orchestrator_model_identity_shortcut_matches_legacy_copy():
     runtime = _Runtime(
         stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]},

@@ -34,6 +34,23 @@ def _references(bundle: GraphEvidenceBundle) -> tuple[str, ...]:
     return tuple(bundle.direct_render_dois or bundle.doi_candidates or ())
 
 
+def _numeric_rows_are_direct_safe(rows: list[dict[str, Any]]) -> bool:
+    if not rows:
+        return False
+    for row in rows:
+        try:
+            confidence = float(row.get("parser_confidence") or 0.0)
+        except (TypeError, ValueError):
+            return False
+        if confidence < 0.8:
+            return False
+        if row.get("parsed_value") is None:
+            return False
+        if not _clean_text(row.get("parsed_unit")):
+            return False
+    return True
+
+
 def _legacy_params(plan: GraphQueryPlanV2) -> dict[str, Any]:
     return dict((plan.legacy_template_plan.params if plan.legacy_template_plan is not None else {}) or {})
 
@@ -95,8 +112,7 @@ def render_direct_answer(
                 return DirectAnswerResult(handled=False, metadata={"reason": "suspicious_doi"})
 
     if intent == "numeric_property_query":
-        best_confidence = max((float(row.get("parser_confidence") or 0.0) for row in rows), default=0.0)
-        if best_confidence < 0.8:
+        if not _numeric_rows_are_direct_safe(rows):
             return DirectAnswerResult(handled=False, metadata={"reason": "direct_renderer_unavailable"})
 
     if not rows and intent not in {"count_by_structured_field"}:
@@ -183,6 +199,29 @@ def render_direct_answer(
         term = _clean_text(bundle.render_slots.get("term"))
         prefix = f"{term} " if term else ""
         return DirectAnswerResult(handled=True, answer=f"{prefix}{field_label} 在当前图谱中的命中文献数量为 {count} 篇。", references=references)
+
+    if intent == "numeric_property_query":
+        sections = [
+            [
+                "## 📊 数值属性结果",
+                f"- 当前展示 {len(rows)} 条图谱记录",
+                "- 查询类型：数值属性",
+            ],
+            ["## 📖 相关记录"],
+        ]
+        for index, row in enumerate(rows, start=1):
+            title = _clean_text(row.get("title")) or _clean_text(row.get("doi")) or "未知条目"
+            sections[-1].append(f"### [{index}] {title}")
+            doi = _clean_text(row.get("doi"))
+            if doi:
+                sections[-1].append(f"- DOI：{doi}")
+            sample_name = _clean_text(row.get("sample_name"))
+            if sample_name:
+                sections[-1].append(f"- 样品：{sample_name}")
+            original_value = _clean_text(row.get("original_value") or row.get("value"))
+            if original_value:
+                sections[-1].append(f"- 原始数值：{original_value}")
+        return DirectAnswerResult(handled=True, answer=_build_markdown(sections), references=references)
 
     if intent.startswith("community"):
         label = _clean_text(bundle.render_slots.get("community_label")) or "相关文献聚类"

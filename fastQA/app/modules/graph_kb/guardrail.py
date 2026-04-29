@@ -6,7 +6,9 @@ from app.modules.graph_kb.models import GuardrailResult
 from app.modules.graph_kb.schema_registry import SchemaRegistry
 
 
-_WRITE_CLAUSE_RE = re.compile(r"\b(CREATE|MERGE|DELETE|SET|REMOVE|DROP|CALL)\b", re.IGNORECASE)
+_WRITE_CLAUSE_RE = re.compile(r"\b(CREATE|MERGE|DELETE|DETACH|SET|REMOVE|DROP|LOAD\s+CSV|CALL\s+dbms|CALL)\b", re.IGNORECASE)
+_MULTI_STATEMENT_RE = re.compile(r";")
+_COMMENT_RE = re.compile(r"(--|//|/\*)")
 _LABEL_RE = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)")
 _REL_RE = re.compile(r"\[:([A-Za-z_][A-Za-z0-9_]*)\]")
 _DYNAMIC_REL_RE = re.compile(r"-\[\s*[A-Za-z_][A-Za-z0-9_]*\s*\]->")
@@ -52,8 +54,12 @@ def _find_unapproved_tokens(cypher: str, registry: SchemaRegistry) -> tuple[str,
 
 def inspect_cypher(*, cypher: str, registry: SchemaRegistry) -> GuardrailResult:
     normalized = str(cypher or "").strip()
+    if _MULTI_STATEMENT_RE.search(normalized):
+        return GuardrailResult(verdict="reject", issues=("multi_statement",), normalized_cypher=normalized)
     if _contains_write_clause(normalized):
         return GuardrailResult(verdict="reject", issues=("write_clause",), normalized_cypher=normalized)
+    if _COMMENT_RE.search(normalized):
+        return GuardrailResult(verdict="reject", issues=("comment",), normalized_cypher=normalized)
     issues = _find_unapproved_tokens(normalized, registry)
     if issues:
         return GuardrailResult(verdict="reject", issues=issues, normalized_cypher=normalized)

@@ -4,7 +4,7 @@ from typing import Any
 
 from app.modules.graph_kb.community_labels import build_community_label
 from app.modules.graph_kb.doi_quality import classify_doi_quality
-from app.modules.graph_kb.models import GraphEvidenceBundle, GraphQueryPlanV2
+from app.modules.graph_kb.models import GraphConstraint, GraphEvidenceBundle, GraphQueryPlanV2
 from app.modules.graph_kb.value_parsers import parse_capacity, parse_conductivity, parse_density, parse_retention
 
 
@@ -71,6 +71,109 @@ def _parse_numeric_row(row: dict[str, Any]) -> dict[str, Any]:
     return enriched
 
 
+def _constraints_from_plan(plan: GraphQueryPlanV2) -> tuple[GraphConstraint, ...]:
+    slots = plan.parametric_slots.get("slots") if isinstance(plan.parametric_slots.get("slots"), dict) else {}
+    constraints: list[GraphConstraint] = []
+    property_field = _clean(slots.get("property_field"))
+    operator = _clean(slots.get("operator"))
+    threshold = slots.get("threshold")
+    if property_field and operator and threshold is not None:
+        constraints.append(GraphConstraint(field=f"performance.{property_field}", operator=operator, value=threshold))
+
+    recipe_terms = slots.get("recipe_terms") if isinstance(slots.get("recipe_terms"), dict) else {}
+    for field, values in dict(recipe_terms or {}).items():
+        for value in tuple(values or ()):
+            text = _clean(value)
+            if text:
+                constraints.append(GraphConstraint(field=f"recipe.{field}", operator="contains", value=text))
+    return tuple(constraints)
+
+
+def _numeric_slots(plan: GraphQueryPlanV2) -> dict[str, Any]:
+    return plan.parametric_slots.get("slots") if isinstance(plan.parametric_slots.get("slots"), dict) else {}
+
+
+def _passes_numeric_operator(row: dict[str, Any], *, operator: str, threshold: Any) -> bool:
+    if not operator or threshold is None:
+        return True
+    parsed_value = row.get("parsed_value")
+    if parsed_value is None:
+        numeric_source = row.get("original_value") or row.get("value") or row.get("capacity") or row.get("density") or row.get("conductivity") or row.get("retention")
+        return not bool(_clean(numeric_source))
+    try:
+        left = float(parsed_value)
+        right = float(threshold)
+    except (TypeError, ValueError):
+        return False
+    if operator == ">":
+        return left > right
+    if operator == ">=":
+        return left >= right
+    if operator == "<":
+        return left < right
+    if operator == "<=":
+        return left <= right
+    if operator == "=":
+        return left == right
+    return True
+
+
+def _has_numeric_source(row: dict[str, Any]) -> bool:
+    if row.get("parsed_value") is not None:
+        return True
+    return any(_clean(row.get(key)) for key in ("original_value", "value", "capacity", "density", "conductivity", "retention"))
+
+
+def _apply_numeric_policy(*, plan: GraphQueryPlanV2, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if plan.intent not in {"numeric_property_query", "hybrid_property_analysis"}:
+        return rows
+    slots = _numeric_slots(plan)
+    operator = _clean(slots.get("operator"))
+    threshold = slots.get("threshold")
+    numeric_rows = [row for row in rows if _has_numeric_source(row)]
+    expansion_rows = [row for row in rows if not _has_numeric_source(row)]
+    filtered = [row for row in numeric_rows if _passes_numeric_operator(row, operator=operator, threshold=threshold)]
+    ranking = _clean(slots.get("ranking"))
+    limit = slots.get("limit")
+    if ranking == "top":
+        numeric_rows = sorted(
+            [row for row in filtered if row.get("parsed_value") is not None],
+            key=lambda row: float(row.get("parsed_value") or 0.0),
+            reverse=True,
+        )
+        unparsed_numeric_rows = [row for row in filtered if row.get("parsed_value") is None]
+        filtered = numeric_rows + unparsed_numeric_rows
+    if limit is not None:
+        try:
+            parsed_limit = max(1, int(limit))
+            numeric_rows = _dedupe_numeric_rows_for_limit(
+                [row for row in filtered if row.get("parsed_value") is not None]
+            )[:parsed_limit]
+            unparsed_numeric_rows = [row for row in filtered if row.get("parsed_value") is None]
+            filtered = numeric_rows + unparsed_numeric_rows
+        except (TypeError, ValueError):
+            pass
+    if plan.intent == "hybrid_property_analysis":
+        allowed_dois = {doi for row in filtered for doi in _row_doi_values(row)}
+        expansion_rows = [row for row in expansion_rows if any(doi in allowed_dois for doi in _row_doi_values(row))]
+    if plan.intent == "numeric_property_query":
+        return filtered + expansion_rows
+    return filtered + expansion_rows
+
+
+def _dedupe_numeric_rows_for_limit(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, ...]] = set()
+    for row in rows:
+        doi_values = _row_doi_values(row)
+        key = doi_values or (_clean(row.get("title")), _clean(row.get("sample_name")), _clean(row.get("original_value") or row.get("value")))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(row)
+    return result
+
+
 def canonicalize_graph_rows(*, plan: GraphQueryPlanV2, rows: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> GraphEvidenceBundle:
     source_rows = [dict(item or {}) for item in list(rows or []) if isinstance(item, dict)]
     canonical_rows: list[dict[str, Any]] = []
@@ -81,8 +184,13 @@ def canonicalize_graph_rows(*, plan: GraphQueryPlanV2, rows: list[dict[str, Any]
     suspicious_doi_count = 0
     invalid_doi_count = 0
 
-    for row in source_rows:
-        current = _parse_numeric_row(row) if plan.intent == "numeric_property_query" else dict(row)
+    prepared_rows = [
+        _parse_numeric_row(row) if plan.intent in {"numeric_property_query", "hybrid_property_analysis"} else dict(row)
+        for row in source_rows
+    ]
+    prepared_rows = _apply_numeric_policy(plan=plan, rows=prepared_rows)
+
+    for current in prepared_rows:
         for doi in _row_doi_values(current):
             quality = classify_doi_quality(doi)
             if quality.status == "valid":
@@ -153,7 +261,7 @@ def canonicalize_graph_rows(*, plan: GraphQueryPlanV2, rows: list[dict[str, Any]
         facts=tuple(facts),
         render_slots=render_slots,
         direct_answerable=direct_answerable,
-        constraints_for_rag=(),
+        constraints_for_rag=_constraints_from_plan(plan),
         diagnostics={
             "filtered_doi_count": len(direct_render_dois),
             "suspicious_doi_count": suspicious_doi_count,

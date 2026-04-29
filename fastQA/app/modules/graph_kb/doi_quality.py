@@ -19,6 +19,10 @@ def classify_doi_quality(value: str) -> DoiQuality:
     doi = str(value or "").strip().strip(".,;:，。；：")
     if not doi:
         return DoiQuality(doi="", status="invalid", reason="empty")
+    if doi.lower().startswith(("http://", "https://", "www.")):
+        return DoiQuality(doi=doi, status="invalid", reason="url_corrupted")
+    if doi.lower().startswith("10.") and "/" not in doi and "_" in doi:
+        doi = doi.replace("_", "/", 1)
     if "/" not in doi or not doi.lower().startswith("10."):
         return DoiQuality(doi=doi, status="invalid", reason="not_doi")
     if not _STRICT_DOI_RE.match(doi):
