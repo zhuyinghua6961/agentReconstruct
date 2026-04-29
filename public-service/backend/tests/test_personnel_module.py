@@ -882,6 +882,46 @@ def test_personnel_import_without_remarks_column_keeps_existing_remarks():
     assert repo.rows[0]["remarks"] is REMARKS_UNSET
 
 
+def test_personnel_import_accepts_chinese_template_headers_and_defaults_status_active():
+    module_spec = find_module_spec("app.modules.personnel.import_service")
+    assert module_spec is not None
+
+    from app.modules.personnel.import_service import PersonnelImportService
+
+    class FakeRepository:
+        def __init__(self) -> None:
+            self.rows = None
+
+        def import_personnel_rows(self, *, rows, sync_bound_users=True):
+            self.rows = rows
+            return {
+                "created": 1,
+                "updated": 0,
+                "details": [
+                    {
+                        "row": rows[0]["line_no"],
+                        "employee_no": rows[0]["employee_no"],
+                        "full_name": rows[0]["full_name"],
+                        "personnel_record_status": rows[0]["status"],
+                        "status": "created",
+                    }
+                ],
+            }
+
+    repo = FakeRepository()
+    service = PersonnelImportService(repository=repo, department_service=_FakeThreeLevelDepartments())
+    csv_bytes = (
+        "工号,姓名,一级部门,二级部门,三级部门,校验码,备注\n"
+        "T2024001,张三,计算机学院,软件工程系,智能软件实验室,AAA111,示例备注\n"
+    ).encode("utf-8")
+
+    result = service.import_personnel(file_bytes=csv_bytes, filename="personnel.csv")
+
+    assert result["success"] is True
+    assert repo.rows[0]["status"] == "active"
+    assert repo.rows[0]["remarks"] == "示例备注"
+
+
 def test_personnel_import_is_atomic_when_late_row_validation_fails():
     module_spec = find_module_spec("app.modules.personnel.import_service")
     assert module_spec is not None
@@ -932,7 +972,9 @@ def test_personnel_template_supports_csv_and_xlsx():
     xlsx_response = service.template_response(fmt="xlsx")
 
     assert csv_response.headers["Content-Disposition"].endswith('personnel_import_template.csv"')
-    assert "employee_no" in csv_response.body.decode("utf-8-sig")
+    first_line = csv_response.body.decode("utf-8-sig").splitlines()[0]
+    assert first_line == "工号,姓名,一级部门,二级部门,三级部门,校验码,备注"
+    assert "status" not in first_line
     assert xlsx_response.headers["Content-Disposition"].endswith('personnel_import_template.xlsx"')
     assert xlsx_response.media_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 

@@ -733,7 +733,6 @@ onMounted(async () => {
                   修改用户名
                 </button>
                 <button class="action-btn" @click="openResetPasswordModal(user)">重置密码</button>
-                <button class="action-btn" @click="openPasswordModal(user)">修改密码</button>
                 <button
                   v-if="!isAdminIdentity(user)"
                   class="action-btn"

@@ -16,17 +16,30 @@ from app.modules.personnel.service import PersonnelService, _is_db_unavailable_e
 
 logger = logging.getLogger(__name__)
 
-REQUIRED_COLUMNS = [
-    "employee_no",
-    "full_name",
-    "verification_code",
-    "status",
-    "primary_department_name",
-    "secondary_department_name",
-    "tertiary_department_name",
-]
-OPTIONAL_COLUMNS = ["remarks"]
+TEMPLATE_COLUMNS = ["工号", "姓名", "一级部门", "二级部门", "三级部门", "校验码", "备注"]
+REQUIRED_COLUMN_ALIASES = {
+    "employee_no": ("工号", "employee_no"),
+    "full_name": ("姓名", "full_name"),
+    "primary_department_name": ("一级部门", "primary_department_name"),
+    "secondary_department_name": ("二级部门", "secondary_department_name"),
+    "tertiary_department_name": ("三级部门", "tertiary_department_name"),
+    "verification_code": ("校验码", "verification_code"),
+}
+OPTIONAL_COLUMN_ALIASES = {
+    "remarks": ("备注", "remarks"),
+    "status": ("状态", "status"),
+}
+REQUIRED_COLUMNS = list(REQUIRED_COLUMN_ALIASES)
 VALID_STATUSES = {"active", "disabled"}
+STATUS_ALIASES = {
+    "active": "active",
+    "enabled": "active",
+    "启用": "active",
+    "正常": "active",
+    "disabled": "disabled",
+    "停用": "disabled",
+    "禁用": "disabled",
+}
 
 
 class PersonnelImportService:
@@ -47,6 +60,42 @@ class PersonnelImportService:
     def _clean_text(value: object) -> str:
         return str(value or "").strip()
 
+    @staticmethod
+    def _normalize_column_name(value: object) -> str:
+        return str(value or "").strip().lower()
+
+    def _match_column(self, normalized: dict[str, Any], aliases: tuple[str, ...]) -> Any | None:
+        for alias in aliases:
+            normalized_alias = self._normalize_column_name(alias)
+            if normalized_alias in normalized:
+                return normalized[normalized_alias]
+        return None
+
+    def _resolve_import_columns(self, columns: list[Any]) -> tuple[dict[str, Any], list[str]]:
+        normalized = {self._normalize_column_name(col): col for col in columns}
+        resolved: dict[str, Any] = {}
+        missing: list[str] = []
+
+        for canonical, aliases in REQUIRED_COLUMN_ALIASES.items():
+            matched = self._match_column(normalized, aliases)
+            if matched is None:
+                missing.append(str(aliases[0]))
+            else:
+                resolved[canonical] = matched
+
+        for canonical, aliases in OPTIONAL_COLUMN_ALIASES.items():
+            matched = self._match_column(normalized, aliases)
+            if matched is not None:
+                resolved[canonical] = matched
+
+        return resolved, missing
+
+    def _normalize_status(self, value: object) -> str:
+        status = self._clean_text(value).lower()
+        if not status:
+            return "active"
+        return STATUS_ALIASES.get(status, status)
+
     def _validate_rows(
         self,
         *,
@@ -54,7 +103,7 @@ class PersonnelImportService:
         employee_no_col: str,
         full_name_col: str,
         verification_code_col: str,
-        status_col: str,
+        status_col: str | None,
         primary_department_name_col: str,
         secondary_department_name_col: str,
         tertiary_department_name_col: str,
@@ -66,7 +115,7 @@ class PersonnelImportService:
             employee_no = self._clean_text(row.get(employee_no_col))
             full_name = self._clean_text(row.get(full_name_col))
             verification_code = self._clean_text(row.get(verification_code_col))
-            status = self._clean_text(row.get(status_col)).lower()
+            status = self._normalize_status(row.get(status_col) if status_col else "")
             primary_department_name = self._clean_text(row.get(primary_department_name_col))
             secondary_department_name = self._clean_text(row.get(secondary_department_name_col))
             tertiary_department_name = self._clean_text(row.get(tertiary_department_name_col))
@@ -81,7 +130,7 @@ class PersonnelImportService:
             if status not in VALID_STATUSES:
                 return None, {
                     "success": False,
-                    "error": f"第 {line_no} 行状态必须是 active 或 disabled",
+                    "error": f"第 {line_no} 行状态必须是 active/disabled 或 启用/停用",
                     "code": "VALIDATION_ERROR",
                 }
             if not primary_department_name or not secondary_department_name or not tertiary_department_name:
@@ -140,19 +189,18 @@ class PersonnelImportService:
                 return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
             return {"success": False, "error": "批量导入失败", "code": "IMPORT_ERROR"}
 
-        normalized = {str(col).strip().lower(): col for col in rows["columns"]}
-        missing = [column for column in REQUIRED_COLUMNS if column not in normalized]
+        columns, missing = self._resolve_import_columns(rows["columns"])
         if missing:
             return {"success": False, "error": f"缺少必要列: {', '.join(missing)}", "code": "VALIDATION_ERROR"}
 
-        employee_no_col = normalized["employee_no"]
-        full_name_col = normalized["full_name"]
-        verification_code_col = normalized["verification_code"]
-        status_col = normalized["status"]
-        primary_department_name_col = normalized["primary_department_name"]
-        secondary_department_name_col = normalized["secondary_department_name"]
-        tertiary_department_name_col = normalized["tertiary_department_name"]
-        remarks_col = normalized.get("remarks")
+        employee_no_col = columns["employee_no"]
+        full_name_col = columns["full_name"]
+        verification_code_col = columns["verification_code"]
+        status_col = columns.get("status")
+        primary_department_name_col = columns["primary_department_name"]
+        secondary_department_name_col = columns["secondary_department_name"]
+        tertiary_department_name_col = columns["tertiary_department_name"]
+        remarks_col = columns.get("remarks")
 
         seen_rows: dict[str, list[int]] = {}
         for index, row in enumerate(rows["items"]):
@@ -259,10 +307,10 @@ class PersonnelImportService:
         if fmt not in {"xlsx", "csv"}:
             return {"success": False, "error": "不支持的格式，只支持xlsx和csv", "code": "INVALID_FORMAT"}
 
-        headers = [*REQUIRED_COLUMNS, *OPTIONAL_COLUMNS]
+        headers = TEMPLATE_COLUMNS
         rows = [
-            ["T2024001", "张三", "ABC123", "active", "计算机学院", "软件工程系", "智能软件实验室", "化学学院"],
-            ["T2024002", "李四", "XYZ789", "disabled", "化学学院", "材料系", "高分子实验室", "材料系"],
+            ["T2024001", "张三", "计算机学院", "软件工程系", "智能软件实验室", "ABC123", "示例备注"],
+            ["T2024002", "李四", "化学学院", "材料系", "高分子实验室", "XYZ789", ""],
         ]
 
         if fmt == "csv":

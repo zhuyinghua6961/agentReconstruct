@@ -148,7 +148,7 @@ function requestClose() {
             <button class="template-btn" @click="downloadTemplate('xlsx')">下载 Excel 模板</button>
             <button class="template-btn" @click="downloadTemplate('csv')">下载 CSV 模板</button>
           </div>
-          <p class="hint">模板列固定为 employee_no、full_name、verification_code、status、remarks。</p>
+          <p class="hint">模板列固定为工号、姓名、一级部门、二级部门、三级部门、校验码、备注；导入后人员状态默认启用。</p>
         </div>
 
         <div class="upload-section">
@@ -187,11 +187,11 @@ function requestClose() {
         <div class="info-section">
           <p class="info-title">导入说明：</p>
           <ul class="info-list">
-            <li><code>employee_no</code>、<code>full_name</code>、<code>verification_code</code> 必填。</li>
-            <li><code>status</code> 只能填写 <code>active</code> 或 <code>disabled</code>。</li>
-            <li><code>remarks</code> 可留空，用于记录备注说明。</li>
-            <li>同一文件内重复的 employee_no 会导致整次导入失败。</li>
-            <li>数据库里已存在的 employee_no 会按导入值覆盖更新。</li>
+            <li>工号、姓名、一级部门、二级部门、三级部门、校验码必填。</li>
+            <li>备注可留空，用于记录补充说明。</li>
+            <li>模板不包含状态列，新导入和更新的人员状态默认启用。</li>
+            <li>同一文件内重复的工号会导致整次导入失败。</li>
+            <li>数据库里已存在的工号会按导入值覆盖更新。</li>
           </ul>
         </div>
       </div>

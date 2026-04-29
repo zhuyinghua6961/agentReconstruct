@@ -52,6 +52,12 @@ test('AdminDashboard wires username editing into user management flows', () => {
   assert.match(adminSource, /!isAdminIdentity\(user\)/)
 })
 
+test('AdminDashboard account list keeps reset password but removes direct password edit action', () => {
+  assert.match(adminSource, /重置密码/)
+  assert.match(adminSource, /openResetPasswordModal\(user\)/)
+  assert.doesNotMatch(adminSource, /@click="openPasswordModal\(user\)"/)
+})
+
 test('BatchImportDialog documents the simplified user import template without department columns', () => {
   assert.match(batchImportSource, /username、password、user_type/)
   assert.match(batchImportSource, /部门信息由绑定的人员记录同步|不再从用户导入模板填写部门/)
