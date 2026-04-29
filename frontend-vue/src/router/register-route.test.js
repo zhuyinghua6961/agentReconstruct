@@ -17,6 +17,13 @@ test('Login shows a register account entry that routes to /register', () => {
   assert.match(loginSource, /href="\/register"|to="\/register"|window\.location\.href = '\/register'/)
 })
 
+test('Login password input supports visibility toggle', () => {
+  assert.match(loginSource, /showLoginPassword/)
+  assert.match(loginSource, /password-toggle/)
+  assert.match(loginSource, /:type="showLoginPassword \? 'text' : 'password'"/)
+  assert.match(loginSource, /aria-label="显示或隐藏密码"/)
+})
+
 test('router treats /register as guest-facing and redirects authenticated users away', () => {
   assert.match(routerSource, /to\.path === '\/register'/)
   assert.match(routerSource, /currentUser\?\.role === 'admin' \? '\/admin' : '\/'/)

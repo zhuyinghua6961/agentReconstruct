@@ -8,6 +8,8 @@ const confirmPassword = ref('')
 const error = ref('')
 const success = ref('')
 const loading = ref(false)
+const showRegisterPassword = ref(false)
+const showConfirmPassword = ref(false)
 
 const employeeNoInput = ref('')
 const fullNameInput = ref('')
@@ -165,94 +167,126 @@ async function handleRegister() {
         <div v-if="error" class="alert alert-error">{{ error }}</div>
         <div v-if="success" class="alert alert-success">{{ success }}</div>
 
-        <section class="form-section">
-          <h2>账号信息</h2>
-          <div class="form-grid">
-            <div class="form-group">
-              <label>用户名</label>
-              <input v-model="username" type="text" placeholder="请输入用户名" :disabled="loading">
-            </div>
-            <div class="form-group">
-              <label>密码</label>
-              <input v-model="password" type="password" placeholder="请输入密码" :disabled="loading">
-            </div>
-            <div class="form-group full-width">
-              <label>确认密码</label>
-              <input v-model="confirmPassword" type="password" placeholder="请再次输入密码" :disabled="loading">
-            </div>
+        <div class="register-layout">
+          <div class="details-column">
+            <section class="form-section">
+              <h2>账号信息</h2>
+              <div class="form-grid">
+                <div class="form-group">
+                  <label>用户名</label>
+                  <input v-model="username" type="text" placeholder="请输入用户名" :disabled="loading">
+                </div>
+                <div class="form-group">
+                  <label>密码</label>
+                  <div class="password-input">
+                    <input
+                      v-model="password"
+                      :type="showRegisterPassword ? 'text' : 'password'"
+                      placeholder="请输入密码"
+                      :disabled="loading"
+                    >
+                    <button
+                      type="button"
+                      class="password-toggle"
+                      aria-label="显示或隐藏密码"
+                      :disabled="loading"
+                      @click="showRegisterPassword = !showRegisterPassword"
+                    >
+                      {{ showRegisterPassword ? '隐藏' : '显示' }}
+                    </button>
+                  </div>
+                </div>
+                <div class="form-group full-width">
+                  <label>确认密码</label>
+                  <div class="password-input">
+                    <input
+                      v-model="confirmPassword"
+                      :type="showConfirmPassword ? 'text' : 'password'"
+                      placeholder="请再次输入密码"
+                      :disabled="loading"
+                    >
+                    <button
+                      type="button"
+                      class="password-toggle"
+                      aria-label="显示或隐藏密码"
+                      :disabled="loading"
+                      @click="showConfirmPassword = !showConfirmPassword"
+                    >
+                      {{ showConfirmPassword ? '隐藏' : '显示' }}
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <p class="section-hint">密码至少 8 位，且数字、小写字母、大写字母、特殊符号中至少包含 3 类。</p>
+            </section>
+
+            <section class="form-section">
+              <h2>人员信息</h2>
+              <p class="section-hint personnel-hint">部门信息将根据绑定的人员记录自动带出，注册时无需单独填写。</p>
+              <div class="form-grid">
+                <div class="form-group">
+                  <label>工号</label>
+                  <input v-model="employeeNoInput" type="text" placeholder="请输入工号" :disabled="loading">
+                </div>
+                <div class="form-group">
+                  <label>姓名</label>
+                  <input v-model="fullNameInput" type="text" placeholder="请输入姓名" :disabled="loading">
+                </div>
+                <div class="form-group full-width">
+                  <label>校验码</label>
+                  <input v-model="verificationCodeInput" type="password" placeholder="请输入校验码" :disabled="loading">
+                </div>
+              </div>
+            </section>
           </div>
-          <p class="section-hint">密码要求与首次登录修改密码一致：至少 8 位，且 4 类字符至少包含 3 类。</p>
-        </section>
 
-        <section class="form-section">
-          <h2>部门同步说明</h2>
-          <p class="section-hint">部门信息将根据绑定的人员记录自动带出，注册时无需单独填写。</p>
-        </section>
-
-        <section class="form-section">
-          <h2>人员信息</h2>
-          <div class="form-grid">
-            <div class="form-group">
-              <label>工号</label>
-              <input v-model="employeeNoInput" type="text" placeholder="请输入工号" :disabled="loading">
-            </div>
-            <div class="form-group">
-              <label>姓名</label>
-              <input v-model="fullNameInput" type="text" placeholder="请输入姓名" :disabled="loading">
-            </div>
-            <div class="form-group full-width">
-              <label>校验码</label>
-              <input v-model="verificationCodeInput" type="password" placeholder="请输入校验码" :disabled="loading">
-            </div>
-          </div>
-        </section>
-
-        <section class="form-section">
-          <div class="section-title">
-            <h2>安全问题设置</h2>
-            <button
-              v-if="securityQuestions.length < 3"
-              type="button"
-              class="link-btn"
-              :disabled="loading"
-              @click="addQuestion"
-            >
-              + 添加问题
-            </button>
-          </div>
-          <p class="section-hint">至少设置 1 个，最多 3 个，注册成功后不再进入首次登录安全问题补全。</p>
-
-          <div
-            v-for="(question, index) in securityQuestions"
-            :key="`question-${index}`"
-            class="question-card"
-          >
-            <div class="question-header">
-              <span>问题 {{ index + 1 }}</span>
+          <section class="form-section security-column">
+            <div class="section-title">
+              <h2>安全问题设置</h2>
               <button
-                v-if="securityQuestions.length > 1"
+                v-if="securityQuestions.length < 3"
                 type="button"
-                class="remove-btn"
+                class="link-btn"
                 :disabled="loading"
-                @click="removeQuestion(index)"
+                @click="addQuestion"
               >
-                移除
+                添加问题
               </button>
             </div>
-            <select v-model="securityQuestions[index]" :disabled="loading">
-              <option value="">请选择安全问题</option>
-              <option v-for="pq in presetQuestions" :key="pq" :value="pq">
-                {{ pq }}
-              </option>
-            </select>
-            <input
-              v-model="securityAnswers[index]"
-              type="text"
-              placeholder="请输入答案"
-              :disabled="loading"
+            <p class="section-hint">至少设置 1 个，最多 3 个。用于找回密码。</p>
+
+            <div
+              v-for="(question, index) in securityQuestions"
+              :key="`question-${index}`"
+              class="question-card"
             >
-          </div>
-        </section>
+              <div class="question-header">
+                <span>问题 {{ index + 1 }}</span>
+                <button
+                  v-if="securityQuestions.length > 1"
+                  type="button"
+                  class="remove-btn"
+                  :disabled="loading"
+                  @click="removeQuestion(index)"
+                >
+                  移除
+                </button>
+              </div>
+              <select v-model="securityQuestions[index]" :disabled="loading">
+                <option value="">请选择安全问题</option>
+                <option v-for="pq in presetQuestions" :key="pq" :value="pq">
+                  {{ pq }}
+                </option>
+              </select>
+              <input
+                v-model="securityAnswers[index]"
+                type="text"
+                placeholder="请输入答案"
+                :disabled="loading"
+              >
+            </div>
+          </section>
+        </div>
 
         <button type="submit" class="submit-btn" :disabled="loading">
           {{ loading ? '注册中...' : '注册并进入系统' }}
@@ -272,56 +306,69 @@ async function handleRegister() {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 28px;
-  background:
-    radial-gradient(circle at top left, rgba(255, 255, 255, 0.22), transparent 34%),
-    linear-gradient(145deg, #4f7cac 0%, #6b9080 45%, #f6bd60 100%);
+  padding: 32px 20px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
 }
 
 .register-card {
-  width: min(920px, 100%);
-  background: rgba(255, 255, 255, 0.96);
-  border-radius: 24px;
-  padding: 36px;
-  box-shadow: 0 28px 80px rgba(15, 23, 42, 0.24);
-  backdrop-filter: blur(8px);
+  width: 100%;
+  max-width: 900px;
+  background: white;
+  border-radius: 16px;
+  padding: 40px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
 }
 
 .card-header {
   margin-bottom: 28px;
+  text-align: center;
 }
 
 .card-header h1 {
   margin: 0;
-  font-size: 34px;
-  color: #17324d;
+  font-size: 28px;
+  color: #1f2937;
 }
 
 .subtitle {
-  margin: 10px 0 0;
-  color: #4b5563;
+  margin: 8px 0 0;
+  color: #6b7280;
+  font-size: 14px;
 }
 
 .register-form {
   display: flex;
   flex-direction: column;
-  gap: 22px;
+  gap: 20px;
+}
+
+.register-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 20px;
+  align-items: start;
+}
+
+.details-column {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
 }
 
 .form-section {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 20px;
-  border: 1px solid #dbe4ea;
-  border-radius: 18px;
-  background: #f8fbfc;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  background: #f9fafb;
 }
 
 .form-section h2 {
   margin: 0;
-  font-size: 20px;
-  color: #17324d;
+  font-size: 18px;
+  color: #1f2937;
 }
 
 .section-title {
@@ -333,8 +380,18 @@ async function handleRegister() {
 
 .section-status,
 .section-hint {
-  color: #5f6b7a;
-  font-size: 14px;
+  margin: 0;
+  color: #6b7280;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.personnel-hint {
+  padding: 10px 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #eff6ff;
+  color: #1d4ed8;
 }
 
 .form-grid {
@@ -355,32 +412,61 @@ async function handleRegister() {
 
 label {
   font-weight: 600;
-  color: #1f2937;
+  color: #374151;
+  font-size: 14px;
 }
 
 input,
 select {
   width: 100%;
-  padding: 12px 14px;
-  border: 1px solid #c7d2da;
-  border-radius: 12px;
+  padding: 12px 16px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
   background: #fff;
-  font-size: 15px;
+  font-size: 14px;
   color: #111827;
   box-sizing: border-box;
+  transition: border-color 0.2s, box-shadow 0.2s;
 }
 
 input:focus,
 select:focus {
   outline: none;
-  border-color: #4f7cac;
-  box-shadow: 0 0 0 3px rgba(79, 124, 172, 0.14);
+  border-color: #667eea;
+  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+.password-input {
+  position: relative;
+}
+
+.password-input input {
+  padding-right: 62px;
+}
+
+.password-toggle {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: none;
+  background: transparent;
+  color: #667eea;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 4px;
+}
+
+.password-toggle:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .alert {
-  border-radius: 14px;
+  border-radius: 8px;
   padding: 12px 14px;
   font-size: 14px;
+  text-align: center;
 }
 
 .alert-error {
@@ -405,10 +491,10 @@ select:focus {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 16px;
-  border-radius: 16px;
+  padding: 14px;
+  border-radius: 10px;
   background: #ffffff;
-  border: 1px solid #d7e1e8;
+  border: 1px solid #e5e7eb;
 }
 
 .question-header {
@@ -416,30 +502,42 @@ select:focus {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  color: #17324d;
+  color: #374151;
+  font-size: 14px;
   font-weight: 600;
 }
 
 .link-btn,
 .remove-btn {
-  border: none;
-  background: none;
+  border: 1px solid #d1d5db;
+  background: white;
+  border-radius: 999px;
   color: #1d4ed8;
   cursor: pointer;
-  padding: 0;
+  padding: 5px 10px;
   font-size: 14px;
+}
+
+.link-btn:hover,
+.remove-btn:hover {
+  background: #eff6ff;
 }
 
 .submit-btn {
   width: 100%;
   border: none;
-  border-radius: 16px;
-  padding: 14px 18px;
-  background: linear-gradient(135deg, #17324d 0%, #2a6f97 100%);
+  border-radius: 8px;
+  padding: 14px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   color: #fff;
   font-size: 16px;
-  font-weight: 700;
+  font-weight: 500;
   cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.submit-btn:hover:not(:disabled) {
+  opacity: 0.9;
 }
 
 .submit-btn:disabled,
@@ -455,19 +553,28 @@ select:focus {
 }
 
 .card-footer a {
-  color: #17324d;
+  color: #6b7280;
   text-decoration: none;
-  font-weight: 600;
+  font-size: 14px;
 }
 
-@media (max-width: 768px) {
+.card-footer a:hover {
+  color: #667eea;
+}
+
+@media (max-width: 860px) {
   .register-container {
     padding: 16px;
+    align-items: flex-start;
   }
 
   .register-card {
     padding: 24px;
-    border-radius: 18px;
+    border-radius: 14px;
+  }
+
+  .register-layout {
+    grid-template-columns: 1fr;
   }
 
   .form-grid {

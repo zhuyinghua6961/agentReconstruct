@@ -6,6 +6,7 @@ const username = ref('')
 const password = ref('')
 const error = ref('')
 const loading = ref(false)
+const showLoginPassword = ref(false)
 const showPasswordWarning = ref(false)
 const passwordWarningMessage = ref('')
 const showAccountLocked = ref(false)
@@ -209,12 +210,23 @@ function goToChangePassword() {
         
         <div class="form-group">
           <label>密码</label>
-          <input 
-            type="password" 
-            v-model="password"
-            placeholder="请输入密码"
-            :disabled="loading"
-          >
+          <div class="password-input">
+            <input
+              :type="showLoginPassword ? 'text' : 'password'"
+              v-model="password"
+              placeholder="请输入密码"
+              :disabled="loading"
+            >
+            <button
+              type="button"
+              class="password-toggle"
+              aria-label="显示或隐藏密码"
+              :disabled="loading"
+              @click="showLoginPassword = !showLoginPassword"
+            >
+              {{ showLoginPassword ? '隐藏' : '显示' }}
+            </button>
+          </div>
         </div>
         
         <button type="submit" class="login-btn" :disabled="loading">
@@ -292,6 +304,34 @@ function goToChangePassword() {
   border-radius: 8px;
   font-size: 14px;
   transition: border-color 0.2s;
+}
+
+.password-input {
+  position: relative;
+}
+
+.password-input input {
+  width: 100%;
+  padding-right: 62px;
+  box-sizing: border-box;
+}
+
+.password-toggle {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: none;
+  background: transparent;
+  color: #667eea;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 4px;
+}
+
+.password-toggle:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .form-group input:focus {

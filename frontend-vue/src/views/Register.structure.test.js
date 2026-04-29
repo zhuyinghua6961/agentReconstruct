@@ -33,3 +33,18 @@ test('Register includes password confirmation and preset security question workf
   assert.match(registerSource, /securityAnswers/)
   assert.match(registerSource, /addQuestion/)
 })
+
+test('Register password fields support visibility toggles', () => {
+  assert.match(registerSource, /showRegisterPassword/)
+  assert.match(registerSource, /showConfirmPassword/)
+  assert.match(registerSource, /password-toggle/)
+  assert.match(registerSource, /:type="showRegisterPassword \? 'text' : 'password'"/)
+  assert.match(registerSource, /:type="showConfirmPassword \? 'text' : 'password'"/)
+})
+
+test('Register uses a compact two-column auth layout without a standalone department section', () => {
+  assert.match(registerSource, /register-layout/)
+  assert.match(registerSource, /security-column/)
+  assert.match(registerSource, /personnel-hint/)
+  assert.doesNotMatch(registerSource, /<h2>\s*部门同步说明\s*<\/h2>/)
+})
