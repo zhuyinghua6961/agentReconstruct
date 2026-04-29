@@ -470,6 +470,160 @@ def test_targeted_retrieval_preserves_explicit_id_resolution_without_vector_sear
     assert payload["source_ids"] == ["US20240001234A1"]
 
 
+def test_targeted_retrieval_applies_graph_candidate_patent_filter():
+    chunk_calls: list[list[str] | None] = []
+    service = PatentRetrievalService(
+        identity_registry={"CN123456789A": "CN123456789A", "US20240001234A1": "US20240001234A1"},
+        catalog_records=_catalog(),
+        retrieval_version="retrieval-v2",
+        catalog_index_version="catalog-v2",
+        abstract_vector_search=lambda question, top_k: [{"patent_id": "US20240001234A1", "abstract_score": 0.9}],
+        chunk_vector_search=lambda question, candidate_patent_ids, top_k: chunk_calls.append(list(candidate_patent_ids or [])) or [
+            {
+                "patent_id": "CN123456789A",
+                "chunk_score": 0.9,
+                "source_file": "说明书.json",
+                "json_stem": "CN123456789A",
+                "chunk_index": 1,
+                "document": "graph filtered evidence",
+            }
+        ],
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_plan=PatentRetrievalPlan(evidence_localization_queries=["graph query"]),
+        user_question="graph question",
+        context={"graph_kb": {"stage2_patent_candidates": ["CN123456789A"]}},
+    )
+
+    assert chunk_calls == [["CN123456789A"]]
+    assert payload["metadata"]["graph_stage2_behavior"] == "filter_applied"
+    assert payload["metadata"]["graph_candidate_patent_ids"] == ["CN123456789A"]
+
+
+def test_targeted_retrieval_records_graph_no_hit_fallback():
+    service = PatentRetrievalService(
+        identity_registry={"CN123456789A": "CN123456789A"},
+        catalog_records=_catalog(),
+        retrieval_version="retrieval-v2",
+        catalog_index_version="catalog-v2",
+        abstract_vector_search=lambda question, top_k: [{"patent_id": "US20240001234A1", "abstract_score": 0.9}],
+        chunk_vector_search=lambda question, candidate_patent_ids, top_k: [],
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_plan=PatentRetrievalPlan(evidence_localization_queries=["graph query"]),
+        user_question="battery thermal management",
+        context={"graph_kb": {"stage2_patent_candidates": ["CN123456789A"]}},
+    )
+
+    assert payload["metadata"]["graph_stage2_behavior"] == "fallback_no_vector_hits"
+    assert payload["metadata"]["graph_candidate_patent_ids"] == ["CN123456789A"]
+
+
+def test_targeted_retrieval_claims_path_applies_graph_candidate_filter():
+    chunk_calls: list[list[str] | None] = []
+    service = PatentRetrievalService(
+        identity_registry={"CN123456789A": "CN123456789A", "US20240001234A1": "US20240001234A1"},
+        catalog_records=_catalog(),
+        retrieval_version="retrieval-v2",
+        catalog_index_version="catalog-v2",
+        abstract_vector_search=lambda question, top_k: [
+            {"patent_id": "US20240001234A1", "abstract_score": 0.9, "document": "wrong abstract"}
+        ],
+        chunk_vector_search=lambda question, candidate_patent_ids, top_k: chunk_calls.append(list(candidate_patent_ids or [])) or [
+            {
+                "patent_id": "CN123456789A",
+                "chunk_score": 0.9,
+                "source_file": "说明书.json",
+                "json_stem": "CN123456789A",
+                "chunk_index": 1,
+                "document": "graph constrained claim evidence",
+            }
+        ],
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[PatentRetrievalClaim(claim="graph claim", keywords=["graph"])],
+        user_question="graph question",
+        query_generation_fn=lambda *, user_question, retrieval_claim: ["graph claim query"],
+        context={"graph_kb": {"stage2_patent_candidates": ["CN123456789A"]}},
+    )
+
+    assert chunk_calls == [["CN123456789A"]]
+    assert payload["references"] == ["CN123456789A"]
+    assert payload["source_ids"] == ["CN123456789A"]
+    assert payload["metadata"]["candidate_patent_ids"] == ["CN123456789A"]
+    assert payload["metadata"]["graph_stage2_behavior"] == "filter_applied"
+    assert payload["metadata"]["graph_candidate_patent_ids"] == ["CN123456789A"]
+
+
+def test_targeted_retrieval_drops_off_graph_chunk_hits_when_backend_ignores_candidates():
+    chunk_calls: list[list[str] | None] = []
+    service = PatentRetrievalService(
+        identity_registry={"CN123456789A": "CN123456789A", "US20240001234A1": "US20240001234A1"},
+        catalog_records=_catalog(),
+        retrieval_version="retrieval-v2",
+        catalog_index_version="catalog-v2",
+        abstract_vector_search=lambda question, top_k: [],
+        chunk_vector_search=lambda question, candidate_patent_ids, top_k: chunk_calls.append(list(candidate_patent_ids or [])) or [
+            {
+                "patent_id": "US20240001234A1",
+                "chunk_score": 0.9,
+                "source_file": "说明书.json",
+                "json_stem": "US20240001234A1",
+                "chunk_index": 1,
+                "document": "off graph evidence",
+            }
+        ],
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_plan=PatentRetrievalPlan(evidence_localization_queries=["graph query"]),
+        user_question="graph question",
+        context={"graph_kb": {"stage2_patent_candidates": ["CN123456789A"]}},
+    )
+
+    assert chunk_calls == [["CN123456789A"]]
+    assert payload["references"] == ["CN123456789A"]
+    assert payload["source_ids"] == ["CN123456789A"]
+    assert payload["metadata"]["graph_stage2_behavior"] == "fallback_no_vector_hits"
+    assert payload["metadata"]["graph_candidate_patent_ids"] == ["CN123456789A"]
+
+
+def test_targeted_retrieval_returns_not_found_when_graph_candidates_have_no_anchor():
+    service = PatentRetrievalService(
+        identity_registry={"CN999999999A": "CN999999999A", "US20240001234A1": "US20240001234A1"},
+        catalog_records=[_catalog()[1]],
+        retrieval_version="retrieval-v2",
+        catalog_index_version="catalog-v2",
+        abstract_vector_search=lambda question, top_k: [],
+        chunk_vector_search=lambda question, candidate_patent_ids, top_k: [
+            {
+                "patent_id": "US20240001234A1",
+                "chunk_score": 0.9,
+                "source_file": "说明书.json",
+                "json_stem": "US20240001234A1",
+                "chunk_index": 1,
+                "document": "off graph evidence",
+            }
+        ],
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_plan=PatentRetrievalPlan(evidence_localization_queries=["graph query"]),
+        user_question="US20240001234A1 graph question",
+        context={"graph_kb": {"stage2_patent_candidates": ["CN999999999A"]}},
+    )
+
+    assert payload["references"] == []
+    assert payload["source_ids"] == []
+    assert payload["not_found"] is True
+    assert payload["metadata"]["graph_stage2_behavior"] == "fallback_no_vector_hits"
+    assert payload["metadata"]["graph_candidate_patent_ids"] == ["CN999999999A"]
+    assert payload["metadata"]["candidate_patent_ids"] == ["CN999999999A"]
+
+
 def test_targeted_retrieval_falls_back_to_archive_default_anchor_when_candidate_recall_is_confident_but_chunk_localization_is_empty():
     service = PatentRetrievalService(
         identity_registry={"CN115132975B": "CN115132975B"},

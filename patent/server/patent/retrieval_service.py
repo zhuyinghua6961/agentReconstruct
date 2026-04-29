@@ -77,6 +77,19 @@ def _normalize_query_list(values: Any) -> list[str]:
     return queries
 
 
+def _normalize_patent_id_values(values: Any) -> list[str]:
+    if isinstance(values, str):
+        iterable = [values]
+    else:
+        iterable = list(values or [])
+    normalized: list[str] = []
+    for item in iterable:
+        text = _normalize_identifier(str(item or ""))
+        if text and text not in normalized:
+            normalized.append(text)
+    return normalized
+
+
 def _document_prefix_key(text: str) -> str:
     normalized = _normalize_text(text)
     if not normalized:
@@ -391,6 +404,24 @@ class PatentRetrievalService:
             context=context,
         )
 
+    def _graph_retrieval_controls(self, context: dict[str, Any] | None) -> dict[str, Any]:
+        graph_kb = dict((context or {}).get("graph_kb") or {}) if isinstance(context, dict) else {}
+        if not graph_kb:
+            return {"candidate_patent_ids": [], "constraints": [], "entity_hints": {}, "behavior": "none"}
+        candidate_patent_ids = _normalize_patent_id_values(graph_kb.get("stage2_patent_candidates"))
+        constraints = [dict(item) for item in list(graph_kb.get("stage2_constraints") or []) if isinstance(item, dict)]
+        entity_hints = {
+            str(key): _normalize_query_list(values)
+            for key, values in dict(graph_kb.get("stage2_entity_hints") or {}).items()
+        }
+        behavior = "filter_applied" if candidate_patent_ids else ("hint_only" if constraints or entity_hints or graph_kb.get("stage4_fact_block") else "none")
+        return {
+            "candidate_patent_ids": candidate_patent_ids,
+            "constraints": constraints,
+            "entity_hints": entity_hints,
+            "behavior": behavior,
+        }
+
     def _targeted_retrieve_from_plan(
         self,
         *,
@@ -399,6 +430,7 @@ class PatentRetrievalService:
         context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         plan = self._coerce_retrieval_plan(retrieval_plan)
+        graph_controls = self._graph_retrieval_controls(context)
         started_at = time.perf_counter()
         timings: dict[str, int] = {}
 
@@ -426,6 +458,9 @@ class PatentRetrievalService:
 
         if self._vector_search_enabled():
             candidate_patent_ids = self._candidate_patent_ids_from_plan(plan, user_question=user_question)
+            graph_candidate_patent_ids = list(graph_controls.get("candidate_patent_ids") or [])
+            if graph_candidate_patent_ids:
+                candidate_patent_ids = graph_candidate_patent_ids
             localization_queries = self._localization_queries_from_plan(plan, user_question=user_question)
             matches_by_query = [
                 self._vector_matches(
@@ -451,6 +486,10 @@ class PatentRetrievalService:
                 metadata = dict(payload.get("metadata") or {})
                 if candidate_patent_ids:
                     metadata["candidate_patent_ids"] = list(candidate_patent_ids)
+                if graph_candidate_patent_ids:
+                    metadata["graph_stage2_behavior"] = "filter_applied"
+                    metadata["graph_candidate_patent_ids"] = list(graph_candidate_patent_ids)
+                    metadata["graph_constraints_applied"] = list(graph_controls.get("constraints") or [])
                 metadata["retrieval_plan_queries"] = list(localization_queries)
                 payload["metadata"] = metadata
                 return payload
@@ -475,19 +514,49 @@ class PatentRetrievalService:
                     payload = self._stage2_payload_from_outcome(outcome)
                     metadata = dict(payload.get("metadata") or {})
                     metadata["candidate_patent_ids"] = list(candidate_patent_ids)
+                    if graph_candidate_patent_ids:
+                        metadata["graph_stage2_behavior"] = "fallback_no_vector_hits"
+                        metadata["graph_candidate_patent_ids"] = list(graph_candidate_patent_ids)
+                        metadata["graph_constraints_applied"] = list(graph_controls.get("constraints") or [])
                     metadata["retrieval_plan_queries"] = list(localization_queries)
                     metadata["localization_fallback"] = "archive_default_anchor"
                     payload["metadata"] = metadata
                     return payload
 
+        if graph_controls.get("candidate_patent_ids"):
+            payload = self._stage2_payload_from_outcome(
+                self._build_not_found(
+                    "vector_hybrid",
+                    negative_cache_hit=False,
+                    timings=timings,
+                    started_at=started_at,
+                )
+            )
+            metadata = dict(payload.get("metadata") or {})
+            metadata["graph_stage2_behavior"] = "fallback_no_vector_hits"
+            metadata["graph_candidate_patent_ids"] = list(graph_controls.get("candidate_patent_ids") or [])
+            metadata["graph_constraints_applied"] = list(graph_controls.get("constraints") or [])
+            metadata["candidate_patent_ids"] = list(graph_controls.get("candidate_patent_ids") or [])
+            payload["metadata"] = metadata
+            return payload
+
         fallback_question = explicit_patent_ids[0] if explicit_patent_ids else user_question
-        return self._stage2_payload_from_outcome(
+        payload = self._stage2_payload_from_outcome(
             self.retrieve(
                 question=fallback_question,
                 context=context,
                 include_answer_text=False,
             )
         )
+        if graph_controls.get("candidate_patent_ids") or graph_controls.get("behavior") == "hint_only":
+            metadata = dict(payload.get("metadata") or {})
+            metadata["graph_stage2_behavior"] = (
+                "fallback_no_vector_hits" if graph_controls.get("candidate_patent_ids") else "hint_only"
+            )
+            metadata["graph_candidate_patent_ids"] = list(graph_controls.get("candidate_patent_ids") or [])
+            metadata["graph_constraints_applied"] = list(graph_controls.get("constraints") or [])
+            payload["metadata"] = metadata
+        return payload
 
     def _targeted_retrieve_from_claims(
         self,
@@ -504,6 +573,7 @@ class PatentRetrievalService:
         del active_stream_count
         if callable(should_cancel) and should_cancel():
             return self._cancelled_stage2_payload()
+        graph_controls = self._graph_retrieval_controls(context)
         if not self._vector_search_enabled():
             return self._targeted_retrieve_from_plan(
                 retrieval_plan=self._retrieval_plan_from_claims(retrieval_claims, user_question=user_question),
@@ -515,6 +585,8 @@ class PatentRetrievalService:
         timings: dict[str, int] = {}
         generated_queries: list[str] = []
         candidate_patent_ids: list[str] = []
+        graph_candidate_patent_ids = list(graph_controls.get("candidate_patent_ids") or [])
+        graph_candidate_keys = {_normalize_identifier(item) for item in graph_candidate_patent_ids}
         resolved_frozen_claim_queries = list(frozen_claim_queries or [])
         claim_jobs = list(enumerate(retrieval_claims))
 
@@ -560,6 +632,8 @@ class PatentRetrievalService:
                     normalized = self._normalize_patent_id(
                         hit.get("patent_id") or hit.get("canonical_patent_id") or hit.get("json_stem")
                     )
+                    if graph_candidate_keys and _normalize_identifier(normalized) not in graph_candidate_keys:
+                        continue
                     if normalized and normalized not in query_candidate_ids:
                         query_candidate_ids.append(normalized)
                     abstract_match = self._match_from_abstract_hit(
@@ -572,12 +646,20 @@ class PatentRetrievalService:
                 for patent_id in query_candidate_ids:
                     if patent_id not in claim_candidate_patent_ids:
                         claim_candidate_patent_ids.append(patent_id)
+                chunk_candidate_ids = query_candidate_ids or (graph_candidate_patent_ids if graph_candidate_patent_ids else None)
                 chunk_hits = self._run_chunk_vector_search(
                     query,
-                    query_candidate_ids or None,
+                    chunk_candidate_ids,
                     self._top_k_chunk_vector,
                 )
                 for hit in chunk_hits:
+                    normalized = self._normalize_patent_id(
+                        hit.get("patent_id") or hit.get("canonical_patent_id") or hit.get("json_stem")
+                    )
+                    if graph_candidate_keys and _normalize_identifier(normalized) not in graph_candidate_keys:
+                        continue
+                    if normalized and normalized not in claim_candidate_patent_ids:
+                        claim_candidate_patent_ids.append(normalized)
                     chunk_match = self._match_from_chunk_hit(
                         self._augment_stage2_hit_metadata(
                             hit,
@@ -663,8 +745,12 @@ class PatentRetrievalService:
         )
         payload = self._stage2_payload_from_outcome(outcome, matches=merged_matches)
         metadata = dict(payload.get("metadata") or {})
-        metadata["candidate_patent_ids"] = list(candidate_patent_ids)
+        metadata["candidate_patent_ids"] = list(graph_candidate_patent_ids or candidate_patent_ids)
         metadata["retrieval_plan_queries"] = list(generated_queries)
+        if graph_candidate_patent_ids or graph_controls.get("behavior") == "hint_only":
+            metadata["graph_stage2_behavior"] = "filter_applied" if graph_candidate_patent_ids else "hint_only"
+            metadata["graph_candidate_patent_ids"] = list(graph_candidate_patent_ids)
+            metadata["graph_constraints_applied"] = list(graph_controls.get("constraints") or [])
         payload["metadata"] = metadata
         payload["source_ids"] = self.extract_source_ids(payload)
         return payload
@@ -1056,6 +1142,7 @@ class PatentRetrievalService:
         if not self._vector_search_enabled():
             return []
         resolved_candidate_ids = [self._normalize_patent_id(item) for item in list(candidate_patent_ids or []) if self._normalize_patent_id(item)]
+        has_candidate_filter = bool(resolved_candidate_ids)
         if not resolved_candidate_ids:
             abstract_hits = self._run_abstract_vector_search(question, self._top_k_abstract_vector)
             for hit in abstract_hits:
@@ -1064,6 +1151,7 @@ class PatentRetrievalService:
                     resolved_candidate_ids.append(normalized)
         if not resolved_candidate_ids and force_backend == "exact_id":
             return []
+        resolved_candidate_keys = {_normalize_identifier(item) for item in resolved_candidate_ids}
         chunk_hits = self._run_chunk_vector_search(question, resolved_candidate_ids or None, self._top_k_chunk_vector)
         if not chunk_hits:
             return []
@@ -1072,6 +1160,8 @@ class PatentRetrievalService:
         for hit in chunk_hits:
             match = self._match_from_chunk_hit(hit)
             if match is None:
+                continue
+            if (has_candidate_filter or resolved_candidate_keys) and _normalize_identifier(match.record.canonical_patent_id) not in resolved_candidate_keys:
                 continue
             key = (
                 match.record.canonical_patent_id,

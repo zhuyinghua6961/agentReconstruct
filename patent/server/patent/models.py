@@ -26,6 +26,7 @@ class PatentGenerationRuntime(Protocol):
         user_question: str,
         should_cancel: Any | None = None,
         active_stream_count: int | None = None,
+        conversation_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         ...
 

@@ -1,4 +1,4 @@
-from server.patent.cache_keys import build_stage1_cache_fingerprint
+from server.patent.cache_keys import build_stage1_cache_fingerprint, build_stage2_cache_fingerprint
 
 
 def test_stage1_cache_fingerprint_changes_when_graph_payload_changes():
@@ -68,6 +68,48 @@ def test_stage1_cache_fingerprint_is_stable_when_only_graph_diagnostics_change()
             }
         },
         runtime_signature={"planning_model": "test-model"},
+    )
+
+    assert fingerprint_a == fingerprint_b
+
+
+def test_stage2_cache_fingerprint_changes_when_graph_stage2_candidates_change():
+    fingerprint_a = build_stage2_cache_fingerprint(
+        question="比较两件专利",
+        retrieval_claims=[],
+        retrieval_plan={},
+        conversation_context={"graph_kb": {"stage2_patent_candidates": ["CN1001A"]}},
+        runtime_signature={"retrieval_version": "v1"},
+    )
+    fingerprint_b = build_stage2_cache_fingerprint(
+        question="比较两件专利",
+        retrieval_claims=[],
+        retrieval_plan={},
+        conversation_context={"graph_kb": {"stage2_patent_candidates": ["CN1002A"]}},
+        runtime_signature={"retrieval_version": "v1"},
+    )
+
+    assert fingerprint_a != fingerprint_b
+
+
+def test_stage2_cache_fingerprint_ignores_graph_diagnostics():
+    base_graph = {
+        "stage2_patent_candidates": ["CN1001A"],
+        "stage2_constraints": [{"field": "patent.id", "operator": "eq", "value": "CN1001A"}],
+    }
+    fingerprint_a = build_stage2_cache_fingerprint(
+        question="比较两件专利",
+        retrieval_claims=[],
+        retrieval_plan={},
+        conversation_context={"graph_kb": {**base_graph, "diagnostics": {"latency_ms": 1}}},
+        runtime_signature={"retrieval_version": "v1"},
+    )
+    fingerprint_b = build_stage2_cache_fingerprint(
+        question="比较两件专利",
+        retrieval_claims=[],
+        retrieval_plan={},
+        conversation_context={"graph_kb": {**base_graph, "diagnostics": {"latency_ms": 99}}},
+        runtime_signature={"retrieval_version": "v1"},
     )
 
     assert fingerprint_a == fingerprint_b

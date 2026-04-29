@@ -129,3 +129,107 @@ def test_direct_renderer_avoids_stub_only_direct_answers():
     )
 
     assert result.handled is False
+
+
+def test_direct_renderer_handles_stub_true_process_facet_rows():
+    decision = PatentGraphSemanticDecision(mode="direct_answer", route_family="precise")
+    plan = PatentGraphQueryPlanV2(
+        strategy="parametric",
+        intent="list_patent_process_steps",
+        question="CN100355122C 的工艺步骤是什么？",
+        parametric_slots={
+            "candidate_queries": build_patent_parametric_query_candidates("CN100355122C 的工艺步骤是什么？"),
+        },
+    )
+    bundle = canonicalize_patent_graph_rows(
+        plan=plan,
+        rows=[
+            {"patent_id": "CN100355122C", "title": "示例专利", "step_order": 1, "step_name": "干燥", "stub": True}
+        ],
+    )
+
+    result = render_patent_direct_answer(decision=decision, plan=plan, bundle=bundle)
+
+    assert result.handled is True
+    assert "干燥" in result.answer
+    assert result.references == ("CN100355122C",)
+
+
+def test_direct_renderer_uses_matched_path_and_refuses_primary_facet_fallback_rows():
+    decision = PatentGraphSemanticDecision(mode="direct_answer", route_family="precise")
+    plan = PatentGraphQueryPlanV2(
+        strategy="parametric",
+        intent="list_patent_process_steps",
+        question="CN100355122C 的工艺步骤是什么？",
+        parametric_slots={
+            "candidate_queries": build_patent_parametric_query_candidates("CN100355122C 的工艺步骤是什么？"),
+        },
+    )
+    bundle = canonicalize_patent_graph_rows(
+        plan=plan,
+        rows=[{"patent_id": "CN100355122C", "title": "示例专利", "abstract": "基础信息", "stub": None}],
+        matched_path="lookup_patent_by_id",
+    )
+
+    result = render_patent_direct_answer(decision=decision, plan=plan, bundle=bundle)
+
+    assert result.handled is False
+    assert result.metadata["reason"] == "not_direct_answerable"
+
+
+def test_direct_renderer_handles_applicant_and_ipc_count_parametric_paths():
+    decision = PatentGraphSemanticDecision(mode="direct_answer", route_family="precise")
+    applicant_plan = PatentGraphQueryPlanV2(
+        strategy="parametric",
+        intent="applicant_listing",
+        question="宁德时代有哪些专利？",
+        parametric_slots={"candidate_queries": build_patent_parametric_query_candidates("宁德时代有哪些专利？")},
+    )
+    applicant_bundle = canonicalize_patent_graph_rows(
+        plan=applicant_plan,
+        rows=[{"patent_id": "CN100355122C", "title": "示例专利", "applicant_name": "宁德时代", "stub": True}],
+    )
+
+    applicant_result = render_patent_direct_answer(decision=decision, plan=applicant_plan, bundle=applicant_bundle)
+
+    assert applicant_result.handled is True
+    assert "申请人 `宁德时代`" in applicant_result.answer
+    assert applicant_result.references == ("CN100355122C",)
+
+    ipc_plan = PatentGraphQueryPlanV2(
+        strategy="parametric",
+        intent="ipc_count",
+        question="H01M10 有多少专利？",
+        parametric_slots={"candidate_queries": build_patent_parametric_query_candidates("H01M10 有多少专利？")},
+    )
+    ipc_bundle = canonicalize_patent_graph_rows(
+        plan=ipc_plan,
+        rows=[{"ipc_code_prefix": "H01M10", "patent_count": 7}],
+    )
+
+    ipc_result = render_patent_direct_answer(decision=decision, plan=ipc_plan, bundle=ipc_bundle)
+
+    assert ipc_result.handled is True
+    assert "`H01M10` 对应的专利数量为 7" in ipc_result.answer
+
+
+def test_direct_renderer_allows_stub_true_rows_when_requested_facet_exists():
+    decision = PatentGraphSemanticDecision(mode="direct_answer", route_family="precise")
+    plan = PatentGraphQueryPlanV2(
+        strategy="parametric",
+        intent="list_patent_atmospheres",
+        question="CN100355122C 的气氛条件是什么？",
+        parametric_slots={
+            "candidate_queries": build_patent_parametric_query_candidates("CN100355122C 的气氛条件是什么？"),
+        },
+    )
+    bundle = canonicalize_patent_graph_rows(
+        plan=plan,
+        rows=[{"patent_id": "CN100355122C", "atmosphere_options": "氮气", "atmosphere_preferred": "true", "stub": True}],
+    )
+
+    result = render_patent_direct_answer(decision=decision, plan=plan, bundle=bundle)
+
+    assert bundle.direct_answerable is True
+    assert result.handled is True
+    assert "氮气" in result.answer

@@ -79,6 +79,42 @@ test('inline list marker after patent citation punctuation is normalized into a 
   }
 })
 
+test('graph direct list patent ids rendered as inline code become clickable patent links', () => {
+  const markdown = [
+    '涉及材料 `石墨烯` 的专利包括：',
+    '- `CN101562248B`：一种正极材料',
+    '- `CN218274694U`：一种电池组件',
+  ].join('\n')
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.match(html, /class="doi-link patent-link"/)
+    assert.match(html, /data-patent-id="CN101562248B"/)
+    assert.match(html, /data-patent-id="CN218274694U"/)
+    assert.doesNotMatch(html, /<code>CN101562248B<\/code>/)
+    assert.doesNotMatch(html, /<code>CN218274694U<\/code>/)
+  }
+})
+
+test('graph direct lookup patent id rendered as inline code becomes a clickable patent link', () => {
+  const markdown = [
+    '专利 `CN100355122C` 的图谱信息如下：',
+    '- 标题：提高磷酸铁锂大电流放电性能的方法',
+    '- 申请人：示例申请人',
+  ].join('\n')
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.match(html, /class="doi-link patent-link"/)
+    assert.match(html, /data-patent-id="CN100355122C"/)
+    assert.doesNotMatch(html, /<code>CN100355122C<\/code>/)
+  }
+})
+
 test('inline markdown heading marker after plain text is normalized into a real heading', () => {
   const markdown = [
     '全电池性能 ### 总结',

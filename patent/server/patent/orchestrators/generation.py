@@ -516,6 +516,7 @@ class PatentGenerationOrchestrator:
                 question=question,
                 retrieval_claims=retrieval_claims,
                 retrieval_plan=retrieval_plan,
+                conversation_context=conversation_context,
                 runtime_signature=runtime_retrieval_signature,
             )
             stage2_result = self._timed(
@@ -524,11 +525,21 @@ class PatentGenerationOrchestrator:
                 lambda: self._run_cached_stage(
                     stage="stage2",
                     fingerprint=stage2_fingerprint,
-                    compute=lambda: runtime.stage2_targeted_retrieval(
-                        retrieval_claims,
-                        user_question=question,
-                        should_cancel=None,
-                        active_stream_count=None,
+                    compute=lambda: (
+                        runtime.stage2_targeted_retrieval(
+                            retrieval_claims,
+                            user_question=question,
+                            should_cancel=None,
+                            active_stream_count=None,
+                            conversation_context=conversation_context,
+                        )
+                        if _callable_accepts_keyword(runtime.stage2_targeted_retrieval, "conversation_context")
+                        else runtime.stage2_targeted_retrieval(
+                            retrieval_claims,
+                            user_question=question,
+                            should_cancel=None,
+                            active_stream_count=None,
+                        )
                     ),
                 ),
             )

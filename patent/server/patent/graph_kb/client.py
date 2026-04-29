@@ -4,6 +4,8 @@ import re
 from typing import Any
 
 from server.patent.graph_kb.models import PatentGraphKbQueryPlan
+from server.patent.graph_kb.query_templates import build_patent_template_candidates
+from server.patent.graph_kb.slots import extract_patent_graph_slots
 
 
 _DOI_PATTERN = re.compile(r"10\.\d+/[A-Za-z0-9._\-()/]+", re.IGNORECASE)
@@ -127,6 +129,10 @@ def build_patent_parametric_query_candidates(question: str) -> list[dict[str, An
     text = _normalize_question(question)
     if not text or _DOI_PATTERN.search(text):
         return []
+
+    registry_candidates = list(build_patent_template_candidates(extract_patent_graph_slots(text), limit=200))
+    if registry_candidates:
+        return registry_candidates
 
     candidates: list[dict[str, Any]] = []
     patent_ids = _extract_patent_ids(text)

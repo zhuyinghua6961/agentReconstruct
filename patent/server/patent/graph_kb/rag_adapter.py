@@ -100,6 +100,8 @@ def build_patent_graph_rag_payload(
     diagnostics = dict(bundle.diagnostics or {})
     diagnostics.setdefault("route_family", decision.route_family)
     diagnostics.setdefault("strategy", plan.strategy)
+    diagnostics.setdefault("template_id", str(plan.legacy_template_id or ""))
+    diagnostics.setdefault("path_id", str(bundle.render_slots.get("path_id") or ""))
     payload = PatentGraphRagPayload(
         stage1_context_block=_render_stage1_context(decision=decision, plan=plan, bundle=bundle),
         stage2_patent_candidates=_dedupe_preserve_order(bundle.patent_candidates),

@@ -557,8 +557,8 @@ def test_orchestrator_runtime_retrieval_signature_excludes_parallel_worker_count
             self.stage2_parallel_workers = 4
             self.stage3_parallel_workers = 3
 
-    def _capture_stage2(*, question, retrieval_claims, retrieval_plan, runtime_signature):
-        del question, retrieval_claims, retrieval_plan
+    def _capture_stage2(*, question, retrieval_claims, retrieval_plan, runtime_signature, conversation_context=None):
+        del question, retrieval_claims, retrieval_plan, conversation_context
         captured["stage2"] = dict(runtime_signature or {})
         return "stage2-fingerprint"
 
@@ -580,6 +580,63 @@ def test_orchestrator_runtime_retrieval_signature_excludes_parallel_worker_count
     assert "stage3_parallel_workers" not in captured["stage2"]
     assert "stage2_parallel_workers" not in captured["stage3"]
     assert "stage3_parallel_workers" not in captured["stage3"]
+
+
+def test_orchestrator_passes_graph_context_to_stage2_cache_fingerprint(monkeypatch):
+    captured: dict[str, object] = {}
+    graph_context = {
+        "graph_kb": {
+            "stage2_patent_candidates": ["CN100355122C"],
+            "stage2_constraints": [{"field": "patent.id", "operator": "eq", "value": "CN100355122C"}],
+            "diagnostics": {"latency_ms": 12},
+        }
+    }
+
+    def _capture_stage2(*, question, retrieval_claims, retrieval_plan, runtime_signature, conversation_context=None):
+        del question, retrieval_claims, retrieval_plan, runtime_signature
+        captured["conversation_context"] = conversation_context
+        return "stage2-fingerprint"
+
+    monkeypatch.setattr("server.patent.orchestrators.generation.build_stage2_cache_fingerprint", _capture_stage2)
+
+    PatentGenerationOrchestrator().run(
+        question="How should we compare replacement risk?",
+        runtime=_FakeRuntime(),
+        conversation_context=graph_context,
+    )
+
+    assert captured["conversation_context"] == graph_context
+
+
+def test_orchestrator_passes_graph_context_to_stage2_runtime():
+    captured: dict[str, object] = {}
+    graph_context = {"graph_kb": {"stage2_patent_candidates": ["CN100355122C"]}}
+
+    class _ContextRuntime(_FakeRuntime):
+        def stage2_targeted_retrieval(
+            self,
+            retrieval_plan: PatentRetrievalPlan,
+            *,
+            user_question: str,
+            should_cancel=None,
+            active_stream_count=None,
+            conversation_context=None,
+        ) -> dict[str, object]:
+            captured["conversation_context"] = conversation_context
+            return super().stage2_targeted_retrieval(
+                retrieval_plan,
+                user_question=user_question,
+                should_cancel=should_cancel,
+                active_stream_count=active_stream_count,
+            )
+
+    PatentGenerationOrchestrator().run(
+        question="How should we compare replacement risk?",
+        runtime=_ContextRuntime(),
+        conversation_context=graph_context,
+    )
+
+    assert captured["conversation_context"] == graph_context
 
 
 def test_orchestrator_continues_passing_none_for_should_cancel():

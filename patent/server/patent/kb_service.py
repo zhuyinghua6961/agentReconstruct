@@ -7,6 +7,7 @@ from typing import Any
 from server.errors import codes
 from server.errors.core import APIError
 from server.patent.graph_kb.models import PatentGraphKbExecutionResult, PatentGraphRagPayload, PatentGraphRoutingResult
+from server.patent.graph_kb.metadata import build_patent_graph_route_metadata
 from server.patent.graph_kb.service import route_patent_graph_kb_v2
 from server.patent.models import PatentQaExecutionResult
 from server.patent.orchestrators.generation import PatentGenerationOrchestrator
@@ -179,6 +180,7 @@ class PatentKbService:
                     max_rows=self._graph_kb_max_rows,
                     timeout_ms=self._graph_kb_timeout_ms,
                     generation_runtime=active_runtime,
+                    trace_id=request.trace_id,
                 )
             except Exception:
                 _LOGGER.warning("patent kb_service graph v2 preflight failed trace=%s", request.trace_id, exc_info=True)
@@ -337,22 +339,41 @@ class PatentKbService:
     ) -> dict[str, Any]:
         strategy = str(routing.diagnostics.get("strategy") or payload.diagnostics.get("strategy") or "")
         fingerprint = str(payload.cache_fingerprint or "none")
+        evidence_quality = dict(routing.diagnostics.get("evidence_quality") or payload.diagnostics.get("evidence_quality") or {})
+        path_id = str(routing.diagnostics.get("path_id") or payload.diagnostics.get("path_id") or "")
+        template_id = str(routing.diagnostics.get("matched_path") or routing.diagnostics.get("template_id") or path_id)
+        route_family = str(routing.diagnostics.get("route_family") or payload.diagnostics.get("route_family") or "")
+        row_count = routing.diagnostics.get("row_count")
         nested = {
             "mode": routing.mode,
+            "route_family": route_family,
             "strategy": strategy,
+            "template_id": template_id,
+            "path_id": path_id,
             "fingerprint": fingerprint,
-            "diagnostics": dict(routing.diagnostics or {}),
-            "payload_diagnostics": dict(payload.diagnostics or {}),
-        }
-        metadata = {
-            "graph_kb": nested,
-            "graph_kb_mode": routing.mode,
-            "graph_kb_strategy": strategy,
-            "graph_kb_fingerprint": fingerprint,
+            "row_count": row_count,
+            "evidence_quality": evidence_quality,
         }
         if downgrade_reason:
             nested["downgrade_reason"] = downgrade_reason
-            metadata["graph_kb_downgrade_reason"] = downgrade_reason
+        metadata = build_patent_graph_route_metadata(
+            attempted=True,
+            mode=routing.mode,
+            route_family=route_family,
+            strategy=strategy,
+            template_id=template_id,
+            path_id=path_id,
+            fingerprint=fingerprint,
+            row_count=int(row_count) if isinstance(row_count, int) else None,
+            evidence_quality=evidence_quality,
+            downgrade_reason=downgrade_reason,
+            stage2_behavior=str(payload.diagnostics.get("stage2_behavior") or ""),
+        )
+        metadata.update(
+            {
+            "graph_kb": nested,
+            }
+        )
         return metadata
 
     def _apply_graph_metadata(self, execution_result: dict[str, Any], *, graph_metadata: dict[str, Any]) -> None:

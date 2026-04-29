@@ -48,6 +48,9 @@ def test_rag_adapter_builds_stable_payload_and_context_blocks():
     assert "graph_route_family: hybrid" in payload.stage1_context_block
     assert "CN100355122C" in payload.stage1_context_block
     assert payload.stage2_patent_candidates == ("CN100355122C", "CN100371239C")
+    assert payload.diagnostics["route_family"] == "hybrid"
+    assert payload.diagnostics["strategy"] == "parametric"
+    assert payload.diagnostics["path_id"] == ""
     assert payload.stage2_constraints[0].field == "person.inventor"
     assert payload.stage2_entity_hints["ipc_codes"] == ("H01M10/0525",)
     assert payload.stage2_entity_hints["organizations"] == ("宁德时代新能源科技股份有限公司",)

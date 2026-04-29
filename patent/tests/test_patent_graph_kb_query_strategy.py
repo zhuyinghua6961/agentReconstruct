@@ -17,7 +17,7 @@ def test_query_strategy_prefers_legacy_template_for_existing_questions():
             question="CN100355122C 的工艺步骤是什么？",
             decision=decision,
         )
-        == "template"
+        == "parametric"
     )
 
 
@@ -86,8 +86,22 @@ def test_query_strategy_keeps_llm_cypher_disabled_by_default():
     assert can_build_patent_parametric_query(
         question="总结 发明人张三相关专利的常见技术方案",
         decision=decision,
-    ) is False
+    ) is True
     assert select_patent_query_strategy(
         question="总结 发明人张三相关专利的常见技术方案",
         decision=decision,
-    ) is None
+    ) == "parametric"
+
+
+def test_query_strategy_specific_facets_outrank_generic_lookup():
+    decision = PatentGraphSemanticDecision(mode="direct_answer", route_family="precise")
+
+    assert select_patent_query_strategy(question="CN100355122C 的气氛条件是什么？", decision=decision) == "parametric"
+    assert select_patent_query_strategy(question="CN100355122C 的实施例洞察是什么？", decision=decision) == "parametric"
+    assert select_patent_query_strategy(question="CN100355122C 的发明点是什么？", decision=decision) == "parametric"
+
+
+def test_query_strategy_material_process_analysis_stays_parametric_graph_for_rag():
+    decision = PatentGraphSemanticDecision(mode="graph_for_rag", route_family="hybrid")
+
+    assert select_patent_query_strategy(question="为什么喷雾干燥能提升磷酸铁锂倍率性能？", decision=decision) == "parametric"

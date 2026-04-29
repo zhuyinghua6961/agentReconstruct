@@ -90,3 +90,71 @@ def test_canonicalizer_extracts_constraints_for_parametric_listing():
     assert bundle.constraints_for_rag[0].field == "person.inventor"
     assert bundle.constraints_for_rag[0].operator == "eq"
     assert bundle.constraints_for_rag[0].value == "张三"
+
+
+def test_stub_true_process_rows_can_be_direct_answerable():
+    plan = PatentGraphQueryPlanV2(
+        strategy="parametric",
+        intent="list_patent_process_steps",
+        question="CN100355122C 的工艺步骤是什么？",
+        parametric_slots={
+            "candidate_queries": build_patent_parametric_query_candidates("CN100355122C 的工艺步骤是什么？"),
+        },
+    )
+
+    bundle = canonicalize_patent_graph_rows(
+        plan=plan,
+        rows=[{"patent_id": "CN100355122C", "stub": True, "step_name": "干燥"}],
+    )
+
+    assert bundle.direct_answerable is True
+    assert bundle.diagnostics["evidence_quality"]["has_requested_facet"] is True
+    assert bundle.diagnostics["evidence_quality"]["is_stub_only"] is False
+
+
+def test_stub_only_facet_rows_are_not_direct_answerable():
+    plan = PatentGraphQueryPlanV2(
+        strategy="parametric",
+        intent="list_patent_process_steps",
+        question="CN100355122C 的工艺步骤是什么？",
+        parametric_slots={
+            "candidate_queries": build_patent_parametric_query_candidates("CN100355122C 的工艺步骤是什么？"),
+        },
+    )
+
+    bundle = canonicalize_patent_graph_rows(
+        plan=plan,
+        rows=[{"patent_id": "CN100355122C", "stub": True, "title": "stub patent"}],
+    )
+
+    assert bundle.direct_answerable is False
+    assert bundle.diagnostics["evidence_quality"]["is_stub_only"] is True
+
+
+def test_canonicalizer_downgrades_direct_when_fallback_lookup_matches_after_empty_facet():
+    plan = PatentGraphQueryPlanV2(
+        strategy="parametric",
+        intent="list_patent_process_steps",
+        question="CN100355122C 的工艺步骤是什么？",
+        parametric_slots={
+            "candidate_queries": build_patent_parametric_query_candidates("CN100355122C 的工艺步骤是什么？"),
+        },
+    )
+
+    bundle = canonicalize_patent_graph_rows(
+        plan=plan,
+        rows=[
+            {
+                "patent_id": "CN100355122C",
+                "title": "示例专利",
+                "abstract": "只有基础专利信息，没有工艺步骤。",
+                "stub": None,
+            }
+        ],
+        matched_path="lookup_patent_by_id",
+    )
+
+    assert bundle.direct_answerable is False
+    assert bundle.render_slots["path_id"] == "lookup_patent_by_id"
+    assert bundle.render_slots["primary_path_id"] == "list_patent_process_steps"
+    assert bundle.diagnostics["direct_downgrade_reason"] == "matched_fallback_path_differs_from_primary"

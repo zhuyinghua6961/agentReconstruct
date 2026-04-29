@@ -177,6 +177,10 @@ def _with_sync_quota_payload(response, *, quota_type: str, finalize_result: Quot
     payload = dict(payload)
     payload["quota"] = _quota_payload_from_finalize(quota_type=quota_type, finalize_result=finalize_result)
     headers = dict(getattr(response, "headers", {}) or {})
+    headers.pop("content-length", None)
+    headers.pop("Content-Length", None)
+    headers.pop("transfer-encoding", None)
+    headers.pop("Transfer-Encoding", None)
     return JSONResponse(
         status_code=int(getattr(response, "status_code", 200) or 200),
         content=payload,

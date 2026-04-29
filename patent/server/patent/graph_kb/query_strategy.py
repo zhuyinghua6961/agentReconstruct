@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from server.patent.graph_kb.client import build_patent_parametric_query_candidates, plan_patent_graph_query
+from server.patent.graph_kb.client import plan_patent_graph_query
 from server.patent.graph_kb.models import PatentGraphSemanticDecision
+from server.patent.graph_kb.query_templates import build_patent_template_candidates
+from server.patent.graph_kb.slots import extract_patent_graph_slots
 
 
 def can_use_patent_legacy_template(question: str) -> bool:
@@ -15,7 +17,7 @@ def can_build_patent_parametric_query(
 ) -> bool:
     if decision.mode == "skip_graph":
         return False
-    return bool(build_patent_parametric_query_candidates(question))
+    return bool(build_patent_template_candidates(extract_patent_graph_slots(question), limit=20))
 
 
 def select_patent_query_strategy(
@@ -25,8 +27,9 @@ def select_patent_query_strategy(
 ) -> str | None:
     if decision.mode == "skip_graph":
         return None
-    if can_use_patent_legacy_template(question):
-        return "template"
     if can_build_patent_parametric_query(question=question, decision=decision):
         return "parametric"
+    if can_use_patent_legacy_template(question):
+        return "template"
     return None
+

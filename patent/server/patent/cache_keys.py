@@ -140,13 +140,16 @@ def build_stage2_cache_fingerprint(
     question: str,
     retrieval_claims: object | None = None,
     retrieval_plan: object,
+    conversation_context: dict[str, object] | None = None,
     runtime_signature: dict[str, object] | None = None,
 ) -> str:
+    context = dict(conversation_context or {})
     return _fingerprint(
         {
             "question": " ".join(str(question or "").split()),
             "retrieval_claims": retrieval_claims or [],
             "retrieval_plan": retrieval_plan,
+            "graph_kb": _normalize_graph_kb_context_for_cache(context.get("graph_kb")),
             "runtime_signature": runtime_signature or {},
         }
     )

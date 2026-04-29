@@ -76,7 +76,7 @@ def test_executor_v2_runs_guardrailed_parametric_query():
     assert result.trace.matched_path == "list_patents_by_inventor"
     assert result.trace.attempted_paths == ("list_patents_by_inventor",)
     assert result.trace.guardrail_verdict == "allow"
-    assert calls["params"] == {"inventor_name": "张三"}
+    assert calls["params"]["inventor_name"] == "张三"
     assert calls["timeout_ms"] == 3000
 
 
@@ -133,9 +133,9 @@ def test_executor_v2_honors_max_path_attempts_and_tracks_match():
 
         def query(self, cypher, params, *, timeout_ms):
             calls.append((cypher, params, timeout_ms))
-            if params == {"inventor_name": "张三"}:
+            if params.get("inventor_name") == "张三":
                 return []
-            if params == {"agency_name": "北京理工专利事务所"}:
+            if params.get("agency_name") == "北京理工专利事务所":
                 return [{"patent_id": "CN100355122C", "agency_name": "北京理工专利事务所"}]
             raise AssertionError("unexpected candidate execution")
 

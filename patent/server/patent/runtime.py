@@ -470,6 +470,7 @@ class PatentRuntime:
         user_question: str,
         should_cancel: Any | None = None,
         active_stream_count: int | None = None,
+        conversation_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         query_client = self.planning_client
         if self.planning_hot_pool is not None:
@@ -512,6 +513,7 @@ class PatentRuntime:
             should_cancel=should_cancel,
             active_stream_count=active_stream_count,
             parallel_workers=self.stage2_parallel_workers,
+            context=conversation_context,
         )
 
     def _extract_patent_ids_from_results(self, retrieval_results: dict[str, Any]) -> list[str]:

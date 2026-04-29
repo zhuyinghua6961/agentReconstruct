@@ -124,9 +124,7 @@ function logPatentRenderDiagnostics({ renderer, phase, originalText, normalizedT
   const textDiagnostics = collectPatentTextDiagnostics(normalizedText)
   const htmlDiagnostics = collectPatentHtmlDiagnostics(html)
   const suspicious = (
-    textDiagnostics.backtickPatentSpanCount > 0
-    || textDiagnostics.backtickRenderedPatentCitationCount > 0
-    || htmlDiagnostics.codePatentSpanCount > 0
+    htmlDiagnostics.codePatentSpanCount > 0
     || (textDiagnostics.patentPublicationCount > 0 && htmlDiagnostics.patentAnchorCount === 0)
   )
   if (!suspicious) return
@@ -447,13 +445,13 @@ function applyDoiLinksToHtml(html) {
     .join('')
 }
 
-function linkifyPatentTextSegment(text) {
-  const renderPatentAnchor = (rawPatentId) => {
-    const patentId = normalizePatentIdForLink(rawPatentId)
-    if (!patentId) return null
-    return `<a href="#" class="doi-link patent-link" data-patent-id="${patentId}">${patentId}</a>`
-  }
+function renderPatentAnchor(rawPatentId) {
+  const patentId = normalizePatentIdForLink(rawPatentId)
+  if (!patentId || !isPatentPublicationNumber(patentId)) return null
+  return `<a href="#" class="doi-link patent-link" data-patent-id="${patentId}">${patentId}</a>`
+}
 
+function linkifyPatentTextSegment(text) {
   const source = String(text || '')
   let output = ''
   let i = 0
@@ -504,8 +502,24 @@ function linkifyPatentTextSegment(text) {
   return output
 }
 
+function linkifyPatentListCodeSpans(html) {
+  return String(html || '')
+    .split(/(<pre\b[\s\S]*?<\/pre>)/gi)
+    .map((segment) => {
+      if (/^<pre\b/i.test(segment)) return segment
+      return segment.replace(
+        /(<li\b[^>]*>\s*(?:<p>\s*)?)<code>\s*([A-Za-z]{2}\d{6,14}[A-Za-z]\d?)\s*<\/code>/g,
+        (raw, prefix, patentId) => `${prefix}${renderPatentAnchor(patentId) || raw}`
+      ).replace(
+        /(<p>\s*专利\s*)<code>\s*([A-Za-z]{2}\d{6,14}[A-Za-z]\d?)\s*<\/code>/g,
+        (raw, prefix, patentId) => `${prefix}${renderPatentAnchor(patentId) || raw}`
+      )
+    })
+    .join('')
+}
+
 function applyPatentLinksToHtml(html) {
-  const segments = String(html || '').split(/(<[^>]+>)/g)
+  const segments = linkifyPatentListCodeSpans(html).split(/(<[^>]+>)/g)
   let inAnchor = false
   let codeDepth = 0
   let preDepth = 0
