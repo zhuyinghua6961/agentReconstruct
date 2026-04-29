@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -11,6 +13,30 @@ from app.modules.graph_kb.models import GraphKbExecutionResult, GraphRoutingResu
 
 
 client = TestClient(app)
+
+
+def _sse_payloads(text: str) -> list[dict[str, object]]:
+    payloads: list[dict[str, object]] = []
+    for frame in str(text or "").split("\n\n"):
+        data_lines = [
+            line.removeprefix("data:").strip()
+            for line in frame.splitlines()
+            if line.strip().startswith("data:")
+        ]
+        if not data_lines:
+            continue
+        payloads.append(json.loads("\n".join(data_lines)))
+    return payloads
+
+
+class _FakeRequest:
+    def __init__(self, app_instance, path: str = "/api/v1/ask_stream"):
+        self.app = app_instance
+        self.headers = {}
+        self.url = SimpleNamespace(path=path)
+
+    async def is_disconnected(self) -> bool:
+        return False
 
 
 def _payload() -> dict[str, object]:
@@ -27,6 +53,285 @@ def _enable_graph_kb(monkeypatch):
     monkeypatch.setattr(app.state, "load_conversation_context_hook", None)
     monkeypatch.setattr(app.state, "persist_assistant_summary_hook", None)
     monkeypatch.setattr(app.state, "persist_assistant_terminal_hook", None)
+
+
+def test_iter_route_events_yields_graph_processing_step_before_route_graph_call(monkeypatch):
+    _enable_graph_kb(monkeypatch)
+    monkeypatch.setattr(
+        app.state,
+        "settings",
+        replace(
+            app.state.settings,
+            graph_kb_enabled=True,
+            graph_kb_v2_enabled=True,
+            graph_kb_rag_injection_enabled=True,
+        ),
+    )
+    monkeypatch.setattr(qa_router_module, "generation_runtime_is_ready", lambda runtime: True)
+    app.state.generation_runtime = object()
+    route_calls: list[str] = []
+
+    def _fake_route_graph(**kwargs):
+        route_calls.append("called")
+        return GraphRoutingResult(
+            mode="graph_for_rag",
+            rag_payload=qa_router_module.GraphRagPayload(
+                stage1_context_block="graph_route_family: hybrid",
+                stage2_doi_candidates=("10.1000/test",),
+                stage4_fact_block="structured graph facts",
+                cache_fingerprint="graph:test",
+            ),
+            diagnostics={
+                "tri_state_mode": "graph_for_rag",
+                "graph_execution_mode": "graph_for_rag",
+                "graph_result_count": 1,
+                "graph_doi_candidates_count": 1,
+            },
+        )
+
+    def _fake_generation(**kwargs):
+        yield {"type": "metadata", "query_mode": "生成驱动检索", "route": "kb_qa"}
+        yield {"type": "content", "content": "generation with graph evidence"}
+        yield {"type": "done", "route": "kb_qa", "references": []}
+
+    monkeypatch.setattr(qa_router_module, "route_graph_kb_v2", _fake_route_graph)
+    monkeypatch.setattr(qa_router_module.qa_kb_service, "iter_answer_events", _fake_generation)
+
+    adapted_request = qa_router_module.GatewayAskRequest(
+        question="10.1000/test 这篇文献是什么？",
+        requested_mode="fast",
+        actual_mode="fast",
+        route="kb_qa",
+        trace_id="trace-graph-step",
+    )
+    iterator = qa_router_module._iter_route_events(
+        request=_FakeRequest(app),
+        adapted_request=adapted_request,
+        route="kb_qa",
+        file_context=None,
+        should_cancel=lambda: False,
+    )
+
+    first = next(iterator)
+
+    assert first["type"] == "step"
+    assert first["step"] == "graph_retrieval"
+    assert first["status"] == "processing"
+    assert route_calls == []
+
+    remaining = list(iterator)
+    assert route_calls == ["called"]
+    assert any(
+        event.get("type") == "step"
+        and event.get("step") == "graph_retrieval"
+        and event.get("status") == "success"
+        for event in remaining
+    )
+
+
+def test_stream_ask_graph_for_rag_emits_graph_retrieval_step(monkeypatch):
+    _enable_graph_kb(monkeypatch)
+    monkeypatch.setattr(
+        app.state,
+        "settings",
+        replace(
+            app.state.settings,
+            graph_kb_enabled=True,
+            graph_kb_v2_enabled=True,
+            graph_kb_rag_injection_enabled=True,
+        ),
+    )
+    monkeypatch.setattr(qa_router_module, "generation_runtime_is_ready", lambda runtime: True)
+    app.state.generation_runtime = object()
+
+    monkeypatch.setattr(
+        qa_router_module,
+        "route_graph_kb_v2",
+        lambda **kwargs: GraphRoutingResult(
+            mode="graph_for_rag",
+            rag_payload=qa_router_module.GraphRagPayload(
+                stage1_context_block="graph_route_family: hybrid",
+                stage2_doi_candidates=("10.1000/test", "10.1000/other"),
+                stage4_fact_block="structured graph facts",
+                cache_fingerprint="graph:test",
+            ),
+            diagnostics={
+                "legacy_route_family": "hybrid",
+                "tri_state_mode": "graph_for_rag",
+                "graph_execution_mode": "graph_for_rag",
+                "graph_strategy": "multi_stage",
+                "graph_intent": "hybrid_property_analysis",
+                "graph_result_count": 3,
+                "graph_doi_candidates_count": 2,
+            },
+        ),
+    )
+
+    def _fake_generation(**kwargs):
+        yield {"type": "metadata", "query_mode": "生成驱动检索", "route": "kb_qa"}
+        yield {"type": "content", "content": "generation with graph evidence"}
+        yield {"type": "done", "route": "kb_qa", "references": []}
+
+    monkeypatch.setattr(qa_router_module.qa_kb_service, "iter_answer_events", _fake_generation)
+
+    response = client.post("/api/v1/ask_stream", json=_payload())
+
+    assert response.status_code == 200
+    payloads = _sse_payloads(response.text)
+    graph_steps = [
+        payload
+        for payload in payloads
+        if payload.get("type") == "step" and payload.get("step") == "graph_retrieval"
+    ]
+    content_index = next(
+        idx
+        for idx, payload in enumerate(payloads)
+        if payload.get("type") == "content" and payload.get("content") == "generation with graph evidence"
+    )
+    graph_step_indices = [
+        idx
+        for idx, payload in enumerate(payloads)
+        if payload.get("type") == "step" and payload.get("step") == "graph_retrieval"
+    ]
+    assert [step["status"] for step in graph_steps] == ["processing", "success"]
+    assert graph_step_indices[0] < graph_step_indices[1] < content_index
+    assert graph_steps[0]["title"] == "图谱检索"
+    assert "识别图谱意图" in graph_steps[0]["message"]
+    assert "转入文献检索与生成" in graph_steps[1]["message"]
+    assert graph_steps[1]["data"]["count"] == 3
+    assert graph_steps[1]["data"]["doi_candidates_count"] == 2
+
+
+def test_stream_ask_skip_graph_emits_graph_retrieval_fallback_step(monkeypatch):
+    _enable_graph_kb(monkeypatch)
+    monkeypatch.setattr(
+        app.state,
+        "settings",
+        replace(app.state.settings, graph_kb_enabled=True, graph_kb_v2_enabled=True),
+    )
+    monkeypatch.setattr(qa_router_module, "generation_runtime_is_ready", lambda runtime: True)
+    app.state.generation_runtime = object()
+
+    monkeypatch.setattr(
+        qa_router_module,
+        "route_graph_kb_v2",
+        lambda **kwargs: GraphRoutingResult(
+            mode="skip_graph",
+            diagnostics={
+                "tri_state_mode": "skip_graph",
+                "graph_execution_mode": "skip_graph",
+                "graph_result_count": 0,
+                "graph_doi_candidates_count": 0,
+                "graph_fallback_reason": "no_useful_graph_slots",
+            },
+        ),
+    )
+
+    def _fake_generation(**kwargs):
+        yield {"type": "metadata", "query_mode": "生成驱动检索", "route": "kb_qa"}
+        yield {"type": "content", "content": "generation after skip"}
+        yield {"type": "done", "route": "kb_qa", "references": []}
+
+    monkeypatch.setattr(qa_router_module.qa_kb_service, "iter_answer_events", _fake_generation)
+
+    response = client.post("/api/v1/ask_stream", json=_payload())
+
+    assert response.status_code == 200
+    payloads = _sse_payloads(response.text)
+    graph_steps = [
+        payload
+        for payload in payloads
+        if payload.get("type") == "step" and payload.get("step") == "graph_retrieval"
+    ]
+    content_index = next(
+        idx
+        for idx, payload in enumerate(payloads)
+        if payload.get("type") == "content" and payload.get("content") == "generation after skip"
+    )
+    graph_step_indices = [
+        idx
+        for idx, payload in enumerate(payloads)
+        if payload.get("type") == "step" and payload.get("step") == "graph_retrieval"
+    ]
+    assert [step["status"] for step in graph_steps] == ["processing", "success"]
+    assert graph_step_indices[0] < graph_step_indices[1] < content_index
+    assert "未命中可用结构化线索" in graph_steps[1]["message"]
+    assert graph_steps[1]["data"]["mode"] == "skip_graph"
+
+
+def test_stream_ask_direct_answer_keeps_existing_graph_steps(monkeypatch):
+    _enable_graph_kb(monkeypatch)
+    monkeypatch.setattr(app.state, "settings", replace(app.state.settings, graph_kb_enabled=True, graph_kb_v2_enabled=True))
+    monkeypatch.setattr(qa_router_module, "generation_runtime_is_ready", lambda runtime: True)
+    app.state.generation_runtime = object()
+
+    monkeypatch.setattr(
+        qa_router_module,
+        "route_graph_kb_v2",
+        lambda **kwargs: GraphRoutingResult(
+            mode="direct_answer",
+            direct_result=GraphKbExecutionResult(
+                handled=True,
+                answer="graph v2 answer",
+                references=("10.1000/test",),
+                query_mode="graph_kb",
+                template_id="lookup_by_doi",
+                result_count=1,
+            ),
+            diagnostics={
+                "tri_state_mode": "direct_answer",
+                "graph_execution_mode": "direct_answer",
+                "graph_result_count": 1,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        qa_router_module.qa_kb_service,
+        "iter_answer_events",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("generation path should not run")),
+    )
+
+    response = client.post("/api/v1/ask_stream", json=_payload())
+
+    assert response.status_code == 200
+    payloads = _sse_payloads(response.text)
+    step_keys = [payload.get("step") for payload in payloads if payload.get("type") == "step"]
+    assert "graph_retrieval" in step_keys
+    assert "graph_intent" in step_keys
+    assert "graph_query" in step_keys
+    assert "graph_answer" in step_keys
+
+
+def test_stream_ask_graph_v2_exception_emits_error_step_then_generation(monkeypatch):
+    _enable_graph_kb(monkeypatch)
+    monkeypatch.setattr(app.state, "settings", replace(app.state.settings, graph_kb_enabled=True, graph_kb_v2_enabled=True))
+    monkeypatch.setattr(qa_router_module, "generation_runtime_is_ready", lambda runtime: True)
+    app.state.generation_runtime = object()
+
+    def _raise_graph_error(**kwargs):
+        raise RuntimeError("neo4j timeout")
+
+    monkeypatch.setattr(qa_router_module, "route_graph_kb_v2", _raise_graph_error)
+
+    def _fake_generation(**kwargs):
+        yield {"type": "metadata", "query_mode": "生成驱动检索", "route": "kb_qa"}
+        yield {"type": "content", "content": "fallback generation"}
+        yield {"type": "done", "route": "kb_qa", "references": []}
+
+    monkeypatch.setattr(qa_router_module.qa_kb_service, "iter_answer_events", _fake_generation)
+
+    response = client.post("/api/v1/ask_stream", json=_payload())
+
+    assert response.status_code == 200
+    payloads = _sse_payloads(response.text)
+    graph_steps = [
+        payload
+        for payload in payloads
+        if payload.get("type") == "step" and payload.get("step") == "graph_retrieval"
+    ]
+    assert [step["status"] for step in graph_steps] == ["processing", "error"]
+    assert graph_steps[1]["error"] == "neo4j timeout"
+    assert any(payload.get("type") == "content" and payload.get("content") == "fallback generation" for payload in payloads)
 
 
 def test_sync_ask_returns_graph_answer_when_handled(monkeypatch):

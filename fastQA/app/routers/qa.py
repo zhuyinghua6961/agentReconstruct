@@ -729,6 +729,7 @@ def _iter_route_events(
         graph_v2_metadata: dict[str, Any] | None = None
         if graph_enabled and graph_v2_enabled:
             try:
+                yield _graph_retrieval_step_event(status="processing")
                 routing_result = route_graph_kb_v2(
                     question=adapted_request.question,
                     conversation_context=conversation_context,
@@ -752,6 +753,11 @@ def _iter_route_events(
                 graph_v2_metadata = _graph_v2_metadata(routing_result.diagnostics, tri_state_mode=routing_result.mode)
                 graph_v2_metadata["graph_rag_injection_enabled"] = graph_rag_injection_enabled
                 graph_v2_metadata["graph_rag_injected"] = False
+                yield _graph_retrieval_step_event(
+                    status="success",
+                    mode=routing_result.mode,
+                    diagnostics=routing_result.diagnostics,
+                )
                 if routing_result.mode == "direct_answer" and routing_result.direct_result is not None and routing_result.direct_result.handled:
                     yield from _iter_graph_kb_events(
                         result=routing_result.direct_result,
@@ -770,6 +776,12 @@ def _iter_route_events(
                 if routing_result.mode == "skip_graph":
                     logger.info("fastqa graph kb v2 skipped graph execution and fell through to generation")
             except Exception as exc:
+                yield _graph_retrieval_step_event(
+                    status="error",
+                    mode="error",
+                    diagnostics={},
+                    error=str(exc) or exc.__class__.__name__,
+                )
                 logger.warning("fastqa graph kb v2 attempt failed, falling back to generation: %s", exc)
         elif graph_enabled:
             try:
@@ -890,6 +902,61 @@ def _iter_route_events(
         requested_mode=adapted_request.requested_mode,
         actual_mode=adapted_request.actual_mode,
     )
+
+
+def _coerce_non_negative_int(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        return 0
+    return max(0, parsed)
+
+
+def _graph_retrieval_step_event(
+    *,
+    status: str,
+    mode: str = "",
+    diagnostics: dict[str, Any] | None = None,
+    error: str = "",
+) -> dict[str, Any]:
+    source = dict(diagnostics or {})
+    normalized_status = str(status or "processing").strip().lower() or "processing"
+    normalized_mode = str(mode or source.get("graph_execution_mode") or source.get("tri_state_mode") or "").strip()
+    result_count = _coerce_non_negative_int(source.get("graph_result_count"))
+    doi_candidates_count = _coerce_non_negative_int(source.get("graph_doi_candidates_count"))
+
+    if normalized_status == "processing":
+        message = "图谱检索：识别图谱意图并查询结构化知识"
+        detail = "正在尝试从知识图谱获取结构化线索"
+    elif normalized_status == "error":
+        message = "图谱检索：结构化查询失败，转入文献检索"
+        detail = "图谱检索失败，已自动降级为常规生成链路"
+    elif normalized_mode == "skip_graph":
+        message = "图谱检索：未命中可用结构化线索，转入文献检索"
+        detail = "未找到可直接用于增强生成的图谱线索"
+    elif normalized_mode == "direct_answer":
+        message = "图谱检索：已命中结构化答案"
+        detail = f"图谱命中 {result_count} 条结构化结果"
+    else:
+        message = "图谱检索：已获取结构化线索，转入文献检索与生成"
+        detail = f"图谱命中 {result_count} 条结构化结果，候选 DOI {doi_candidates_count} 个"
+
+    payload: dict[str, Any] = {
+        "type": "step",
+        "step": "graph_retrieval",
+        "title": "图谱检索",
+        "message": message,
+        "detail": detail,
+        "status": normalized_status if normalized_status in {"processing", "success", "error"} else "processing",
+        "data": {
+            "count": result_count,
+            "doi_candidates_count": doi_candidates_count,
+            "mode": normalized_mode or ("error" if normalized_status == "error" else ""),
+        },
+    }
+    if error:
+        payload["error"] = str(error)
+    return payload
 
 
 def _graph_v2_metadata(diagnostics: dict[str, Any] | None, *, tri_state_mode: str | None = None) -> dict[str, Any]:
