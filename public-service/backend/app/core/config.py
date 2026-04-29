@@ -6,12 +6,12 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote
 
-from app.core.env_loader import load_env
+from app.core.env_loader import SERVICE_DIR, load_env
 
 
 load_env(override_existing=False)
 
-_DEFAULT_DATA_ROOT = Path("/tmp/public-service")
+_DEFAULT_DATA_ROOT = SERVICE_DIR / "data" / "runtime"
 _CONVERSATION_AUTHORITY_TARGETS = frozenset({"legacy", "public_service", "shadow_public_service"})
 _PRODUCTION_APP_ENVS = frozenset({"prod", "production"})
 
@@ -139,6 +139,10 @@ class Settings:
     minio_bucket: str
     minio_secure: bool
     minio_region: str | None
+    neo4j_url: str
+    neo4j_username: str
+    neo4j_password: str
+    neo4j_database: str
     data_root: Path
     uploads_dir: Path
     papers_dir: Path
@@ -241,6 +245,15 @@ def get_settings() -> Settings:
         minio_bucket=str(os.getenv("MINIO_BUCKET", "agentcode") or "agentcode").strip() or "agentcode",
         minio_secure=_get_bool("MINIO_SECURE", False),
         minio_region=(str(os.getenv("MINIO_REGION", "") or "").strip() or None),
+        neo4j_url=str(os.getenv("PUBLIC_SERVICE_NEO4J_URL") or os.getenv("NEO4J_URL", "") or "").strip(),
+        neo4j_username=str(
+            os.getenv("PUBLIC_SERVICE_NEO4J_USERNAME") or os.getenv("NEO4J_USERNAME", "neo4j") or "neo4j"
+        ).strip(),
+        neo4j_password=str(os.getenv("PUBLIC_SERVICE_NEO4J_PASSWORD") or os.getenv("NEO4J_PASSWORD", "") or ""),
+        neo4j_database=str(
+            os.getenv("PUBLIC_SERVICE_NEO4J_DATABASE") or os.getenv("NEO4J_DATABASE", "neo4j") or "neo4j"
+        ).strip()
+        or "neo4j",
         data_root=data_root,
         uploads_dir=uploads_dir,
         papers_dir=papers_dir,

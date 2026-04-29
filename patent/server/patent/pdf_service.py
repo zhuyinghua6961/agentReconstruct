@@ -867,18 +867,23 @@ class PatentPdfAnswerClient:
 
     @classmethod
     def from_env(cls, *, http_client: Any | None = None) -> "PatentPdfAnswerClient | None":
-        use_shared_env = _env_flag("PATENT_OPENAI_USE_SHARED_ENV", default=False)
         api_key = _first_env(
             "PATENT_OPENAI_API_KEY",
-            default=(os.getenv("OPENAI_API_KEY") or os.getenv("DASHSCOPE_API_KEY")) if use_shared_env else "",
+            "LLM_API_KEY",
+            "OPENAI_API_KEY",
+            "DASHSCOPE_API_KEY",
         )
         base_url = _first_env(
             "PATENT_OPENAI_BASE_URL",
-            default=(os.getenv("OPENAI_BASE_URL") or os.getenv("DASHSCOPE_BASE_URL")) if use_shared_env else "",
+            "LLM_BASE_URL",
+            "OPENAI_BASE_URL",
+            "DASHSCOPE_BASE_URL",
         )
         model = _first_env(
             "PATENT_OPENAI_MODEL",
-            default=(os.getenv("OPENAI_MODEL") or os.getenv("DASHSCOPE_MODEL")) if use_shared_env else "",
+            "LLM_MODEL",
+            "OPENAI_MODEL",
+            "DASHSCOPE_MODEL",
         )
         if not api_key or not base_url or not model:
             return None

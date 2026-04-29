@@ -117,6 +117,30 @@ def test_init_llm_openai_compatible_path_propagates_http_client(monkeypatch):
     assert calls["stream_read_timeout_seconds"] == 601.0
 
 
+def test_init_llm_prefers_unified_llm_aliases(monkeypatch):
+    _configure_langchain_branch(monkeypatch)
+    monkeypatch.delenv("PDF_QA_MODEL", raising=False)
+    monkeypatch.setenv("LLM_API_KEY", "llm-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("LLM_MODEL", "llm-model")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openai.example/v1")
+    monkeypatch.setenv("OPENAI_MODEL", "openai-model")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dash-key")
+    monkeypatch.setenv("DASHSCOPE_BASE_URL", "https://dash.example/v1")
+    monkeypatch.setenv("DASHSCOPE_MODEL", "dash-model")
+    calls: dict[str, object] = {}
+    sentinel = object()
+
+    monkeypatch.setattr(llm_factory, "should_use_dashscope_native", lambda **_kwargs: True)
+    monkeypatch.setattr(llm_factory, "build_chat_adapter", lambda **kwargs: calls.update(kwargs) or sentinel)
+
+    assert llm_factory.init_llm(_FakeLogger()) is sentinel
+    assert calls["api_key"] == "llm-key"
+    assert calls["base_url"] == "https://llm.example/v1"
+    assert calls["model"] == "llm-model"
+
+
 def test_init_llm_langchain_constructor_failure_closes_private_client_before_fallback(monkeypatch):
     _configure_langchain_branch(monkeypatch)
     built_clients: list[SimpleNamespace] = []

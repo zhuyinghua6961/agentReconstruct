@@ -274,7 +274,7 @@ class QuotaService:
     def __init__(self, *, repo: QuotaRepositoryProtocol | None = None, redis_service: RedisService | None = None):
         self._repo = repo or UnavailableQuotaRepository()
         self._redis_service = redis_service
-        self._redis_service_resolved = redis_service is not None
+        self._redis_service_resolved = redis_service is not None or repo is not None
 
     @staticmethod
     def _json_safe_value(value: Any) -> Any:

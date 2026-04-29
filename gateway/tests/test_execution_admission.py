@@ -48,8 +48,8 @@ def test_build_admission_status_exposes_task_api_defaults(monkeypatch):
     assert payload["runtime_role"] == "web"
     assert payload["worker_script_supported"] is True
     assert payload["request_path_cutover_enabled"] is True
-    assert payload["backend_specific_ceilings"]["fast_or_patent"] == 20
-    assert payload["backend_specific_ceilings"]["thinking"] == 5
+    assert payload["backend_specific_ceilings"]["fast_or_patent"] == 50
+    assert payload["backend_specific_ceilings"]["thinking"] == 20
     assert payload["per_user_max_active"] == 5
     assert payload["thinking_min_slots"] == 1
     assert payload["queue_max_size"] == 200

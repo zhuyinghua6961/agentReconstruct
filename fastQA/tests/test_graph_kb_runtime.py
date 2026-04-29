@@ -17,10 +17,11 @@ def _reload_config_module():
     return reloaded
 
 
-def test_settings_default_graph_kb_disabled(monkeypatch):
+def test_settings_default_graph_kb_always_on(monkeypatch):
     for name in (
         "FASTQA_GRAPH_KB_ENABLED",
         "FASTQA_GRAPH_KB_V2_ENABLED",
+        "FASTQA_GRAPH_KB_RAG_INJECTION_ENABLED",
         "FASTQA_GRAPH_KB_TIMEOUT_MS",
         "FASTQA_GRAPH_KB_MAX_ROWS",
         "FASTQA_GRAPH_KB_QUERY_LOGGING",
@@ -30,8 +31,9 @@ def test_settings_default_graph_kb_disabled(monkeypatch):
     get_settings.cache_clear()
     settings = get_settings()
 
-    assert settings.graph_kb_enabled is False
-    assert settings.graph_kb_v2_enabled is False
+    assert settings.graph_kb_enabled is True
+    assert settings.graph_kb_v2_enabled is True
+    assert settings.graph_kb_rag_injection_enabled is True
     assert settings.graph_kb_timeout_ms == 3000
     assert settings.graph_kb_max_rows == 20
     assert settings.graph_kb_query_logging is False
@@ -39,17 +41,69 @@ def test_settings_default_graph_kb_disabled(monkeypatch):
     get_settings.cache_clear()
 
 
-def test_fastqa_shared_config_enables_graph_kb_by_default():
+def test_settings_allows_hidden_graph_kb_rollback_env(monkeypatch):
+    monkeypatch.setenv("FASTQA_GRAPH_KB_ENABLED", "false")
+    monkeypatch.setenv("FASTQA_GRAPH_KB_V2_ENABLED", "false")
+    monkeypatch.setenv("FASTQA_GRAPH_KB_RAG_INJECTION_ENABLED", "false")
+
+    get_settings.cache_clear()
+    settings = get_settings()
+
+    assert settings.graph_kb_enabled is False
+    assert settings.graph_kb_v2_enabled is False
+    assert settings.graph_kb_rag_injection_enabled is False
+
+    get_settings.cache_clear()
+
+
+def test_fastqa_service_config_no_longer_exposes_graph_disable_flags():
     repo_root = Path(__file__).resolve().parents[2]
     shared_env = repo_root / "resource/config/services/fastQA/config.shared.env"
     content = shared_env.read_text(encoding="utf-8")
 
-    assert "FASTQA_GRAPH_KB_ENABLED=1" in content
+    assert "FASTQA_GRAPH_KB_ENABLED" not in content
+    assert "FASTQA_GRAPH_KB_V2_ENABLED" not in content
+    assert "FASTQA_GRAPH_KB_RAG_INJECTION_ENABLED" not in content
 
 
-def test_bootstrap_graph_kb_skips_when_disabled():
+def test_settings_prefer_fastqa_namespaced_neo4j(monkeypatch):
+    for name in ("NEO4J_URL", "NEO4J_USERNAME", "NEO4J_PASSWORD", "NEO4J_DATABASE"):
+        monkeypatch.setenv(name, f"legacy-{name.lower()}")
+    monkeypatch.setenv("FASTQA_NEO4J_URL", "bolt://fastqa:7688")
+    monkeypatch.setenv("FASTQA_NEO4J_USERNAME", "fastqa-user")
+    monkeypatch.setenv("FASTQA_NEO4J_PASSWORD", "fastqa-pw")
+    monkeypatch.setenv("FASTQA_NEO4J_DATABASE", "fastqa-db")
+
+    config = _reload_config_module()
+    settings = config.get_settings()
+
+    assert settings.neo4j_url == "bolt://fastqa:7688"
+    assert settings.neo4j_username == "fastqa-user"
+    assert settings.neo4j_password == "fastqa-pw"
+    assert settings.neo4j_database == "fastqa-db"
+
+
+def test_settings_keep_legacy_neo4j_fallback(tmp_path, monkeypatch):
+    for name in ("FASTQA_NEO4J_URL", "FASTQA_NEO4J_USERNAME", "FASTQA_NEO4J_PASSWORD", "FASTQA_NEO4J_DATABASE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("NEO4J_URL", "bolt://legacy:7688")
+    monkeypatch.setenv("NEO4J_USERNAME", "legacy-user")
+    monkeypatch.setenv("NEO4J_PASSWORD", "legacy-pw")
+    monkeypatch.setenv("NEO4J_DATABASE", "legacy-db")
+    monkeypatch.setenv("RESOURCE_ROOT", str(tmp_path / "resource"))
+
+    config = _reload_config_module()
+    settings = config.get_settings()
+
+    assert settings.neo4j_url == "bolt://legacy:7688"
+    assert settings.neo4j_username == "legacy-user"
+    assert settings.neo4j_password == "legacy-pw"
+    assert settings.neo4j_database == "legacy-db"
+
+
+def test_bootstrap_graph_kb_respects_hidden_disabled_flag():
     runtime = SimpleNamespace(
-        settings=SimpleNamespace(graph_kb_enabled=False),
+        settings=SimpleNamespace(graph_kb_enabled=False, neo4j_url=""),
         neo4j_client=None,
         graph_kb_ready=False,
         component_status={},
@@ -65,13 +119,12 @@ def test_bootstrap_graph_kb_skips_when_disabled():
 
 def test_bootstrap_graph_kb_degrades_when_enabled_but_url_missing(monkeypatch):
     runtime = SimpleNamespace(
-        settings=SimpleNamespace(graph_kb_enabled=True),
+        settings=SimpleNamespace(graph_kb_enabled=True, neo4j_url=""),
         neo4j_client=None,
         graph_kb_ready=False,
         component_status={},
         health_flags={},
     )
-    monkeypatch.delenv("NEO4J_URL", raising=False)
 
     bootstrap_graph_kb(runtime)
 
@@ -82,13 +135,17 @@ def test_bootstrap_graph_kb_degrades_when_enabled_but_url_missing(monkeypatch):
 
 def test_bootstrap_graph_kb_marks_ready(monkeypatch):
     runtime = SimpleNamespace(
-        settings=SimpleNamespace(graph_kb_enabled=True),
+        settings=SimpleNamespace(
+            graph_kb_enabled=True,
+            neo4j_url="bolt://127.0.0.1:7687",
+            neo4j_username="neo4j",
+            neo4j_password="secret",
+        ),
         neo4j_client=None,
         graph_kb_ready=False,
         component_status={},
         health_flags={},
     )
-    monkeypatch.setenv("NEO4J_URL", "bolt://127.0.0.1:7687")
     monkeypatch.setattr(
         "app.core.runtime.bootstrap_neo4j",
         lambda **kwargs: SimpleNamespace(available=True, degraded=False, graph=object(), error=""),
@@ -104,7 +161,12 @@ def test_bootstrap_graph_kb_marks_ready(monkeypatch):
 
 def test_bootstrap_graph_kb_does_not_change_generation_runtime_state(monkeypatch):
     runtime = SimpleNamespace(
-        settings=SimpleNamespace(graph_kb_enabled=True),
+        settings=SimpleNamespace(
+            graph_kb_enabled=True,
+            neo4j_url="bolt://127.0.0.1:7687",
+            neo4j_username="neo4j",
+            neo4j_password="secret",
+        ),
         neo4j_client=None,
         graph_kb_ready=False,
         generation_runtime=object(),
@@ -112,7 +174,6 @@ def test_bootstrap_graph_kb_does_not_change_generation_runtime_state(monkeypatch
         component_status={"generation_runtime": {"status": "ok"}},
         health_flags={},
     )
-    monkeypatch.setenv("NEO4J_URL", "bolt://127.0.0.1:7687")
     monkeypatch.setattr(
         "app.core.runtime.bootstrap_neo4j",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),

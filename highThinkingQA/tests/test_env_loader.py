@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 from pathlib import Path
 
 import pytest
@@ -60,12 +61,13 @@ def test_iter_workspace_env_files_uses_service_config_root(tmp_path, monkeypatch
 
     result = reloaded.iter_workspace_env_files()
 
-    assert result[:3] == reloaded._iter_resource_shared_env_files()
-    assert result[3:7] == (
-        (config_root / "config.env").resolve(),
+    assert result[:4] == reloaded.ENV_FILE_CANDIDATES
+    assert result[4:10] == reloaded._iter_resource_shared_env_files()
+    assert result[10:14] == (
         (config_root / "config.shared.env").resolve(),
         (config_root / "config.secret.env").resolve(),
         (config_root / ".env").resolve(),
+        (config_root / "config.env").resolve(),
     )
 
 
@@ -90,15 +92,121 @@ def test_iter_workspace_env_files_includes_resource_shared_before_service_files(
 
     reloaded = importlib.reload(env_loader)
 
-    assert reloaded.iter_workspace_env_files()[:7] == (
+    assert reloaded.iter_workspace_env_files() == (
+        *reloaded.ENV_FILE_CANDIDATES,
         (shared_root / "infrastructure.shared.env").resolve(),
         (shared_root / "model-endpoints.shared.env").resolve(),
         (shared_root / "infrastructure.secret.env").resolve(),
-        (config_root / "config.env").resolve(),
+        (shared_root / "model-endpoints.secret.env").resolve(),
+        (shared_root / "graph.shared.env").resolve(),
+        (shared_root / "graph.secret.env").resolve(),
         (config_root / "config.shared.env").resolve(),
         (config_root / "config.secret.env").resolve(),
         (config_root / ".env").resolve(),
+        (config_root / "config.env").resolve(),
     )
+
+
+def test_iter_workspace_env_files_orders_legacy_shared_and_service_layers(tmp_path, monkeypatch):
+    workspace_dir = tmp_path / "workspace"
+    resource_root = workspace_dir / "resource"
+    legacy_shared = workspace_dir / "config.shared.env"
+    legacy_secret = workspace_dir / "config.secret.env"
+    shared_root = resource_root / "config" / "shared"
+    service_root = resource_root / "config" / "services" / "highThinkingQA"
+    shared_root.mkdir(parents=True)
+    service_root.mkdir(parents=True)
+    legacy_shared.write_text("LEGACY_SHARED=1\n", encoding="utf-8")
+    legacy_secret.write_text("LEGACY_SECRET=1\n", encoding="utf-8")
+    for name in (
+        "infrastructure.shared.env",
+        "model-endpoints.shared.env",
+        "infrastructure.secret.env",
+        "model-endpoints.secret.env",
+        "graph.shared.env",
+        "graph.secret.env",
+    ):
+        (shared_root / name).write_text(f"{name}=1\n", encoding="utf-8")
+    for name in ("config.shared.env", "config.secret.env", ".env", "config.env"):
+        (service_root / name).write_text(f"{name}=1\n", encoding="utf-8")
+
+    monkeypatch.setenv("RESOURCE_ROOT", str(resource_root))
+    monkeypatch.delenv("HIGHTHINKINGQA_SERVICE_CONFIG_ROOT", raising=False)
+    monkeypatch.delenv("SERVICE_CONFIG_ROOT", raising=False)
+    monkeypatch.delenv("HIGHTHINKINGQA_ENV_FILE", raising=False)
+    monkeypatch.delenv("HIGHTHINKINGQA_ENV_FILES", raising=False)
+    monkeypatch.delenv("SERVICE_ENV_FILE", raising=False)
+    monkeypatch.delenv("SERVICE_ENV_FILES", raising=False)
+    monkeypatch.setattr(env_loader, "WORKSPACE_DIR", workspace_dir)
+    monkeypatch.setattr(env_loader, "REPO_ROOT", workspace_dir)
+    monkeypatch.setattr(env_loader, "SHARED_ENV_FILE", legacy_shared.resolve())
+    monkeypatch.setattr(env_loader, "SECRET_ENV_FILE", legacy_secret.resolve())
+    monkeypatch.setattr(env_loader, "ENV_FILE_CANDIDATES", (legacy_shared.resolve(), legacy_secret.resolve()))
+
+    result = env_loader.iter_workspace_env_files()
+
+    assert result == (
+        legacy_shared.resolve(),
+        legacy_secret.resolve(),
+        (shared_root / "infrastructure.shared.env").resolve(),
+        (shared_root / "model-endpoints.shared.env").resolve(),
+        (shared_root / "infrastructure.secret.env").resolve(),
+        (shared_root / "model-endpoints.secret.env").resolve(),
+        (shared_root / "graph.shared.env").resolve(),
+        (shared_root / "graph.secret.env").resolve(),
+        (service_root / "config.shared.env").resolve(),
+        (service_root / "config.secret.env").resolve(),
+        (service_root / ".env").resolve(),
+        (service_root / "config.env").resolve(),
+    )
+
+
+def test_load_workspace_env_preserves_process_env_and_service_config_wins(tmp_path, monkeypatch):
+    workspace_dir = tmp_path / "workspace"
+    resource_root = workspace_dir / "resource"
+    legacy_secret = workspace_dir / "config.secret.env"
+    shared_file = resource_root / "config" / "shared" / "model-endpoints.shared.env"
+    service_config = resource_root / "config" / "services" / "highThinkingQA" / "config.env"
+    shared_file.parent.mkdir(parents=True)
+    service_config.parent.mkdir(parents=True)
+    legacy_secret.write_text("HT_QA_CACHE_EPOCH=legacy\n", encoding="utf-8")
+    shared_file.write_text("HT_QA_CACHE_EPOCH=shared\n", encoding="utf-8")
+    service_config.write_text("HT_QA_CACHE_EPOCH=service\n", encoding="utf-8")
+
+    monkeypatch.setenv("RESOURCE_ROOT", str(resource_root))
+    monkeypatch.delenv("HT_QA_CACHE_EPOCH", raising=False)
+    monkeypatch.setattr(env_loader, "WORKSPACE_DIR", workspace_dir)
+    monkeypatch.setattr(env_loader, "REPO_ROOT", workspace_dir)
+    monkeypatch.setattr(env_loader, "ENV_FILE_CANDIDATES", (legacy_secret.resolve(),))
+
+    env_loader.load_workspace_env(override_existing=False)
+
+    assert os.environ["HT_QA_CACHE_EPOCH"] == "service"
+
+    monkeypatch.setenv("HT_QA_CACHE_EPOCH", "process")
+    env_loader.load_workspace_env(override_existing=False)
+
+    assert os.environ["HT_QA_CACHE_EPOCH"] == "process"
+
+
+def test_http_settings_resolve_port_from_shared_infrastructure(tmp_path, monkeypatch):
+    resource_root = tmp_path / "resource"
+    shared_root = resource_root / "config" / "shared"
+    service_root = resource_root / "config" / "services" / "highThinkingQA"
+    shared_root.mkdir(parents=True)
+    service_root.mkdir(parents=True)
+    (shared_root / "infrastructure.shared.env").write_text(
+        "HIGHTHINKINGQA_HOST=127.0.0.1\nHIGHTHINKINGQA_PORT=18009\n",
+        encoding="utf-8",
+    )
+    for name in ("HIGHTHINKINGQA_HOST", "HIGHTHINKINGQA_PORT", "APP_HOST", "APP_PORT"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("RESOURCE_ROOT", str(resource_root))
+
+    config = _reload_config_module()
+
+    assert config.HTTP_SETTINGS.app_host == "127.0.0.1"
+    assert config.HTTP_SETTINGS.app_port == 18009
 
 
 def test_resolve_resource_root_defaults_to_repo_resource(monkeypatch):
@@ -134,6 +242,21 @@ def test_config_uses_env_values_and_resolves_relative_paths(monkeypatch):
 def test_config_derives_service_roots_from_resource_root(tmp_path, monkeypatch):
     resource_root = (tmp_path / "resource").resolve()
     (resource_root / "assets" / "prompts").mkdir(parents=True, exist_ok=True)
+    service_config_root = resource_root / "config" / "services" / "highThinkingQA"
+    service_config_root.mkdir(parents=True, exist_ok=True)
+    (service_config_root / "config.shared.env").write_text(
+        "\n".join(
+            (
+                "PAPERS_DIR=papers",
+                "UPLOAD_DIR=uploads",
+                "CHAT_JSON_BASE_DIR=data/conversations",
+                "PROMPTS_DIR=prompts",
+                "CHROMA_PERSIST_DIR=vectordb",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     monkeypatch.setenv("RESOURCE_ROOT", str(resource_root))
     monkeypatch.delenv("HIGHTHINKINGQA_SERVICE_CONFIG_ROOT", raising=False)

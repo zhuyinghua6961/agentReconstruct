@@ -115,7 +115,7 @@ cd "$REPO_ROOT/fastQA" && PYTHONPATH=. pytest tests/test_health.py -q
 
 以下场景必须全部成立：
 
-1. `FASTQA_GRAPH_KB_ENABLED=0` 时，`kb_qa` 行为与改动前一致
+1. `FASTQA_GRAPH_KB_ENABLED=<deprecated-disable-value>` 时，`kb_qa` 行为与改动前一致
 2. `FASTQA_GRAPH_KB_ENABLED=1` 但 Neo4j 不可用时，`kb_qa` 仍返回 generation-driven 答案
 3. 图谱分类命中但查询失败时，`kb_qa` 仍返回 generation-driven 答案
 4. 文件 `pdf_qa / tabular_qa / hybrid_qa` 行为无变化
@@ -203,7 +203,7 @@ Implement:
 
 Constraints:
 - graph runtime failure must not change `generation_runtime_ready`
-- `config.shared.env` default must be `FASTQA_GRAPH_KB_ENABLED=0`
+- `config.shared.env` default must be `FASTQA_GRAPH_KB_ENABLED=<deprecated-disable-value>`
 
 - [ ] **Step 4: Update health payload and example config files**
 
@@ -626,7 +626,7 @@ Example:
 
 ```bash
 REPO_ROOT=$(git rev-parse --show-toplevel)
-cd "$REPO_ROOT/fastQA" && FASTQA_GRAPH_KB_ENABLED=0 PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8008
+cd "$REPO_ROOT/fastQA" && FASTQA_GRAPH_KB_ENABLED=<deprecated-disable-value> PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8008
 ```
 
 Then confirm:

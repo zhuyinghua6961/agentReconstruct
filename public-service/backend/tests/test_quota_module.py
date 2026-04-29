@@ -1937,9 +1937,9 @@ def test_protected_quota_route_returns_503_when_auth_repo_unavailable(monkeypatc
 
     failing_service = AuthService(repo=FailingRepo(), token_service=TokenService())
     token = failing_service._tokens.issue_access_token(user_id=7, role="user")
-    monkeypatch.setattr(auth_service_module, "auth_service", failing_service)
 
     with TestClient(app) as client:
+        monkeypatch.setattr(auth_service_module, "auth_service", failing_service)
         response = client.get("/api/v1/quota/my", headers={"Authorization": f"Bearer {token}"})
 
     assert response.status_code == 503

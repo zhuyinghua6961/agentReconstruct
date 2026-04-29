@@ -672,7 +672,7 @@ Phase 1 对 follow-up 问题采用严格保守策略。
 
 建议新增以下环境变量：
 
-- `FASTQA_GRAPH_KB_ENABLED=0|1`
+- `FASTQA_GRAPH_KB_ENABLED=<deprecated-disable-value>|1`
 - `FASTQA_GRAPH_KB_TIMEOUT_MS`
 - `FASTQA_GRAPH_KB_MAX_ROWS`
 - `FASTQA_GRAPH_KB_QUERY_LOGGING=0|1`
@@ -685,7 +685,7 @@ Phase 1 对 follow-up 问题采用严格保守策略。
 
 默认策略：
 
-- `FASTQA_GRAPH_KB_ENABLED=0` 时完全关闭图谱分支
+- `FASTQA_GRAPH_KB_ENABLED=<deprecated-disable-value>` 时完全关闭图谱分支
 - 未配置 Neo4j 连接时视为 `skipped`
 
 这样 rollout 和回滚都只需要改配置，无需立即回退代码。
@@ -750,7 +750,7 @@ Phase 1 对 follow-up 问题采用严格保守策略。
 
 回滚要求必须简单直接：
 
-1. 先通过 `FASTQA_GRAPH_KB_ENABLED=0` 关闭功能
+1. 先通过 `FASTQA_GRAPH_KB_ENABLED=<deprecated-disable-value>` 关闭功能
 2. 若仍需彻底移除，再删除 `kb_qa` 前置图谱调用
 3. 不需要动 generation-driven 主链代码
 

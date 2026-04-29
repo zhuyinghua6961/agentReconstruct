@@ -48,7 +48,7 @@ class PatentKbService:
         self._graph_kb_service_v2 = graph_kb_service_v2
         self._graph_kb_client = graph_kb_client
         self._graph_kb_enabled = bool(graph_kb_enabled)
-        self._graph_kb_v2_enabled = bool(graph_kb_v2_enabled)
+        self._graph_kb_v2_enabled = bool(callable(graph_kb_service_v2) or graph_kb_v2_enabled)
         self._graph_kb_rag_injection_enabled = bool(graph_kb_rag_injection_enabled)
         self._graph_kb_max_rows = max(1, int(graph_kb_max_rows or 20))
         self._graph_kb_timeout_ms = max(100, int(graph_kb_timeout_ms or 3000))

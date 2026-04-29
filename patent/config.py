@@ -6,11 +6,26 @@ from pathlib import Path
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
 _SERVICE_ROOT = Path(__file__).resolve().parent
+_REPO_ROOT = _SERVICE_ROOT.parent
 _INITIAL_ENV_KEYS = frozenset(os.environ.keys())
-_DEFAULT_ENV_FILES = (
-    ("config.shared.env", False),
-    ("config.secret.env", True),
-    (".env", True),
+_LEGACY_ENV_FILENAMES = (
+    "config.shared.env",
+    "config.secret.env",
+    ".env",
+)
+_SHARED_ENV_FILENAMES = (
+    "infrastructure.shared.env",
+    "model-endpoints.shared.env",
+    "infrastructure.secret.env",
+    "model-endpoints.secret.env",
+    "graph.shared.env",
+    "graph.secret.env",
+)
+_SERVICE_ENV_FILENAMES = (
+    "config.shared.env",
+    "config.secret.env",
+    ".env",
+    "config.env",
 )
 
 
@@ -42,9 +57,52 @@ def _load_env_file(path: Path, *, override_loaded_values: bool = False) -> None:
         os.environ[name] = _strip_optional_quotes(raw_value.strip())
 
 
+def _resolve_path(raw: str, *, base: Path) -> Path:
+    path = Path(raw).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    return (base / path).resolve()
+
+
+def _resolve_resource_root() -> Path | None:
+    raw = str(os.getenv("RESOURCE_ROOT", "") or "").strip()
+    if raw:
+        return _resolve_path(raw, base=_REPO_ROOT)
+    candidate = (_REPO_ROOT / "resource").resolve()
+    if candidate.exists() and candidate.is_dir():
+        return candidate
+    return None
+
+
+def _iter_default_env_files() -> tuple[Path, ...]:
+    values: list[Path] = []
+    seen: set[Path] = set()
+
+    def add(path: Path) -> None:
+        resolved = path.resolve()
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        values.append(resolved)
+
+    for filename in _LEGACY_ENV_FILENAMES:
+        add(_SERVICE_ROOT / filename)
+
+    resource_root = _resolve_resource_root()
+    if resource_root is not None:
+        shared_root = resource_root / "config" / "shared"
+        service_root = resource_root / "config" / "services" / "patent"
+        for filename in _SHARED_ENV_FILENAMES:
+            add(shared_root / filename)
+        for filename in _SERVICE_ENV_FILENAMES:
+            add(service_root / filename)
+
+    return tuple(values)
+
+
 def _load_default_env_files() -> None:
-    for filename, override_loaded_values in _DEFAULT_ENV_FILES:
-        _load_env_file(_SERVICE_ROOT / filename, override_loaded_values=override_loaded_values)
+    for path in _iter_default_env_files():
+        _load_env_file(path, override_loaded_values=True)
 
 
 _load_default_env_files()
@@ -265,9 +323,9 @@ def get_settings() -> Settings:
             limit=max(1, _read_int("PATENT_PLANNING_UPSTREAM_GATE_LIMIT", 1)),
         ),
         graph_kb=PatentGraphSettings(
-            enabled=_read_bool("PATENT_GRAPH_KB_ENABLED", False),
-            v2_enabled=_read_bool("PATENT_GRAPH_KB_V2_ENABLED", False),
-            rag_injection_enabled=_read_bool("PATENT_GRAPH_KB_RAG_INJECTION_ENABLED", False),
+            enabled=_read_bool("PATENT_GRAPH_KB_ENABLED", True),
+            v2_enabled=_read_bool("PATENT_GRAPH_KB_V2_ENABLED", True),
+            rag_injection_enabled=_read_bool("PATENT_GRAPH_KB_RAG_INJECTION_ENABLED", True),
             neo4j_url=str(os.getenv("PATENT_NEO4J_URL", "bolt://127.0.0.1:8687") or "").strip(),
             neo4j_username=str(os.getenv("PATENT_NEO4J_USERNAME", "neo4j") or "neo4j").strip(),
             neo4j_password=str(os.getenv("PATENT_NEO4J_PASSWORD", "") or ""),

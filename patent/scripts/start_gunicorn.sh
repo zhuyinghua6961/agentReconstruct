@@ -20,9 +20,9 @@ export PATENT_SERVICE_RUNTIME_ROOT="${PATENT_SERVICE_RUNTIME_ROOT:-$RUNTIME_DIR_
 export PATENT_SERVICE_LOG_ROOT="${PATENT_SERVICE_LOG_ROOT:-$LOG_DIR_DEFAULT}"
 PATENT_SHARED_ENV_FILES=""
 if [[ -n "${RESOURCE_DIR:-}" ]]; then
-  PATENT_SHARED_ENV_FILES="$RESOURCE_DIR/config/shared/infrastructure.shared.env:$RESOURCE_DIR/config/shared/model-endpoints.shared.env:$RESOURCE_DIR/config/shared/infrastructure.secret.env"
+  PATENT_SHARED_ENV_FILES="$RESOURCE_DIR/config/shared/infrastructure.shared.env:$RESOURCE_DIR/config/shared/model-endpoints.shared.env:$RESOURCE_DIR/config/shared/infrastructure.secret.env:$RESOURCE_DIR/config/shared/model-endpoints.secret.env:$RESOURCE_DIR/config/shared/graph.shared.env:$RESOURCE_DIR/config/shared/graph.secret.env"
 fi
-export PATENT_ENV_FILES="${PATENT_ENV_FILES:-$PATENT_SHARED_ENV_FILES:$CONFIG_DIR_DEFAULT/config.env:$CONFIG_DIR_DEFAULT/config.shared.env:$CONFIG_DIR_DEFAULT/config.secret.env:$PUBLIC_SERVICE_ROOT/config.shared.env:$PUBLIC_SERVICE_ROOT/config.secret.env:$PROJECT_ROOT/.env}"
+export PATENT_ENV_FILES="${PATENT_ENV_FILES:-$PROJECT_ROOT/config.shared.env:$PROJECT_ROOT/config.secret.env:$PROJECT_ROOT/.env:$PUBLIC_SERVICE_ROOT/config.shared.env:$PUBLIC_SERVICE_ROOT/config.secret.env:$PATENT_SHARED_ENV_FILES:$CONFIG_DIR_DEFAULT/config.shared.env:$CONFIG_DIR_DEFAULT/config.secret.env:$CONFIG_DIR_DEFAULT/.env:$CONFIG_DIR_DEFAULT/config.env}"
 
 load_env_files_preserving_process_env "$PATENT_ENV_FILES"
 

@@ -5,6 +5,11 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from app.core.env_loader import load_workspace_env
+
+
+load_workspace_env(override_existing=False)
+
 
 _DEFAULT_MODE_BACKEND_ENDPOINTS = {
     'fast': 'http://127.0.0.1:8008',

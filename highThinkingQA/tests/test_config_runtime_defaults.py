@@ -11,5 +11,5 @@ def test_config_raises_thinking_service_concurrency_defaults(monkeypatch):
 
     reloaded = importlib.reload(config)
 
-    assert reloaded.ASK_STREAM_MAX_CONCURRENT == 5
-    assert reloaded.ASK_EXECUTOR_MAX_WORKERS == 5
+    assert reloaded.ASK_STREAM_MAX_CONCURRENT == 20
+    assert reloaded.ASK_EXECUTOR_MAX_WORKERS == 20

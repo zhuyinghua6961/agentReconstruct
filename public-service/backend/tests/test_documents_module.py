@@ -12,9 +12,11 @@ from app.core.deps import AuthContext
 from app.main import app
 from app.modules.auth import service as auth_service_module
 from app.modules.auth.deps import get_optional_auth_context, require_auth_context
+from app.modules.documents import api as documents_api_module
 from app.modules.documents import reference_preview as reference_preview_module
 from app.modules.documents.reference_preview import build_reference_preview_batch, query_graph_reference_metadata
-from app.modules.documents.service import documents_service
+from app.modules.documents.service import DocumentsService, documents_service
+from app.modules.documents.translator import SmartTranslator
 from app.modules.quota import service as quota_service_module
 from app.modules.retrieval.models import ChromaBootstrapResult, RetrievalBindings, RetrievalRuntimeConfig
 
@@ -26,6 +28,50 @@ def test_document_routes_registered():
     assert "/api/translate_document" in paths
     assert "/api/reference_preview" in paths
     assert "/api/patent/original/{canonical_patent_id}" in paths
+
+
+def test_smart_translator_prefers_unified_llm_aliases(monkeypatch):
+    calls: dict[str, object] = {}
+
+    class _FakeOpenAI:
+        def __init__(self, **kwargs):
+            calls.update(kwargs)
+
+    monkeypatch.setenv("LLM_API_KEY", "llm-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("LLM_MODEL", "llm-model")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openai.example/v1")
+    monkeypatch.setenv("OPENAI_MODEL", "openai-model")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dash-key")
+    monkeypatch.setenv("DASHSCOPE_BASE_URL", "https://dash.example/v1")
+    monkeypatch.setenv("DASHSCOPE_MODEL", "dash-model")
+
+    translator = SmartTranslator(_FakeOpenAI)
+
+    assert translator.api_key == "llm-key"
+    assert translator.base_url == "https://llm.example/v1"
+    assert translator.model == "llm-model"
+    assert calls == {"api_key": "llm-key", "base_url": "https://llm.example/v1"}
+
+
+def test_documents_service_prefers_unified_llm_aliases(monkeypatch, tmp_path):
+    monkeypatch.setenv("PUBLIC_SERVICE_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("LLM_API_KEY", "llm-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("LLM_MODEL", "llm-model")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openai.example/v1")
+    monkeypatch.setenv("OPENAI_MODEL", "openai-model")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dash-key")
+    monkeypatch.setenv("DASHSCOPE_BASE_URL", "https://dash.example/v1")
+    monkeypatch.setenv("DASHSCOPE_MODEL", "dash-model")
+
+    service = DocumentsService()
+
+    assert service._openai_api_key == "llm-key"
+    assert service._openai_base_url == "https://llm.example/v1"
+    assert service._openai_model == "llm-model"
 
 
 def test_view_pdf_route_serves_file(monkeypatch, tmp_path):
@@ -539,7 +585,9 @@ def test_literature_content_graph_query_prefers_exact_doi_match():
     assert "ORDER BY match_rank ASC" in str(captured["query"])
 
 
-def test_literature_content_route_reports_retrieval_dependency_when_runtime_missing():
+def test_literature_content_route_reports_retrieval_dependency_when_runtime_missing(monkeypatch):
+    monkeypatch.setattr(documents_api_module, "_agent_from_request", lambda request: None)
+    monkeypatch.setattr(documents_api_module, "_runtime_from_request", lambda request: None)
     with TestClient(app) as client:
         response = client.get("/api/v1/literature_content", params={"doi": "10.1000/test"})
 
@@ -649,7 +697,9 @@ def test_reference_preview_post_accepts_frontend_doi_payload(monkeypatch):
     assert captured["max_items"] == 5
 
 
-def test_reference_preview_route_reports_optional_retrieval_dependency_when_runtime_missing():
+def test_reference_preview_route_reports_optional_retrieval_dependency_when_runtime_missing(monkeypatch):
+    monkeypatch.setattr(documents_api_module, "_agent_from_request", lambda request: None)
+    monkeypatch.setattr(documents_api_module, "_runtime_from_request", lambda request: None)
     with TestClient(app) as client:
         response = client.get("/api/v1/reference_preview", params=[("dois", "10.1000/test")])
 

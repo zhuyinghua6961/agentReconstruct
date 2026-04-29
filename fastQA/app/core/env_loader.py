@@ -14,11 +14,14 @@ except Exception:  # pragma: no cover
 SERVICE_CODE = "FASTQA"
 SERVICE_NAME = "fastQA"
 WORKSPACE_DIR = Path(__file__).resolve().parents[3]
-DEFAULT_ENV_FILENAMES = ("config.env", "config.shared.env", "config.secret.env", ".env")
+DEFAULT_ENV_FILENAMES = ("config.shared.env", "config.secret.env", ".env", "config.env")
 SHARED_CONFIG_FILENAMES = (
     "infrastructure.shared.env",
     "model-endpoints.shared.env",
     "infrastructure.secret.env",
+    "model-endpoints.secret.env",
+    "graph.shared.env",
+    "graph.secret.env",
 )
 LEGACY_ENV_FILE = WORKSPACE_DIR / "config.env"
 SHARED_ENV_FILE = WORKSPACE_DIR / "config.shared.env"
@@ -138,14 +141,13 @@ def iter_workspace_env_files() -> tuple[Path, ...]:
     config_root = _resolve_config_root()
     if config_root is not None:
         candidates = tuple((config_root / filename).resolve() for filename in DEFAULT_ENV_FILENAMES)
-        if any(path.exists() for path in candidates):
-            merged: list[Path] = []
-            for path in (*_iter_resource_shared_env_files(), *candidates, *ENV_FILE_CANDIDATES):
-                if path in seen:
-                    continue
-                seen.add(path)
-                merged.append(path)
-            return tuple(merged)
+        merged: list[Path] = []
+        for path in (*ENV_FILE_CANDIDATES, *_iter_resource_shared_env_files(), *candidates):
+            if path in seen:
+                continue
+            seen.add(path)
+            merged.append(path)
+        return tuple(merged)
 
     return ENV_FILE_CANDIDATES
 

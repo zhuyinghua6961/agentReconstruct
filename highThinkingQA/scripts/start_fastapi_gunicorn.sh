@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RESOURCE_DIR="$(cd "$ROOT_DIR/../resource" 2>/dev/null && pwd || true)"
+source "$ROOT_DIR/../scripts/env_file_loader.sh"
+capture_env_file_loader_process_keys
 SERVICE_CONFIG_ROOT_DEFAULT="$ROOT_DIR"
 SERVICE_STATE_ROOT_DEFAULT="$ROOT_DIR"
 SERVICE_RUNTIME_ROOT_DEFAULT="$ROOT_DIR/.runtime"
@@ -27,8 +29,14 @@ export APP_RUNTIME_LOGS_DIR="${APP_RUNTIME_LOGS_DIR:-$SERVICE_LOG_ROOT_DEFAULT}"
 export APP_PORT="${APP_PORT:-8009}"
 
 if [[ -n "${RESOURCE_DIR:-}" ]]; then
-  export HIGHTHINKINGQA_SHARED_ENV_FILES="${HIGHTHINKINGQA_SHARED_ENV_FILES:-$RESOURCE_DIR/config/shared/infrastructure.shared.env:$RESOURCE_DIR/config/shared/model-endpoints.shared.env:$RESOURCE_DIR/config/shared/infrastructure.secret.env}"
-  export HIGHTHINKINGQA_ENV_FILES="${HIGHTHINKINGQA_ENV_FILES:-$HIGHTHINKINGQA_SHARED_ENV_FILES:$HIGHTHINKINGQA_SERVICE_CONFIG_ROOT/config.env:$HIGHTHINKINGQA_SERVICE_CONFIG_ROOT/config.shared.env:$HIGHTHINKINGQA_SERVICE_CONFIG_ROOT/config.secret.env:$HIGHTHINKINGQA_SERVICE_CONFIG_ROOT/.env}"
+  export HIGHTHINKINGQA_SHARED_ENV_FILES="${HIGHTHINKINGQA_SHARED_ENV_FILES:-$RESOURCE_DIR/config/shared/infrastructure.shared.env:$RESOURCE_DIR/config/shared/model-endpoints.shared.env:$RESOURCE_DIR/config/shared/infrastructure.secret.env:$RESOURCE_DIR/config/shared/model-endpoints.secret.env:$RESOURCE_DIR/config/shared/graph.shared.env:$RESOURCE_DIR/config/shared/graph.secret.env}"
+  export HIGHTHINKINGQA_ENV_FILES="${HIGHTHINKINGQA_ENV_FILES:-$ROOT_DIR/config.env:$ROOT_DIR/config.shared.env:$ROOT_DIR/config.secret.env:$ROOT_DIR/.env:$HIGHTHINKINGQA_SHARED_ENV_FILES:$HIGHTHINKINGQA_SERVICE_CONFIG_ROOT/config.shared.env:$HIGHTHINKINGQA_SERVICE_CONFIG_ROOT/config.secret.env:$HIGHTHINKINGQA_SERVICE_CONFIG_ROOT/.env:$HIGHTHINKINGQA_SERVICE_CONFIG_ROOT/config.env}"
+fi
+
+load_env_files_preserving_process_env "${HIGHTHINKINGQA_ENV_FILES:-}"
+
+if [[ -z "${ENV_FILE_LOADER_PROCESS_KEYS[APP_PORT]+x}" ]]; then
+  export APP_PORT="${HIGHTHINKINGQA_PORT:-${APP_PORT:-8009}}"
 fi
 
 PID_FILE="$HIGHTHINKINGQA_SERVICE_RUNTIME_ROOT/gunicorn.pid"

@@ -821,6 +821,7 @@ def test_admission_worker_sends_patent_protocol_fields_to_upstream_stream(monkey
     captured_payload = {}
 
     class _Handle:
+        backend = "patent"
         status_code = 200
         headers = {"content-type": "text/event-stream"}
 
@@ -943,6 +944,7 @@ def test_admission_worker_sends_patent_stream_capability_header_for_file_route_t
     captured_headers = {}
 
     class _Handle:
+        backend = "patent"
         status_code = 200
         headers = {"content-type": "text/event-stream"}
 
@@ -1455,6 +1457,7 @@ def test_admission_worker_patent_preview_chunks_do_not_sync_into_main_assistant_
     terminal_calls: list[dict] = []
 
     class _Handle:
+        backend = "patent"
         status_code = 200
         headers = {"content-type": "text/event-stream"}
 

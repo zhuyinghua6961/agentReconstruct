@@ -34,6 +34,16 @@ try:
 except Exception:
     OpenAI = None
 
+DEFAULT_LLM_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+
+def _first_env(*names: str, default: str = "") -> str:
+    for name in names:
+        value = str(os.getenv(name, "") or "").strip()
+        if value:
+            return value
+    return default
+
 
 def format_material_content(node_data: dict[str, Any]) -> str:
     content_parts: list[str] = []
@@ -106,8 +116,14 @@ class DocumentsService:
     def __init__(self) -> None:
         self._papers_dir = self._resolve_papers_dir()
         self._max_pdf_pages = max(1, int(str(os.getenv("MAX_PDF_PAGES", "50") or "50")))
-        self._openai_api_key = str(os.getenv("OPENAI_API_KEY", "") or "")
-        self._openai_base_url = str(os.getenv("OPENAI_BASE_URL", "") or "")
+        self._openai_api_key = _first_env("LLM_API_KEY", "OPENAI_API_KEY", "DASHSCOPE_API_KEY")
+        self._openai_base_url = _first_env(
+            "LLM_BASE_URL",
+            "OPENAI_BASE_URL",
+            "DASHSCOPE_BASE_URL",
+            default=DEFAULT_LLM_BASE_URL,
+        )
+        self._openai_model = _first_env("LLM_MODEL", "OPENAI_MODEL", "DASHSCOPE_MODEL", default="deepseek-v3.1")
 
     def _resolve_papers_dir(self) -> Path:
         path = get_settings().papers_dir
@@ -609,7 +625,7 @@ class DocumentsService:
 
             client = OpenAI(api_key=self._openai_api_key, base_url=self._openai_base_url)
             resp = client.chat.completions.create(
-                model="deepseek-v3.1",
+                model=self._openai_model,
                 messages=[
                     {"role": "system", "content": "你是一名材料领域文献速读助手，擅长用中文提炼论文要点。"},
                     {"role": "user", "content": prompt},

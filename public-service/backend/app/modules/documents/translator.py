@@ -9,6 +9,16 @@ from typing import Any
 
 from .translation_cache_impl import TranslationCache
 
+DEFAULT_LLM_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+
+def _first_env(*names: str, default: str = "") -> str:
+    for name in names:
+        value = str(os.getenv(name, "") or "").strip()
+        if value:
+            return value
+    return default
+
 
 class SmartTranslator:
     def __init__(
@@ -17,11 +27,16 @@ class SmartTranslator:
         *,
         api_key: str | None = None,
         base_url: str | None = None,
-        model: str = "deepseek-v3.1",
+        model: str | None = None,
     ):
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        self.base_url = base_url or os.getenv("OPENAI_BASE_URL")
-        self.model = model
+        self.api_key = api_key or _first_env("LLM_API_KEY", "OPENAI_API_KEY", "DASHSCOPE_API_KEY")
+        self.base_url = base_url or _first_env(
+            "LLM_BASE_URL",
+            "OPENAI_BASE_URL",
+            "DASHSCOPE_BASE_URL",
+            default=DEFAULT_LLM_BASE_URL,
+        )
+        self.model = model or _first_env("LLM_MODEL", "OPENAI_MODEL", "DASHSCOPE_MODEL", default="deepseek-v3.1")
 
         if not self.api_key:
             self.client = None

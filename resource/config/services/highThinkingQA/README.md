@@ -9,13 +9,13 @@ highThinkingQA intentionally differs from the shared default.
 Load order for the service process:
 
 - explicit env files via `HIGHTHINKINGQA_ENV_FILE(S)` or `SERVICE_ENV_FILE(S)`
-- otherwise shared files first, then this service config root: `config.env`,
-  `config.shared.env`, `config.secret.env`, `.env`
+- otherwise legacy fallback, shared files, then this service config root:
+  `config.shared.env`, `config.secret.env`, `.env`, `config.env`
 - workspace fallback is only used when no service config root is active
 
 highThinkingQA owns:
 
-- app port, host, Gunicorn worker/thread/timeouts, CORS, SSE, and ask concurrency
+- Gunicorn worker/thread/timeouts, CORS, SSE, and ask concurrency
 - thinking-mode model choices such as `LLM_MODEL`, `DECOMPOSE_MODEL`,
   `DIRECT_ANSWER_MODEL`, `SUB_ANSWER_MODEL`, `CHECKER_MODEL`, and thinking flags
 - DashScope embedding/OCR model choices and dimensions
@@ -23,8 +23,8 @@ highThinkingQA owns:
 - local paper, prompt, Chroma, upload, and conversation paths
 - `REDIS_KEY_PREFIX=highthinkingqa`
 
-Shared config owns common Redis/MySQL/MinIO infrastructure defaults and shared
-DashScope-compatible base URL aliases. Service-local embedding/OCR settings remain here
-because highThinkingQA uses DashScope defaults rather than the local embedding endpoint.
+Shared config owns service ports, common Redis/MySQL/MinIO infrastructure defaults, model
+endpoint aliases, and graph endpoints. Use `config.env` or process env for local overrides;
+do not commit filled secret files.
 
 Runtime/state/assets should resolve via the `resource/` contract when the service runs from this monorepo.

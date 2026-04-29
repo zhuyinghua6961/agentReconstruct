@@ -9,6 +9,8 @@ from typing import Any, Iterable, Iterator, Mapping
 
 from app.core.logging import beijing_now_iso
 
+DEFAULT_OPENAI_COMPATIBLE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
 
 def _coerce_text_content(content: Any) -> str:
     if content is None:
@@ -71,7 +73,7 @@ def normalize_messages(payload: Any) -> list[dict[str, str]]:
 def normalize_openai_compatible_endpoint(base_url: str | None) -> str:
     value = str(base_url or "").strip().rstrip("/")
     if not value:
-        value = "https://api.openai.com/v1"
+        value = DEFAULT_OPENAI_COMPATIBLE_BASE_URL
     for suffix in ("/v1/chat/completions", "/chat/completions"):
         if value.endswith(suffix):
             value = value[: -len(suffix)]

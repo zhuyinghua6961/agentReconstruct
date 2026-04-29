@@ -247,7 +247,7 @@ def test_kb_service_falls_back_to_staged_runtime_when_graph_service_does_not_han
     assert execution_result["query_mode"] == "patent_kb_qa"
 
 
-def test_kb_service_skips_graph_preflight_when_graph_disabled():
+def test_kb_service_respects_hidden_disabled_graph_flag_for_preflight():
     class _RecordingOrchestrator(_FakeOrchestrator):
         def __init__(self) -> None:
             self.calls = 0
@@ -390,7 +390,7 @@ def test_kb_service_v2_graph_for_rag_skips_injection_when_disabled():
 
     assert "graph_kb" not in captured["conversation_context"]
     assert execution_result["metadata"]["graph_kb_mode"] == "graph_for_rag"
-    assert execution_result["metadata"]["graph_kb_downgrade_reason"] == "rag_injection_disabled"
+    assert execution_result["metadata"].get("graph_kb_downgrade_reason", "") == "rag_injection_disabled"
 
 
 def test_kb_service_v2_skip_graph_leaves_staged_runtime_unchanged():

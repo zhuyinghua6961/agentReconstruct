@@ -47,6 +47,8 @@ def test_no_implicit_repo_root_env_loading(config_module) -> None:
 def test_explicit_env_file_loading(config_module, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     env_file = tmp_path / "public-service.env"
     env_file.write_text("MYSQL_HOST=10.0.0.8\nPUBLIC_SERVICE_PORT=9123\n", encoding="utf-8")
+    monkeypatch.delenv("MYSQL_HOST", raising=False)
+    monkeypatch.delenv("PUBLIC_SERVICE_PORT", raising=False)
     monkeypatch.setenv("PUBLIC_SERVICE_ENV_FILE", str(env_file))
 
     import app.core.env_loader as env_loader
@@ -60,16 +62,35 @@ def test_explicit_env_file_loading(config_module, monkeypatch: pytest.MonkeyPatc
     assert settings.port == 9123
 
 
+def test_public_service_prefers_namespaced_neo4j_config(config_module, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NEO4J_URL", "bolt://legacy:7688")
+    monkeypatch.setenv("NEO4J_USERNAME", "legacy-user")
+    monkeypatch.setenv("NEO4J_PASSWORD", "legacy-pw")
+    monkeypatch.setenv("PUBLIC_SERVICE_NEO4J_URL", "bolt://public:7688")
+    monkeypatch.setenv("PUBLIC_SERVICE_NEO4J_USERNAME", "public-user")
+    monkeypatch.setenv("PUBLIC_SERVICE_NEO4J_PASSWORD", "public-pw")
+    monkeypatch.setenv("PUBLIC_SERVICE_NEO4J_DATABASE", "public-db")
+    config_module.get_settings.cache_clear()
+
+    settings = config_module.get_settings()
+
+    assert settings.neo4j_url == "bolt://public:7688"
+    assert settings.neo4j_username == "public-user"
+    assert settings.neo4j_password == "public-pw"
+    assert settings.neo4j_database == "public-db"
+
+
 def test_default_data_dirs_resolve_under_tmp_root(config_module) -> None:
     settings = config_module.get_settings()
-    assert settings.data_root == Path("/tmp/public-service")
-    assert settings.uploads_dir == Path("/tmp/public-service/uploads")
-    assert settings.papers_dir == Path("/tmp/public-service/papers")
-    assert settings.chat_json_base_dir == Path("/tmp/public-service/data/conversations")
-    assert settings.vector_db_path == Path("/tmp/public-service/vector_database")
-    assert settings.translation_cache_dir == Path("/tmp/public-service/translation_cache")
-    assert settings.logs_dir == Path("/tmp/public-service/logs")
-    assert settings.local_storage_root == Path("/tmp/public-service/storage")
+    expected_root = Path(config_module.__file__).resolve().parents[3] / "data" / "runtime"
+    assert settings.data_root == expected_root
+    assert settings.uploads_dir == settings.data_root / "uploads"
+    assert settings.papers_dir == settings.data_root / "papers"
+    assert settings.chat_json_base_dir == settings.data_root / "data/conversations"
+    assert settings.vector_db_path == settings.data_root / "vector_database"
+    assert settings.translation_cache_dir == settings.data_root / "translation_cache"
+    assert settings.logs_dir == settings.data_root / "logs"
+    assert settings.local_storage_root == settings.data_root / "storage"
 
 
 def test_relative_overrides_resolve_under_data_root(config_module, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -94,6 +94,9 @@ def test_shared_llm_pool_default_capacity_matches_streaming_budget(monkeypatch):
         "LLM_READ_TIMEOUT_SECONDS",
         "LLM_WRITE_TIMEOUT_SECONDS",
         "LLM_POOL_TIMEOUT_SECONDS",
+        "LLM_KEEPALIVE_EXPIRY_SECONDS",
+        "LLM_MAX_CONNECTIONS",
+        "LLM_MAX_KEEPALIVE_CONNECTIONS",
     ):
         monkeypatch.delenv(name, raising=False)
 

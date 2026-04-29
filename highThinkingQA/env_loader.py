@@ -15,11 +15,14 @@ SERVICE_CODE = "HIGHTHINKINGQA"
 SERVICE_NAME = "highThinkingQA"
 WORKSPACE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = WORKSPACE_DIR.parent
-DEFAULT_ENV_FILENAMES = ("config.env", "config.shared.env", "config.secret.env", ".env")
+DEFAULT_ENV_FILENAMES = ("config.shared.env", "config.secret.env", ".env", "config.env")
 SHARED_CONFIG_FILENAMES = (
     "infrastructure.shared.env",
     "model-endpoints.shared.env",
     "infrastructure.secret.env",
+    "model-endpoints.secret.env",
+    "graph.shared.env",
+    "graph.secret.env",
 )
 LEGACY_ENV_FILE = WORKSPACE_DIR / "config.env"
 SHARED_ENV_FILE = WORKSPACE_DIR / "config.shared.env"
@@ -139,12 +142,14 @@ def iter_workspace_env_files() -> tuple[Path, ...]:
 
     config_root = _resolve_config_root()
     if config_root is not None:
-        return tuple(
-            (
-                *_iter_resource_shared_env_files(),
-                *((config_root / filename).resolve() for filename in DEFAULT_ENV_FILENAMES),
-            )
-        )
+        candidates = tuple((config_root / filename).resolve() for filename in DEFAULT_ENV_FILENAMES)
+        merged: list[Path] = []
+        for path in (*ENV_FILE_CANDIDATES, *_iter_resource_shared_env_files(), *candidates):
+            if path in seen:
+                continue
+            seen.add(path)
+            merged.append(path)
+        return tuple(merged)
 
     return ENV_FILE_CANDIDATES
 

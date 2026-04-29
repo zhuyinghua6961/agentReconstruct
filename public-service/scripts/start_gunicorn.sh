@@ -19,11 +19,11 @@ mkdir -p "$RUNTIME_DIR" "$LOG_DIR_DEFAULT"
 
 PUBLIC_SERVICE_SHARED_ENV_FILES=""
 if [[ -n "${RESOURCE_DIR:-}" ]]; then
-  PUBLIC_SERVICE_SHARED_ENV_FILES="$RESOURCE_DIR/config/shared/infrastructure.shared.env:$RESOURCE_DIR/config/shared/model-endpoints.shared.env:$RESOURCE_DIR/config/shared/infrastructure.secret.env"
+  PUBLIC_SERVICE_SHARED_ENV_FILES="$RESOURCE_DIR/config/shared/infrastructure.shared.env:$RESOURCE_DIR/config/shared/model-endpoints.shared.env:$RESOURCE_DIR/config/shared/infrastructure.secret.env:$RESOURCE_DIR/config/shared/model-endpoints.secret.env:$RESOURCE_DIR/config/shared/graph.shared.env:$RESOURCE_DIR/config/shared/graph.secret.env"
 fi
 
 export PUBLIC_SERVICE_PORT="${PUBLIC_SERVICE_PORT:-8102}"
-export PUBLIC_SERVICE_ENV_FILES="${PUBLIC_SERVICE_ENV_FILES:-$PUBLIC_SERVICE_SHARED_ENV_FILES:$PROJECT_ROOT/config.shared.env:$PROJECT_ROOT/config.secret.env}"
+export PUBLIC_SERVICE_ENV_FILES="${PUBLIC_SERVICE_ENV_FILES:-$PROJECT_ROOT/config.shared.env:$PROJECT_ROOT/config.secret.env:$PROJECT_ROOT/.env:$PUBLIC_SERVICE_SHARED_ENV_FILES:$RESOURCE_DIR/config/services/public-service/config.shared.env:$RESOURCE_DIR/config/services/public-service/config.secret.env:$RESOURCE_DIR/config/services/public-service/.env:$RESOURCE_DIR/config/services/public-service/config.env}"
 export PUBLIC_SERVICE_GUNICORN_WORKERS="${PUBLIC_SERVICE_GUNICORN_WORKERS:-4}"
 
 load_env_files_preserving_process_env "$PUBLIC_SERVICE_ENV_FILES"

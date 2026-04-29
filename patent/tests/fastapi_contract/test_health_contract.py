@@ -2,6 +2,7 @@ import json
 import runpy
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,6 +15,20 @@ from server_fastapi.app import create_app
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 TEST_JWT_SECRET = "patent-test-secret"
+
+
+@pytest.fixture(autouse=True)
+def _fast_degraded_graph_bootstrap(monkeypatch):
+    monkeypatch.setenv("PATENT_LLM_HTTP_SHARED_POOL_ENABLED", "false")
+    monkeypatch.setenv("PATENT_PLANNING_HOT_POOL_ENABLED", "false")
+    monkeypatch.setenv("PATENT_PLANNING_HOT_POOL_WARMUP_ENABLED", "false")
+    monkeypatch.setenv("PATENT_PLANNING_UPSTREAM_GATE_ENABLED", "false")
+    monkeypatch.setenv("PATENT_DURABLE_AUTHORITY_ENABLED", "false")
+    monkeypatch.setattr(
+        patent_fastapi_app,
+        "bootstrap_patent_neo4j_client",
+        lambda **kwargs: SimpleNamespace(available=False, degraded=True, error="test graph unavailable", close=lambda: None),
+    )
 
 
 

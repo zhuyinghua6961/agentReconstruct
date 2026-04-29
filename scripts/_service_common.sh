@@ -14,13 +14,48 @@ env_bool() {
   [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "on" ]]
 }
 
+shared_env_files() {
+  echo "$RESOURCE_DIR/config/shared/infrastructure.shared.env:$RESOURCE_DIR/config/shared/model-endpoints.shared.env:$RESOURCE_DIR/config/shared/infrastructure.secret.env:$RESOURCE_DIR/config/shared/model-endpoints.secret.env:$RESOURCE_DIR/config/shared/graph.shared.env:$RESOURCE_DIR/config/shared/graph.secret.env"
+}
+
+load_shared_service_port_defaults() {
+  local file="$RESOURCE_DIR/config/shared/infrastructure.shared.env"
+  local raw_line line name value
+  [[ -f "$file" ]] || return 0
+  while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
+    line="${raw_line%$'\r'}"
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$line" == *=* ]] || continue
+    name="${line%%=*}"
+    value="${line#*=}"
+    name="${name#"${name%%[![:space:]]*}"}"
+    name="${name%"${name##*[![:space:]]}"}"
+    case "$name" in
+      GATEWAY_PORT|PUBLIC_SERVICE_PORT|FASTQA_PORT|FASTQA_FASTAPI_PORT|HIGHTHINKINGQA_PORT|PATENT_PORT) ;;
+      *) continue ;;
+    esac
+    if [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]]; then
+      value="${value:1:${#value}-2}"
+    elif [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+    if [[ -z "${ENV_FILE_LOADER_PROCESS_KEYS[$name]+x}" ]]; then
+      export "${name}=${value}"
+    fi
+  done < "$file"
+}
+
+load_shared_service_port_defaults
+
 gateway_env_files() {
   local config_dir_default="$ROOT_DIR/gateway"
-  local shared_env_files="$RESOURCE_DIR/config/shared/infrastructure.shared.env:$RESOURCE_DIR/config/shared/model-endpoints.shared.env:$RESOURCE_DIR/config/shared/infrastructure.secret.env"
+  local shared_env_files
+  shared_env_files="$(shared_env_files)"
   if [[ -d "$RESOURCE_DIR/config/services/gateway" ]]; then
     config_dir_default="$RESOURCE_DIR/config/services/gateway"
   fi
-  echo "${GATEWAY_ENV_FILES:-$shared_env_files:$config_dir_default/config.env:$config_dir_default/config.shared.env:$config_dir_default/config.secret.env:$ROOT_DIR/gateway/.env}"
+  echo "${GATEWAY_ENV_FILES:-$ROOT_DIR/gateway/config.env:$ROOT_DIR/gateway/config.shared.env:$ROOT_DIR/gateway/config.secret.env:$ROOT_DIR/gateway/.env:$shared_env_files:$config_dir_default/config.shared.env:$config_dir_default/config.secret.env:$config_dir_default/.env:$config_dir_default/config.env}"
 }
 
 load_gateway_env_files() {
@@ -35,22 +70,22 @@ load_gateway_env_files() {
 
 service_port() {
   case "$1" in
-    gateway) echo 8101 ;;
-    public-service) echo 8102 ;;
-    fastQA) echo 8008 ;;
-    highThinkingQA) echo 8009 ;;
-    patent) echo 8010 ;;
+    gateway) echo "${GATEWAY_PORT:-8101}" ;;
+    public-service) echo "${PUBLIC_SERVICE_PORT:-8102}" ;;
+    fastQA) echo "${FASTQA_FASTAPI_PORT:-${FASTQA_PORT:-8008}}" ;;
+    highThinkingQA) echo "${HIGHTHINKINGQA_PORT:-8009}" ;;
+    patent) echo "${PATENT_PORT:-8010}" ;;
     *) return 1 ;;
   esac
 }
 
 service_health_url() {
   case "$1" in
-    gateway) echo "http://127.0.0.1:8101/docs" ;;
-    public-service) echo "http://127.0.0.1:8102/api/health" ;;
-    fastQA) echo "http://127.0.0.1:8008/api/health" ;;
-    highThinkingQA) echo "http://127.0.0.1:8009/api/health" ;;
-    patent) echo "http://127.0.0.1:8010/api/health" ;;
+    gateway) echo "http://127.0.0.1:$(service_port gateway)/docs" ;;
+    public-service) echo "http://127.0.0.1:$(service_port public-service)/api/health" ;;
+    fastQA) echo "http://127.0.0.1:$(service_port fastQA)/api/health" ;;
+    highThinkingQA) echo "http://127.0.0.1:$(service_port highThinkingQA)/api/health" ;;
+    patent) echo "http://127.0.0.1:$(service_port patent)/api/health" ;;
     *) return 1 ;;
   esac
 }
@@ -81,16 +116,13 @@ run_service_script() {
       bash "$ROOT_DIR/gateway/scripts/status_gunicorn.sh"
       ;;
     public-service:start)
-      PUBLIC_SERVICE_PORT=8102 \
-      PUBLIC_SERVICE_ENV_FILES="${PUBLIC_SERVICE_ENV_FILES:-$RESOURCE_DIR/config/shared/infrastructure.shared.env:$RESOURCE_DIR/config/shared/model-endpoints.shared.env:$RESOURCE_DIR/config/shared/infrastructure.secret.env:$ROOT_DIR/public-service/config.shared.env:$ROOT_DIR/public-service/config.secret.env}" \
+      PUBLIC_SERVICE_ENV_FILES="${PUBLIC_SERVICE_ENV_FILES:-$ROOT_DIR/public-service/config.shared.env:$ROOT_DIR/public-service/config.secret.env:$ROOT_DIR/public-service/.env:$(shared_env_files):$RESOURCE_DIR/config/services/public-service/config.shared.env:$RESOURCE_DIR/config/services/public-service/config.secret.env:$RESOURCE_DIR/config/services/public-service/.env:$RESOURCE_DIR/config/services/public-service/config.env}" \
       bash "$ROOT_DIR/public-service/scripts/start_gunicorn.sh"
       ;;
     public-service:stop)
-      PUBLIC_SERVICE_PORT=8102 \
       bash "$ROOT_DIR/public-service/scripts/stop_gunicorn.sh"
       ;;
     public-service:status)
-      PUBLIC_SERVICE_PORT=8102 \
       bash "$ROOT_DIR/public-service/scripts/status_gunicorn.sh"
       ;;
     fastQA:start)
@@ -98,21 +130,14 @@ run_service_script() {
       FASTQA_SERVICE_STATE_ROOT="$RESOURCE_DIR/state/dev/fastQA" \
       FASTQA_SERVICE_RUNTIME_ROOT="$RESOURCE_DIR/runtime/dev/fastQA" \
       FASTQA_SERVICE_ASSET_ROOT="$RESOURCE_DIR/assets" \
-      APP_PORT=8008 \
-      FASTAPI_PORT=8008 \
-      BACKEND_PORT=8008 \
       bash "$ROOT_DIR/fastQA/scripts/start_gunicorn.sh"
       ;;
     fastQA:stop)
       FASTQA_SERVICE_RUNTIME_ROOT="$RESOURCE_DIR/runtime/dev/fastQA" \
-      APP_PORT=8008 \
-      FASTAPI_PORT=8008 \
       bash "$ROOT_DIR/fastQA/scripts/stop_gunicorn.sh"
       ;;
     fastQA:status)
       FASTQA_SERVICE_RUNTIME_ROOT="$RESOURCE_DIR/runtime/dev/fastQA" \
-      APP_PORT=8008 \
-      FASTAPI_PORT=8008 \
       bash "$ROOT_DIR/fastQA/scripts/status_gunicorn.sh"
       ;;
     highThinkingQA:start)
@@ -120,12 +145,10 @@ run_service_script() {
       HIGHTHINKINGQA_SERVICE_STATE_ROOT="$RESOURCE_DIR/state/dev/highThinkingQA" \
       HIGHTHINKINGQA_SERVICE_RUNTIME_ROOT="$RESOURCE_DIR/runtime/dev/highThinkingQA" \
       HIGHTHINKINGQA_SERVICE_ASSET_ROOT="$RESOURCE_DIR/assets" \
-      APP_PORT=8009 \
       bash "$ROOT_DIR/highThinkingQA/scripts/start_fastapi_gunicorn.sh"
       ;;
     highThinkingQA:stop)
       HIGHTHINKINGQA_SERVICE_RUNTIME_ROOT="$RESOURCE_DIR/runtime/dev/highThinkingQA" \
-      APP_PORT=8009 \
       bash "$ROOT_DIR/highThinkingQA/scripts/stop_fastapi_gunicorn.sh"
       ;;
     highThinkingQA:status)
@@ -133,22 +156,18 @@ run_service_script() {
       HIGHTHINKINGQA_SERVICE_STATE_ROOT="$RESOURCE_DIR/state/dev/highThinkingQA" \
       HIGHTHINKINGQA_SERVICE_RUNTIME_ROOT="$RESOURCE_DIR/runtime/dev/highThinkingQA" \
       HIGHTHINKINGQA_SERVICE_ASSET_ROOT="$RESOURCE_DIR/assets" \
-      APP_PORT=8009 \
       bash "$ROOT_DIR/highThinkingQA/scripts/status_fastapi_gunicorn.sh"
       ;;
     patent:start)
-      PATENT_PORT=8010 \
       PATENT_SERVICE_RUNTIME_ROOT="$RESOURCE_DIR/runtime/dev/patent" \
       PATENT_SERVICE_LOG_ROOT="$RESOURCE_DIR/logs/dev/patent" \
       bash "$ROOT_DIR/patent/scripts/start_gunicorn.sh"
       ;;
     patent:stop)
-      PATENT_PORT=8010 \
       PATENT_SERVICE_RUNTIME_ROOT="$RESOURCE_DIR/runtime/dev/patent" \
       bash "$ROOT_DIR/patent/scripts/stop_gunicorn.sh"
       ;;
     patent:status)
-      PATENT_PORT=8010 \
       PATENT_SERVICE_RUNTIME_ROOT="$RESOURCE_DIR/runtime/dev/patent" \
       PATENT_SERVICE_LOG_ROOT="$RESOURCE_DIR/logs/dev/patent" \
       bash "$ROOT_DIR/patent/scripts/status_gunicorn.sh"

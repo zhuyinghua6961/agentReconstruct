@@ -70,3 +70,22 @@ def test_patent_service_is_registered_in_common_helpers() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert 'registered' in result.stdout
+
+
+def test_service_ports_honor_environment_overrides() -> None:
+    result = _run_bash(
+        f"""
+        set -euo pipefail
+        export PATENT_PORT=18110
+        export FASTQA_FASTAPI_PORT=18108
+        export GATEWAY_PORT=18101
+        source '{SCRIPT}'
+        [[ "$(service_port patent)" == "18110" ]]
+        [[ "$(service_health_url fastQA)" == "http://127.0.0.1:18108/api/health" ]]
+        [[ "$(service_health_url gateway)" == "http://127.0.0.1:18101/docs" ]]
+        echo env-ports
+        """
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "env-ports" in result.stdout

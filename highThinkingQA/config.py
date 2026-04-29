@@ -241,14 +241,17 @@ class GunicornSettings:
 
 def get_runtime_settings() -> RuntimeSettings:
     dashscope_api_key = str(os.getenv("DASHSCOPE_API_KEY", "") or "").strip()
-    llm_api_key = str(os.getenv("LLM_API_KEY", dashscope_api_key) or dashscope_api_key).strip()
-    embedding_api_key = str(os.getenv("EMBEDDING_API_KEY", dashscope_api_key) or dashscope_api_key).strip()
-    ocr_api_key = str(os.getenv("OCR_API_KEY", dashscope_api_key) or dashscope_api_key).strip()
+    openai_api_key = str(os.getenv("OPENAI_API_KEY", "") or "").strip()
+    llm_api_key = str(os.getenv("LLM_API_KEY") or openai_api_key or dashscope_api_key or "").strip()
+    embedding_api_key = str(os.getenv("EMBEDDING_API_KEY") or llm_api_key or "").strip()
+    ocr_api_key = str(os.getenv("OCR_API_KEY") or llm_api_key or "").strip()
 
     return RuntimeSettings(
         dashscope_api_key=dashscope_api_key,
         llm_base_url=str(
-            os.getenv("LLM_BASE_URL", os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"))
+            os.getenv("LLM_BASE_URL")
+            or os.getenv("OPENAI_BASE_URL")
+            or os.getenv("DASHSCOPE_BASE_URL")
             or "https://dashscope.aliyuncs.com/compatible-mode/v1"
         ).strip(),
         llm_model=str(os.getenv("LLM_MODEL", "qwen3-max") or "qwen3-max").strip(),
@@ -262,7 +265,8 @@ def get_runtime_settings() -> RuntimeSettings:
         embedding_base_url=str(
             os.getenv(
                 "EMBEDDING_BASE_URL",
-                os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+                os.getenv("OPENAI_BASE_URL")
+                or os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
             )
             or "https://dashscope.aliyuncs.com/compatible-mode/v1"
         ).strip(),
@@ -270,7 +274,11 @@ def get_runtime_settings() -> RuntimeSettings:
         embedding_api_key=embedding_api_key,
         embedding_dimensions=_get_int("EMBEDDING_DIMENSIONS", 2048, minimum=1),
         ocr_base_url=str(
-            os.getenv("OCR_BASE_URL", os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"))
+            os.getenv(
+                "OCR_BASE_URL",
+                os.getenv("OPENAI_BASE_URL")
+                or os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+            )
             or "https://dashscope.aliyuncs.com/compatible-mode/v1"
         ).strip(),
         ocr_model=str(os.getenv("OCR_MODEL", "qwen-vl-ocr-2025-11-20") or "qwen-vl-ocr-2025-11-20").strip(),
@@ -308,10 +316,16 @@ def get_runtime_settings() -> RuntimeSettings:
 
 
 def get_http_service_settings() -> HttpServiceSettings:
+    raw_port = str(os.getenv("HIGHTHINKINGQA_PORT") or os.getenv("APP_PORT") or "8008").strip()
+    try:
+        app_port = int(raw_port)
+    except Exception:
+        app_port = 8008
+    app_port = max(1, min(65535, app_port))
     return HttpServiceSettings(
         app_env=str(os.getenv("APP_ENV", "dev") or "dev").strip(),
-        app_host=str(os.getenv("APP_HOST", "0.0.0.0") or "0.0.0.0").strip(),
-        app_port=_get_int("APP_PORT", 8008, minimum=1, maximum=65535),
+        app_host=str(os.getenv("HIGHTHINKINGQA_HOST") or os.getenv("APP_HOST") or "0.0.0.0").strip(),
+        app_port=app_port,
         app_log_level=str(os.getenv("APP_LOG_LEVEL", "INFO") or "INFO").strip().upper(),
         upload_dir=_resolve_state_path("UPLOAD_DIR", "uploads"),
         ask_stream_max_concurrent=_get_int("ASK_STREAM_MAX_CONCURRENT", 5, minimum=1),

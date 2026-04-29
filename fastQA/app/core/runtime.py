@@ -724,7 +724,7 @@ def bootstrap_graph_kb(runtime: Any) -> None:
     runtime.neo4j_client = None
     runtime.graph_kb_ready = False
 
-    if not bool(getattr(settings, "graph_kb_enabled", False)):
+    if not bool(getattr(settings, "graph_kb_enabled", True)):
         _set_component_status(
             runtime,
             "graph_kb",
@@ -735,8 +735,6 @@ def bootstrap_graph_kb(runtime: Any) -> None:
         return
 
     neo4j_url = str(getattr(settings, "neo4j_url", "") or "").strip()
-    if not neo4j_url:
-        neo4j_url = str(__import__("os").getenv("NEO4J_URL", "") or "").strip()
     if not neo4j_url:
         _set_component_status(
             runtime,
@@ -760,8 +758,8 @@ def bootstrap_graph_kb(runtime: Any) -> None:
     try:
         client = bootstrap_neo4j(
             url=neo4j_url,
-            username=str(__import__("os").getenv("NEO4J_USERNAME", "neo4j") or "neo4j").strip(),
-            password=str(__import__("os").getenv("NEO4J_PASSWORD", "password") or "password"),
+            username=str(getattr(settings, "neo4j_username", "neo4j") or "neo4j").strip(),
+            password=str(getattr(settings, "neo4j_password", "") or ""),
             logger=getattr(runtime, "logger", None),
         )
         runtime.neo4j_client = client

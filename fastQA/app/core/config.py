@@ -177,6 +177,10 @@ class Settings:
     graph_kb_enabled: bool
     graph_kb_v2_enabled: bool
     graph_kb_rag_injection_enabled: bool
+    neo4j_url: str
+    neo4j_username: str
+    neo4j_password: str
+    neo4j_database: str
     graph_kb_timeout_ms: int
     graph_kb_max_rows: int
     graph_kb_query_logging: bool
@@ -271,13 +275,25 @@ def get_settings() -> Settings:
 
     cors_raw = str(os.getenv("BACKEND_CORS_ORIGINS", "*") or "*").strip()
     cors_origins = [item.strip() for item in cors_raw.split(",") if item.strip()] or ["*"]
-    fastapi_host = str(os.getenv("FASTAPI_HOST", os.getenv("BACKEND_HOST", "0.0.0.0")) or "0.0.0.0").strip()
+    fastapi_host = str(
+        os.getenv("FASTQA_HOST")
+        or os.getenv("FASTAPI_HOST")
+        or os.getenv("BACKEND_HOST")
+        or "0.0.0.0"
+    ).strip()
     app_env = str(os.getenv("APP_ENV", "development") or "development").strip()
-    raw_fastapi_port = str(os.getenv("FASTAPI_PORT", os.getenv("BACKEND_PORT", "8012")) or "8012").strip()
+    raw_fastapi_port = str(
+        os.getenv("FASTQA_FASTAPI_PORT")
+        or os.getenv("FASTQA_PORT")
+        or os.getenv("FASTAPI_PORT")
+        or os.getenv("BACKEND_PORT")
+        or "8012"
+    ).strip()
     try:
         fastapi_port_default = int(raw_fastapi_port)
     except Exception:
         fastapi_port_default = 8012
+    fastapi_port_default = max(1, min(65535, fastapi_port_default))
 
     conversation_execution_authority_target, conversation_execution_user_write_target, conversation_execution_context_read_target, conversation_assistant_write_target, conversation_overlay_enabled = _resolve_conversation_rollout(app_env)
 
@@ -291,7 +307,7 @@ def get_settings() -> Settings:
         app_env=app_env,
         debug=_get_bool("FASTAPI_DEBUG", False),
         host=fastapi_host or "0.0.0.0",
-        port=_get_int("FASTAPI_PORT", fastapi_port_default, minimum=1, maximum=65535),
+        port=fastapi_port_default,
         api_prefix=str(os.getenv("FASTAPI_API_PREFIX", "/api") or "/api").strip(),
         docs_url=str(os.getenv("FASTAPI_DOCS_URL", "/docs") or "/docs").strip(),
         openapi_url=str(os.getenv("FASTAPI_OPENAPI_URL", "/openapi.json") or "/openapi.json").strip(),
@@ -318,9 +334,18 @@ def get_settings() -> Settings:
         redis_socket_connect_timeout_sec=_get_int("REDIS_SOCKET_CONNECT_TIMEOUT_SEC", 2, minimum=1, maximum=60),
         redis_socket_timeout_sec=_get_int("REDIS_SOCKET_TIMEOUT_SEC", 2, minimum=1, maximum=60),
         generation_runtime_enabled=_get_bool("FASTQA_GENERATION_RUNTIME_ENABLED", False),
-        graph_kb_enabled=_get_bool("FASTQA_GRAPH_KB_ENABLED", False),
-        graph_kb_v2_enabled=_get_bool("FASTQA_GRAPH_KB_V2_ENABLED", False),
-        graph_kb_rag_injection_enabled=_get_bool("FASTQA_GRAPH_KB_RAG_INJECTION_ENABLED", False),
+        graph_kb_enabled=_get_bool("FASTQA_GRAPH_KB_ENABLED", True),
+        graph_kb_v2_enabled=_get_bool("FASTQA_GRAPH_KB_V2_ENABLED", True),
+        graph_kb_rag_injection_enabled=_get_bool("FASTQA_GRAPH_KB_RAG_INJECTION_ENABLED", True),
+        neo4j_url=str(os.getenv("FASTQA_NEO4J_URL") or os.getenv("NEO4J_URL", "") or "").strip(),
+        neo4j_username=str(
+            os.getenv("FASTQA_NEO4J_USERNAME") or os.getenv("NEO4J_USERNAME", "neo4j") or "neo4j"
+        ).strip(),
+        neo4j_password=str(os.getenv("FASTQA_NEO4J_PASSWORD") or os.getenv("NEO4J_PASSWORD", "") or ""),
+        neo4j_database=str(
+            os.getenv("FASTQA_NEO4J_DATABASE") or os.getenv("NEO4J_DATABASE", "neo4j") or "neo4j"
+        ).strip()
+        or "neo4j",
         graph_kb_timeout_ms=_get_int("FASTQA_GRAPH_KB_TIMEOUT_MS", 3000, minimum=100, maximum=60000),
         graph_kb_max_rows=_get_int("FASTQA_GRAPH_KB_MAX_ROWS", 20, minimum=1, maximum=200),
         graph_kb_query_logging=_get_bool("FASTQA_GRAPH_KB_QUERY_LOGGING", False),

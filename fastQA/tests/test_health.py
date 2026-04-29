@@ -22,6 +22,7 @@ def test_healthz_exposes_service_roots():
     assert payload["ask_stream_max_concurrent"] >= 1
     assert "graph_kb" in payload["components"]
     assert "graph_kb_enabled" in payload
+    assert "graph_kb_configured" in payload
     assert "graph_kb_ready" in payload
 
 
@@ -49,6 +50,7 @@ def _make_health_request(
         api_prefix="/api",
         generation_runtime_enabled=True,
         graph_kb_enabled=False,
+        neo4j_url="",
         allow_placeholder_fallback=True,
         file_context_fallback_enabled=True,
         ask_stream_max_concurrent=20,

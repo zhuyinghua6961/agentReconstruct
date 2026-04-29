@@ -253,13 +253,9 @@ class PatentPlanningClient:
 
 
 def _resolve_patent_planning_runtime_config() -> tuple[str, str, str, float]:
-    use_shared_env = _env_flag(
-        "PATENT_STAGE1_OPENAI_USE_SHARED_ENV",
-        default=_env_flag("PATENT_OPENAI_USE_SHARED_ENV", default=False),
-    )
-    shared_api_key = (os.getenv("OPENAI_API_KEY") or os.getenv("DASHSCOPE_API_KEY") or "") if use_shared_env else ""
-    shared_base_url = (os.getenv("OPENAI_BASE_URL") or os.getenv("DASHSCOPE_BASE_URL") or "") if use_shared_env else ""
-    shared_model = (os.getenv("OPENAI_MODEL") or os.getenv("DASHSCOPE_MODEL") or "") if use_shared_env else ""
+    shared_api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("DASHSCOPE_API_KEY") or ""
+    shared_base_url = os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL") or os.getenv("DASHSCOPE_BASE_URL") or ""
+    shared_model = os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL") or os.getenv("DASHSCOPE_MODEL") or ""
     api_key = str(
         os.getenv("PATENT_STAGE1_OPENAI_API_KEY")
         or os.getenv("PATENT_OPENAI_API_KEY")

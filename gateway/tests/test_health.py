@@ -46,9 +46,9 @@ def test_healthz_contains_backend_registry_and_upstreams():
     assert payload["success"] is True
     assert payload["conversation_file_provider"] == "noop"
     assert payload["runtime_role"] == "web"
-    assert payload["components"]["redis"]["enabled"] is False
+    assert payload["components"]["redis"]["enabled"] is True
     assert payload["components"]["admission"]["worker_script_supported"] is True
-    assert payload["components"]["admission"]["request_path_cutover_enabled"] is False
+    assert payload["components"]["admission"]["request_path_cutover_enabled"] is True
     assert payload["components"]["admission"]["shared_state_ready"] is True
     assert payload["components"]["queue_status_store"]["storage_mode"] == "memory_fallback"
     assert payload["components"]["event_relay_store"]["storage_mode"] == "memory_fallback"

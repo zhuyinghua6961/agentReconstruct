@@ -336,21 +336,30 @@ def test_stream_ask_graph_v2_exception_emits_error_step_then_generation(monkeypa
 
 def test_sync_ask_returns_graph_answer_when_handled(monkeypatch):
     _enable_graph_kb(monkeypatch)
+    monkeypatch.setattr(
+        app.state,
+        "settings",
+        replace(app.state.settings, graph_kb_enabled=True, graph_kb_v2_enabled=True),
+    )
     monkeypatch.setattr(qa_router_module, "generation_runtime_is_ready", lambda runtime: True)
     app.state.generation_runtime = object()
 
-    def _fake_graph_answer(**kwargs):
-        return qa_router_module.GraphKbExecutionResult(
-            handled=True,
-            answer="graph answer",
-            references=("10.1000/test",),
-            query_mode="graph_kb",
-            template_id="lookup_by_doi",
-            result_count=1,
-            latency_ms=12.5,
+    def _fake_graph_route(**kwargs):
+        return GraphRoutingResult(
+            mode="direct_answer",
+            diagnostics={"tri_state_mode": "direct_answer"},
+            direct_result=qa_router_module.GraphKbExecutionResult(
+                handled=True,
+                answer="graph answer",
+                references=("10.1000/test",),
+                query_mode="graph_kb",
+                template_id="lookup_by_doi",
+                result_count=1,
+                latency_ms=12.5,
+            ),
         )
 
-    monkeypatch.setattr(qa_router_module, "try_graph_kb_answer", _fake_graph_answer)
+    monkeypatch.setattr(qa_router_module, "route_graph_kb_v2", _fake_graph_route)
     monkeypatch.setattr(
         qa_router_module.qa_kb_service,
         "iter_answer_events",
@@ -649,7 +658,7 @@ def test_sync_ask_passes_graph_payload_into_generation_when_mode_is_graph_for_ra
     assert captured["request"].graph_evidence is not None
 
 
-def test_sync_ask_reports_graph_payload_not_injected_when_rag_injection_disabled(monkeypatch):
+def test_sync_ask_respects_hidden_disabled_rag_injection_flag(monkeypatch):
     _enable_graph_kb(monkeypatch)
     monkeypatch.setattr(
         app.state,
@@ -866,20 +875,29 @@ def test_sync_ask_falls_back_to_generation_when_graph_raises(monkeypatch):
 
 def test_stream_ask_emits_graph_metadata_step_content_and_done(monkeypatch):
     _enable_graph_kb(monkeypatch)
+    monkeypatch.setattr(
+        app.state,
+        "settings",
+        replace(app.state.settings, graph_kb_enabled=True, graph_kb_v2_enabled=True),
+    )
     monkeypatch.setattr(qa_router_module, "generation_runtime_is_ready", lambda runtime: True)
     app.state.generation_runtime = object()
 
     monkeypatch.setattr(
         qa_router_module,
-        "try_graph_kb_answer",
-        lambda **kwargs: qa_router_module.GraphKbExecutionResult(
-            handled=True,
-            answer="graph answer",
-            references=("10.1000/test",),
-            query_mode="graph_kb",
-            template_id="lookup_by_doi",
-            result_count=1,
-            latency_ms=8.5,
+        "route_graph_kb_v2",
+        lambda **kwargs: GraphRoutingResult(
+            mode="direct_answer",
+            diagnostics={"tri_state_mode": "direct_answer"},
+            direct_result=qa_router_module.GraphKbExecutionResult(
+                handled=True,
+                answer="graph answer",
+                references=("10.1000/test",),
+                query_mode="graph_kb",
+                template_id="lookup_by_doi",
+                result_count=1,
+                latency_ms=8.5,
+            ),
         ),
     )
     monkeypatch.setattr(

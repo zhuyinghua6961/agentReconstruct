@@ -719,10 +719,10 @@ def _iter_route_events(
             execution_files=adapted_request.execution_files,
             primary_file_id=adapted_request.primary_file_id,
         )
-        graph_enabled = bool(getattr(getattr(request.app.state, "settings", None), "graph_kb_enabled", False))
-        graph_v2_enabled = bool(getattr(getattr(request.app.state, "settings", None), "graph_kb_v2_enabled", False))
+        graph_enabled = bool(getattr(getattr(request.app.state, "settings", None), "graph_kb_enabled", True))
+        graph_v2_enabled = bool(getattr(getattr(request.app.state, "settings", None), "graph_kb_v2_enabled", True))
         graph_rag_injection_enabled = bool(
-            getattr(getattr(request.app.state, "settings", None), "graph_kb_rag_injection_enabled", False)
+            getattr(getattr(request.app.state, "settings", None), "graph_kb_rag_injection_enabled", True)
         )
         graph_client = getattr(request.app.state, "neo4j_client", None)
         graph_rag_payload: GraphRagPayload | None = None

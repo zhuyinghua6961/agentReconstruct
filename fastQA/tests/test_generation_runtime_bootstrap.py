@@ -17,6 +17,9 @@ def test_resolve_generation_runtime_inputs_uses_service_roots(monkeypatch, tmp_p
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://example.com/v1")
     monkeypatch.setenv("OPENAI_MODEL", "gpt-test")
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
     monkeypatch.setenv("EMBEDDING_MODEL_TYPE", "local")
     monkeypatch.setenv("EMBEDDING_MODEL_PATH", "models/bge")
     monkeypatch.setenv("VECTOR_DB_PATH", "vectordb")
@@ -41,6 +44,9 @@ def test_resolve_generation_runtime_inputs_accepts_dashscope_aliases(monkeypatch
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
     monkeypatch.setenv("DASHSCOPE_API_KEY", "dash-key")
     monkeypatch.setenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
     monkeypatch.setenv("DASHSCOPE_MODEL", "qwen-plus")
@@ -100,6 +106,13 @@ def test_build_openai_client_uses_local_factory(monkeypatch):
         "FASTQA_LLM_HTTP_KEEPALIVE_EXPIRY_SECONDS",
         "FASTQA_LLM_HTTP_MAX_CONNECTIONS",
         "FASTQA_LLM_HTTP_MAX_KEEPALIVE_CONNECTIONS",
+        "LLM_CONNECT_TIMEOUT_SECONDS",
+        "LLM_READ_TIMEOUT_SECONDS",
+        "LLM_WRITE_TIMEOUT_SECONDS",
+        "LLM_POOL_TIMEOUT_SECONDS",
+        "LLM_KEEPALIVE_EXPIRY_SECONDS",
+        "LLM_MAX_CONNECTIONS",
+        "LLM_MAX_KEEPALIVE_CONNECTIONS",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("OPENAI_CONNECT_TIMEOUT_SECONDS", "12")
@@ -220,4 +233,4 @@ def test_runtime_bootstrap_reports_shared_pool_degraded_when_provider_init_fails
     assert shared_status["bootstrap_source"] == "startup"
     assert shared_status["max_connections"] == 160
     assert shared_status["max_keepalive_connections"] == 64
-    assert shared_status["keepalive_expiry_seconds"] == 90.0
+    assert shared_status["keepalive_expiry_seconds"] == 120.0

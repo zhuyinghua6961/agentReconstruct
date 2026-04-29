@@ -489,7 +489,7 @@ Fallback：
 
 以下场景必须全部成立：
 
-1. `PATENT_GRAPH_KB_ENABLED=false` 时，现有 `kb_qa` staged QA 行为不变。
+1. `PATENT_GRAPH_KB_ENABLED=<deprecated-disable-value>` 时，现有 `kb_qa` staged QA 行为不变。
 2. `PATENT_GRAPH_KB_ENABLED=true` 但 Neo4j 不可用时，`kb_qa` 仍返回 staged QA 答案。
 3. 图谱分类命中但查询失败、超时、结果为空时，`kb_qa` 仍返回 staged QA 答案。
 4. 目标专利为 `stub = TRUE` 时，图谱层不输出薄证据答案，直接回退 staged QA。
@@ -635,14 +635,14 @@ graph_kb=PatentGraphSettings(
 Add to `patent/config.shared.env.example`:
 
 ```bash
-PATENT_GRAPH_KB_ENABLED=false
+PATENT_GRAPH_KB_ENABLED=<deprecated-disable-value>
 PATENT_GRAPH_KB_TIMEOUT_MS=3000
 PATENT_GRAPH_KB_MAX_ROWS=20
 PATENT_GRAPH_KB_QUERY_LOGGING=false
 PATENT_NEO4J_URL=bolt://127.0.0.1:8687
 PATENT_NEO4J_DATABASE=neo4j
 PATENT_NEO4J_USERNAME=neo4j
-PATENT_NEO4J_PASSWORD=
+PATENT_NEO4J_PASSWORD placeholder: local secret
 ```
 
 Do not commit real password values.
@@ -1537,7 +1537,7 @@ export PATENT_GRAPH_KB_ENABLED=true
 export PATENT_NEO4J_URL=bolt://127.0.0.1:8687
 export PATENT_NEO4J_DATABASE=neo4j
 export PATENT_NEO4J_USERNAME=neo4j
-export PATENT_NEO4J_PASSWORD="$PATENT_NEO4J_PASSWORD"
+export PATENT_NEO4J_PASSWORD
 ```
 
 Then use the repository's normal patent startup path or test client harness.
