@@ -77,6 +77,14 @@ function isBindingsExpanded(personnelId) {
   return expandedPersonnelIds.value.includes(Number(personnelId))
 }
 
+function getPersonnelStatusText(status) {
+  return String(status || '').trim().toLowerCase() === 'active' ? '启用' : '停用'
+}
+
+function getPersonnelStatusClass(status) {
+  return String(status || '').trim().toLowerCase() === 'active' ? 'active' : 'disabled'
+}
+
 async function loadBindings(personnelId, { force = false } = {}) {
   const normalizedId = Number(personnelId)
   if (!force && bindingsByPersonnelId.value[normalizedId]) {
@@ -280,22 +288,26 @@ onMounted(() => {
           <template v-for="item in personnelItems" :key="item.id">
             <tr>
               <td>
-                <button class="expand-btn" @click="toggleBindings(item.id)">
+                <button class="action-btn expand-btn" @click="toggleBindings(item.id)">
                   {{ isBindingsExpanded(item.id) ? '收起' : '展开' }}
                 </button>
               </td>
               <td>{{ item.employee_no }}</td>
               <td>{{ item.full_name }}</td>
               <td>{{ item.department_display || '-' }}</td>
-              <td>{{ item.personnel_record_status }}</td>
+              <td>
+                <span class="status-badge" :class="getPersonnelStatusClass(item.personnel_record_status)">
+                  {{ getPersonnelStatusText(item.personnel_record_status) }}
+                </span>
+              </td>
               <td>{{ item.binding_count }}</td>
               <td>{{ item.updated_at || '-' }}</td>
               <td class="row-actions">
-                <button class="link-btn" @click="openEditDialog(item)">编辑</button>
-                <button class="link-btn" @click="handleTogglePersonnelStatus(item)">
+                <button class="action-btn" @click="openEditDialog(item)">编辑</button>
+                <button class="action-btn" @click="handleTogglePersonnelStatus(item)">
                   {{ item.personnel_record_status === 'active' ? '停用' : '启用' }}
                 </button>
-                <button class="link-btn" @click="toggleBindings(item.id)">查看绑定</button>
+                <button class="action-btn" @click="toggleBindings(item.id)">查看绑定</button>
               </td>
             </tr>
             <tr v-if="isBindingsExpanded(item.id)" class="bindings-row">
@@ -361,6 +373,18 @@ onMounted(() => {
   align-items: flex-start;
 }
 
+.panel-header h3 {
+  margin: 0;
+  color: #1f2937;
+  font-size: 18px;
+}
+
+.panel-hint {
+  margin: 6px 0 0;
+  color: #6b7280;
+  font-size: 14px;
+}
+
 .panel-actions,
 .filter-actions {
   align-items: center;
@@ -370,19 +394,47 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 
+.filters-card {
+  background: #f9fafb;
+}
+
 .filter-grid label {
   display: flex;
   flex-direction: column;
   gap: 6px;
   min-width: 180px;
+  color: #374151;
+  font-size: 14px;
+}
+
+.filter-grid input,
+.filter-grid select {
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  color: #1f2937;
+  font-size: 14px;
+  padding: 9px 12px;
+}
+
+.filter-grid input:focus,
+.filter-grid select:focus {
+  border-color: #667eea;
+  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.12);
+  outline: none;
 }
 
 .filters-card,
 .table-card {
-  background: white;
   border: 1px solid #e5e7eb;
   border-radius: 12px;
   padding: 16px;
+}
+
+.table-card {
+  background: white;
+  border: none;
+  border-radius: 0;
+  padding: 0;
 }
 
 .personnel-table {
@@ -395,6 +447,76 @@ onMounted(() => {
   padding: 12px;
   border-bottom: 1px solid #e5e7eb;
   text-align: left;
+}
+
+.personnel-table th {
+  background: #f9fafb;
+  color: #374151;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.personnel-table td {
+  color: #1f2937;
+  font-size: 14px;
+}
+
+.status-badge {
+  border-radius: 4px;
+  font-size: 12px;
+  padding: 4px 8px;
+}
+
+.status-badge.active {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.status-badge.disabled {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+.action-btn {
+  background: white;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  color: #374151;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 6px 12px;
+}
+
+.action-btn:hover {
+  background: #f9fafb;
+}
+
+.btn-primary,
+.btn-secondary {
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 10px 20px;
+}
+
+.btn-primary {
+  background: #667eea;
+  color: white;
+}
+
+.btn-primary:hover {
+  background: #5a67d8;
+}
+
+.btn-secondary {
+  background: #f3f4f6;
+  border: 1px solid #d1d5db;
+  color: #374151;
+}
+
+.btn-secondary:hover {
+  background: #e5e7eb;
 }
 
 .bindings-row td {
@@ -418,6 +540,12 @@ onMounted(() => {
 .loading-state,
 .bindings-state {
   color: #6b7280;
+}
+
+.empty-state,
+.loading-state {
+  padding: 40px;
+  text-align: center;
 }
 
 .bindings-state.error {

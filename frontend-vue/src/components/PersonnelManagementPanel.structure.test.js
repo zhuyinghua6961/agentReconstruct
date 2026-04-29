@@ -47,6 +47,15 @@ test('PersonnelManagementPanel exposes create edit status and bindings actions',
   assert.match(panelSource, /绑定账号数/)
 })
 
+test('PersonnelManagementPanel aligns personnel table controls with account list styling', () => {
+  assert.match(panelSource, /getPersonnelStatusText/)
+  assert.match(panelSource, /status-badge/)
+  assert.match(panelSource, /class="action-btn"/)
+  assert.match(panelSource, /\.personnel-table th\s*\{[^}]*background:\s*#f9fafb/s)
+  assert.match(panelSource, /\.action-btn\s*\{[^}]*border:\s*1px solid #d1d5db/s)
+  assert.doesNotMatch(panelSource, /class="link-btn"/)
+})
+
 test('PersonnelManagementPanel submits primary secondary tertiary department ids on create and update', () => {
   assert.match(panelSource, /primary_department_id/)
   assert.match(panelSource, /secondary_department_id/)
