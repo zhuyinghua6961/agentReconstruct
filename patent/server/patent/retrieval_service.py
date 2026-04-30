@@ -5,12 +5,14 @@ import logging
 import re
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Callable
 
 from server.patent.models import PatentRetrievalClaim
 from server.patent.original_models import OriginalRequest
 from server.patent.original_service import build_original_viewer_uri
+from server.patent.retrieval_scoring import aggregate_patent_candidates, derive_patent_retrieval_intent
+from server.patent.retrieval_validation import validate_patent_stage2_candidates
 from server.patent.retrieval_models import (
     PatentCatalogRecord,
     PatentClaim,
@@ -20,6 +22,7 @@ from server.patent.retrieval_models import (
     PatentRetrievalOutcome,
     PatentTableSupplement,
 )
+from server.patent.stage2_controls import STAGE2_PAYLOAD_CONTRACT_VERSION, resolve_stage2_runtime_toggles
 
 
 _IDENTIFIER_RE = re.compile(r"\b(?=[A-Z0-9/.,-]*\d)[A-Z]{2}[A-Z0-9][A-Z0-9/.,-]{4,}[A-Z0-9]\b")
@@ -385,6 +388,8 @@ class PatentRetrievalService:
         should_cancel: Callable[[], bool] | None = None,
         active_stream_count: int | None = None,
         context: dict[str, Any] | None = None,
+        rerank_fn: Callable[..., dict[str, Any]] | None = None,
+        stage2_query_diagnostics: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         claims = self._coerce_retrieval_claims(retrieval_claims)
         if claims:
@@ -397,6 +402,8 @@ class PatentRetrievalService:
                 should_cancel=should_cancel,
                 active_stream_count=active_stream_count,
                 context=context,
+                rerank_fn=rerank_fn,
+                stage2_query_diagnostics=stage2_query_diagnostics,
             )
         return self._targeted_retrieve_from_plan(
             retrieval_plan=retrieval_plan,
@@ -569,17 +576,36 @@ class PatentRetrievalService:
         should_cancel: Callable[[], bool] | None = None,
         active_stream_count: int | None = None,
         context: dict[str, Any] | None = None,
+        rerank_fn: Callable[..., dict[str, Any]] | None = None,
+        stage2_query_diagnostics: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         del active_stream_count
+        toggles = resolve_stage2_runtime_toggles()
         if callable(should_cancel) and should_cancel():
             return self._cancelled_stage2_payload()
         graph_controls = self._graph_retrieval_controls(context)
+        c_enabled = toggles.convergence_enabled and toggles.c_patent_scoring_enabled
+        _LOGGER.info(
+            "patent stage2 convergence controls enabled=%s c_enabled=%s rerank=%s validation=%s "
+            "global_chunk=%s table_metric=%s max_global_patents=%s graph_behavior=%s graph_candidates=%s claim_count=%s",
+            bool(toggles.convergence_enabled),
+            bool(c_enabled),
+            bool(toggles.rerank_enabled),
+            bool(toggles.validation_enabled),
+            bool(toggles.c_global_chunk_recall_enabled),
+            bool(toggles.c_table_metric_boost_enabled),
+            int(toggles.max_global_patents),
+            str(graph_controls.get("behavior") or "none"),
+            len(list(graph_controls.get("candidate_patent_ids") or [])),
+            len(list(retrieval_claims or [])),
+        )
         if not self._vector_search_enabled():
-            return self._targeted_retrieve_from_plan(
+            payload = self._targeted_retrieve_from_plan(
                 retrieval_plan=self._retrieval_plan_from_claims(retrieval_claims, user_question=user_question),
                 user_question=user_question,
                 context=context,
             )
+            return self._annotate_no_vector_convergence_payload(payload, toggles=toggles) if toggles.convergence_enabled else payload
 
         started_at = time.perf_counter()
         timings: dict[str, int] = {}
@@ -587,6 +613,7 @@ class PatentRetrievalService:
         candidate_patent_ids: list[str] = []
         graph_candidate_patent_ids = list(graph_controls.get("candidate_patent_ids") or [])
         graph_candidate_keys = {_normalize_identifier(item) for item in graph_candidate_patent_ids}
+        hard_graph_candidate_keys = set() if c_enabled else set(graph_candidate_keys)
         resolved_frozen_claim_queries = list(frozen_claim_queries or [])
         claim_jobs = list(enumerate(retrieval_claims))
 
@@ -632,7 +659,7 @@ class PatentRetrievalService:
                     normalized = self._normalize_patent_id(
                         hit.get("patent_id") or hit.get("canonical_patent_id") or hit.get("json_stem")
                     )
-                    if graph_candidate_keys and _normalize_identifier(normalized) not in graph_candidate_keys:
+                    if hard_graph_candidate_keys and _normalize_identifier(normalized) not in hard_graph_candidate_keys:
                         continue
                     if normalized and normalized not in query_candidate_ids:
                         query_candidate_ids.append(normalized)
@@ -646,7 +673,9 @@ class PatentRetrievalService:
                 for patent_id in query_candidate_ids:
                     if patent_id not in claim_candidate_patent_ids:
                         claim_candidate_patent_ids.append(patent_id)
-                chunk_candidate_ids = query_candidate_ids or (graph_candidate_patent_ids if graph_candidate_patent_ids else None)
+                chunk_candidate_ids = query_candidate_ids or (
+                    graph_candidate_patent_ids if graph_candidate_patent_ids and not c_enabled else None
+                )
                 chunk_hits = self._run_chunk_vector_search(
                     query,
                     chunk_candidate_ids,
@@ -656,7 +685,7 @@ class PatentRetrievalService:
                     normalized = self._normalize_patent_id(
                         hit.get("patent_id") or hit.get("canonical_patent_id") or hit.get("json_stem")
                     )
-                    if graph_candidate_keys and _normalize_identifier(normalized) not in graph_candidate_keys:
+                    if hard_graph_candidate_keys and _normalize_identifier(normalized) not in hard_graph_candidate_keys:
                         continue
                     if normalized and normalized not in claim_candidate_patent_ids:
                         claim_candidate_patent_ids.append(normalized)
@@ -670,7 +699,35 @@ class PatentRetrievalService:
                     )
                     if chunk_match is not None:
                         query_matches.append(chunk_match)
+                if c_enabled and toggles.c_global_chunk_recall_enabled:
+                    global_chunk_hits = self._run_chunk_vector_search(query, None, self._top_k_chunk_vector)
+                    for hit in global_chunk_hits:
+                        normalized = self._normalize_patent_id(
+                            hit.get("patent_id") or hit.get("canonical_patent_id") or hit.get("json_stem")
+                        )
+                        if normalized and normalized not in claim_candidate_patent_ids:
+                            claim_candidate_patent_ids.append(normalized)
+                        chunk_match = self._match_from_chunk_hit(
+                            self._augment_stage2_hit_metadata(
+                                hit,
+                                stage2_source="chunk_vector_global",
+                                generated_query=query,
+                                retrieval_claim=claim,
+                            )
+                        )
+                        if chunk_match is not None:
+                            query_matches.append(chunk_match)
                 per_query_matches.append(self._dedupe_matches_by_prefix(query_matches))
+            _LOGGER.info(
+                "patent stage2 claim retrieval completed claim_index=%s query_count=%s candidate_patents=%s match_groups=%s "
+                "graph_filter=%s global_chunk=%s",
+                int(index) + 1,
+                len(claim_queries),
+                len(claim_candidate_patent_ids),
+                len(per_query_matches),
+                bool(hard_graph_candidate_keys),
+                bool(c_enabled and toggles.c_global_chunk_recall_enabled),
+            )
             return {
                 "index": index,
                 "generated_queries": list(claim_queries),
@@ -727,15 +784,137 @@ class PatentRetrievalService:
         merged_matches = self._dedupe_matches_by_prefix(all_matches)
         if not merged_matches:
             fallback_plan = self._retrieval_plan_from_claims(retrieval_claims, user_question=user_question)
-            return self._targeted_retrieve_from_plan(
+            payload = self._targeted_retrieve_from_plan(
                 retrieval_plan=fallback_plan,
                 user_question=user_question,
                 context=context,
             )
+            return self._annotate_no_vector_convergence_payload(payload, toggles=toggles) if toggles.convergence_enabled else payload
+
+        if c_enabled and graph_candidate_patent_ids:
+            seen_ids = {match.record.canonical_patent_id for match in merged_matches}
+            for patent_id in graph_candidate_patent_ids:
+                if patent_id in seen_ids:
+                    continue
+                graph_match = self._default_match_for_patent(patent_id)
+                if graph_match is None:
+                    continue
+                merged_matches.append(
+                    _MatchedReference(
+                        record=graph_match.record,
+                        snippet_text=graph_match.snippet_text,
+                        section_type=graph_match.section_type,
+                        section_label=graph_match.section_label,
+                        claim_number=graph_match.claim_number,
+                        paragraph_id=graph_match.paragraph_id,
+                        abstract_score=graph_match.abstract_score,
+                        chunk_score=graph_match.chunk_score,
+                        metadata={
+                            **dict(graph_match.metadata or {}),
+                            "patent_id": graph_match.record.canonical_patent_id,
+                            "stage2_source": "graph_candidate",
+                            "stage2_channel": "graph_candidate",
+                        },
+                    )
+                )
+
+        raw_candidate_patent_ids = list(dict.fromkeys(match.record.canonical_patent_id for match in merged_matches))
+        selected_matches = list(merged_matches)
+        explicit_patent_ids = [
+            self._normalize_patent_id(item)
+            for item in self._retrieval_plan_from_claims(retrieval_claims, user_question=user_question).get("explicit_patent_ids", [])
+            if self._normalize_patent_id(item)
+        ]
+        explicit_id_fallback = False
+        if toggles.convergence_enabled and explicit_patent_ids:
+            explicit_set = set(explicit_patent_ids)
+            selected_matches = [
+                self._mark_explicit_id_match(match)
+                for match in selected_matches
+                if match.record.canonical_patent_id in explicit_set
+            ]
+            if not selected_matches:
+                selected_matches = [
+                    self._mark_explicit_id_match(match)
+                    for patent_id in explicit_patent_ids
+                    for match in [self._default_match_for_patent(patent_id)]
+                    if match is not None
+                ]
+                explicit_id_fallback = bool(selected_matches)
+        stage2_rerank_metadata = {"enabled": False, "applied": False, "fallback": False}
+        if toggles.convergence_enabled:
+            selected_matches, stage2_rerank_metadata = self._apply_stage2_rerank(
+                matches=selected_matches,
+                query=user_question,
+                toggles=toggles,
+                rerank_fn=rerank_fn,
+            )
+
+        validation_metadata: dict[str, Any] | None = None
+        filtered_sample: list[dict[str, Any]] = []
+        if toggles.convergence_enabled and toggles.validation_enabled and not c_enabled:
+            validation_result = validate_patent_stage2_candidates(
+                candidates=[self._candidate_from_match(match) for match in selected_matches],
+                user_question=user_question,
+                claim_text=" ".join(str(claim.claim or "") for claim in retrieval_claims),
+                min_results=toggles.min_results_per_claim,
+            )
+            selected_keys = {
+                (
+                    dict(item.get("metadata") or {}).get("patent_id"),
+                    item.get("document"),
+                    dict(item.get("metadata") or {}).get("chunk_index"),
+                    dict(item.get("metadata") or {}).get("section_type"),
+                )
+                for item in validation_result.selected
+            }
+            selected_matches = [
+                match
+                for match in selected_matches
+                if (
+                    match.record.canonical_patent_id,
+                    match.snippet_text,
+                    dict(match.metadata or {}).get("chunk_index"),
+                    match.section_type,
+                )
+                in selected_keys
+            ]
+            validation_metadata = dict(validation_result.diagnostics)
+            filtered_sample = [dict(item.get("metadata") or {}) for item in validation_result.filtered[:5]]
+            _LOGGER.info(
+                "patent stage2 validation completed before=%s after=%s filtered=%s fallback=%s",
+                len(selected_keys) + len(validation_result.filtered),
+                len(selected_matches),
+                int(validation_metadata.get("filtered_count") or 0),
+                bool(validation_metadata.get("validation_fallback")),
+            )
+
+        if c_enabled:
+            selected_matches, patent_score_metadata = self._apply_c_patent_scoring(
+                matches=selected_matches,
+                retrieval_claims=retrieval_claims,
+                user_question=user_question,
+                graph_controls=graph_controls,
+                toggles=toggles,
+            )
+        else:
+            patent_score_metadata = []
+
+        if toggles.convergence_enabled:
+            selected_matches = self._limit_matches_to_patents(
+                selected_matches,
+                max_patents=toggles.max_global_patents,
+            )
+            _LOGGER.info(
+                "patent stage2 payload contraction selected_patents=%s selected_matches=%s max_global_patents=%s",
+                len({match.record.canonical_patent_id for match in selected_matches}),
+                len(selected_matches),
+                int(toggles.max_global_patents),
+            )
 
         outcome = self._build_success(
             "vector_hybrid",
-            merged_matches,
+            selected_matches,
             question=user_question,
             context=context,
             cache_hit=False,
@@ -743,16 +922,51 @@ class PatentRetrievalService:
             started_at=started_at,
             include_answer_text=False,
         )
-        payload = self._stage2_payload_from_outcome(outcome, matches=merged_matches)
+        payload = self._stage2_payload_from_outcome(outcome, matches=selected_matches)
         metadata = dict(payload.get("metadata") or {})
         metadata["candidate_patent_ids"] = list(graph_candidate_patent_ids or candidate_patent_ids)
         metadata["retrieval_plan_queries"] = list(generated_queries)
+        if stage2_query_diagnostics:
+            metadata["stage2_query_diagnostics"] = list(stage2_query_diagnostics)
         if graph_candidate_patent_ids or graph_controls.get("behavior") == "hint_only":
             metadata["graph_stage2_behavior"] = "filter_applied" if graph_candidate_patent_ids else "hint_only"
+            if c_enabled and graph_candidate_patent_ids:
+                metadata["graph_stage2_behavior"] = "seed_boost"
             metadata["graph_candidate_patent_ids"] = list(graph_candidate_patent_ids)
             metadata["graph_constraints_applied"] = list(graph_controls.get("constraints") or [])
+        if toggles.convergence_enabled:
+            metadata["stage2_raw_candidate_count"] = len(raw_candidate_patent_ids)
+            metadata["stage2_raw_candidate_patent_ids"] = list(raw_candidate_patent_ids)
+            metadata["stage2_payload_contract_version"] = STAGE2_PAYLOAD_CONTRACT_VERSION
+            metadata["stage2_rerank"] = stage2_rerank_metadata
+            if validation_metadata is not None:
+                metadata["stage2_validation"] = validation_metadata
+                metadata["stage2_filtered_out_sample"] = filtered_sample
+            if patent_score_metadata:
+                metadata["stage2_patent_scores"] = patent_score_metadata
+                metadata["stage2_explicit_id_fallback"] = explicit_id_fallback or any(
+                    "explicit_id_fallback" in list(item.get("reasons") or [])
+                    for item in patent_score_metadata
+                    if isinstance(item, dict)
+                )
+            elif explicit_id_fallback:
+                metadata["stage2_explicit_id_fallback"] = True
         payload["metadata"] = metadata
         payload["source_ids"] = self.extract_source_ids(payload)
+        _LOGGER.info(
+            "patent stage2 retrieval summary convergence=%s c_enabled=%s raw_candidates=%s selected_sources=%s "
+            "rerank_applied=%s rerank_fallback=%s validation_filtered=%s graph_behavior=%s explicit_fallback=%s source_ids=%s",
+            bool(toggles.convergence_enabled),
+            bool(c_enabled),
+            len(raw_candidate_patent_ids),
+            len(list(payload.get("source_ids") or [])),
+            bool(stage2_rerank_metadata.get("applied")),
+            bool(stage2_rerank_metadata.get("fallback")),
+            int((validation_metadata or {}).get("filtered_count") or 0),
+            str(metadata.get("graph_stage2_behavior") or "none"),
+            bool(metadata.get("stage2_explicit_id_fallback")),
+            list(payload.get("source_ids") or [])[:5],
+        )
         return payload
 
     def _cancelled_stage2_payload(self) -> dict[str, Any]:
@@ -952,6 +1166,11 @@ class PatentRetrievalService:
     ) -> dict[str, Any]:
         enriched = dict(hit or {})
         enriched["stage2_source"] = str(stage2_source)
+        channel_by_source = {
+            "abstract": "abstract_vector",
+            "chunk": "chunk_vector_candidate",
+        }
+        enriched["stage2_channel"] = channel_by_source.get(str(stage2_source), str(stage2_source))
         enriched["generated_query"] = str(generated_query)
         enriched["claim_text"] = str(retrieval_claim.claim or "")
         enriched["claim_keywords"] = list(retrieval_claim.keywords or [])
@@ -1032,6 +1251,267 @@ class PatentRetrievalService:
         ordered = list(merged.values())
         ordered.sort(key=lambda item: (float(item.chunk_score or 0.0), float(item.abstract_score or 0.0), item.record.publication_date), reverse=True)
         return ordered
+
+    def _candidate_from_match(self, match: _MatchedReference) -> dict[str, Any]:
+        metadata = dict(match.metadata or {})
+        metadata.setdefault("patent_id", match.record.canonical_patent_id)
+        metadata.setdefault("section_type", match.section_type)
+        return {
+            "document": match.snippet_text,
+            "metadata": metadata,
+            "score": match.chunk_score if match.chunk_score is not None else match.abstract_score,
+        }
+
+    def _mark_explicit_id_match(self, match: _MatchedReference) -> _MatchedReference:
+        metadata = dict(match.metadata or {})
+        metadata["patent_id"] = match.record.canonical_patent_id
+        metadata["section_type"] = match.section_type
+        metadata["exact_id_match"] = True
+        return replace(match, metadata=metadata)
+
+    def _apply_stage2_rerank(
+        self,
+        *,
+        matches: list[_MatchedReference],
+        query: str,
+        toggles: Any,
+        rerank_fn: Callable[..., dict[str, Any]] | None,
+    ) -> tuple[list[_MatchedReference], dict[str, Any]]:
+        if not toggles.rerank_enabled:
+            return list(matches), {"enabled": False, "applied": False, "fallback": False}
+        if not callable(rerank_fn):
+            _LOGGER.info(
+                "patent stage2 rerank skipped provider=%s reason=no_callable candidates=%s",
+                str(toggles.rerank_provider),
+                len(matches),
+            )
+            return list(matches), {"enabled": True, "applied": False, "fallback": False, "provider": toggles.rerank_provider}
+        candidates = list(matches)[: max(1, int(toggles.rerank_candidates))]
+        documents = [match.snippet_text for match in candidates]
+        metadatas = [self._candidate_from_match(match)["metadata"] for match in candidates]
+        _LOGGER.info(
+            "patent stage2 rerank start provider=%s model=%s candidates=%s top_n=%s",
+            str(toggles.rerank_provider),
+            str(toggles.rerank_model),
+            len(candidates),
+            max(1, int(toggles.rerank_top_patents)),
+        )
+        try:
+            result = dict(
+                rerank_fn(
+                    query=query,
+                    documents=documents,
+                    metadatas=metadatas,
+                    top_n=max(1, int(toggles.rerank_top_patents)),
+                    provider=toggles.rerank_provider,
+                    model=toggles.rerank_model,
+                )
+                or {}
+            )
+        except Exception:
+            _LOGGER.warning(
+                "patent stage2 rerank failed provider=%s candidates=%s",
+                str(toggles.rerank_provider),
+                len(candidates),
+                exc_info=True,
+            )
+            return list(matches), {
+                "enabled": True,
+                "applied": False,
+                "fallback": True,
+                "fallback_reason": "request_failed",
+            }
+        if bool(result.get("fallback")):
+            fallback_reason = str(result.get("fallback_reason") or "provider_fallback")
+            provider = str(result.get("provider") or toggles.rerank_provider)
+            _LOGGER.info(
+                "patent stage2 rerank fallback reason=%s provider=%s candidates=%s",
+                fallback_reason,
+                provider,
+                len(candidates),
+            )
+            return list(matches), {
+                "enabled": True,
+                "applied": False,
+                "fallback": True,
+                "fallback_reason": fallback_reason,
+                "provider": provider,
+            }
+        selected: list[_MatchedReference] = []
+        used_indexes: set[int] = set()
+        result_metadatas = list(result.get("metadatas") or [])
+        result_documents = list(result.get("documents") or [])
+        for result_index, metadata in enumerate(result_metadatas):
+            result_document = result_documents[result_index] if result_index < len(result_documents) else None
+            metadata_patent_id = self._normalize_patent_id(dict(metadata or {}).get("patent_id"))
+            for index, match in enumerate(candidates):
+                if index in used_indexes:
+                    continue
+                if metadata_patent_id and metadata_patent_id != match.record.canonical_patent_id:
+                    continue
+                if result_document is not None and str(result_document) != match.snippet_text:
+                    continue
+                selected.append(match)
+                used_indexes.add(index)
+                break
+        if not selected:
+            for index in list(result.get("indices") or []):
+                try:
+                    selected.append(candidates[int(index)])
+                except Exception:
+                    continue
+        if not selected:
+            _LOGGER.info(
+                "patent stage2 rerank fallback reason=empty_response provider=%s candidates=%s",
+                str(result.get("provider") or toggles.rerank_provider),
+                len(candidates),
+            )
+            return list(matches), {"enabled": True, "applied": False, "fallback": True, "fallback_reason": "empty_response"}
+        selected = self._limit_matches_to_patents(selected, max_patents=max(1, int(toggles.rerank_top_patents)))
+        _LOGGER.info(
+            "patent stage2 rerank applied provider=%s selected=%s",
+            str(result.get("provider") or toggles.rerank_provider),
+            len(selected),
+        )
+        return selected, {
+            "enabled": True,
+            "applied": True,
+            "fallback": False,
+            "provider": str(result.get("provider") or toggles.rerank_provider),
+        }
+
+    def _limit_matches_to_patents(self, matches: list[_MatchedReference], *, max_patents: int) -> list[_MatchedReference]:
+        selected: list[_MatchedReference] = []
+        seen_patents: set[str] = set()
+        for match in list(matches or []):
+            patent_id = match.record.canonical_patent_id
+            if patent_id in seen_patents:
+                continue
+            selected.append(match)
+            seen_patents.add(patent_id)
+            if len(seen_patents) >= max(1, int(max_patents)):
+                break
+        return selected
+
+    def _apply_c_patent_scoring(
+        self,
+        *,
+        matches: list[_MatchedReference],
+        retrieval_claims: list[PatentRetrievalClaim],
+        user_question: str,
+        graph_controls: dict[str, Any],
+        toggles: Any,
+    ) -> tuple[list[_MatchedReference], list[dict[str, Any]]]:
+        candidate_ids = list(dict.fromkeys(match.record.canonical_patent_id for match in matches))
+        table_supplements_by_id: dict[str, list[dict[str, Any]]] = {}
+        if toggles.c_table_metric_boost_enabled:
+            for patent_id in candidate_ids:
+                table_supplements_by_id[patent_id] = [
+                    {
+                        "table_title": item.table_title,
+                        "columns": list(item.columns),
+                        "rows": [dict(row) for row in item.rows],
+                        "source_image": item.source_image,
+                    }
+                    for item in self._load_table_supplements(patent_id)
+                ]
+            _LOGGER.info(
+                "patent stage2 c table supplements loaded candidate_patents=%s patents_with_tables=%s",
+                len(candidate_ids),
+                sum(1 for items in table_supplements_by_id.values() if items),
+            )
+        hits: list[dict[str, Any]] = []
+        for match in matches:
+            metadata = dict(match.metadata or {})
+            if table_supplements_by_id.get(match.record.canonical_patent_id):
+                metadata["table_supplements"] = table_supplements_by_id[match.record.canonical_patent_id]
+            hits.append(
+                {
+                    "patent_id": match.record.canonical_patent_id,
+                    "document": match.snippet_text,
+                    "section_type": match.section_type,
+                    "score": match.chunk_score if match.chunk_score is not None else match.abstract_score,
+                    "channel": metadata.get("stage2_channel") or metadata.get("stage2_source") or "",
+                    "metadata": metadata,
+                }
+            )
+        intent = derive_patent_retrieval_intent(
+            user_question=user_question,
+            retrieval_claims=retrieval_claims,
+            graph_context=graph_controls,
+        )
+        ranked = aggregate_patent_candidates(
+            hits=hits,
+            intent=intent,
+            table_metric_boost_enabled=toggles.c_table_metric_boost_enabled,
+        )
+        _LOGGER.info(
+            "patent stage2 c scoring completed candidates=%s ranked=%s explicit_ids=%s top_patents=%s",
+            len(candidate_ids),
+            len(ranked),
+            len(intent.explicit_patent_ids),
+            [item.patent_id for item in ranked[:5]],
+        )
+        match_by_patent: dict[str, _MatchedReference] = {}
+        for match in matches:
+            match_by_patent.setdefault(match.record.canonical_patent_id, match)
+        fallback_score_items: list[dict[str, Any]] = []
+        if intent.explicit_patent_ids and not ranked:
+            selected_matches = []
+            for patent_id in intent.explicit_patent_ids:
+                fallback_match = self._default_match_for_patent(patent_id)
+                if fallback_match is None:
+                    continue
+                selected_matches.append(fallback_match)
+                fallback_score_items.append(
+                    {
+                        "patent_id": patent_id,
+                        "score": 1.0,
+                        "reasons": ["explicit_id_fallback"],
+                    }
+                )
+            _LOGGER.info(
+                "patent stage2 c explicit fallback selected=%s explicit_ids=%s",
+                len(selected_matches),
+                list(intent.explicit_patent_ids),
+            )
+            return selected_matches, fallback_score_items
+        selected_matches = [match_by_patent[item.patent_id] for item in ranked if item.patent_id in match_by_patent]
+        metadata = [
+            {
+                "patent_id": item.patent_id,
+                "score": item.score,
+                "reasons": list(item.reasons),
+            }
+            for item in ranked
+        ]
+        if intent.explicit_patent_ids:
+            return selected_matches, metadata
+        return selected_matches or list(matches), metadata
+
+    def _annotate_no_vector_convergence_payload(self, payload: dict[str, Any], *, toggles: Any) -> dict[str, Any]:
+        resolved = dict(payload or {})
+        metadata = dict(resolved.get("metadata") or {})
+        source_ids = list(resolved.get("source_ids") or self.extract_source_ids(resolved))
+        metadata["stage2_validation"] = {
+            "enabled": bool(toggles.validation_enabled),
+            "validated_count": len(source_ids),
+            "filtered_count": 0,
+            "validation_fallback": False,
+        }
+        metadata["stage2_no_vector_fallback"] = True
+        metadata["stage2_missing_vector_signal"] = "exact_id_or_archive_fallback"
+        metadata["stage2_payload_contract_version"] = STAGE2_PAYLOAD_CONTRACT_VERSION
+        for key in ("documents", "metadatas", "distances", "references", "reference_objects", "reference_links", "original_links", "source_ids"):
+            resolved[key] = list(resolved.get(key) or [])
+        resolved["source_ids"] = source_ids
+        resolved["metadata"] = metadata
+        _LOGGER.info(
+            "patent stage2 no-vector fallback annotated source_ids=%s validation_enabled=%s",
+            source_ids[:5],
+            bool(toggles.validation_enabled),
+        )
+        return resolved
 
     def _default_match_for_patent(self, canonical_patent_id: str) -> _MatchedReference | None:
         record = self._ensure_catalog_record(canonical_patent_id)

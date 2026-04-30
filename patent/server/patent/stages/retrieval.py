@@ -5,7 +5,9 @@ import re
 from typing import Any, Callable
 
 from server.patent.models import PatentRetrievalClaim
+from server.patent.retrieval_guardrails import apply_patent_stage2_query_guardrails
 from server.patent.retrieval_service import PatentRetrievalService
+from server.patent.stage2_controls import resolve_stage2_runtime_toggles
 
 
 DEFAULT_PATENT_STAGE2_QUERY_PROMPT = """
@@ -243,25 +245,52 @@ def run_stage2_targeted_retrieval(
     active_stream_count: int | None = None,
     parallel_workers: int = 1,
     context: dict[str, Any] | None = None,
+    rerank_fn: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     log = logger
     planning_log = logger or _NullLogger()
-    frozen_claim_queries = [
-        build_stage2_queries_for_claim(
+    toggles = resolve_stage2_runtime_toggles()
+    frozen_claim_queries: list[list[str]] = []
+    stage2_query_diagnostics: list[dict[str, Any]] = []
+    graph_context = dict((context or {}).get("graph_kb") or {}) if isinstance(context, dict) else {}
+    for claim_index, claim in enumerate(list(retrieval_claims or []), start=1):
+        claim_queries = build_stage2_queries_for_claim(
             user_question=user_question,
             retrieval_claim=claim,
             client=query_client,
             model=query_model,
             logger=planning_log,
         )
-        for claim in list(retrieval_claims or [])
-    ]
+        guarded = apply_patent_stage2_query_guardrails(
+            user_question=user_question,
+            retrieval_claim=claim,
+            queries=claim_queries,
+            toggles=toggles,
+            graph_context=graph_context,
+        )
+        frozen_claim_queries.append(list(guarded.queries))
+        stage2_query_diagnostics.append(dict(guarded.diagnostics))
+        if log is not None:
+            log.info(
+                "patent stage2 query guardrail claim_index=%s enabled=%s original_queries=%s final_queries=%s "
+                "injected_entities=%s injected_metrics=%s",
+                claim_index,
+                bool(guarded.diagnostics.get("enabled")),
+                len(claim_queries),
+                len(guarded.queries),
+                len(list(guarded.diagnostics.get("injected_entities") or [])),
+                len(list(guarded.diagnostics.get("injected_metrics") or [])),
+            )
     if log is not None:
         log.info(
-            "patent stage2 targeted retrieval start claim_count=%s query_model=%s parallel_workers=%s",
+            "patent stage2 targeted retrieval start claim_count=%s query_model=%s parallel_workers=%s convergence=%s rerank=%s validation=%s c_scoring=%s",
             len(list(retrieval_claims or [])),
             str(query_model or "").strip(),
             max(1, int(parallel_workers or 1)),
+            bool(toggles.convergence_enabled),
+            bool(toggles.rerank_enabled),
+            bool(toggles.validation_enabled),
+            bool(toggles.c_patent_scoring_enabled),
         )
     result = retrieval_service.targeted_retrieve(
         retrieval_claims=list(retrieval_claims or []),
@@ -272,14 +301,21 @@ def run_stage2_targeted_retrieval(
         should_cancel=should_cancel,
         active_stream_count=active_stream_count,
         context=context,
+        rerank_fn=rerank_fn,
+        stage2_query_diagnostics=stage2_query_diagnostics,
     )
     if log is not None:
         metadata = dict(result.get("metadata") or {})
         log.info(
-            "patent stage2 targeted retrieval completed source_ids=%s references=%s retrieval_plan_queries=%s",
+            "patent stage2 targeted retrieval completed source_ids=%s references=%s retrieval_plan_queries=%s raw_candidates=%s "
+            "rerank=%s validation=%s graph_behavior=%s",
             list(result.get("source_ids") or []),
             len(list(result.get("references") or [])),
             list(metadata.get("retrieval_plan_queries") or []),
+            metadata.get("stage2_raw_candidate_count"),
+            dict(metadata.get("stage2_rerank") or {}),
+            dict(metadata.get("stage2_validation") or {}),
+            str(metadata.get("graph_stage2_behavior") or "none"),
         )
     return result
 

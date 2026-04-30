@@ -16,6 +16,8 @@ from server.patent.archive_loader import PatentArchiveLoader
 from server.patent.models import PatentRetrievalClaim, PatentRetrievalPlan
 from server.patent.resource_registry import PatentResourceRegistry
 from server.patent.retrieval_service import PatentRetrievalService
+from server.patent.rerank_service import build_patent_stage2_rerank_fn
+from server.patent.stage2_controls import build_stage2_runtime_signature
 from server.patent.stages.evidence_loading import run_stage3_load_patent_evidence
 from server.patent.stages.planning import DEFAULT_PATENT_STAGE1_PROMPT, run_stage1_pre_answer_and_planning
 from server.patent.stages.retrieval import (
@@ -436,6 +438,17 @@ class PatentRuntime:
     stage3_force_pdf: bool = False
     stage2_parallel_workers: int = 4
     stage3_parallel_workers: int = 4
+    stage2_rerank_fn: Any | None = None
+
+    def stage2_runtime_signature(self) -> dict[str, Any]:
+        return build_stage2_runtime_signature(
+            base_signature={
+                "runtime_type": type(self).__name__,
+                "retrieval_version": getattr(self.retrieval_service, "retrieval_version", ""),
+                "catalog_index_version": getattr(self.retrieval_service, "catalog_index_version", ""),
+                "stage2_query_model": self.planning_model,
+            }
+        )
 
     def stage1_pre_answer_and_planning(
         self,
@@ -514,6 +527,7 @@ class PatentRuntime:
             active_stream_count=active_stream_count,
             parallel_workers=self.stage2_parallel_workers,
             context=conversation_context,
+            rerank_fn=self.stage2_rerank_fn,
         )
 
     def _extract_patent_ids_from_results(self, retrieval_results: dict[str, Any]) -> list[str]:
@@ -686,6 +700,7 @@ def build_default_patent_runtime(
         planning_hot_pool=planning_hot_pool,
         planning_upstream_gate=planning_upstream_gate,
         planning_model=planning_model,
+        stage2_rerank_fn=build_patent_stage2_rerank_fn(logger=_LOGGER),
         stage3_force_pdf=_first_env("PATENT_STAGE3_FORCE_PDF", default="false").lower() in {"1", "true", "yes", "on"},
         stage2_parallel_workers=_positive_int_env("PATENT_STAGE2_PARALLEL_WORKERS", default=4),
         stage3_parallel_workers=_positive_int_env("PATENT_STAGE3_PARALLEL_WORKERS", default=4),

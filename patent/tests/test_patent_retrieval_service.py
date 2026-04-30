@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from pathlib import Path
@@ -1972,3 +1973,606 @@ def test_targeted_retrieval_keeps_explicit_patent_ids_authoritative_even_when_ve
 
     assert chunk_calls == [["CN123456789A"]]
     assert payload["references"] == ["CN123456789A"]
+
+
+def test_stage2_convergence_rerank_failure_falls_back_with_metadata(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE2_RERANK_ENABLED", "true")
+
+    service = PatentRetrievalService(
+        catalog_records=_catalog(),
+        abstract_vector_search=lambda question, top_k: [
+            {"patent_id": "CN123456789A", "document": "battery thermal abstract", "distance": 0.1},
+        ],
+        chunk_vector_search=lambda question, patent_ids, top_k: [
+            {"patent_id": "CN123456789A", "document": "battery thermal chunk", "source_file": "说明书.txt", "chunk_index": 0, "distance": 0.2},
+        ],
+    )
+
+    def _broken_rerank(**kwargs):
+        raise RuntimeError("rerank down")
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[{"claim": "battery thermal", "keywords": []}],
+        user_question="battery thermal",
+        frozen_claim_queries=[["battery thermal"]],
+        rerank_fn=_broken_rerank,
+    )
+
+    assert payload["source_ids"] == ["CN123456789A"]
+    assert payload["metadata"]["stage2_rerank"]["fallback_reason"] == "request_failed"
+
+
+def test_stage2_convergence_rerank_adapter_fallback_is_not_reported_as_applied(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE2_RERANK_ENABLED", "true")
+
+    service = PatentRetrievalService(
+        catalog_records=_catalog(),
+        abstract_vector_search=lambda question, top_k: [
+            {"patent_id": "CN123456789A", "document": "battery thermal abstract", "distance": 0.1},
+        ],
+        chunk_vector_search=lambda question, patent_ids, top_k: [
+            {"patent_id": "CN123456789A", "document": "battery thermal chunk", "source_file": "说明书.txt", "chunk_index": 0, "distance": 0.2},
+        ],
+    )
+
+    def _fallback_rerank(**kwargs):
+        return {
+            "documents": list(kwargs.get("documents") or []),
+            "metadatas": list(kwargs.get("metadatas") or []),
+            "rerank_scores": [1.0],
+            "fallback": True,
+            "fallback_reason": "request_failed",
+            "provider": "local",
+        }
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[{"claim": "battery thermal", "keywords": []}],
+        user_question="battery thermal",
+        frozen_claim_queries=[["battery thermal"]],
+        rerank_fn=_fallback_rerank,
+    )
+
+    assert payload["source_ids"] == ["CN123456789A"]
+    assert payload["metadata"]["stage2_rerank"]["applied"] is False
+    assert payload["metadata"]["stage2_rerank"]["fallback"] is True
+    assert payload["metadata"]["stage2_rerank"]["fallback_reason"] == "request_failed"
+    assert payload["metadata"]["stage2_rerank"]["provider"] == "local"
+
+
+def test_stage2_convergence_rerank_success_reorders_and_limits_patents(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE2_RERANK_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE2_RERANK_TOP_PATENTS", "1")
+    monkeypatch.setenv("PATENT_STAGE2_MAX_GLOBAL_PATENTS", "1")
+
+    service = PatentRetrievalService(
+        catalog_records=_catalog(),
+        abstract_vector_search=lambda question, top_k: [
+            {"patent_id": "CN123456789A", "document": "thermal abstract", "distance": 0.1},
+            {"patent_id": "US20240001234A1", "document": "electrode abstract", "distance": 0.2},
+        ],
+        chunk_vector_search=lambda question, patent_ids, top_k: [
+            {"patent_id": "CN123456789A", "document": "thermal chunk", "source_file": "说明书.txt", "chunk_index": 0, "distance": 0.1},
+            {"patent_id": "US20240001234A1", "document": "electrode chunk", "source_file": "说明书.txt", "chunk_index": 1, "distance": 0.2},
+        ],
+    )
+
+    def _fake_rerank(*, query, documents, metadatas, top_n, **kwargs):
+        del query, top_n, kwargs
+        return {
+            "documents": [documents[1]],
+            "metadatas": [metadatas[1]],
+            "rerank_scores": [0.99],
+            "fallback": False,
+            "provider": "fake",
+        }
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[{"claim": "electrode", "keywords": []}],
+        user_question="electrode",
+        frozen_claim_queries=[["electrode"]],
+        rerank_fn=_fake_rerank,
+    )
+
+    assert payload["source_ids"] == ["US20240001234A1"]
+    assert payload["references"] == ["US20240001234A1"]
+    assert payload["metadata"]["stage2_rerank"]["applied"] is True
+    assert payload["metadata"]["stage2_rerank"]["provider"] == "fake"
+
+
+def test_runtime_stage2_targeted_retrieval_passes_rerank_fn_to_wrapper(monkeypatch):
+    captured = {}
+
+    def _fake_run_stage2_targeted_retrieval(**kwargs):
+        captured.update(kwargs)
+        return {"documents": [], "metadatas": [], "distances": [], "references": [], "source_ids": [], "metadata": {}}
+
+    monkeypatch.setattr("server.patent.runtime.run_stage2_targeted_retrieval", _fake_run_stage2_targeted_retrieval)
+
+    runtime = PatentRuntime(
+        retrieval_service=_service(),
+        resources=[],
+        planning_client=None,
+        planning_model="",
+    )
+
+    def _rerank(**kwargs):
+        return {"documents": [], "metadatas": [], "rerank_scores": []}
+
+    runtime.stage2_rerank_fn = _rerank
+
+    runtime.stage2_targeted_retrieval(
+        [PatentRetrievalClaim(claim="battery thermal", keywords=[])],
+        user_question="battery thermal",
+    )
+
+    assert captured["rerank_fn"] is _rerank
+
+
+def test_build_default_runtime_wires_stage2_rerank_fn_from_env(monkeypatch, tmp_path):
+    from server.patent.resource_registry import PatentResourceRegistry
+    from server.patent.runtime import build_default_patent_runtime
+
+    class _ArchiveLoader:
+        def build_identity_registry(self):
+            return {}
+
+        def build_catalog_records(self):
+            return []
+
+        def load_tables(self, patent_id):
+            return []
+
+    class _AnswerBuilder:
+        def close(self):
+            return None
+
+    monkeypatch.setenv("PATENT_STAGE2_RERANK_PROVIDER", "dashscope")
+    monkeypatch.setenv("PATENT_STAGE2_RERANK_API_KEY", "patent-key")
+    monkeypatch.setenv("PATENT_STAGE2_RERANK_MODEL", "gte-rerank-v2")
+    archive_root = tmp_path / "archive"
+    archive_root.mkdir()
+    monkeypatch.setattr(
+        "server.patent.runtime.PatentResourceRegistry.discover",
+        lambda: PatentResourceRegistry(
+            repo_root=tmp_path,
+            abstract_db_path=tmp_path / "missing_abstract",
+            chunk_db_path=tmp_path / "missing_chunk",
+            archive_root=archive_root,
+        ),
+    )
+    monkeypatch.setattr("server.patent.runtime.PatentArchiveLoader", lambda root: _ArchiveLoader())
+    monkeypatch.setattr("server.patent.runtime.PatentAnswerBuilder.from_env", lambda: _AnswerBuilder())
+
+    runtime = build_default_patent_runtime()
+
+    assert callable(runtime.stage2_rerank_fn)
+
+
+def test_run_stage2_targeted_retrieval_passes_rerank_fn_to_service():
+    class _Service:
+        def targeted_retrieve(self, **kwargs):
+            self.kwargs = kwargs
+            return {"documents": [], "metadatas": [], "distances": [], "references": [], "source_ids": [], "metadata": {}}
+
+    service = _Service()
+
+    def _rerank(**kwargs):
+        return {"documents": [], "metadatas": [], "rerank_scores": []}
+
+    run_stage2_targeted_retrieval(
+        retrieval_service=service,
+        retrieval_claims=[PatentRetrievalClaim(claim="battery thermal", keywords=[])],
+        user_question="battery thermal",
+        rerank_fn=_rerank,
+    )
+
+    assert service.kwargs["rerank_fn"] is _rerank
+
+
+def test_stage2_convergence_targeted_no_vector_fallback_keeps_stage3_payload(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE2_VALIDATION_ENABLED", "true")
+
+    service = PatentRetrievalService(
+        catalog_records=_catalog(),
+        identity_registry={"CN123456789A": "CN123456789A"},
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[
+            {
+                "claim": "Summarize CN123456789A thermal management",
+                "keywords": ["CN123456789A"],
+                "preferred_sections": ["claims"],
+            }
+        ],
+        user_question="Summarize CN123456789A",
+    )
+
+    assert payload["source_ids"] == ["CN123456789A"]
+    assert payload["references"] == ["CN123456789A"]
+    assert isinstance(payload["documents"], list)
+    assert isinstance(payload["metadatas"], list)
+    assert isinstance(payload["distances"], list)
+    assert isinstance(payload["reference_objects"], list)
+    assert isinstance(payload["reference_links"], list)
+    assert isinstance(payload["original_links"], list)
+    assert payload["metadata"]["stage2_validation"]["validation_fallback"] in {False, True}
+
+
+def test_stage2_convergence_contracts_payload_to_selected_patents(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE2_MAX_GLOBAL_PATENTS", "1")
+
+    service = PatentRetrievalService(
+        catalog_records=_catalog(),
+        abstract_vector_search=lambda question, top_k: [
+            {"patent_id": "CN123456789A", "document": "thermal abstract", "distance": 0.1},
+            {"patent_id": "US20240001234A1", "document": "electrode abstract", "distance": 0.2},
+        ],
+        chunk_vector_search=lambda question, patent_ids, top_k: [
+            {"patent_id": "CN123456789A", "document": "thermal chunk", "source_file": "说明书.txt", "chunk_index": 0, "distance": 0.1},
+            {"patent_id": "US20240001234A1", "document": "electrode chunk", "source_file": "说明书.txt", "chunk_index": 1, "distance": 0.2},
+        ],
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[{"claim": "thermal electrode", "keywords": []}],
+        user_question="thermal electrode",
+        frozen_claim_queries=[["thermal electrode"]],
+    )
+
+    assert payload["source_ids"] == ["CN123456789A"]
+    assert payload["references"] == ["CN123456789A"]
+    assert [item["canonical_patent_id"] for item in payload["reference_objects"]] == ["CN123456789A"]
+    assert [item["patent_id"] for item in payload["metadatas"]] == ["CN123456789A"]
+    assert payload["metadata"]["stage2_raw_candidate_count"] >= 2
+
+
+def test_stage2_convergence_logs_controls_and_summary(monkeypatch, caplog):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE2_RERANK_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE2_MAX_GLOBAL_PATENTS", "1")
+
+    service = PatentRetrievalService(
+        catalog_records=_catalog(),
+        abstract_vector_search=lambda question, top_k: [
+            {"patent_id": "CN123456789A", "document": "thermal abstract", "distance": 0.1},
+            {"patent_id": "US20240001234A1", "document": "electrode abstract", "distance": 0.2},
+        ],
+        chunk_vector_search=lambda question, patent_ids, top_k: [
+            {"patent_id": "CN123456789A", "document": "thermal chunk", "source_file": "说明书.txt", "chunk_index": 0, "distance": 0.1},
+            {"patent_id": "US20240001234A1", "document": "electrode chunk", "source_file": "说明书.txt", "chunk_index": 1, "distance": 0.2},
+        ],
+    )
+
+    with caplog.at_level(logging.INFO, logger="patent.retrieval"):
+        service.targeted_retrieve(
+            retrieval_claims=[{"claim": "thermal electrode", "keywords": []}],
+            user_question="thermal electrode",
+            frozen_claim_queries=[["thermal electrode"]],
+        )
+
+    messages = [record.message for record in caplog.records if record.name == "patent.retrieval"]
+    assert any("patent stage2 convergence controls" in message for message in messages)
+    assert any("patent stage2 retrieval summary" in message for message in messages)
+
+
+def test_stage2_b_keeps_graph_candidate_hard_filter_when_convergence_enabled(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE2_C_PATENT_SCORING_ENABLED", "false")
+
+    service = PatentRetrievalService(
+        catalog_records=_catalog(),
+        abstract_vector_search=lambda question, top_k: [
+            {"patent_id": "CN123456789A", "document": "thermal abstract", "distance": 0.1},
+            {"patent_id": "US20240001234A1", "document": "electrode abstract", "distance": 0.2},
+        ],
+        chunk_vector_search=lambda question, patent_ids, top_k: [
+            {"patent_id": "CN123456789A", "document": "thermal chunk", "source_file": "说明书.txt", "chunk_index": 0, "distance": 0.1},
+            {"patent_id": "US20240001234A1", "document": "electrode chunk", "source_file": "说明书.txt", "chunk_index": 1, "distance": 0.2},
+        ],
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[{"claim": "thermal", "keywords": []}],
+        user_question="thermal",
+        frozen_claim_queries=[["thermal"]],
+        context={"graph_kb": {"stage2_patent_candidates": ["CN123456789A"]}},
+    )
+
+    assert payload["source_ids"] == ["CN123456789A"]
+    assert payload["metadata"]["graph_stage2_behavior"] == "filter_applied"
+
+
+def test_stage2_convergence_disabled_preserves_existing_wide_output(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "false")
+    monkeypatch.setenv("PATENT_STAGE2_MAX_GLOBAL_PATENTS", "1")
+    monkeypatch.setenv("PATENT_STAGE2_VALIDATION_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE2_RERANK_ENABLED", "true")
+
+    service = PatentRetrievalService(
+        catalog_records=_catalog(),
+        abstract_vector_search=lambda question, top_k: [
+            {"patent_id": "CN123456789A", "document": "thermal abstract", "distance": 0.1},
+            {"patent_id": "US20240001234A1", "document": "electrode abstract", "distance": 0.2},
+        ],
+        chunk_vector_search=lambda question, patent_ids, top_k: [
+            {
+                "patent_id": patent_id,
+                "document": f"{patent_id} chunk",
+                "source_file": "说明书.txt",
+                "chunk_index": index,
+                "distance": 0.1 + index,
+            }
+            for index, patent_id in enumerate(list(patent_ids or []))
+        ],
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[{"claim": "thermal electrode", "keywords": []}],
+        user_question="thermal electrode",
+        frozen_claim_queries=[["thermal electrode"]],
+    )
+
+    assert payload["source_ids"] == ["CN123456789A", "US20240001234A1"]
+    assert payload["references"] == ["CN123456789A", "US20240001234A1"]
+    assert "stage2_validation" not in payload.get("metadata", {})
+    assert "stage2_rerank" not in payload.get("metadata", {})
+
+
+def test_stage2_convergence_disabled_keeps_b_graph_filter_even_if_c_toggles_are_set(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "false")
+    monkeypatch.setenv("PATENT_STAGE2_C_PATENT_SCORING_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE2_C_GLOBAL_CHUNK_RECALL_ENABLED", "true")
+
+    chunk_calls: list[list[str] | None] = []
+    service = PatentRetrievalService(
+        catalog_records=_catalog(),
+        abstract_vector_search=lambda question, top_k: [
+            {"patent_id": "CN123456789A", "document": "thermal abstract", "distance": 0.1},
+            {"patent_id": "US20240001234A1", "document": "electrode abstract", "distance": 0.2},
+        ],
+        chunk_vector_search=lambda question, patent_ids, top_k: (
+            chunk_calls.append(list(patent_ids) if patent_ids is not None else None)
+            or [
+                {"patent_id": "CN123456789A", "document": "thermal chunk", "source_file": "说明书.txt", "chunk_index": 0, "distance": 0.1},
+                {"patent_id": "US20240001234A1", "document": "electrode chunk", "source_file": "说明书.txt", "chunk_index": 1, "distance": 0.2},
+            ]
+        ),
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[{"claim": "thermal electrode", "keywords": []}],
+        user_question="thermal electrode",
+        frozen_claim_queries=[["thermal electrode"]],
+        context={"graph_kb": {"stage2_patent_candidates": ["CN123456789A"]}},
+    )
+
+    assert None not in chunk_calls
+    assert payload["source_ids"] == ["CN123456789A"]
+    assert payload["metadata"]["graph_stage2_behavior"] == "filter_applied"
+
+
+def test_stage2_c_global_chunk_recall_finds_better_evidence_outside_abstract_candidates(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE2_C_PATENT_SCORING_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE2_C_GLOBAL_CHUNK_RECALL_ENABLED", "true")
+
+    chunk_calls: list[list[str] | None] = []
+
+    service = PatentRetrievalService(
+        catalog_records=_catalog(),
+        abstract_vector_search=lambda question, top_k: [
+            {"patent_id": "CN123456789A", "document": "generic thermal abstract", "distance": 0.1},
+        ],
+        chunk_vector_search=lambda question, patent_ids, top_k: (
+            chunk_calls.append(list(patent_ids) if patent_ids is not None else None)
+            or (
+                [
+                    {"patent_id": "CN123456789A", "document": "generic thermal chunk", "source_file": "说明书.txt", "chunk_index": 0, "distance": 0.2},
+                ]
+                if patent_ids
+                else [
+                    {"patent_id": "US20240001234A1", "document": "Anode porosity control at high C-rate", "source_file": "说明书.txt", "chunk_index": 1, "distance": 0.05},
+                ]
+            )
+        ),
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[{"claim": "anode porosity high C-rate", "keywords": []}],
+        user_question="anode porosity high C-rate",
+        frozen_claim_queries=[["anode porosity high C-rate"]],
+    )
+
+    assert None in chunk_calls
+    assert payload["source_ids"][0] == "US20240001234A1"
+
+
+def test_stage2_c_graph_candidates_do_not_hard_filter_strong_vector_candidates(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE2_C_PATENT_SCORING_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE2_C_GLOBAL_CHUNK_RECALL_ENABLED", "true")
+
+    chunk_calls: list[list[str] | None] = []
+
+    service = PatentRetrievalService(
+        catalog_records=_catalog(),
+        abstract_vector_search=lambda question, top_k: [
+            {"patent_id": "CN123456789A", "document": "generic graph-seeded abstract", "distance": 0.4},
+        ],
+        chunk_vector_search=lambda question, patent_ids, top_k: (
+            chunk_calls.append(list(patent_ids) if patent_ids is not None else None)
+            or (
+                [
+                    {"patent_id": "CN123456789A", "document": "generic graph chunk", "source_file": "说明书.txt", "chunk_index": 0, "distance": 0.4},
+                ]
+                if patent_ids
+                else [
+                    {"patent_id": "US20240001234A1", "document": "LiFePO4 放电容量 156 mAh/g 实施例", "source_file": "说明书.txt", "chunk_index": 1, "distance": 0.02},
+                ]
+            )
+        ),
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[{"claim": "LFP 放电容量超过 150 mAh/g", "keywords": ["LFP"]}],
+        user_question="找 LFP 放电容量超过 150 mAh/g 的专利",
+        frozen_claim_queries=[["LFP discharge capacity 150 mAh/g"]],
+        context={"graph_kb": {"stage2_patent_candidates": ["CN123456789A"]}},
+    )
+
+    assert None in chunk_calls
+    assert set(payload["metadata"]["stage2_raw_candidate_patent_ids"]) >= {"CN123456789A", "US20240001234A1"}
+    assert payload["source_ids"][0] == "US20240001234A1"
+    assert any(
+        "graph_candidate_boost" in item["reasons"]
+        for item in payload["metadata"]["stage2_patent_scores"]
+        if item["patent_id"] == "CN123456789A"
+    )
+
+
+def test_stage2_c_table_boost_loads_tables_only_for_candidate_pool(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE2_C_PATENT_SCORING_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE2_C_TABLE_METRIC_BOOST_ENABLED", "true")
+
+    loaded_tables: list[str] = []
+
+    service = PatentRetrievalService(
+        catalog_records=_catalog(),
+        abstract_vector_search=lambda question, top_k: [
+            {"patent_id": "CN123456789A", "document": "LFP capacity abstract", "distance": 0.2},
+            {"patent_id": "US20240001234A1", "document": "generic electrode abstract", "distance": 0.1},
+        ],
+        chunk_vector_search=lambda question, patent_ids, top_k: [
+            {"patent_id": patent_id, "document": f"{patent_id} chunk", "source_file": "说明书.txt", "chunk_index": 0, "distance": 0.2}
+            for patent_id in list(patent_ids or [])
+        ],
+        table_loader=lambda patent_id: (
+            loaded_tables.append(patent_id)
+            or (
+                [{"table_title": "表1 放电容量", "rows": [{"材料": "LFP", "放电容量": "156 mAh/g"}]}]
+                if patent_id == "CN123456789A"
+                else []
+            )
+        ),
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[{"claim": "LFP 放电容量超过 150 mAh/g", "keywords": ["LFP"]}],
+        user_question="找 LFP 放电容量超过 150 mAh/g 的专利",
+        frozen_claim_queries=[["LFP discharge capacity 150 mAh/g"]],
+    )
+
+    assert set(loaded_tables) <= set(payload["metadata"]["stage2_raw_candidate_patent_ids"])
+    assert payload["source_ids"][0] == "CN123456789A"
+    assert "table_metric_match" in payload["metadata"]["stage2_patent_scores"][0]["reasons"]
+
+
+def test_stage2_c_explicit_id_hard_constraint_uses_exact_fallback_when_vectors_miss(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE2_C_PATENT_SCORING_ENABLED", "true")
+
+    service = PatentRetrievalService(
+        catalog_records=_catalog(),
+        identity_registry={"CN123456789A": "CN123456789A"},
+        abstract_vector_search=lambda question, top_k: [
+            {"patent_id": "US20240001234A1", "document": "unrelated electrode abstract", "distance": 0.1},
+        ],
+        chunk_vector_search=lambda question, patent_ids, top_k: [
+            {"patent_id": "US20240001234A1", "document": "unrelated electrode chunk", "source_file": "说明书.txt", "chunk_index": 0, "distance": 0.1},
+        ],
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[{"claim": "请总结 CN123456789A", "keywords": []}],
+        user_question="请总结 CN123456789A",
+        frozen_claim_queries=[["CN123456789A"]],
+    )
+
+    assert payload["source_ids"] == ["CN123456789A"]
+    assert payload["references"] == ["CN123456789A"]
+    assert payload["metadata"]["stage2_explicit_id_fallback"] is True
+
+
+def test_stage2_b_explicit_id_hard_constraint_uses_exact_fallback_when_vectors_miss(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE2_C_PATENT_SCORING_ENABLED", "false")
+
+    service = PatentRetrievalService(
+        catalog_records=_catalog(),
+        identity_registry={"CN123456789A": "CN123456789A"},
+        abstract_vector_search=lambda question, top_k: [
+            {"patent_id": "US20240001234A1", "document": "unrelated electrode abstract", "distance": 0.1},
+        ],
+        chunk_vector_search=lambda question, patent_ids, top_k: [
+            {"patent_id": "US20240001234A1", "document": "unrelated electrode chunk", "source_file": "说明书.txt", "chunk_index": 0, "distance": 0.1},
+        ],
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[{"claim": "请总结 CN123456789A", "keywords": []}],
+        user_question="请总结 CN123456789A",
+        frozen_claim_queries=[["CN123456789A"]],
+    )
+
+    assert payload["source_ids"] == ["CN123456789A"]
+    assert payload["references"] == ["CN123456789A"]
+    assert payload["metadata"]["stage2_explicit_id_fallback"] is True
+
+
+def test_stage2_b_explicit_id_fallback_survives_validation_with_zero_min_results(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE2_C_PATENT_SCORING_ENABLED", "false")
+    monkeypatch.setenv("PATENT_STAGE2_MIN_RESULTS_PER_CLAIM", "0")
+
+    service = PatentRetrievalService(
+        catalog_records=_catalog(),
+        identity_registry={"CN123456789A": "CN123456789A"},
+        abstract_vector_search=lambda question, top_k: [
+            {"patent_id": "US20240001234A1", "document": "unrelated electrode abstract", "distance": 0.1},
+        ],
+        chunk_vector_search=lambda question, patent_ids, top_k: [
+            {"patent_id": "US20240001234A1", "document": "unrelated electrode chunk", "source_file": "说明书.txt", "chunk_index": 0, "distance": 0.1},
+        ],
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[{"claim": "请总结 CN123456789A", "keywords": []}],
+        user_question="请总结 CN123456789A",
+        frozen_claim_queries=[["CN123456789A"]],
+    )
+
+    assert payload["source_ids"] == ["CN123456789A"]
+    assert payload["metadatas"][0]["exact_id_match"] is True
+
+
+def test_stage2_c_respects_max_global_patents_instead_of_forcing_one(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE2_C_PATENT_SCORING_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE2_MAX_GLOBAL_PATENTS", "2")
+
+    service = PatentRetrievalService(
+        catalog_records=_catalog(),
+        abstract_vector_search=lambda question, top_k: [
+            {"patent_id": "CN123456789A", "document": "LFP capacity abstract", "distance": 0.2},
+            {"patent_id": "US20240001234A1", "document": "electrode abstract", "distance": 0.1},
+        ],
+        chunk_vector_search=lambda question, patent_ids, top_k: [
+            {"patent_id": "CN123456789A", "document": "LiFePO4 放电容量 156 mAh/g", "source_file": "说明书.txt", "chunk_index": 0, "distance": 0.2},
+            {"patent_id": "US20240001234A1", "document": "electrode process", "source_file": "说明书.txt", "chunk_index": 1, "distance": 0.1},
+        ],
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[{"claim": "LFP 放电容量超过 150 mAh/g", "keywords": ["LFP"]}],
+        user_question="找 LFP 放电容量超过 150 mAh/g 的专利",
+        frozen_claim_queries=[["LFP discharge capacity 150 mAh/g"]],
+    )
+
+    assert payload["source_ids"] == ["CN123456789A", "US20240001234A1"]

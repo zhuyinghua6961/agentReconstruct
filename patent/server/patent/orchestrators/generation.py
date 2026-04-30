@@ -416,6 +416,11 @@ class PatentGenerationOrchestrator:
             "catalog_index_version": getattr(retrieval_service, "catalog_index_version", ""),
             "stage2_query_model": getattr(runtime, "planning_model", ""),
         }
+        stage2_runtime_signature = getattr(runtime, "stage2_runtime_signature", None)
+        if callable(stage2_runtime_signature):
+            extra_signature = stage2_runtime_signature()
+            if isinstance(extra_signature, dict):
+                runtime_retrieval_signature.update(extra_signature)
         _LOGGER.info(
             "patent pipeline start trace=%s question_chars=%s conversation_turns=%s runtime=%s planning_model=%s question=%s",
             normalized_trace_id,

@@ -1364,3 +1364,27 @@ def test_orchestrator_short_circuits_to_stage1_answer_when_no_retrieval_claims_a
             "status": "success",
         }
     ]
+
+
+def test_orchestrator_stage2_fingerprint_includes_stage2_runtime_signature(monkeypatch):
+    captured = {}
+
+    class _Runtime(_FakeRuntime):
+        def stage2_runtime_signature(self):
+            return {
+                "stage2_convergence_enabled": True,
+                "stage2_guardrail_version": "guardrail-v1",
+                "stage2_max_global_patents": 12,
+            }
+
+    def _capture_stage2(**kwargs):
+        captured["runtime_signature"] = dict(kwargs.get("runtime_signature") or {})
+        return "stage2-fingerprint"
+
+    monkeypatch.setattr("server.patent.orchestrators.generation.build_stage2_cache_fingerprint", _capture_stage2)
+
+    PatentGenerationOrchestrator().run(question="q", runtime=_Runtime(), conversation_context={})
+
+    assert captured["runtime_signature"]["stage2_convergence_enabled"] is True
+    assert captured["runtime_signature"]["stage2_guardrail_version"] == "guardrail-v1"
+    assert captured["runtime_signature"]["stage2_max_global_patents"] == 12
