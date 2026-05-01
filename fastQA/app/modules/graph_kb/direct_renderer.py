@@ -5,8 +5,67 @@ from typing import Any
 from app.modules.graph_kb.models import DirectAnswerResult, GraphEvidenceBundle, GraphQueryPlanV2, SemanticDecision
 
 
+_PROFILE_DISPLAY_LIMIT = 5
+_LIST_ITEM_LIMIT = 3
+_LONG_VALUE_LIMIT = 160
+_PLACEHOLDERS = {"null", "none", "nan", "unknown", "_null", "null_null"}
+
+
 def _clean_text(value: Any) -> str:
     return " ".join(str(value or "").split()).strip()
+
+
+def _clean_graph_value(value: Any, *, limit: int = _LONG_VALUE_LIMIT) -> str:
+    text = _clean_text(value)
+    if not text:
+        return ""
+    text = text.replace("null_null", " ")
+    text = text.replace("_null_", " ")
+    text = text.replace("_null", " ")
+    text = text.replace("null_", " ")
+    text = text.replace("__", " ")
+    text = text.replace("_", " ")
+    text = " ".join(text.split()).strip(" ;,，。")
+    if text.lower() in _PLACEHOLDERS:
+        return ""
+    if limit > 0 and len(text) > limit:
+        return text[: max(0, limit - 3)].rstrip() + "..."
+    return text
+
+
+def _clean_identifier(value: Any) -> str:
+    text = _clean_text(value)
+    if not text:
+        return ""
+    text = text.replace("null_null", "")
+    text = text.replace("_null_", "")
+    text = text.replace("_null", "")
+    text = text.replace("null_", "")
+    return text.strip(" ;,，。")
+
+
+def _dedupe_clean_items(values: Any, *, limit: int = _LIST_ITEM_LIMIT) -> list[str]:
+    if isinstance(values, (list, tuple)):
+        raw_items = list(values)
+    elif isinstance(values, set):
+        raw_items = list(values)
+    elif values is None:
+        raw_items = []
+    else:
+        raw_items = [values]
+    items: list[str] = []
+    for item in raw_items:
+        text = _clean_graph_value(item)
+        if not text or text in items:
+            continue
+        items.append(text)
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _format_compact_list(values: Any, *, limit: int = _LIST_ITEM_LIMIT) -> str:
+    return "；".join(_dedupe_clean_items(values, limit=limit))
 
 
 def _clean_items(values: Any, *, limit: int) -> list[str]:
@@ -86,6 +145,68 @@ def _render_list(
     return DirectAnswerResult(handled=True, answer=_build_markdown(sections), references=references)
 
 
+def _append_profile_bullet(
+    lines: list[str],
+    label: str,
+    values: Any,
+    *,
+    limit: int = _LIST_ITEM_LIMIT,
+    exclude: set[str] | None = None,
+) -> None:
+    excluded = set(exclude or set())
+    items = [item for item in _dedupe_clean_items(values, limit=limit) if item not in excluded]
+    text = "；".join(items)
+    if text:
+        lines.append(f"- {label}：{text}")
+
+
+def _render_paper_profiles(
+    *,
+    rows: list[dict[str, Any]],
+    references: tuple[str, ...],
+    heading_label: str,
+    condition_label: str,
+    condition_key: str,
+) -> DirectAnswerResult:
+    displayed_rows = rows[:_PROFILE_DISPLAY_LIMIT]
+    sections = [
+        [
+            "## 📚 文献概览",
+            f"- 当前展示 {len(rows)} 篇相关文献",
+            f"- 查询类型：{heading_label}",
+        ],
+        ["## 📖 相关文献"],
+    ]
+    if len(rows) > len(displayed_rows):
+        sections[0].append(f"- 另有 {len(rows) - len(displayed_rows)} 条命中未展开，已保留在参考文献中")
+
+    for index, row in enumerate(displayed_rows, start=1):
+        title = _clean_graph_value(row.get("title")) or _clean_graph_value(row.get("doi")) or "未知条目"
+        lines = [f"### [{index}] {title}"]
+        doi = _clean_identifier(row.get("doi"))
+        if doi:
+            lines.append(f"- DOI：{doi}")
+        matched_values = _dedupe_clean_items(row.get(condition_key), limit=3)
+        if not matched_values:
+            matched = _clean_graph_value(row.get(condition_key))
+            matched_values = [matched] if matched else []
+        if matched_values:
+            lines.append(f"- 命中条件：{condition_label} = {'；'.join(matched_values)}")
+        matched_set = set(matched_values)
+        _append_profile_bullet(lines, "原料", row.get("raw_materials"), limit=3)
+        recipe_values: list[str] = []
+        for key in ("carbon_sources", "carbon_contents", "dopants", "doping_elements", "additives"):
+            recipe_values.extend(_dedupe_clean_items(row.get(key), limit=3))
+        _append_profile_bullet(lines, "配方", recipe_values, limit=8)
+        _append_profile_bullet(lines, "制备方法", row.get("preparation_methods"), limit=3, exclude=matched_set)
+        _append_profile_bullet(lines, "关键参数", row.get("process_parameters"), limit=3)
+        _append_profile_bullet(lines, "测试/表征", row.get("testing_items"), limit=3)
+        _append_profile_bullet(lines, "设备", row.get("equipment"), limit=3)
+        sections[-1].extend(lines)
+
+    return DirectAnswerResult(handled=True, answer=_build_markdown(sections), references=references)
+
+
 def render_direct_answer(
     *,
     decision: SemanticDecision,
@@ -149,7 +270,7 @@ def render_direct_answer(
         return DirectAnswerResult(handled=True, answer=_build_markdown(sections), references=references, metadata={"template_id": template_id or intent})
 
     if template_id == "list_by_raw_material" or intent == "list_by_raw_material":
-        return _render_list(
+        return _render_paper_profiles(
             rows=rows,
             references=references,
             heading_label="按原料查文献",
@@ -163,8 +284,10 @@ def render_direct_answer(
             current = dict(row)
             if "carbon_source" in current and "carbon_sources" not in current:
                 current["carbon_sources"] = [current["carbon_source"]]
+            if "matched_carbon_sources" in current:
+                current["carbon_sources"] = current.get("matched_carbon_sources")
             normalized_rows.append(current)
-        return _render_list(
+        return _render_paper_profiles(
             rows=normalized_rows,
             references=references,
             heading_label="按碳源查文献",
@@ -173,8 +296,14 @@ def render_direct_answer(
         )
 
     if intent == "list_by_process_method":
-        return _render_list(
-            rows=rows,
+        normalized_rows = []
+        for row in rows:
+            current = dict(row)
+            if "matched_preparation_methods" in current:
+                current["preparation_methods"] = current.get("matched_preparation_methods")
+            normalized_rows.append(current)
+        return _render_paper_profiles(
+            rows=normalized_rows,
             references=references,
             heading_label="按工艺查文献",
             condition_label="工艺",
@@ -182,13 +311,12 @@ def render_direct_answer(
         )
 
     if template_id == "list_by_material" or intent == "list_by_title_or_material":
-        material = str(legacy_params.get("material_name") or "")
-        items = [f"《{_clean_text(item.get('title')) or _clean_text(item.get('doi')) or '未知条目'}》" for item in rows]
-        return DirectAnswerResult(
-            handled=True,
-            answer=f"关于 {material} 的图谱命中文献包括：{'；'.join(items)}。",
+        return _render_paper_profiles(
+            rows=rows,
             references=references,
-            metadata={"template_id": template_id or intent},
+            heading_label="按标题/材料查文献",
+            condition_label="标题/材料",
+            condition_key="raw_materials",
         )
 
     if template_id == "count_by_filter" or intent == "count_by_structured_field":

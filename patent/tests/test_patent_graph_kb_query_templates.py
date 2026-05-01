@@ -119,3 +119,90 @@ def test_material_role_and_rank_candidates_are_reachable_from_natural_questions(
     assert material[0]["path_id"] == "list_patents_by_material"
     assert role[0]["path_id"] == "list_patents_by_material_role"
     assert rank[0]["path_id"] == "rank_materials_by_frequency"
+
+
+def _assert_candidate_limit_before_profile_expansion(cypher: str) -> None:
+    candidate_limit = cypher.index("LIMIT $limit")
+    optional_profile = cypher.index("OPTIONAL MATCH", candidate_limit)
+    assert candidate_limit < optional_profile
+
+
+def test_broad_listing_templates_limit_candidates_before_profile_expansion():
+    for template_id in (
+        "list_patents_by_material",
+        "list_patents_by_material_role",
+        "list_patents_by_process_term",
+        "list_patents_by_applicant",
+        "list_patents_by_inventor",
+        "list_patents_by_agency",
+        "list_patents_by_ipc_prefix",
+        "list_patents_by_ipc_code_prefix",
+        "list_patents_by_ipc_full_code",
+    ):
+        template = get_patent_query_template(template_id)
+        assert template is not None
+        _assert_candidate_limit_before_profile_expansion(template.cypher)
+
+
+def test_broad_listing_templates_expose_profile_columns_and_stub():
+    expected_columns = {
+        "abstract",
+        "application_date",
+        "publication_date",
+        "legal_status",
+        "applicants",
+        "inventors",
+        "ipc_codes",
+        "material_roles",
+        "process_steps",
+        "problems",
+        "solutions",
+        "inventive_points",
+        "performance_facts",
+        "measurements",
+        "stub",
+    }
+    for template_id in (
+        "list_patents_by_material",
+        "list_patents_by_material_role",
+        "list_patents_by_process_term",
+        "list_patents_by_applicant",
+        "list_patents_by_inventor",
+        "list_patents_by_agency",
+        "list_patents_by_ipc_prefix",
+        "list_patents_by_ipc_code_prefix",
+        "list_patents_by_ipc_full_code",
+    ):
+        template = get_patent_query_template(template_id)
+        assert template is not None
+        assert expected_columns.issubset(set(template.expected_columns))
+
+
+def test_broad_listing_templates_limit_distinct_patents_not_match_values():
+    for template_id in (
+        "list_patents_by_material",
+        "list_patents_by_material_role",
+        "list_patents_by_process_term",
+        "list_patents_by_ipc_prefix",
+        "list_patents_by_ipc_code_prefix",
+        "list_patents_by_ipc_full_code",
+    ):
+        template = get_patent_query_template(template_id)
+        assert template is not None
+        assert "WITH p, collect(DISTINCT" in template.cypher
+        assert "AS matched_values" in template.cypher
+        assert "WITH DISTINCT p," not in template.cypher
+        assert "LIMIT $limit OPTIONAL MATCH" in template.cypher
+
+
+def test_lookup_patent_template_exposes_supplemental_profile_columns():
+    template = get_patent_query_template("lookup_patent_by_id")
+
+    assert template is not None
+    assert {
+        "problems",
+        "solutions",
+        "inventive_points",
+        "performance_facts",
+        "measurements",
+    }.issubset(set(template.expected_columns))

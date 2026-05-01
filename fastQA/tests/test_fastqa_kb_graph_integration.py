@@ -414,6 +414,9 @@ def test_sync_ask_uses_graph_direct_answer_when_mode_is_direct_answer(monkeypatc
     payload = response.json()
     assert payload["final_answer"] == "graph v2 answer"
     assert payload["query_mode"] == "graph_kb"
+    assert payload["references"] == ["10.1000/test"]
+    assert payload["reference_links"] == [{"doi": "10.1000/test", "pdf_url": "/api/v1/view_pdf/10.1000/test"}]
+    assert payload["metadata"]["graph_rag_injected"] is False
 
 
 def test_sync_ask_graph_v2_metadata_exposes_pipeline_version_and_legacy_route_family(monkeypatch):

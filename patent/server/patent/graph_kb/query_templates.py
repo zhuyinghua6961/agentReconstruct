@@ -43,6 +43,78 @@ def _template(
     )
 
 
+_PATENT_PROFILE_COLUMNS = (
+    "abstract",
+    "application_date",
+    "publication_date",
+    "legal_status",
+    "applicants",
+    "inventors",
+    "ipc_codes",
+    "material_roles",
+    "process_steps",
+    "problems",
+    "solutions",
+    "inventive_points",
+    "performance_facts",
+    "measurements",
+)
+
+
+def _listing_columns(matched_column: str) -> tuple[str, ...]:
+    return ("patent_id", "title", matched_column, *_PATENT_PROFILE_COLUMNS, "stub")
+
+
+def _listing_profile_return(matched_column: str) -> str:
+    return f"""
+        OPTIONAL MATCH (p)-[:HAS_APPLICANT]->(profile_applicant:Organization)
+        WITH p, matched_values, collect(DISTINCT profile_applicant.name)[0..3] AS applicants
+        OPTIONAL MATCH (p)-[:HAS_INVENTOR]->(profile_inventor:Person)
+        WITH p, matched_values, applicants, collect(DISTINCT profile_inventor.name)[0..3] AS inventors
+        OPTIONAL MATCH (p)-[:CLASSIFIED_AS]->(profile_ipc:IPC)
+        WITH p, matched_values, applicants, inventors, collect(DISTINCT profile_ipc.code)[0..5] AS ipc_codes
+        OPTIONAL MATCH (p)-[:HAS_MATERIAL_ROLE]->(profile_role:MaterialRole)
+        OPTIONAL MATCH (profile_role)-[:OPTION_INCLUDES]->(profile_material:Material)
+        WITH p, matched_values, applicants, inventors, ipc_codes,
+             collect(DISTINCT CASE
+                 WHEN profile_role IS NULL AND profile_material IS NULL THEN NULL
+                 WHEN profile_material.name IS NULL THEN coalesce(profile_role.role, profile_role.type, '')
+                 ELSE coalesce(profile_role.role, profile_role.type, '') + ': ' + profile_material.name
+             END)[0..5] AS material_roles
+        OPTIONAL MATCH (p)-[:HAS_PROCESS_STEP]->(profile_step:ProcessStep)
+        OPTIONAL MATCH (profile_step)-[:INSTANCE_OF]->(profile_template:StepTemplate)
+        WITH p, matched_values, applicants, inventors, ipc_codes, material_roles,
+             collect(DISTINCT CASE
+                 WHEN profile_step IS NULL AND profile_template IS NULL THEN NULL
+                 ELSE coalesce(profile_step.name, profile_step.operation, profile_template.label, profile_template.name)
+             END)[0..5] AS process_steps
+        OPTIONAL MATCH (p)-[:ADDRESSES]->(profile_problem:TechnicalProblem)
+        WITH p, matched_values, applicants, inventors, ipc_codes, material_roles, process_steps,
+             collect(DISTINCT profile_problem.text)[0..2] AS problems
+        OPTIONAL MATCH (p)-[:PROPOSES]->(profile_solution:TechnicalSolution)
+        WITH p, matched_values, applicants, inventors, ipc_codes, material_roles, process_steps, problems,
+             collect(DISTINCT profile_solution.text)[0..2] AS solutions
+        OPTIONAL MATCH (p)-[:HAS_INVENTIVE_POINT]->(profile_point:InventivePoint)
+        WITH p, matched_values, applicants, inventors, ipc_codes, material_roles, process_steps, problems, solutions,
+             collect(DISTINCT profile_point.text)[0..3] AS inventive_points
+        OPTIONAL MATCH (p)-[:HAS_PERFORMANCE_FACT]->(profile_fact:PerformanceFact)
+        WITH p, matched_values, applicants, inventors, ipc_codes, material_roles, process_steps, problems, solutions, inventive_points,
+             collect(DISTINCT profile_fact.text)[0..3] AS performance_facts
+        OPTIONAL MATCH (p)-[:HAS_EXPERIMENT_TABLE]->(:ExperimentTable)-[:HAS_ROW]->(:TableRow)-[:HAS_MEASUREMENT]->(profile_measurement:Measurement)
+        RETURN p.patent_id AS patent_id, p.title AS title, p.abstract AS abstract,
+               p.application_date AS application_date, p.publication_date AS publication_date,
+               p.legal_status AS legal_status, matched_values AS {matched_column},
+               applicants, inventors, ipc_codes, material_roles, process_steps,
+               problems, solutions, inventive_points, performance_facts,
+               collect(DISTINCT CASE
+                   WHEN profile_measurement IS NULL THEN NULL
+                   ELSE coalesce(profile_measurement.metric_key, '') + ':' + coalesce(profile_measurement.value_raw, '') + coalesce(profile_measurement.unit_hint, '')
+               END)[0..3] AS measurements,
+               p.stub AS stub
+        LIMIT $limit
+    """
+
+
 _TEMPLATES: tuple[PatentGraphQueryTemplate, ...] = (
     _template(
         "lookup_patent_by_id",
@@ -51,15 +123,41 @@ _TEMPLATES: tuple[PatentGraphQueryTemplate, ...] = (
         OPTIONAL MATCH (p)-[:HAS_APPLICANT]->(applicant:Organization)
         OPTIONAL MATCH (p)-[:HAS_INVENTOR]->(inventor:Person)
         OPTIONAL MATCH (p)-[:CLASSIFIED_AS]->(ipc:IPC)
+        OPTIONAL MATCH (p)-[:ADDRESSES]->(problem:TechnicalProblem)
+        OPTIONAL MATCH (p)-[:PROPOSES]->(solution:TechnicalSolution)
+        OPTIONAL MATCH (p)-[:HAS_INVENTIVE_POINT]->(point:InventivePoint)
+        OPTIONAL MATCH (p)-[:HAS_PERFORMANCE_FACT]->(fact:PerformanceFact)
+        OPTIONAL MATCH (p)-[:HAS_EXPERIMENT_TABLE]->(:ExperimentTable)-[:HAS_ROW]->(:TableRow)-[:HAS_MEASUREMENT]->(measurement:Measurement)
         RETURN p.patent_id AS patent_id, p.title AS title, p.abstract AS abstract,
                p.application_date AS application_date, p.publication_date AS publication_date,
                p.legal_status AS legal_status, collect(DISTINCT applicant.name)[0..5] AS applicants,
                collect(DISTINCT inventor.name)[0..5] AS inventors, collect(DISTINCT ipc.code)[0..5] AS ipc_codes,
+               collect(DISTINCT problem.text)[0..2] AS problems,
+               collect(DISTINCT solution.text)[0..2] AS solutions,
+               collect(DISTINCT point.text)[0..3] AS inventive_points,
+               collect(DISTINCT fact.text)[0..3] AS performance_facts,
+               collect(DISTINCT CASE
+                   WHEN measurement IS NULL THEN NULL
+                   ELSE coalesce(measurement.metric_key, '') + ':' + coalesce(measurement.value_raw, '') + coalesce(measurement.unit_hint, '')
+               END)[0..3] AS measurements,
                p.stub AS stub
         LIMIT $limit
         """,
         ("patent_id",),
-        ("patent_id", "title", "abstract", "applicants", "inventors", "ipc_codes", "stub"),
+        (
+            "patent_id",
+            "title",
+            "abstract",
+            "applicants",
+            "inventors",
+            "ipc_codes",
+            "problems",
+            "solutions",
+            "inventive_points",
+            "performance_facts",
+            "measurements",
+            "stub",
+        ),
         direct=True,
     ),
     _template(
@@ -196,12 +294,12 @@ _TEMPLATES: tuple[PatentGraphQueryTemplate, ...] = (
         "list_patents_by_applicant",
         """
         MATCH (p:Patent)-[:HAS_APPLICANT]->(org:Organization {name: $applicant_name})
-        RETURN p.patent_id AS patent_id, p.title AS title, org.name AS applicant_name,
-               p.application_date AS application_date, p.publication_date AS publication_date, p.stub AS stub
+        WITH p, collect(DISTINCT org.name)[0..3] AS matched_values
         LIMIT $limit
-        """,
+        """
+        + _listing_profile_return("applicant_name"),
         ("applicant_name",),
-        ("patent_id", "title", "applicant_name", "stub"),
+        _listing_columns("applicant_name"),
         direct=True,
         result_cap=100,
     ),
@@ -214,9 +312,14 @@ _TEMPLATES: tuple[PatentGraphQueryTemplate, ...] = (
     ),
     _template(
         "list_patents_by_inventor",
-        "MATCH (p:Patent)-[:HAS_INVENTOR]->(person:Person {name: $inventor_name}) RETURN p.patent_id AS patent_id, p.title AS title, person.name AS inventor_name, p.application_date AS application_date, p.publication_date AS publication_date, p.stub AS stub LIMIT $limit",
+        """
+        MATCH (p:Patent)-[:HAS_INVENTOR]->(person:Person {name: $inventor_name})
+        WITH p, collect(DISTINCT person.name)[0..3] AS matched_values
+        LIMIT $limit
+        """
+        + _listing_profile_return("inventor_name"),
         ("inventor_name",),
-        ("patent_id", "title", "inventor_name", "stub"),
+        _listing_columns("inventor_name"),
         direct=True,
         result_cap=100,
     ),
@@ -229,9 +332,14 @@ _TEMPLATES: tuple[PatentGraphQueryTemplate, ...] = (
     ),
     _template(
         "list_patents_by_agency",
-        "MATCH (p:Patent)-[:HAS_AGENCY]->(agency:Organization {name: $agency_name}) RETURN p.patent_id AS patent_id, p.title AS title, agency.name AS agency_name, p.application_date AS application_date, p.publication_date AS publication_date, p.stub AS stub LIMIT $limit",
+        """
+        MATCH (p:Patent)-[:HAS_AGENCY]->(agency:Organization {name: $agency_name})
+        WITH p, collect(DISTINCT agency.name)[0..3] AS matched_values
+        LIMIT $limit
+        """
+        + _listing_profile_return("agency_name"),
         ("agency_name",),
-        ("patent_id", "title", "agency_name", "stub"),
+        _listing_columns("agency_name"),
         direct=True,
         result_cap=100,
     ),
@@ -244,9 +352,15 @@ _TEMPLATES: tuple[PatentGraphQueryTemplate, ...] = (
     ),
     _template(
         "list_patents_by_ipc_prefix",
-        "MATCH (p:Patent)-[:IN_IPC_SUBCLASS]->(sub:IPCPrefix) WHERE sub.subclass = $ipc_prefix RETURN p.patent_id AS patent_id, p.title AS title, sub.subclass AS ipc_prefix, p.stub AS stub LIMIT $limit",
+        """
+        MATCH (p:Patent)-[:IN_IPC_SUBCLASS]->(sub:IPCPrefix)
+        WHERE sub.subclass = $ipc_prefix
+        WITH p, collect(DISTINCT sub.subclass)[0..3] AS matched_values
+        LIMIT $limit
+        """
+        + _listing_profile_return("ipc_prefix"),
         ("ipc_prefix",),
-        ("patent_id", "title", "ipc_prefix", "stub"),
+        _listing_columns("ipc_prefix"),
         direct=True,
         result_cap=100,
     ),
@@ -259,9 +373,15 @@ _TEMPLATES: tuple[PatentGraphQueryTemplate, ...] = (
     ),
     _template(
         "list_patents_by_ipc_code_prefix",
-        "MATCH (p:Patent)-[:CLASSIFIED_AS]->(ipc:IPC) WHERE ipc.code STARTS WITH $ipc_code_prefix RETURN p.patent_id AS patent_id, p.title AS title, ipc.code AS ipc_code, p.stub AS stub LIMIT $limit",
+        """
+        MATCH (p:Patent)-[:CLASSIFIED_AS]->(ipc:IPC)
+        WHERE ipc.code STARTS WITH $ipc_code_prefix
+        WITH p, collect(DISTINCT ipc.code)[0..3] AS matched_values
+        LIMIT $limit
+        """
+        + _listing_profile_return("ipc_code"),
         ("ipc_code_prefix",),
-        ("patent_id", "title", "ipc_code", "stub"),
+        _listing_columns("ipc_code"),
         direct=True,
         result_cap=100,
     ),
@@ -274,9 +394,15 @@ _TEMPLATES: tuple[PatentGraphQueryTemplate, ...] = (
     ),
     _template(
         "list_patents_by_ipc_full_code",
-        "MATCH (p:Patent)-[:CLASSIFIED_AS]->(ipc:IPC) WHERE ipc.code = $ipc_full_code RETURN p.patent_id AS patent_id, p.title AS title, ipc.code AS ipc_code, p.stub AS stub LIMIT $limit",
+        """
+        MATCH (p:Patent)-[:CLASSIFIED_AS]->(ipc:IPC)
+        WHERE ipc.code = $ipc_full_code
+        WITH p, collect(DISTINCT ipc.code)[0..3] AS matched_values
+        LIMIT $limit
+        """
+        + _listing_profile_return("ipc_code"),
         ("ipc_full_code",),
-        ("patent_id", "title", "ipc_code", "stub"),
+        _listing_columns("ipc_code"),
         direct=True,
         result_cap=100,
     ),
@@ -324,25 +450,44 @@ _TEMPLATES: tuple[PatentGraphQueryTemplate, ...] = (
     ),
     _template(
         "list_patents_by_material",
-        "MATCH (p:Patent)-[:HAS_MATERIAL_ROLE]->(:MaterialRole)-[:OPTION_INCLUDES]->(material:Material) WHERE toLower(material.name) CONTAINS toLower($material_term) RETURN p.patent_id AS patent_id, p.title AS title, material.name AS material_name, p.stub AS stub LIMIT $limit",
+        """
+        MATCH (p:Patent)-[:HAS_MATERIAL_ROLE]->(:MaterialRole)-[:OPTION_INCLUDES]->(material:Material)
+        WHERE toLower(material.name) CONTAINS toLower($material_term)
+        WITH p, collect(DISTINCT material.name)[0..3] AS matched_values
+        LIMIT $limit
+        """
+        + _listing_profile_return("material_name"),
         ("material_term",),
-        ("patent_id", "title", "material_name", "stub"),
+        _listing_columns("material_name"),
         direct=True,
         result_cap=100,
     ),
     _template(
         "list_patents_by_material_role",
-        "MATCH (p:Patent)-[:HAS_MATERIAL_ROLE]->(role:MaterialRole) WHERE toLower(coalesce(role.role, role.type, '')) CONTAINS toLower($material_role_term) RETURN p.patent_id AS patent_id, p.title AS title, role.role AS material_role, role.type AS material_role_type, p.stub AS stub LIMIT $limit",
+        """
+        MATCH (p:Patent)-[:HAS_MATERIAL_ROLE]->(role:MaterialRole)
+        WHERE toLower(coalesce(role.role, role.type, '')) CONTAINS toLower($material_role_term)
+        WITH p, collect(DISTINCT coalesce(role.role, role.type, ''))[0..3] AS matched_values
+        LIMIT $limit
+        """
+        + _listing_profile_return("material_role"),
         ("material_role_term",),
-        ("patent_id", "title", "material_role", "material_role_type", "stub"),
+        _listing_columns("material_role"),
         direct=True,
         result_cap=100,
     ),
     _template(
         "list_patents_by_process_term",
-        "MATCH (p:Patent)-[:HAS_PROCESS_STEP]->(step:ProcessStep) OPTIONAL MATCH (step)-[:INSTANCE_OF]->(template:StepTemplate) WHERE toLower(coalesce(step.name, step.operation, template.label, template.name, '')) CONTAINS toLower($process_term) RETURN p.patent_id AS patent_id, p.title AS title, step.name AS step_name, template.label AS step_template, p.stub AS stub LIMIT $limit",
+        """
+        MATCH (p:Patent)-[:HAS_PROCESS_STEP]->(step:ProcessStep)
+        OPTIONAL MATCH (step)-[:INSTANCE_OF]->(template:StepTemplate)
+        WHERE toLower(coalesce(step.name, step.operation, template.label, template.name, '')) CONTAINS toLower($process_term)
+        WITH p, collect(DISTINCT coalesce(step.name, step.operation, template.label, template.name, ''))[0..3] AS matched_values
+        LIMIT $limit
+        """
+        + _listing_profile_return("step_name"),
         ("process_term",),
-        ("patent_id", "title", "step_name", "step_template", "stub"),
+        _listing_columns("step_name"),
         direct=True,
         result_cap=100,
     ),

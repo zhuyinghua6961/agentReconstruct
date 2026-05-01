@@ -6,8 +6,90 @@ from server.patent.graph_kb.models import PatentDirectAnswerResult, PatentGraphE
 from server.patent.graph_kb.rendering import render_patent_graph_answer
 
 
+_PATENT_PROFILE_DISPLAY_LIMIT = 5
+_PATENT_LIST_ITEM_LIMIT = 3
+_PATENT_ABSTRACT_LIMIT = 240
+_PATENT_FACT_LIMIT = 160
+_PLACEHOLDERS = {"null", "none", "nan", "unknown", "_null", "null_null"}
+
+
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _clean_graph_value(value: Any, *, limit: int = _PATENT_FACT_LIMIT) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    if not text:
+        return ""
+    text = text.replace("null_null", " ")
+    text = text.replace("_null_", " ")
+    text = text.replace("_null", " ")
+    text = text.replace("null_", " ")
+    text = text.replace("__", " ")
+    text = text.replace("_", " ")
+    text = " ".join(text.split()).strip(" ;,，。")
+    if text.lower() in _PLACEHOLDERS:
+        return ""
+    if limit > 0 and len(text) > limit:
+        return text[: max(0, limit - 3)].rstrip() + "..."
+    return text
+
+
+def _dedupe_clean_items(values: Any, *, limit: int = _PATENT_LIST_ITEM_LIMIT) -> list[str]:
+    if isinstance(values, (list, tuple)):
+        raw_items = list(values)
+    elif isinstance(values, set):
+        raw_items = list(values)
+    elif values is None:
+        raw_items = []
+    else:
+        raw_items = [values]
+    items: list[str] = []
+    for item in raw_items:
+        text = _clean_graph_value(item)
+        if not text or text in items:
+            continue
+        items.append(text)
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _format_compact_list(values: Any, *, limit: int = _PATENT_LIST_ITEM_LIMIT) -> str:
+    return "；".join(_dedupe_clean_items(values, limit=limit))
+
+
+def _first_non_empty(row: dict[str, Any], *keys: str, limit: int = _PATENT_FACT_LIMIT) -> str:
+    for key in keys:
+        text = _clean_graph_value(row.get(key), limit=limit)
+        if text:
+            return text
+    return ""
+
+
+def _first_compact_value(row: dict[str, Any], *keys: str, limit: int = _PATENT_LIST_ITEM_LIMIT) -> str:
+    for key in keys:
+        text = _format_compact_list(row.get(key), limit=limit)
+        if text:
+            return text
+    return ""
+
+
+def _append_bullet(lines: list[str], label: str, values: Any, *, limit: int = _PATENT_LIST_ITEM_LIMIT) -> None:
+    text = _format_compact_list(values, limit=limit)
+    if text:
+        lines.append(f"- {label}：{text}")
+
+
+def _merge_row_values(row: dict[str, Any], *keys: str, limit: int = _PATENT_LIST_ITEM_LIMIT) -> list[str]:
+    items: list[str] = []
+    for key in keys:
+        for item in _dedupe_clean_items(row.get(key), limit=limit):
+            if item not in items:
+                items.append(item)
+            if len(items) >= limit:
+                return items
+    return items
 
 
 def _build_reference_object(*, patent_id: str, title: str = "") -> dict[str, Any]:
@@ -62,11 +144,64 @@ def _render_patent_listing(
         return PatentDirectAnswerResult(handled=False, metadata={"reason": "missing_patent_ids", "path_id": path_id})
     references, reference_objects = _reference_objects_from_rows(filtered_rows)
     lines = [header]
-    for row in filtered_rows:
-        patent_id = _text(row.get("patent_id"))
-        title = _text(row.get("title")) or "未知标题"
+    displayed_rows = filtered_rows[:_PATENT_PROFILE_DISPLAY_LIMIT]
+    if len(filtered_rows) > len(displayed_rows):
+        lines.append(f"以下展示前 {len(displayed_rows)} 件的图谱摘要，另有 {len(filtered_rows) - len(displayed_rows)} 件已保留在参考列表中。")
+    for row in displayed_rows:
+        patent_id = _clean_graph_value(row.get("patent_id"))
+        title = _clean_graph_value(row.get("title")) or "未知标题"
         if patent_id:
-            lines.append(f"- `{patent_id}`：{title}")
+            lines.append(f"### `{patent_id}`：{title}")
+        applicants = _merge_row_values(row, "applicants", "applicant_name", limit=3)
+        inventors = _merge_row_values(row, "inventors", "inventor_name", limit=3)
+        ipc_codes = _merge_row_values(row, "ipc_codes", "ipc_code", "ipc_prefix", "ipc_full_code", limit=5)
+        if applicants:
+            lines.append(f"- 申请人：{'；'.join(applicants)}")
+        if inventors:
+            lines.append(f"- 发明人：{'；'.join(inventors)}")
+        if ipc_codes:
+            lines.append(f"- IPC：{'；'.join(ipc_codes)}")
+        status_bits = [
+            _clean_graph_value(row.get("legal_status")),
+            _clean_graph_value(row.get("application_date")),
+            _clean_graph_value(row.get("publication_date")),
+        ]
+        status_text = "；".join(item for item in status_bits if item)
+        if status_text:
+            lines.append(f"- 状态/日期：{status_text}")
+        abstract = _clean_graph_value(row.get("abstract"), limit=_PATENT_ABSTRACT_LIMIT)
+        if abstract:
+            lines.append(f"- 摘要：{abstract}")
+        matched_values = _merge_row_values(
+            row,
+            "material_name",
+            "material_role",
+            "material_role_type",
+            "step_name",
+            "step_template",
+            "applicant_name",
+            "inventor_name",
+            "agency_name",
+            "ipc_code",
+            "ipc_prefix",
+            "ipc_full_code",
+            limit=3,
+        )
+        if matched_values:
+            lines.append(f"- 命中条件：{'；'.join(matched_values)}")
+        material_values = _merge_row_values(row, "material_roles", "material_options", "material_name", limit=5)
+        process_values = _merge_row_values(row, "process_steps", "step_name", "step_template", limit=5)
+        if material_values or process_values:
+            lines.append(f"- 关键材料/工艺：{'；'.join(material_values + [item for item in process_values if item not in material_values])}")
+        problems = _merge_row_values(row, "problems", "problem_texts", limit=2)
+        solutions = _merge_row_values(row, "solutions", "solution_texts", limit=2)
+        if problems:
+            lines.append(f"- 技术问题：{'；'.join(problems)}")
+        if solutions:
+            lines.append(f"- 技术方案：{'；'.join(solutions)}")
+        _append_bullet(lines, "发明点", row.get("inventive_points") or row.get("inventive_point_texts"), limit=3)
+        _append_bullet(lines, "性能事实", row.get("performance_facts") or row.get("performance_fact_texts"), limit=3)
+        _append_bullet(lines, "实验/测量", row.get("measurements"), limit=3)
     if not references:
         return PatentDirectAnswerResult(handled=False, metadata={"reason": "missing_patent_ids", "path_id": path_id})
     return PatentDirectAnswerResult(
@@ -74,7 +209,7 @@ def _render_patent_listing(
         answer="\n".join(lines),
         references=references,
         reference_objects=reference_objects,
-        metadata={"path_id": path_id, "subject": subject},
+        metadata={"path_id": path_id, "subject": subject, "profile_rows_shown": len(displayed_rows)},
     )
 
 
@@ -111,6 +246,24 @@ def _render_parametric_answer(plan: PatentGraphQueryPlanV2, bundle: PatentGraphE
             value = _text(row.get(key))
             if value:
                 lines.append(f"- {label}：{value}")
+        supplemental: list[str] = []
+        for label, key, limit in (
+            ("技术问题", "problems", 2),
+            ("技术问题", "problem_texts", 2),
+            ("技术方案", "solutions", 2),
+            ("技术方案", "solution_texts", 2),
+            ("发明点", "inventive_points", 3),
+            ("发明点", "inventive_point_texts", 3),
+            ("性能事实", "performance_facts", 3),
+            ("性能事实", "performance_fact_texts", 3),
+            ("实验/测量", "measurements", 3),
+        ):
+            text = _format_compact_list(row.get(key), limit=limit)
+            if text and f"- {label}：{text}" not in supplemental:
+                supplemental.append(f"- {label}：{text}")
+        if supplemental:
+            lines.append("图谱补充信息：")
+            lines.extend(supplemental)
         return PatentDirectAnswerResult(
             handled=True,
             answer="\n".join(lines),
@@ -237,33 +390,33 @@ def _render_parametric_answer(plan: PatentGraphQueryPlanV2, bundle: PatentGraphE
         "list_patents_by_process_term",
     }:
         if path_id == "list_patents_by_inventor":
-            subject = _text(rows[0].get("inventor_name")) or _text(params.get("inventor_name"))
+            subject = _first_compact_value(rows[0], "inventor_name") or _text(params.get("inventor_name"))
             header = f"发明人 `{subject}` 关联的专利包括："
         elif path_id == "list_patents_by_agency":
-            subject = _text(rows[0].get("agency_name")) or _text(params.get("agency_name"))
+            subject = _first_compact_value(rows[0], "agency_name") or _text(params.get("agency_name"))
             header = f"代理机构 `{subject}` 名下的专利包括："
         elif path_id == "list_patents_by_applicant":
-            subject = _text(rows[0].get("applicant_name")) or _text(params.get("applicant_name") or params.get("organization_name"))
+            subject = _first_compact_value(rows[0], "applicant_name") or _text(params.get("applicant_name") or params.get("organization_name"))
             header = f"申请人 `{subject}` 名下的专利包括："
         elif path_id == "list_patents_by_ipc_prefix":
-            subject = _text(rows[0].get("ipc_prefix")) or _text(params.get("ipc_prefix"))
+            subject = _first_compact_value(rows[0], "ipc_prefix") or _text(params.get("ipc_prefix"))
             header = f"`{subject}` IPC 小类下的专利包括："
         elif path_id == "list_patents_by_ipc_code_prefix":
-            subject = _text(params.get("ipc_code_prefix")) or _text(rows[0].get("ipc_code"))
+            subject = _text(params.get("ipc_code_prefix")) or _first_compact_value(rows[0], "ipc_code")
             header = f"`{subject}` IPC 代码前缀下的专利包括："
         elif path_id in {"list_patents_by_ipc_full_code", "list_patents_by_ipc_subclass"}:
-            subject = _text(rows[0].get("ipc_full_code") or rows[0].get("ipc_code") or rows[0].get("ipc_subclass")) or _text(
+            subject = _first_compact_value(rows[0], "ipc_full_code", "ipc_code", "ipc_subclass") or _text(
                 params.get("ipc_full_code") or params.get("ipc_code") or params.get("ipc_subclass")
             )
             header = f"`{subject}` IPC 分类下的专利包括："
         elif path_id == "list_patents_by_material":
-            subject = _text(rows[0].get("material_name")) or _text(params.get("material_term"))
+            subject = _first_compact_value(rows[0], "material_name") or _text(params.get("material_term"))
             header = f"涉及材料 `{subject}` 的专利包括："
         elif path_id == "list_patents_by_material_role":
-            subject = _text(rows[0].get("material_role") or rows[0].get("material_role_type")) or _text(params.get("material_role_term"))
+            subject = _first_compact_value(rows[0], "material_role", "material_role_type") or _text(params.get("material_role_term"))
             header = f"涉及材料角色 `{subject}` 的专利包括："
         else:
-            subject = _text(rows[0].get("step_name") or rows[0].get("step_template")) or _text(params.get("process_term"))
+            subject = _first_compact_value(rows[0], "step_name", "step_template") or _text(params.get("process_term"))
             header = f"涉及工艺 `{subject}` 的专利包括："
         return _render_patent_listing(rows=rows, subject=subject, header=header, path_id=path_id)
 

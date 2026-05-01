@@ -219,6 +219,54 @@ def test_kb_service_returns_graph_result_before_staged_runtime():
     assert captured["generation_runtime"] is not None
 
 
+def test_kb_service_returns_material_listing_graph_result_before_staged_runtime():
+    class _FailingOrchestrator:
+        def run(self, *, question: str, runtime, conversation_context=None) -> PatentQaExecutionResult:
+            raise AssertionError("staged orchestrator should not run after graph material listing hit")
+
+    def _graph_kb_service(*, question, conversation_context, neo4j_client, max_rows, timeout_ms, generation_runtime=None):
+        assert question == "涉及磷酸铁锂的专利有哪些？"
+        _ = conversation_context
+        _ = neo4j_client
+        _ = max_rows
+        _ = timeout_ms
+        _ = generation_runtime
+        return PatentGraphKbExecutionResult(
+            handled=True,
+            answer="涉及材料 `磷酸铁锂` 的专利包括：\n### `CN100355122C`：示例专利\n- 性能事实：容量保持率提升",
+            references=("CN100355122C",),
+            reference_objects=(
+                {
+                    "canonical_patent_id": "CN100355122C",
+                    "patent_id": "CN100355122C",
+                    "title": "示例专利",
+                    "source": "patent_graph",
+                },
+            ),
+            query_mode="patent_graph_kb",
+            template_id="list_patents_by_material",
+            result_count=1,
+            latency_ms=10.0,
+        )
+
+    service = PatentKbService(
+        orchestrator=_FailingOrchestrator(),
+        graph_kb_service=_graph_kb_service,
+        graph_kb_client=object(),
+        graph_kb_enabled=True,
+    )
+
+    execution_result = service.run(
+        request=_make_request(question="涉及磷酸铁锂的专利有哪些？"),
+        runtime=_FakeStagedRuntime(),
+        conversation_context={"recent_turns_for_llm": []},
+    )
+
+    assert execution_result["answer_text"].startswith("涉及材料")
+    assert execution_result["query_mode"] == "patent_graph_kb"
+    assert execution_result["metadata"]["template_id"] == "list_patents_by_material"
+
+
 def test_kb_service_falls_back_to_staged_runtime_when_graph_service_does_not_handle():
     class _RecordingOrchestrator(_FakeOrchestrator):
         def __init__(self) -> None:

@@ -5,6 +5,83 @@ from typing import Any
 from app.modules.graph_kb.models import GraphQueryPath
 
 
+_PROCESS_PARAMETER_MATCHES = (
+    "OPTIONAL MATCH (d)-[:process]->(:process)-[:key_process_parameters]->(:key_process_parameters)-[:calcination]->(calcination:calcination) "
+    "OPTIONAL MATCH (d)-[:process]->(:process)-[:key_process_parameters]->(:key_process_parameters)-[:milling]->(milling:milling) "
+    "OPTIONAL MATCH (d)-[:process]->(:process)-[:key_process_parameters]->(:key_process_parameters)-[:sintering]->(sintering:sintering) "
+    "OPTIONAL MATCH (d)-[:process]->(:process)-[:key_process_parameters]->(:key_process_parameters)-[:drying]->(drying:drying) "
+)
+_PROCESS_PARAMETER_RETURN = (
+    "(collect(DISTINCT calcination.name)[0..1] + "
+    "collect(DISTINCT milling.name)[0..1] + "
+    "collect(DISTINCT sintering.name)[0..1] + "
+    "collect(DISTINCT drying.name)[0..1])[0..3] AS process_parameters, "
+)
+
+
+def _profile_expansion_return(*, prefix: str, extra_return: str) -> str:
+    return (
+        prefix
+        + "OPTIONAL MATCH (d)-[:raw_materials]->(:raw_materials)-[:raw_materials]->(rm_profile:raw_materials) "
+        "WITH d, t, "
+        + extra_return
+        + "collect(DISTINCT rm_profile.name)[0..3] AS raw_materials "
+        "OPTIONAL MATCH (d)-[:recipe]->(:recipe)-[:carbon_source]->(cs:carbon_source) "
+        "WITH d, t, "
+        + extra_return
+        + "raw_materials, collect(DISTINCT cs.name)[0..3] AS carbon_sources "
+        "OPTIONAL MATCH (d)-[:recipe]->(:recipe)-[:carbon_content]->(cc:carbon_content) "
+        "WITH d, t, "
+        + extra_return
+        + "raw_materials, carbon_sources, collect(DISTINCT cc.name)[0..3] AS carbon_contents "
+        "OPTIONAL MATCH (d)-[:recipe]->(:recipe)-[:dopant]->(dop:dopant) "
+        "WITH d, t, "
+        + extra_return
+        + "raw_materials, carbon_sources, carbon_contents, collect(DISTINCT dop.name)[0..3] AS dopants "
+        "OPTIONAL MATCH (d)-[:recipe]->(:recipe)-[:doping_elements]->(de:doping_elements) "
+        "WITH d, t, "
+        + extra_return
+        + "raw_materials, carbon_sources, carbon_contents, dopants, collect(DISTINCT de.name)[0..3] AS doping_elements "
+        "OPTIONAL MATCH (d)-[:recipe]->(:recipe)-[:additives]->(add:additives) "
+        "WITH d, t, "
+        + extra_return
+        + "raw_materials, carbon_sources, carbon_contents, dopants, doping_elements, collect(DISTINCT add.name)[0..3] AS additives "
+        "OPTIONAL MATCH (d)-[:process]->(:process)-[:preparation_method]->(pm:preparation_method) "
+        "WITH d, t, "
+        + extra_return
+        + "raw_materials, carbon_sources, carbon_contents, dopants, doping_elements, additives, collect(DISTINCT pm.name)[0..3] AS preparation_methods "
+        + _PROCESS_PARAMETER_MATCHES
+        + "WITH d, t, "
+        + extra_return
+        + "raw_materials, carbon_sources, carbon_contents, dopants, doping_elements, additives, preparation_methods, "
+        + _PROCESS_PARAMETER_RETURN
+        + "1 AS _profile_keep "
+        "OPTIONAL MATCH (d)-[:testing]->(:testing)-[:testing]->(test:testing) "
+        "WITH d, t, "
+        + extra_return
+        + "raw_materials, carbon_sources, carbon_contents, dopants, doping_elements, additives, preparation_methods, process_parameters, collect(DISTINCT test.name)[0..3] AS testing_items "
+        "OPTIONAL MATCH (d)-[:equipment]->(:equipment)-[:name]->(eq:name) "
+        "RETURN d.name AS doi, t.name AS title, "
+        + extra_return
+        + "raw_materials, carbon_sources, carbon_contents, dopants, doping_elements, additives, preparation_methods, process_parameters, testing_items, "
+        "collect(DISTINCT eq.name)[0..3] AS equipment LIMIT $limit"
+    )
+
+
+_PROFILE_COLUMNS = (
+    "raw_materials",
+    "carbon_sources",
+    "carbon_contents",
+    "dopants",
+    "doping_elements",
+    "additives",
+    "preparation_methods",
+    "process_parameters",
+    "testing_items",
+    "equipment",
+)
+
+
 def _limit(value: int | None) -> int:
     try:
         parsed = int(value or 20)
@@ -89,9 +166,10 @@ def _list_by_title_or_material(slots: dict[str, Any], limit: int) -> list[GraphQ
             "OR toLower(coalesce(t.name, '')) CONTAINS term "
             "OR any(item IN raw_materials WHERE toLower(coalesce(item, '')) CONTAINS term) "
             "OR any(item IN sample_names WHERE toLower(coalesce(item, '')) CONTAINS term)) "
-            "RETURN d.name AS doi, t.name AS title, raw_materials, sample_names LIMIT $limit",
+            "WITH DISTINCT d, t, sample_names LIMIT $limit "
+            + _profile_expansion_return(prefix="", extra_return="sample_names, "),
             {"terms": terms, "limit": _limit(limit)},
-            ("doi", "title", "raw_materials", "sample_names"),
+            ("doi", "title", "sample_names", *_PROFILE_COLUMNS),
             direct=True,
         )
     ]
@@ -105,9 +183,10 @@ def _list_by_raw_material(slots: dict[str, Any], limit: int) -> list[GraphQueryP
             "MATCH (d:doi)-[:raw_materials]->(:raw_materials)-[:raw_materials]->(rm:raw_materials) "
             "OPTIONAL MATCH (d)-[:title]->(t:title) "
             "WHERE any(term IN $terms WHERE toLower(coalesce(rm.name, '')) CONTAINS term) "
-            "RETURN d.name AS doi, t.name AS title, collect(DISTINCT rm.name)[0..3] AS matched_raw_materials LIMIT $limit",
+            "WITH DISTINCT d, t, collect(DISTINCT rm.name)[0..3] AS matched_raw_materials LIMIT $limit "
+            + _profile_expansion_return(prefix="", extra_return="matched_raw_materials, "),
             {"terms": terms, "limit": _limit(limit)},
-            ("doi", "title", "matched_raw_materials"),
+            ("doi", "title", "matched_raw_materials", *_PROFILE_COLUMNS),
             direct=True,
         )
     ]
@@ -121,9 +200,10 @@ def _list_by_carbon_source(slots: dict[str, Any], limit: int) -> list[GraphQuery
             "MATCH (d:doi)-[:recipe]->(:recipe)-[:carbon_source]->(cs:carbon_source) "
             "OPTIONAL MATCH (d)-[:title]->(t:title) "
             "WHERE any(term IN $terms WHERE toLower(coalesce(cs.name, '')) CONTAINS term) "
-            "RETURN d.name AS doi, t.name AS title, collect(DISTINCT cs.name)[0..3] AS carbon_sources LIMIT $limit",
+            "WITH DISTINCT d, t, collect(DISTINCT cs.name)[0..3] AS matched_carbon_sources LIMIT $limit "
+            + _profile_expansion_return(prefix="", extra_return="matched_carbon_sources, "),
             {"terms": terms, "limit": _limit(limit)},
-            ("doi", "title", "carbon_sources"),
+            ("doi", "title", "matched_carbon_sources", *_PROFILE_COLUMNS),
             direct=True,
         )
     ]
@@ -148,9 +228,10 @@ def _list_by_process_method(slots: dict[str, Any], limit: int) -> list[GraphQuer
             "OR any(item IN sample_names WHERE toLower(coalesce(item, '')) CONTAINS term) "
             "OR any(item IN raw_materials WHERE toLower(coalesce(item, '')) CONTAINS term))) "
             "AND (size($terms) = 0 OR any(term IN $terms WHERE toLower(coalesce(pm.name, '')) CONTAINS term)) "
-            "RETURN d.name AS doi, t.name AS title, collect(DISTINCT pm.name)[0..5] AS preparation_methods LIMIT $limit",
+            "WITH DISTINCT d, t, raw_materials, collect(DISTINCT pm.name)[0..5] AS matched_preparation_methods LIMIT $limit "
+            + _profile_expansion_return(prefix="", extra_return="matched_preparation_methods, "),
             {"terms": terms, "target_terms": target_terms, "limit": _limit(limit)},
-            ("doi", "title", "preparation_methods"),
+            ("doi", "title", "matched_preparation_methods", *_PROFILE_COLUMNS),
             direct=True,
         )
     ]

@@ -28,6 +28,136 @@ def test_renders_carbon_source_list_direct_answer():
     assert "10.1021/jp1005692" in result.answer
 
 
+def test_renders_raw_material_list_with_compact_graph_profile():
+    decision = SemanticDecision(mode="direct_answer", legacy_route="precise")
+    plan = GraphQueryPlanV2(strategy="route_template", intent="list_by_raw_material")
+    bundle = GraphEvidenceBundle(
+        doi_candidates=("10.1/a", "10.1/b"),
+        direct_render_dois=("10.1/a", "10.1/b"),
+        render_slots={
+            "rows": [
+                {
+                    "doi": "10.1/a",
+                    "title": "Profile Paper A",
+                    "matched_raw_materials": ["LiFePO4 powder"],
+                    "raw_materials": ["LiFePO4 powder", "PVDF"],
+                    "carbon_sources": ["sucrose"],
+                    "carbon_contents": ["5 wt%"],
+                    "dopants": ["Mg"],
+                    "doping_elements": ["Ti"],
+                    "additives": ["PEG"],
+                    "preparation_methods": ["solid-state synthesis"],
+                    "process_parameters": ["calcination:700 C"],
+                    "testing_items": ["Rate capability"],
+                    "equipment": ["coin cell tester"],
+                },
+                {
+                    "doi": "10.1/b",
+                    "title": "Profile Paper B",
+                    "matched_raw_materials": ["commercial LiFePO4"],
+                },
+            ]
+        },
+    )
+
+    result = render_direct_answer(decision=decision, plan=plan, bundle=bundle)
+
+    assert result.handled
+    assert "## 📚 文献概览" in result.answer
+    assert "Profile Paper A" in result.answer
+    assert "10.1/a" in result.answer
+    assert "LiFePO4 powder" in result.answer
+    assert "sucrose" in result.answer
+    assert "5 wt%" in result.answer
+    assert "Mg" in result.answer
+    assert "Ti" in result.answer
+    assert "solid-state synthesis" in result.answer
+    assert "Rate capability" in result.answer
+    assert "coin cell tester" in result.answer
+    assert result.references == ("10.1/a", "10.1/b")
+
+
+def test_list_profiles_cap_display_but_preserve_all_references():
+    decision = SemanticDecision(mode="direct_answer", legacy_route="precise")
+    plan = GraphQueryPlanV2(strategy="route_template", intent="list_by_carbon_source")
+    rows = [
+        {"doi": f"10.1/{index}", "title": f"Paper {index}", "carbon_sources": ["sucrose"]}
+        for index in range(1, 8)
+    ]
+    references = tuple(row["doi"] for row in rows)
+    bundle = GraphEvidenceBundle(
+        doi_candidates=references,
+        direct_render_dois=references,
+        render_slots={"rows": rows},
+    )
+
+    result = render_direct_answer(decision=decision, plan=plan, bundle=bundle)
+
+    assert result.handled
+    assert "### [5] Paper 5" in result.answer
+    assert "Paper 6" not in result.answer
+    assert "另有 2 条" in result.answer
+    assert result.references == references
+
+
+def test_list_profiles_clean_dirty_values_and_truncate_long_facts():
+    decision = SemanticDecision(mode="direct_answer", legacy_route="precise")
+    plan = GraphQueryPlanV2(strategy="route_template", intent="list_by_process_method")
+    long_parameter = "temperature_" + ("very long detail " * 20) + "_null"
+    bundle = GraphEvidenceBundle(
+        doi_candidates=("10.1/a",),
+        direct_render_dois=("10.1/a",),
+        render_slots={
+            "rows": [
+                {
+                    "doi": "10.1/a",
+                    "title": "Dirty Paper",
+                    "preparation_methods": [
+                        "solid__state_null",
+                        "solid__state_null",
+                        "null",
+                    ],
+                    "process_parameters": [long_parameter, "atmosphere__argon_null_null"],
+                }
+            ]
+        },
+    )
+
+    result = render_direct_answer(decision=decision, plan=plan, bundle=bundle)
+
+    assert result.handled
+    assert "_null" not in result.answer
+    assert "null_null" not in result.answer
+    assert "solid state" in result.answer
+    assert result.answer.count("solid state") == 1
+    assert "atmosphere argon" in result.answer
+    assert "..." in result.answer
+
+
+def test_list_profiles_preserve_underscores_in_doi_display():
+    decision = SemanticDecision(mode="direct_answer", legacy_route="precise")
+    plan = GraphQueryPlanV2(strategy="route_template", intent="list_by_carbon_source")
+    bundle = GraphEvidenceBundle(
+        doi_candidates=("10.1234/foo_bar",),
+        direct_render_dois=("10.1234/foo_bar",),
+        render_slots={
+            "rows": [
+                {
+                    "doi": "10.1234/foo_bar",
+                    "title": "Underscore DOI Paper",
+                    "carbon_sources": ["sucrose"],
+                }
+            ]
+        },
+    )
+
+    result = render_direct_answer(decision=decision, plan=plan, bundle=bundle)
+
+    assert result.handled
+    assert "10.1234/foo_bar" in result.answer
+    assert "10.1234/foo bar" not in result.answer
+
+
 def test_numeric_without_parser_confidence_downgrades():
     decision = SemanticDecision(mode="direct_answer", legacy_route="precise")
     plan = GraphQueryPlanV2(strategy="route_template", intent="numeric_property_query")

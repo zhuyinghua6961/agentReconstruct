@@ -336,6 +336,36 @@ def test_route_graph_kb_v2_preserves_raw_material_list_direct_rendering():
     assert "### [2] Paper B" in routing_result.direct_result.answer
 
 
+def test_route_graph_kb_v2_direct_answer_returns_enriched_profile_without_rag_payload():
+    class _Graph:
+        def query(self, cypher, params):
+            _ = cypher
+            _ = params
+            return [
+                {
+                    "doi": "10.1021/jp1005692",
+                    "title": "Carbon Paper",
+                    "carbon_sources": ["sucrose"],
+                    "preparation_methods": ["solid-state synthesis"],
+                    "testing_items": ["Rate capability"],
+                }
+            ]
+
+    routing_result = route_graph_kb_v2(
+        question="列出使用蔗糖作为碳源的文献",
+        conversation_context={},
+        neo4j_client=SimpleNamespace(graph=_Graph(), available=True, degraded=False),
+        max_rows=5,
+    )
+
+    assert routing_result.mode == "direct_answer"
+    assert routing_result.direct_result is not None
+    assert routing_result.direct_result.handled is True
+    assert routing_result.rag_payload is None
+    assert "solid-state synthesis" in routing_result.direct_result.answer
+    assert "Rate capability" in routing_result.direct_result.answer
+
+
 def test_route_graph_kb_v2_executes_planner_generated_parametric_query_without_guardrail_reject():
     calls: list[tuple[str, dict]] = []
 

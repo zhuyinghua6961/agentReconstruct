@@ -134,3 +134,82 @@ def test_deferred_fields_do_not_build_numeric_templates():
         paths = build_v1_query_paths(intent="numeric_property_query", slots={"property_field": field}, limit=20)
 
         assert paths == ()
+
+
+def _assert_candidate_limit_before_profile_expansion(cypher: str) -> None:
+    candidate_limit = cypher.index("LIMIT $limit")
+    optional_profile = cypher.index("OPTIONAL MATCH", candidate_limit)
+    assert candidate_limit < optional_profile
+
+
+def test_direct_list_templates_limit_candidates_before_profile_expansion():
+    cases = (
+        ("list_by_title_or_material", {"terms": ("lfp",)}),
+        ("list_by_raw_material", {"raw_material_terms": ("lifepo4",)}),
+        ("list_by_carbon_source", {"carbon_source_terms": ("sucrose",)}),
+        ("list_by_process_method", {"process_terms": ("sintering",)}),
+    )
+
+    for intent, slots in cases:
+        paths = build_v1_query_paths(intent=intent, slots=slots, limit=20)
+        assert paths, intent
+        _assert_candidate_limit_before_profile_expansion(paths[0].cypher)
+
+
+def test_direct_list_templates_expose_profile_columns():
+    expected_columns = {
+        "raw_materials",
+        "carbon_sources",
+        "carbon_contents",
+        "dopants",
+        "doping_elements",
+        "additives",
+        "preparation_methods",
+        "process_parameters",
+        "testing_items",
+        "equipment",
+    }
+    cases = (
+        ("list_by_title_or_material", {"terms": ("lfp",)}),
+        ("list_by_raw_material", {"raw_material_terms": ("lifepo4",)}),
+        ("list_by_carbon_source", {"carbon_source_terms": ("sucrose",)}),
+        ("list_by_process_method", {"process_terms": ("sintering",)}),
+    )
+
+    for intent, slots in cases:
+        paths = build_v1_query_paths(intent=intent, slots=slots, limit=20)
+        assert paths, intent
+        assert expected_columns.issubset(set(paths[0].expected_columns))
+
+
+def test_direct_list_templates_aggregate_each_profile_expansion_stage():
+    cases = (
+        ("list_by_title_or_material", {"terms": ("lfp",)}),
+        ("list_by_raw_material", {"raw_material_terms": ("lifepo4",)}),
+        ("list_by_carbon_source", {"carbon_source_terms": ("sucrose",)}),
+        ("list_by_process_method", {"process_terms": ("sintering",)}),
+    )
+
+    for intent, slots in cases:
+        paths = build_v1_query_paths(intent=intent, slots=slots, limit=20)
+        assert paths, intent
+        cypher = paths[0].cypher
+        assert "AS raw_materials" in cypher
+        assert "AS carbon_sources" in cypher
+        assert "AS preparation_methods" in cypher
+        assert "AS testing_items" in cypher
+        assert "AS equipment" in cypher
+        assert cypher.count(" WITH ") >= 8
+        assert cypher.index("AS testing_items") < cypher.index("AS equipment")
+
+
+def test_direct_list_templates_do_not_project_duplicate_profile_aliases():
+    for intent, slots in (
+        ("list_by_carbon_source", {"carbon_source_terms": ("sucrose",)}),
+        ("list_by_process_method", {"process_terms": ("sintering",)}),
+    ):
+        paths = build_v1_query_paths(intent=intent, slots=slots, limit=20)
+        assert paths, intent
+        cypher = paths[0].cypher
+        assert "WITH d, t, carbon_sources," not in cypher
+        assert "WITH d, t, preparation_methods," not in cypher

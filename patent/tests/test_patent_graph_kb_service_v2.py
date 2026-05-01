@@ -13,6 +13,8 @@ from server.patent.graph_kb.models import (
 )
 import server.patent.graph_kb.service as patent_graph_service
 from server.patent.graph_kb.service import route_patent_graph_kb_v2
+from server.patent.graph_kb.direct_renderer import render_patent_direct_answer
+from server.patent.graph_kb.client import build_patent_parametric_query_candidates
 
 
 def test_route_v2_returns_skip_graph_result(monkeypatch):
@@ -107,6 +109,66 @@ def test_route_v2_returns_direct_answer_result(monkeypatch):
     assert result.direct_result.answer == "direct graph answer"
     assert result.direct_result.references == ("CN100355122C",)
     assert result.direct_result.latency_ms == 250.0
+
+
+def test_route_v2_direct_answer_can_render_enriched_listing(monkeypatch):
+    plan = PatentGraphQueryPlanV2(
+        strategy="parametric",
+        intent="material_listing",
+        parametric_slots={
+            "candidate_queries": build_patent_parametric_query_candidates("涉及磷酸铁锂的专利有哪些？"),
+        },
+    )
+    decision = PatentGraphSemanticDecision(mode="direct_answer", route_family="precise")
+    bundle = PatentGraphEvidenceBundle(
+        patent_candidates=("CN100355122C",),
+        direct_answerable=True,
+        render_slots={
+            "path_id": "list_patents_by_material",
+            "rows": (
+                {
+                    "patent_id": "CN100355122C",
+                    "title": "一种提高磷酸铁锂大电流放电性能的方法",
+                    "material_name": "磷酸铁锂",
+                    "applicants": ["宁德时代新能源科技股份有限公司"],
+                    "process_steps": ["热处理"],
+                    "performance_facts": ["容量保持率提升"],
+                    "stub": None,
+                },
+            ),
+        },
+    )
+    monkeypatch.setattr(patent_graph_service, "classify_patent_graph_question_v2", lambda **kwargs: decision)
+    monkeypatch.setattr(patent_graph_service, "build_patent_graph_query_plan_v2", lambda **kwargs: plan)
+    monkeypatch.setattr(
+        patent_graph_service,
+        "execute_patent_prepared_query",
+        lambda **kwargs: PatentRawExecutionResult(
+            rows=tuple(bundle.render_slots["rows"]),
+            trace=PatentExecutionTrace(strategy="parametric", matched_path="list_patents_by_material", attempted_paths=("list_patents_by_material",), guardrail_verdict="allow"),
+        ),
+    )
+    monkeypatch.setattr(patent_graph_service, "canonicalize_patent_graph_rows", lambda **kwargs: bundle)
+    monkeypatch.setattr(patent_graph_service, "render_patent_direct_answer", render_patent_direct_answer)
+    monkeypatch.setattr(
+        patent_graph_service,
+        "build_patent_graph_rag_payload",
+        lambda **kwargs: PatentGraphRagPayload(cache_fingerprint="graph:test"),
+    )
+
+    result = route_patent_graph_kb_v2(
+        question="涉及磷酸铁锂的专利有哪些？",
+        conversation_context={},
+        neo4j_client=object(),
+        max_rows=10,
+    )
+
+    assert result.mode == "direct_answer"
+    assert result.direct_result is not None
+    assert result.direct_result.handled is True
+    assert result.rag_payload is None
+    assert "宁德时代新能源科技股份有限公司" in result.direct_result.answer
+    assert "容量保持率提升" in result.direct_result.answer
 
 
 def test_route_v2_returns_graph_for_rag_payload(monkeypatch):
