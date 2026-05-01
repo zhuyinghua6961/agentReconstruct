@@ -8,6 +8,9 @@ from server.patent.graph_kb.query_templates import build_patent_template_candida
 from server.patent.graph_kb.slots import PatentGraphQuestionSlots, extract_patent_graph_slots
 
 
+_PATENT_DOMAIN_OBJECT_HINTS = ("专利", "申请", "授权", "公开", "件", "项")
+
+
 def _matched_rule_for_single_patent(slots: PatentGraphQuestionSlots) -> str:
     if slots.asks_atmosphere:
         return "single_patent_atmosphere"
@@ -48,6 +51,14 @@ def _diagnostics(slots: PatentGraphQuestionSlots, *, matched_rule: str, candidat
     if slots.agency_names:
         payload["agency_name"] = slots.agency_names[0]
     return payload
+
+
+def _is_explicit_patent_listing_or_count(slots: PatentGraphQuestionSlots) -> bool:
+    return any(hint in slots.normalized_question for hint in _PATENT_DOMAIN_OBJECT_HINTS) and bool(slots.asks_list or slots.asks_count)
+
+
+def _is_material_attribute_question(slots: PatentGraphQuestionSlots) -> bool:
+    return bool(slots.material_terms and slots.asks_attribute_value)
 
 
 def classify_patent_graph_question_v2(
@@ -120,6 +131,13 @@ def classify_patent_graph_question_v2(
             route_family="community",
             standalone=standalone,
             diagnostics=_diagnostics(slots, matched_rule="community_landscape", candidates=candidates),
+        )
+    elif _is_material_attribute_question(slots) and not slots.patent_ids and not _is_explicit_patent_listing_or_count(slots):
+        decision = PatentGraphSemanticDecision(
+            mode="graph_for_rag",
+            route_family="hybrid",
+            standalone=standalone,
+            diagnostics=_diagnostics(slots, matched_rule="material_attribute_graph_anchor", candidates=candidates),
         )
     elif slots.asks_why_how and (slots.patent_ids or slots.process_terms or slots.material_terms or slots.metric_terms):
         decision = PatentGraphSemanticDecision(

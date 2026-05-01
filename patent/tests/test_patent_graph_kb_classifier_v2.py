@@ -198,6 +198,51 @@ def test_classifier_v2_routes_material_and_rank_template_candidates():
     assert process_rank.diagnostics["candidate_path_ids"][0] == "rank_processes_by_frequency"
 
 
+def test_classifier_v2_routes_material_attribute_questions_to_graph_for_rag():
+    cases = [
+        "磷酸铁锂的电压是多少？",
+        "磷酸铁锂电压范围是多少？",
+        "磷酸铁锂的压实密度是多少？",
+        "磷酸铁锂容量是多少？",
+    ]
+
+    for question in cases:
+        decision = classify_patent_graph_question_v2(question=question, conversation_context={})
+        assert decision.mode == "graph_for_rag"
+        assert decision.route_family == "hybrid"
+        assert decision.diagnostics["matched_rule"] == "material_attribute_graph_anchor"
+        assert decision.diagnostics["candidate_path_ids"][0] == "list_patents_by_material"
+
+
+def test_classifier_v2_keeps_explicit_material_patent_lookup_direct_with_attribute_terms():
+    cases = [
+        "涉及磷酸铁锂的专利有哪些？",
+        "涉及磷酸铁锂的专利有多少？",
+        "涉及磷酸铁锂电压相关的专利有哪些？",
+        "磷酸铁锂电压相关专利数量是多少？",
+        "磷酸铁锂电压相关申请数量是多少？",
+        "磷酸铁锂电压相关授权数量是多少？",
+        "磷酸铁锂电压相关公开数量是多少？",
+    ]
+
+    for question in cases:
+        decision = classify_patent_graph_question_v2(question=question, conversation_context={})
+        assert decision.mode == "direct_answer"
+        assert decision.route_family == "precise"
+        assert decision.diagnostics["candidate_path_ids"][0] == "list_patents_by_material"
+
+
+def test_classifier_v2_keeps_single_patent_attribute_question_direct():
+    decision = classify_patent_graph_question_v2(
+        question="CN100355122C 中磷酸铁锂的电压是多少？",
+        conversation_context={},
+    )
+
+    assert decision.mode == "direct_answer"
+    assert decision.route_family == "precise"
+    assert decision.diagnostics["matched_rule"] == "patent_lookup"
+
+
 def test_classifier_v2_routes_applicant_landscape_to_community():
     decision = classify_patent_graph_question_v2(
         question="宁德时代在磷酸铁锂方面的工艺路线有什么特点？",

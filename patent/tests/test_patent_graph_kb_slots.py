@@ -72,3 +72,34 @@ def test_extracts_performance_metric_hint_for_compare_questions():
 
     assert slots.asks_compare is True
     assert "性能指标" in slots.metric_terms
+
+
+def test_extracts_material_attribute_value_intent_without_counting():
+    cases = [
+        "磷酸铁锂的电压是多少？",
+        "磷酸铁锂电压范围是多少？",
+        "磷酸铁锂容量是多少？",
+        "磷酸铁锂的压实密度是多少？",
+    ]
+
+    for question in cases:
+        slots = extract_patent_graph_slots(question)
+        assert "磷酸铁锂" in slots.material_terms
+        assert slots.asks_attribute_value is True
+        assert slots.asks_count is False
+
+
+def test_extracts_patent_count_intent_without_confusing_attribute_value():
+    count_cases = [
+        "涉及磷酸铁锂的专利有多少？",
+        "磷酸铁锂相关专利数量是多少？",
+        "磷酸铁锂电压相关申请数量是多少？",
+        "磷酸铁锂电压相关授权数量是多少？",
+        "磷酸铁锂电压相关公开数量是多少？",
+        "宁德时代有多少专利？",
+        "H01M10 下有多少专利？",
+    ]
+
+    for question in count_cases:
+        slots = extract_patent_graph_slots(question)
+        assert slots.asks_count is True

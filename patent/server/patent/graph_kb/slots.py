@@ -91,6 +91,25 @@ _METRIC_TERMS = (
     "电导率",
 )
 _ATMOSPHERE_TERMS = ("气氛", "氮气", "空气", "惰性气氛", "氩气", "氧气", "atmosphere")
+_ATTRIBUTE_VALUE_TERMS = (
+    "电压范围",
+    "电压",
+    "比容量",
+    "放电容量",
+    "容量",
+    "倍率性能",
+    "倍率",
+    "压实密度",
+    "振实密度",
+    "电导率",
+    "循环性能",
+    "循环",
+    "能量密度",
+    "功率密度",
+    "性能",
+)
+_ATTRIBUTE_VALUE_QUESTION_HINTS = ("是多少", "范围是多少", "怎么样", "如何", "表现")
+_COUNT_OBJECT_HINTS = ("专利", "件", "项", "申请", "授权", "公开")
 
 _LIST_HINTS = ("有哪些", "哪些", "列出", "包括", "包含")
 _COUNT_HINTS = ("有多少", "多少", "数量", "统计")
@@ -134,6 +153,7 @@ class PatentGraphQuestionSlots:
     asks_why_how: bool = False
     asks_trend_landscape: bool = False
     asks_followup: bool = False
+    asks_attribute_value: bool = False
     has_doi: bool = False
 
     def diagnostics(self) -> dict[str, Any]:
@@ -166,6 +186,7 @@ class PatentGraphQuestionSlots:
             "asks_why_how": self.asks_why_how,
             "asks_trend_landscape": self.asks_trend_landscape,
             "asks_followup": self.asks_followup,
+            "asks_attribute_value": self.asks_attribute_value,
             "has_doi": self.has_doi,
         }
 
@@ -194,6 +215,20 @@ def _contains_any(text: str, hints: tuple[str, ...]) -> bool:
 def _extract_terms(text: str, terms: tuple[str, ...]) -> tuple[str, ...]:
     lowered = text.lower()
     return _unique([term for term in terms if term.lower() in lowered])
+
+
+def _asks_attribute_value(text: str) -> bool:
+    return _contains_any(text, _ATTRIBUTE_VALUE_TERMS) and _contains_any(text, _ATTRIBUTE_VALUE_QUESTION_HINTS)
+
+
+def _asks_count_intent(text: str) -> bool:
+    if "数量" in text or "统计" in text:
+        return True
+    if "有多少" in text and _contains_any(text, _COUNT_OBJECT_HINTS):
+        return True
+    if "多少" in text and _contains_any(text, _COUNT_OBJECT_HINTS):
+        return True
+    return False
 
 
 def _regex_name(pattern: re.Pattern[str], text: str) -> tuple[str, ...]:
@@ -271,7 +306,7 @@ def extract_patent_graph_slots(question: str) -> PatentGraphQuestionSlots:
         atmosphere_terms=atmosphere_terms,
         asks_lookup=_contains_any(text, _LOOKUP_HINTS),
         asks_list=_contains_any(text, _LIST_HINTS),
-        asks_count=_contains_any(text, _COUNT_HINTS),
+        asks_count=_asks_count_intent(text),
         asks_compare=_contains_any(text, _COMPARE_HINTS),
         asks_rank=_contains_any(text, _RANK_HINTS) or bool(_RANK_PREFIX_RE.search(text)),
         asks_process=asks_process,
@@ -285,5 +320,6 @@ def extract_patent_graph_slots(question: str) -> PatentGraphQuestionSlots:
         asks_why_how=_contains_any(text, _WHY_HOW_HINTS),
         asks_trend_landscape=_contains_any(text, _TREND_HINTS),
         asks_followup=_contains_any(text, _FOLLOWUP_HINTS),
+        asks_attribute_value=_asks_attribute_value(text),
         has_doi=bool(_DOI_PATTERN.search(text)),
     )

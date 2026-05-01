@@ -355,6 +355,59 @@ def test_kb_service_v2_graph_for_rag_injects_context_when_enabled():
     assert execution_result["metadata"]["graph_kb_fingerprint"] == "graph:test"
 
 
+def test_kb_service_material_attribute_question_uses_graph_for_rag_injection():
+    captured = {}
+
+    class _RecordingOrchestrator:
+        def run(self, *, question: str, runtime, conversation_context=None) -> PatentQaExecutionResult:
+            captured["question"] = question
+            captured["conversation_context"] = conversation_context
+            return PatentQaExecutionResult(
+                success=True,
+                final_answer="generated patent answer",
+                metadata=PatentQaExecutionMetadata(route="kb_qa", query_mode="patent staged qa"),
+                raw={"references": [], "reference_objects": [], "reference_links": [], "original_links": [], "metadata": {}, "steps": []},
+            )
+
+    payload = PatentGraphRagPayload(
+        stage1_context_block="graph_mode: graph_for_rag",
+        stage2_patent_candidates=("CN100355122C",),
+        stage4_fact_block="- graph fact",
+        stage4_graph_candidate_patent_ids=("CN100355122C",),
+        cache_fingerprint="graph:attribute",
+        diagnostics={"matched_rule": "material_attribute_graph_anchor", "strategy": "parametric"},
+    )
+
+    def _router(**kwargs):
+        assert kwargs["question"] == "磷酸铁锂的电压是多少"
+        return PatentGraphRoutingResult(
+            mode="graph_for_rag",
+            rag_payload=payload,
+            diagnostics={"matched_rule": "material_attribute_graph_anchor", "strategy": "parametric"},
+        )
+
+    service = PatentKbService(
+        orchestrator=_RecordingOrchestrator(),
+        graph_kb_client=object(),
+        graph_kb_enabled=True,
+        graph_kb_v2_enabled=True,
+        graph_kb_rag_injection_enabled=True,
+        graph_kb_service_v2=_router,
+    )
+
+    execution_result = service.run(
+        request=_make_request(question="磷酸铁锂的电压是多少"),
+        runtime=_FakeStagedRuntime(),
+        conversation_context={"recent_turns_for_llm": []},
+    )
+
+    assert captured["question"] == "磷酸铁锂的电压是多少"
+    assert captured["conversation_context"]["graph_kb"]["mode"] == "graph_for_rag"
+    assert captured["conversation_context"]["graph_kb"]["cache_fingerprint"] == "graph:attribute"
+    assert execution_result["answer_text"] == "generated patent answer"
+    assert execution_result["metadata"]["graph_kb_mode"] == "graph_for_rag"
+
+
 def test_kb_service_v2_graph_for_rag_skips_injection_when_disabled():
     captured = {}
 
