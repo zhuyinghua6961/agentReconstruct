@@ -248,6 +248,7 @@ function normalizeMessage(item) {
   const failureCode = String(item?.failureCode || item?.failure_code || metadata?.failure_code || '').trim()
   const doneSeen = item?.doneSeen ?? item?.done_seen ?? metadata?.done_seen
   const retriable = item?.retriable ?? metadata?.retriable
+  const timings = item?.timings ?? metadata?.timings ?? metadata?.stage_timings_ms
   const normalizedTerminalStatus = terminalStatus.toLowerCase()
   const terminalCompleted = ['done', 'failed', 'canceled'].includes(normalizedTerminalStatus)
 
@@ -284,6 +285,9 @@ function normalizeMessage(item) {
   if (retriable !== undefined) {
     metadata.retriable = Boolean(retriable);
   }
+  if (timings && typeof timings === 'object' && !Array.isArray(timings)) {
+    metadata.timings = { ...timings };
+  }
 
   const hasStepsCollapsed = Object.prototype.hasOwnProperty.call(item || {}, 'stepsCollapsed');
   const hasIsComplete = Object.prototype.hasOwnProperty.call(item || {}, 'isComplete');
@@ -304,6 +308,7 @@ function normalizeMessage(item) {
     ...(failureCode ? { failureCode } : {}),
     ...(doneSeen !== undefined ? { doneSeen: Boolean(doneSeen) } : {}),
     ...(retriable !== undefined ? { retriable: Boolean(retriable) } : {}),
+    ...(metadata.timings ? { timings: metadata.timings } : {}),
     ...(hasStepsCollapsed ? { stepsCollapsed: Boolean(item?.stepsCollapsed) } : {}),
     ...(resolvedIsComplete !== undefined ? { isComplete: resolvedIsComplete } : {}),
   };

@@ -67,6 +67,15 @@ test('Home uses absolute message identity in the render list wiring', () => {
   assert.match(source, /@click="toggleSteps\(entry\.absoluteMessageIndex\)"/)
 })
 
+test('Home renders QA stage timing summary and details in the processing panel', () => {
+  assert.match(source, /getMessageStageTimingModel/)
+  assert.match(source, /hasProcessPanel/)
+  assert.match(source, /getStepTimingDurationLabel/)
+  assert.match(source, /stage-timing-summary/)
+  assert.match(source, /stage-step-duration/)
+  assert.doesNotMatch(source, /stage-timing-list/)
+})
+
 test('Home imports and uses question anchor helper for stable user-message ids', () => {
   assert.match(
     source,

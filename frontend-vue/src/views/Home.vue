@@ -10,6 +10,7 @@ import { resolveStreamingTarget } from '../utils/streamingTarget'
 import { buildChatRequestContext } from '../utils/chatRequestContext'
 import { focusQuestionItem } from '../utils/questionFocus'
 import { buildQuestionOutlineItems, buildQuestionOutlineSignature, getLastQuestionOutlineItem, getQuestionAnchorId } from '../utils/questionOutline'
+import { getMessageStageTimingModel } from '../utils/stageTimings'
 import { DEFAULT_NEAR_BOTTOM_THRESHOLD_PX, isNearBottom, shouldAutoScroll } from '../utils/scrollFollow'
 import { mergeSelectedFileIdsAfterUpload, resolveUploadedFileDisplayNumber } from '../utils/fileSelection'
 import { shouldIgnoreLateStreamContent, shouldIgnoreLateStreamError } from '../utils/streamingLifecycle'
@@ -674,9 +675,35 @@ function toggleSteps(index) {
   msg.stepsCollapsed = !isStepsCollapsed(msg)
 }
 
+function getMessageSteps(msg) {
+  return Array.isArray(msg?.steps) ? msg.steps : []
+}
+
+function getStepPanelCount(msg) {
+  return getMessageSteps(msg).length
+}
+
+function getStageTimingModel(msg) {
+  return getMessageStageTimingModel(msg)
+}
+
+function getStageTimingSummary(msg) {
+  const model = getStageTimingModel(msg)
+  if (!model.hasTimings) return ''
+  if (model.slowest) {
+    return `总耗时 ${model.totalLabel} · 最慢 ${model.slowest.label} ${model.slowest.durationLabel}`
+  }
+  return `总耗时 ${model.totalLabel}`
+}
+
+function hasProcessPanel(msg) {
+  return getStepPanelCount(msg) > 0 || getStageTimingModel(msg).hasTimings
+}
+
 function getLastStep(msg) {
-  if (!msg?.steps || msg.steps.length === 0) return null
-  return msg.steps[msg.steps.length - 1]
+  const steps = getMessageSteps(msg)
+  if (steps.length === 0) return null
+  return steps[steps.length - 1]
 }
 
 function splitStepMessage(rawMessage) {
@@ -769,13 +796,34 @@ function getStepDetail(step) {
   return message
 }
 
+function getStepTimingDurationLabel(msg, step) {
+  const title = getStepTitle(step).replace(/\s+/g, '')
+  const stepKey = String(step?.step || '').trim()
+  const keyByTitle = {
+    阶段一: 'stage1',
+    阶段二: 'stage2',
+    阶段二点五: 'stage25',
+    阶段2点5: 'stage25',
+    '阶段2.5': 'stage25',
+    阶段三: 'stage3',
+    阶段四: 'stage4',
+  }
+  const candidateKeys = [
+    stepKey,
+    keyByTitle[title],
+  ].filter(Boolean)
+  const model = getStageTimingModel(msg)
+  const entry = model.entries.find((timing) => candidateKeys.includes(timing.key) || candidateKeys.includes(timing.label.replace(/\s+/g, '')))
+  return entry?.durationLabel || ''
+}
+
 function getStepCount(step) {
   const count = Number(step?.data?.count)
   return Number.isFinite(count) && count > 0 ? count : null
 }
 
 function getStepOverview(msg) {
-  const steps = Array.isArray(msg?.steps) ? msg.steps : []
+  const steps = getMessageSteps(msg)
   if (steps.length === 0) return ''
   const processing = steps.filter((step) => normalizeStepStatus(step?.status) === 'processing').length
   const success = steps.filter((step) => normalizeStepStatus(step?.status) === 'success').length
@@ -786,9 +834,7 @@ function getStepOverview(msg) {
 }
 
 function getCollapsedStepSummary(msg) {
-  const current = Array.isArray(msg?.steps)
-    ? [...msg.steps].reverse().find((step) => normalizeStepStatus(step?.status) === 'processing')
-    : null
+  const current = [...getMessageSteps(msg)].reverse().find((step) => normalizeStepStatus(step?.status) === 'processing')
   return current || getLastStep(msg)
 }
 
@@ -2486,14 +2532,17 @@ watch(
               <div class="bot-avatar">✨</div>
               <div class="message-content" :class="{ 'message-graph-kb': isGraphKbMessage(entry.message) }">
                 <div v-if="entry.message.queryMode" class="query-mode-badge">{{ entry.message.queryMode }}</div>
-                <div v-if="entry.message.steps && entry.message.steps.length > 0" class="steps-panel">
+                <div v-if="hasProcessPanel(entry.message)" class="steps-panel">
                   <div class="steps-header" @click="toggleSteps(entry.absoluteMessageIndex)">
                     <div class="steps-title">
                       <span class="steps-toggle">{{ isStepsCollapsed(entry.message) ? '▶' : '▼' }}</span>
                       <span>处理过程</span>
-                      <span class="steps-count">{{ entry.message.steps.length }}</span>
+                      <span v-if="getStepPanelCount(entry.message) > 0" class="steps-count">{{ getStepPanelCount(entry.message) }}</span>
                     </div>
                     <div class="steps-meta">
+                      <span v-if="getStageTimingSummary(entry.message)" class="stage-timing-summary">
+                        {{ getStageTimingSummary(entry.message) }}
+                      </span>
                       <span v-if="getStepOverview(entry.message)" class="steps-overview">{{ getStepOverview(entry.message) }}</span>
                       <div v-if="isStepsCollapsed(entry.message) && getCollapsedStepSummary(entry.message)" class="steps-summary">
                         <span class="step-icon" :class="'step-icon-' + normalizeStepStatus(getCollapsedStepSummary(entry.message).status)">
@@ -2507,14 +2556,22 @@ watch(
                     </div>
                   </div>
                   <div v-show="!isStepsCollapsed(entry.message)" class="processing-steps">
-                    <div v-for="(step, idx) in entry.message.steps" :key="step.step || idx" class="step-item" :class="'step-' + normalizeStepStatus(step.status)">
+                    <div v-for="(step, idx) in getMessageSteps(entry.message)" :key="step.step || idx" class="step-item" :class="'step-' + normalizeStepStatus(step.status)">
                       <span class="step-icon" :class="'step-icon-' + normalizeStepStatus(step.status)">{{ getStepIcon(step) }}</span>
                       <div class="step-body">
                         <div class="step-row">
                           <span class="step-title">{{ getStepTitle(step) }}</span>
                           <span v-if="getStepCount(step)" class="step-badge">{{ getStepCount(step) }}</span>
+                          <span v-if="!getStepDetail(step) && getStepTimingDurationLabel(entry.message, step)" class="stage-step-duration">
+                            {{ getStepTimingDurationLabel(entry.message, step) }}
+                          </span>
                         </div>
-                        <div v-if="getStepDetail(step)" class="step-detail">{{ getStepDetail(step) }}</div>
+                        <div v-if="getStepDetail(step)" class="step-detail">
+                          <span>{{ getStepDetail(step) }}</span>
+                          <span v-if="getStepTimingDurationLabel(entry.message, step)" class="stage-step-duration">
+                            {{ getStepTimingDurationLabel(entry.message, step) }}
+                          </span>
+                        </div>
                         <div v-if="step.error" class="step-error-text">{{ step.error }}</div>
                       </div>
                     </div>
@@ -3308,6 +3365,30 @@ watch(
 .steps-overview {
   background: #e0ecff;
   color: #1d4ed8;
+}
+
+.stage-timing-summary {
+  background: #f1f5f9;
+  color: #334155;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.stage-step-duration {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #334155;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+  white-space: nowrap;
 }
 
 .patent-preview-panel {
@@ -4141,6 +4222,16 @@ watch(
 
   .message-content {
     max-width: 78%;
+  }
+}
+
+@media (max-width: 640px) {
+  .steps-header {
+    align-items: flex-start;
+  }
+
+  .steps-meta {
+    flex-wrap: wrap;
   }
 }
 </style>

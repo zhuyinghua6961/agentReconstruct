@@ -47,6 +47,16 @@ function normalizeDoiLocations(doiLocations = {}) {
     }, {})
 }
 
+function normalizeTimings(timings = {}) {
+  if (!timings || typeof timings !== 'object' || Array.isArray(timings)) return {}
+  return Object.keys(timings)
+    .sort()
+    .reduce((acc, key) => {
+      acc[key] = timings[key]
+      return acc
+    }, {})
+}
+
 function normalizePatentPreviewStream(stream = {}, streamId = '') {
   return {
     contentStreamId: normalizeString(stream?.contentStreamId || streamId),
@@ -102,6 +112,7 @@ function normalizeDoneSeen(message = {}) {
 }
 
 function buildRenderSnapshot(message = {}) {
+  const metadata = message?.metadata && typeof message.metadata === 'object' ? message.metadata : {}
   return {
     role: normalizeString(message?.role),
     content: normalizeString(message?.content),
@@ -114,6 +125,11 @@ function buildRenderSnapshot(message = {}) {
     referencesRef: Array.isArray(message?.references) ? message.references : null,
     referenceLinksRef: Array.isArray(message?.referenceLinks) ? message.referenceLinks : null,
     doiLocationsRef: message?.doiLocations && typeof message.doiLocations === 'object' ? message.doiLocations : null,
+    timingsRef:
+      (message?.timings && typeof message.timings === 'object' && !Array.isArray(message.timings) && message.timings)
+      || (metadata?.timings && typeof metadata.timings === 'object' && !Array.isArray(metadata.timings) && metadata.timings)
+      || (metadata?.stage_timings_ms && typeof metadata.stage_timings_ms === 'object' && !Array.isArray(metadata.stage_timings_ms) && metadata.stage_timings_ms)
+      || null,
     patentStreamingRef:
       (message?.patentStreaming && typeof message.patentStreaming === 'object')
       || (message?.metadata?.patent_streaming && typeof message.metadata.patent_streaming === 'object')
@@ -134,6 +150,7 @@ function hasSameRenderSnapshot(left, right) {
     && left.referencesRef === right.referencesRef
     && left.referenceLinksRef === right.referenceLinksRef
     && left.doiLocationsRef === right.doiLocationsRef
+    && left.timingsRef === right.timingsRef
     && left.patentStreamingRef === right.patentStreamingRef
 }
 
@@ -160,6 +177,7 @@ export function buildMessageRenderMemoKey(message = {}) {
     references: Array.isArray(snapshot.referencesRef) ? snapshot.referencesRef.map(normalizeReference) : [],
     referenceLinks: Array.isArray(snapshot.referenceLinksRef) ? snapshot.referenceLinksRef.map(normalizeReferenceLink) : [],
     doiLocations: normalizeDoiLocations(snapshot.doiLocationsRef),
+    timings: normalizeTimings(snapshot.timingsRef),
     patentStreaming: normalizePatentStreaming(message),
   })
 

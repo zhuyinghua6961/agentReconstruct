@@ -143,10 +143,13 @@ test('api normalizeMessage preserves terminal failure fields from conversation d
   assert.match(source, /const failureMessage = String\(item\?\.failureMessage \|\| item\?\.failure_message \|\| metadata\?\.failure_message \|\| ''\)\.trim\(\)/)
   assert.match(source, /const failureCode = String\(item\?\.failureCode \|\| item\?\.failure_code \|\| metadata\?\.failure_code \|\| ''\)\.trim\(\)/)
   assert.match(source, /const doneSeen = item\?\.doneSeen \?\? item\?\.done_seen \?\? metadata\?\.done_seen/)
+  assert.match(source, /const timings = item\?\.timings \?\? metadata\?\.timings \?\? metadata\?\.stage_timings_ms/)
   assert.match(source, /metadata\.terminal_status = terminalStatus/)
   assert.match(source, /metadata\.failure_message = failureMessage/)
   assert.match(source, /metadata\.failure_code = failureCode/)
   assert.match(source, /metadata\.done_seen = Boolean\(doneSeen\)/)
+  assert.match(source, /metadata\.timings = \{ \.\.\.timings \}/)
+  assert.match(source, /\.\.\.\(metadata\.timings \? \{ timings: metadata\.timings \} : \{\}\)/)
 })
 
 test('api getConversationDetail also preserves frontend-shaped terminal fields when they appear in payloads', async () => {

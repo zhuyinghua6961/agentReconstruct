@@ -37,6 +37,9 @@ function buildPersistedChatPayload() {
             '10.1000/demo': [{ page: 3, section: 'intro', chunk_id: 'c1' }],
           },
           steps: [{ step: 'retrieve', status: 'success', title: '检索', detail: 'done' }],
+          metadata: {
+            timings: { stage1: 10, stage2: 20 },
+          },
         },
         {
           role: 'assistant',
@@ -203,6 +206,8 @@ test('chat store reload path restores durable content and does not revive stale 
   assert.equal(store.currentMessages[1].content, '未完成回答片段')
   assert.equal(store.currentMessages[1].isComplete, false)
   assert.equal(store.currentMessages[1].stepsCollapsed, true)
+  assert.deepEqual(store.currentMessages[1].metadata.timings, { stage1: 10, stage2: 20 })
+  assert.deepEqual(store.currentMessages[1].timings, { stage1: 10, stage2: 20 })
   assert.equal('streamRequestId' in store.currentMessages[1], false)
   assert.equal(store.currentMessages[2].terminalStatus, 'failed')
   assert.equal(store.currentMessages[2].failureMessage, '模型超时')

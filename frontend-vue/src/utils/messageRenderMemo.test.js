@@ -214,3 +214,22 @@ test('buildMessageRenderMemoKey changes when terminal render flags change withou
 
   assert.notEqual(first, second)
 })
+
+test('buildMessageRenderMemoKey changes when timing metadata changes without changing content', async () => {
+  const { buildMessageRenderMemoKey } = await loadMessageRenderMemoUtils()
+
+  assert.equal(typeof buildMessageRenderMemoKey, 'function')
+
+  const message = {
+    role: 'assistant',
+    content: '答案',
+    isComplete: true,
+    metadata: {},
+  }
+
+  const first = buildMessageRenderMemoKey(message)
+  message.metadata.timings = { stage1: 10, stage2: 20 }
+  const second = buildMessageRenderMemoKey(message)
+
+  assert.notEqual(first, second)
+})
