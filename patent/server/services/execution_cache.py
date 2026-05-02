@@ -9,8 +9,11 @@ from typing import Any
 from server.patent.cache_keys import PatentKeyFactory
 
 
-def _encode_pending_turn(trace_id: str, *, user_written: bool) -> str:
+def _encode_pending_turn(trace_id: str, *, user_written: bool, owner_token: str | None = None) -> str:
     suffix = "written" if user_written else "claimed"
+    owner = str(owner_token or "").strip()
+    if owner:
+        return f"{str(trace_id).strip()}|{suffix}|{owner}"
     return f"{str(trace_id).strip()}|{suffix}"
 
 
@@ -20,8 +23,13 @@ def _decode_pending_turn(value: str) -> dict[str, Any]:
         return {"trace_id": "", "user_written": False}
     trace_id, sep, suffix = raw.partition("|")
     if not sep:
-        return {"trace_id": raw, "user_written": False}
-    return {"trace_id": trace_id.strip(), "user_written": suffix.strip() == "written"}
+        return {"trace_id": raw, "user_written": False, "owner_token": ""}
+    status, _sep, owner_token = suffix.partition("|")
+    return {
+        "trace_id": trace_id.strip(),
+        "user_written": status.strip() == "written",
+        "owner_token": owner_token.strip(),
+    }
 
 
 def _normalize_overlay_items(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -124,26 +132,36 @@ class ExecutionCache:
                 return ""
         return str(value).strip()
 
-    def claim_turn_identity(self, *, conversation_id: int, trace_id: str, ttl_seconds: int) -> bool:
+    def claim_turn_identity(self, *, conversation_id: int, trace_id: str, ttl_seconds: int, owner_token: str | None = None) -> bool:
         if self._client is None:
             return False
         key = self._keys.turn(conversation_id, trace_id)
         setter = getattr(self._client, "set", None)
         if not callable(setter):
             return False
-        return bool(setter(key, "1", ex=max(1, int(ttl_seconds)), nx=True))
+        value = str(owner_token or "").strip() or "1"
+        return bool(setter(key, value, ex=max(1, int(ttl_seconds)), nx=True))
 
-    def clear_turn_identity(self, *, conversation_id: int, trace_id: str) -> bool:
+    def clear_turn_identity(self, *, conversation_id: int, trace_id: str, owner_token: str | None = None) -> bool:
         if self._client is None:
             return False
         key = self._keys.turn(conversation_id, trace_id)
+        expected = str(owner_token or "").strip()
+        if expected:
+            compare_delete = getattr(self._client, "compare_delete", None)
+            if not callable(compare_delete):
+                self.last_error = "atomic compare_delete helper unavailable"
+                return False
+            cleared = bool(compare_delete(key, expected))
+            self.last_error = "" if cleared else "turn identity clear rejected"
+            return cleared
         return bool(self._client.delete(key))
 
     def has_turn_identity(self, *, conversation_id: int, trace_id: str) -> bool:
         key = self._keys.turn(conversation_id, trace_id)
         return bool(self._read_text_value(key))
 
-    def mark_turn_inflight(self, *, conversation_id: int, trace_id: str, ttl_seconds: int) -> bool:
+    def mark_turn_inflight(self, *, conversation_id: int, trace_id: str, ttl_seconds: int, owner_token: str | None = None) -> bool:
         if self._client is None:
             self.last_error = "redis client unavailable"
             return False
@@ -152,16 +170,25 @@ class ExecutionCache:
         if not callable(setter):
             self.last_error = "redis set helper unavailable"
             return False
-        marked = bool(setter(key, "1", ex=max(1, int(ttl_seconds)), nx=True))
+        value = str(owner_token or "").strip() or "1"
+        marked = bool(setter(key, value, ex=max(1, int(ttl_seconds)), nx=True))
         self.last_error = "" if marked else "inflight marker already present"
         return marked
 
-    def clear_turn_inflight(self, *, conversation_id: int, trace_id: str) -> bool:
+    def clear_turn_inflight(self, *, conversation_id: int, trace_id: str, owner_token: str | None = None) -> bool:
         if self._client is None:
             self.last_error = "redis client unavailable"
             return False
         key = self._keys.inflight(conversation_id, trace_id)
-        cleared = bool(self._client.delete(key))
+        expected = str(owner_token or "").strip()
+        if expected:
+            compare_delete = getattr(self._client, "compare_delete", None)
+            if not callable(compare_delete):
+                self.last_error = "atomic compare_delete helper unavailable"
+                return False
+            cleared = bool(compare_delete(key, expected))
+        else:
+            cleared = bool(self._client.delete(key))
         self.last_error = "" if cleared else "inflight marker missing"
         return cleared
 
@@ -169,7 +196,7 @@ class ExecutionCache:
         key = self._keys.inflight(conversation_id, trace_id)
         return bool(self._read_text_value(key))
 
-    def renew_turn_inflight(self, *, conversation_id: int, trace_id: str, ttl_seconds: int) -> bool:
+    def renew_turn_inflight(self, *, conversation_id: int, trace_id: str, ttl_seconds: int, owner_token: str | None = None) -> bool:
         if self._client is None:
             self.last_error = "redis client unavailable"
             return False
@@ -178,22 +205,31 @@ class ExecutionCache:
             self.last_error = "atomic compare_expire helper unavailable"
             return False
         key = self._keys.inflight(conversation_id, trace_id)
+        expected = str(owner_token or "").strip() or "1"
         try:
-            renewed = bool(compare_expire(key, "1", max(1, int(ttl_seconds))))
+            renewed = bool(compare_expire(key, expected, max(1, int(ttl_seconds))))
         except Exception as exc:
             self.last_error = str(exc)
             return False
         self.last_error = "" if renewed else "inflight renew rejected"
         return renewed
 
-    def claim_pending_turn(self, *, conversation_id: int, trace_id: str, ttl_seconds: int, user_written: bool = False) -> bool:
+    def claim_pending_turn(
+        self,
+        *,
+        conversation_id: int,
+        trace_id: str,
+        ttl_seconds: int,
+        user_written: bool = False,
+        owner_token: str | None = None,
+    ) -> bool:
         if self._client is None:
             return False
         key = self._keys.pending_turn(conversation_id)
         setter = getattr(self._client, "set", None)
         if not callable(setter):
             return False
-        payload = _encode_pending_turn(trace_id, user_written=user_written)
+        payload = _encode_pending_turn(trace_id, user_written=user_written, owner_token=owner_token)
         return bool(setter(key, payload, ex=max(1, int(ttl_seconds)), nx=True))
 
     def get_pending_turn_state(self, *, conversation_id: int) -> dict[str, Any]:
@@ -203,20 +239,72 @@ class ExecutionCache:
     def get_pending_turn(self, *, conversation_id: int) -> str:
         return str(self.get_pending_turn_state(conversation_id=conversation_id).get("trace_id") or "")
 
-    def mark_pending_turn_user_written(self, *, conversation_id: int, trace_id: str, ttl_seconds: int) -> bool:
+    def mark_pending_turn_user_written(
+        self,
+        *,
+        conversation_id: int,
+        trace_id: str,
+        ttl_seconds: int,
+        owner_token: str | None = None,
+    ) -> bool:
         if self._client is None:
             return False
-        state = self.get_pending_turn_state(conversation_id=conversation_id)
+        key = self._keys.pending_turn(conversation_id)
+        raw_value = self._read_text_value(key)
+        state = _decode_pending_turn(raw_value)
         if str(state.get("trace_id") or "") != str(trace_id).strip():
             return False
-        key = self._keys.pending_turn(conversation_id)
-        setter = getattr(self._client, "set", None)
-        if not callable(setter):
+        expected_owner = str(owner_token or "").strip()
+        current_owner = str(state.get("owner_token") or "").strip()
+        if expected_owner and current_owner and current_owner != expected_owner:
             return False
-        payload = _encode_pending_turn(trace_id, user_written=True)
-        return bool(setter(key, payload, ex=max(1, int(ttl_seconds)), nx=False))
+        compare_set = getattr(self._client, "compare_set", None)
+        if not callable(compare_set):
+            self.last_error = "atomic compare_set helper unavailable"
+            return False
+        payload = _encode_pending_turn(
+            trace_id,
+            user_written=True,
+            owner_token=current_owner or expected_owner,
+        )
+        updated = bool(compare_set(key, raw_value, payload, max(1, int(ttl_seconds))))
+        self.last_error = "" if updated else "pending turn marker advance rejected"
+        return updated
 
-    def clear_pending_turn(self, *, conversation_id: int, trace_id: str) -> bool:
+    def transfer_pending_turn_owner(
+        self,
+        *,
+        conversation_id: int,
+        trace_id: str,
+        ttl_seconds: int,
+        owner_token: str,
+    ) -> bool:
+        if self._client is None:
+            return False
+        key = self._keys.pending_turn(conversation_id)
+        raw_value = self._read_text_value(key)
+        state = _decode_pending_turn(raw_value)
+        if str(state.get("trace_id") or "") != str(trace_id).strip():
+            self.last_error = "pending turn marker mismatch"
+            return False
+        expected_owner = str(owner_token or "").strip()
+        if not expected_owner:
+            self.last_error = "pending turn owner token missing"
+            return False
+        compare_set = getattr(self._client, "compare_set", None)
+        if not callable(compare_set):
+            self.last_error = "atomic compare_set helper unavailable"
+            return False
+        payload = _encode_pending_turn(
+            trace_id,
+            user_written=bool(state.get("user_written")),
+            owner_token=expected_owner,
+        )
+        updated = bool(compare_set(key, raw_value, payload, max(1, int(ttl_seconds))))
+        self.last_error = "" if updated else "pending turn owner transfer rejected"
+        return updated
+
+    def clear_pending_turn(self, *, conversation_id: int, trace_id: str, owner_token: str | None = None) -> bool:
         if self._client is None:
             self.last_error = "redis client unavailable"
             return False
@@ -225,6 +313,11 @@ class ExecutionCache:
         state = _decode_pending_turn(raw_value)
         if str(state.get("trace_id") or "") != str(trace_id).strip():
             self.last_error = "pending turn marker mismatch"
+            return False
+        expected_owner = str(owner_token or "").strip()
+        current_owner = str(state.get("owner_token") or "").strip()
+        if expected_owner and current_owner and current_owner != expected_owner:
+            self.last_error = "pending turn owner mismatch"
             return False
         compare_delete = getattr(self._client, "compare_delete", None)
         if not callable(compare_delete):
@@ -417,7 +510,38 @@ class ExecutionCache:
         key = self._keys.original_cache(canonical_patent_id, section, anchor, response_format, original_version)
         return self.get_json_cache(key=key)
 
-    def set_turn_result(self, *, conversation_id: int, trace_id: str, payload: dict[str, Any], ttl_seconds: int) -> bool:
+    def owns_turn_runtime(self, *, conversation_id: int, trace_id: str, owner_token: str | None = None) -> bool:
+        expected = str(owner_token or "").strip()
+        if not expected:
+            return True
+        turn_owner = self._read_text_value(self._keys.turn(conversation_id, trace_id))
+        inflight_owner = self._read_text_value(self._keys.inflight(conversation_id, trace_id))
+        pending_state = self.get_pending_turn_state(conversation_id=conversation_id)
+        pending_trace = str(pending_state.get("trace_id") or "").strip()
+        pending_owner = str(pending_state.get("owner_token") or "").strip()
+        if turn_owner != expected:
+            self.last_error = "turn identity owner mismatch"
+            return False
+        if inflight_owner != expected:
+            self.last_error = "inflight owner mismatch"
+            return False
+        if pending_trace == str(trace_id).strip() and pending_owner and pending_owner != expected:
+            self.last_error = "pending turn owner mismatch"
+            return False
+        self.last_error = ""
+        return True
+
+    def set_turn_result(
+        self,
+        *,
+        conversation_id: int,
+        trace_id: str,
+        payload: dict[str, Any],
+        ttl_seconds: int,
+        owner_token: str | None = None,
+    ) -> bool:
+        if not self.owns_turn_runtime(conversation_id=conversation_id, trace_id=trace_id, owner_token=owner_token):
+            return False
         return self.set_execution_cache(
             normalized_request_key=f"turn-result:{int(conversation_id)}:{str(trace_id).strip()}",
             payload=payload,
@@ -429,9 +553,20 @@ class ExecutionCache:
             normalized_request_key=f"turn-result:{int(conversation_id)}:{str(trace_id).strip()}",
         )
 
-    def set_overlay_assistant(self, *, user_id: int, conversation_id: int, payload: dict[str, Any], ttl_seconds: int) -> bool:
+    def set_overlay_assistant(
+        self,
+        *,
+        user_id: int,
+        conversation_id: int,
+        payload: dict[str, Any],
+        ttl_seconds: int,
+        owner_token: str | None = None,
+    ) -> bool:
         if self._client is None:
             self.last_error = "redis client unavailable"
+            return False
+        trace_id = str(payload.get("trace_id") or "").strip()
+        if not self.owns_turn_runtime(conversation_id=conversation_id, trace_id=trace_id, owner_token=owner_token):
             return False
         compare_set = getattr(self._client, "compare_set", None)
         if not callable(compare_set):
@@ -439,7 +574,7 @@ class ExecutionCache:
             return False
         key = self._keys.overlay_assistant(user_id, conversation_id)
         normalized_payload = {
-            "trace_id": str(payload.get("trace_id") or "").strip(),
+            "trace_id": trace_id,
             "assistant_content": str(payload.get("assistant_content") or "").strip(),
             "route": str(payload.get("route") or "").strip(),
         }

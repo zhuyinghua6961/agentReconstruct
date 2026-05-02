@@ -156,12 +156,21 @@ def run_stage1_pre_answer_and_planning(
     logger: Any,
     conversation_context: dict[str, Any] | None = None,
     graph_context: str | None = None,
+    should_cancel: Any | None = None,
 ) -> Dict[str, Any]:
     logger.info("阶段一：LLM预回答与检索规划")
     logger.info("用户问题: %s", user_question)
     stage_started = time.perf_counter()
 
     try:
+        if callable(should_cancel) and should_cancel():
+            return {
+                "success": False,
+                "deep_answer": "",
+                "retrieval_claims": [],
+                "error": "cancelled",
+                "metadata": {"cancelled": True},
+            }
         full_system_prompt = stage1_prompt + (("\n\n" + vector_db_context) if vector_db_context else "")
         context_block = _format_conversation_context(conversation_context)
         user_content = f"{context_block}\n\n用户问题：{user_question}" if context_block else f"用户问题：{user_question}"
@@ -192,6 +201,14 @@ def run_stage1_pre_answer_and_planning(
             ],
             logger=logger,
         )
+        if callable(should_cancel) and should_cancel():
+            return {
+                "success": False,
+                "deep_answer": "",
+                "retrieval_claims": [],
+                "error": "cancelled",
+                "metadata": {"cancelled": True},
+            }
 
         result_text = str(response.choices[0].message.content or "").strip()
         logger.info(

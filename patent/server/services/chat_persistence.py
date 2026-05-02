@@ -299,11 +299,13 @@ class ChatPersistenceService:
         inflight_claimed = False
         pending_claimed = False
         user_turn_written = False
+        owner_token = uuid.uuid4().hex
         try:
             turn_identity_claimed = self.execution_cache.claim_turn_identity(
                 conversation_id=conversation_id,
                 trace_id=trace_id,
                 ttl_seconds=self.turn_state_ttl_seconds,
+                owner_token=owner_token,
             )
             if not turn_identity_claimed:
                 cached_result = self.execution_cache.get_turn_result(
@@ -339,6 +341,7 @@ class ChatPersistenceService:
                 conversation_id=conversation_id,
                 trace_id=trace_id,
                 ttl_seconds=self.inflight_ttl_seconds,
+                owner_token=owner_token,
             )
             if not inflight_claimed:
                 cached_result = self.execution_cache.get_turn_result(
@@ -375,6 +378,7 @@ class ChatPersistenceService:
                     trace_id=trace_id,
                     ttl_seconds=self.turn_state_ttl_seconds,
                     user_written=False,
+                    owner_token=owner_token,
                 )
                 if not pending_claimed:
                     pending_state = self.execution_cache.get_pending_turn_state(conversation_id=conversation_id)
@@ -385,6 +389,19 @@ class ChatPersistenceService:
                 else:
                     pending_trace = trace_id
                     pending_user_written = False
+            elif not self.execution_cache.transfer_pending_turn_owner(
+                conversation_id=conversation_id,
+                trace_id=trace_id,
+                ttl_seconds=self.turn_state_ttl_seconds,
+                owner_token=owner_token,
+            ):
+                raise APIError(
+                    code=codes.SERVICE_NOT_READY,
+                    message="durable patent pending turn owner could not be transferred for retry",
+                    status_code=503,
+                    error="service_not_ready",
+                    retriable=True,
+                )
 
             if pending_trace == trace_id and not pending_claimed:
                 user_turn_written = pending_user_written
@@ -392,6 +409,7 @@ class ChatPersistenceService:
                 "conversation_id": conversation_id,
                 "trace_id": trace_id,
                 "user_id": int(resolved_user_id),
+                "owner_token": owner_token,
                 "lock_handle": lock_handle,
                 "inflight_claimed": inflight_claimed,
                 "pending_claimed": pending_claimed,
@@ -407,6 +425,7 @@ class ChatPersistenceService:
                         conversation_id=conversation_id,
                         trace_id=trace_id,
                         ttl_seconds=self.turn_state_ttl_seconds,
+                        owner_token=owner_token,
                     ):
                         raise APIError(
                             code=codes.SERVICE_NOT_READY,
@@ -429,6 +448,7 @@ class ChatPersistenceService:
                     conversation_id=conversation_id,
                     trace_id=trace_id,
                     ttl_seconds=self.turn_state_ttl_seconds,
+                    owner_token=owner_token,
                 ):
                     raise APIError(
                         code=codes.SERVICE_NOT_READY,
@@ -513,6 +533,7 @@ class ChatPersistenceService:
                         "execution_result": normalized_execution_result,
                     },
                     ttl_seconds=self.turn_state_ttl_seconds,
+                    owner_token=_normalize_text(runtime_state.get("owner_token")),
                 ):
                     raise APIError(
                         code=codes.SERVICE_NOT_READY,
@@ -530,6 +551,7 @@ class ChatPersistenceService:
                         "assistant_content": answer_text,
                     },
                     ttl_seconds=self.overlay_ttl_seconds,
+                    owner_token=_normalize_text(runtime_state.get("owner_token")),
                 ):
                     raise APIError(
                         code=codes.SERVICE_NOT_READY,
@@ -541,6 +563,7 @@ class ChatPersistenceService:
                 if not self.execution_cache.clear_pending_turn(
                     conversation_id=int(runtime_state.get("conversation_id") or request.conversation_id or 0),
                     trace_id=trace_id,
+                    owner_token=_normalize_text(runtime_state.get("owner_token")),
                 ):
                     raise APIError(
                         code=codes.SERVICE_NOT_READY,
@@ -571,6 +594,7 @@ class ChatPersistenceService:
                 trace_id=trace_id,
                 answer_text=answer_text,
                 execution_result=normalized_execution_result,
+                owner_token=_normalize_text(runtime_state.get("owner_token")),
             )
             if not isinstance(assistant_accept, dict) or not bool(assistant_accept.get("accepted")):
                 raise APIError(
@@ -591,6 +615,7 @@ class ChatPersistenceService:
                     "execution_result": normalized_execution_result,
                 },
                 ttl_seconds=self.turn_state_ttl_seconds,
+                owner_token=_normalize_text(runtime_state.get("owner_token")),
             ):
                 raise APIError(
                     code=codes.SERVICE_NOT_READY,
@@ -608,6 +633,7 @@ class ChatPersistenceService:
                     "assistant_content": answer_text,
                 },
                 ttl_seconds=self.overlay_ttl_seconds,
+                owner_token=_normalize_text(runtime_state.get("owner_token")),
             ):
                 raise APIError(
                     code=codes.SERVICE_NOT_READY,
@@ -619,6 +645,7 @@ class ChatPersistenceService:
             if not self.execution_cache.clear_pending_turn(
                 conversation_id=int(runtime_state.get("conversation_id") or request.conversation_id or 0),
                 trace_id=trace_id,
+                owner_token=_normalize_text(runtime_state.get("owner_token")),
             ):
                 raise APIError(
                     code=codes.SERVICE_NOT_READY,
@@ -689,6 +716,7 @@ class ChatPersistenceService:
             used_files=[dict(item) for item in list(used_files or []) if isinstance(item, dict)],
             timings=dict(timings or {}),
             failure=dict(failure or {}),
+            owner_token=_normalize_text(runtime_state.get("owner_token")),
         )
         if not isinstance(assistant_terminal_accept, dict) or not bool(assistant_terminal_accept.get("accepted")):
             raise APIError(
@@ -701,6 +729,7 @@ class ChatPersistenceService:
         if not self.execution_cache.clear_pending_turn(
             conversation_id=int(runtime_state.get("conversation_id") or request.conversation_id or 0),
             trace_id=trace_id,
+            owner_token=_normalize_text(runtime_state.get("owner_token")),
         ):
             raise APIError(
                 code=codes.SERVICE_NOT_READY,
@@ -834,6 +863,7 @@ class ChatPersistenceService:
             self.execution_cache.clear_turn_inflight(
                 conversation_id=conversation_id,
                 trace_id=trace_id,
+                owner_token=_normalize_text(state.get("owner_token")),
             )
         if (
             not bool(state.get("assistant_accept_committed"))
@@ -843,6 +873,7 @@ class ChatPersistenceService:
             self.execution_cache.clear_turn_identity(
                 conversation_id=conversation_id,
                 trace_id=trace_id,
+                owner_token=_normalize_text(state.get("owner_token")),
             )
         if (
             bool(state.get("pending_claimed"))
@@ -856,6 +887,7 @@ class ChatPersistenceService:
             self.execution_cache.clear_pending_turn(
                 conversation_id=conversation_id,
                 trace_id=trace_id,
+                owner_token=_normalize_text(state.get("owner_token")),
             )
         lock_handle = state.get("lock_handle")
         if isinstance(lock_handle, LockHandle):
@@ -906,6 +938,7 @@ class ChatPersistenceService:
                     conversation_id=conversation_id,
                     trace_id=trace_id,
                     ttl_seconds=self.inflight_ttl_seconds,
+                    owner_token=_normalize_text(runtime_state.get("owner_token")),
                 )
                 if lock_ok and inflight_ok:
                     continue
@@ -924,11 +957,28 @@ class ChatPersistenceService:
 
     def _assert_runtime_state_healthy(self, runtime_state: dict[str, Any]) -> None:
         error_message = _normalize_text(runtime_state.get("renew_error"))
-        if not error_message:
+        if error_message:
+            raise APIError(
+                code=codes.SERVICE_NOT_READY,
+                message=f"durable patent runtime guard renewal failed: {error_message}",
+                status_code=503,
+                error="service_not_ready",
+                retriable=True,
+            )
+        conversation_id = _safe_positive_int(runtime_state.get("conversation_id"))
+        trace_id = _normalize_text(runtime_state.get("trace_id"))
+        owner_token = _normalize_text(runtime_state.get("owner_token"))
+        if not conversation_id or not trace_id or not owner_token:
+            return
+        if self.execution_cache.owns_turn_runtime(
+            conversation_id=conversation_id,
+            trace_id=trace_id,
+            owner_token=owner_token,
+        ):
             return
         raise APIError(
             code=codes.SERVICE_NOT_READY,
-            message=f"durable patent runtime guard renewal failed: {error_message}",
+            message=f"durable patent runtime owner check failed: {self.execution_cache.last_error or 'runtime owner mismatch'}",
             status_code=503,
             error="service_not_ready",
             retriable=True,
@@ -1007,6 +1057,7 @@ class ChatPersistenceService:
         trace_id: str,
         answer_text: str,
         execution_result: dict[str, Any],
+        owner_token: str = "",
     ) -> dict[str, Any]:
         metadata = dict(execution_result.get("metadata") or {})
         mode_origin = _normalize_mode_origin(request, execution_result)
@@ -1034,6 +1085,7 @@ class ChatPersistenceService:
                 original_links=[dict(item) for item in list(execution_result.get("original_links") or []) if isinstance(item, dict)],
                 used_files=list(execution_result.get("used_files") or []),
                 timings=dict(execution_result.get("timings") or {}),
+                runtime_owner_token=owner_token or None,
             )
         except Exception as exc:
             raise APIError(
@@ -1061,6 +1113,7 @@ class ChatPersistenceService:
         used_files: list[dict[str, Any]],
         timings: dict[str, Any],
         failure: dict[str, Any],
+        owner_token: str = "",
     ) -> dict[str, Any]:
         mode_origin = _normalize_mode_origin(request, {"metadata": metadata})
         if mode_origin:
@@ -1089,6 +1142,7 @@ class ChatPersistenceService:
                 used_files=used_files,
                 timings=timings,
                 failure=failure,
+                runtime_owner_token=owner_token or None,
             )
         except Exception as exc:
             raise APIError(

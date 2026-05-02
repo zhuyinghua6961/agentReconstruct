@@ -214,6 +214,7 @@ class GenerationDrivenRAG:
         user_question: str,
         conversation_context: dict[str, Any] | None = None,
         graph_context: str | None = None,
+        should_cancel=None,
     ) -> Dict[str, Any]:
         return run_stage1_pre_answer_and_planning_impl(
             user_question=user_question,
@@ -224,6 +225,7 @@ class GenerationDrivenRAG:
             logger=logger,
             conversation_context=conversation_context,
             graph_context=graph_context,
+            should_cancel=should_cancel,
         )
 
     def stage2_targeted_retrieval(

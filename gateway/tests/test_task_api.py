@@ -235,9 +235,10 @@ class _AbortAwareBlockingAsyncStream(httpx.AsyncByteStream):
     async def __aiter__(self):
         yield self._first_chunk
         self._first_released.set()
-        while not self._continue_event.wait(timeout=0.05):
+        while not self._continue_event.is_set():
             if self._closed_event.is_set():
                 return
+            await anyio.sleep(0.01)
         if self._closed_event.is_set():
             return
         yield self._second_chunk
@@ -2746,6 +2747,69 @@ def test_cancel_task_terminalizes_running_request_persists_canceled_state_and_ab
     assert replay[-1]["status"] == "canceled"
 
 
+def test_cancel_task_sets_live_cancel_event_before_progress_flush(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    queue_store = app.state.execution_queue_status_store
+    queue_store.put_request(
+        _queued_task_record(
+            request_id="req_live_cancel_event",
+            status="running",
+            conversation_id=52,
+            assistant_message_id="msg_live_cancel_event",
+            quota_grant_id="grant-live-cancel-event",
+            cancel_allowed=False,
+        ),
+        ttl_seconds=900,
+    )
+    cancel_event = threading.Event()
+    observed = {"set_before_flush": False}
+
+    async def _flush_progress(*, force: bool = False):
+        observed["set_before_flush"] = cancel_event.is_set()
+        return True
+
+    app.state.active_task_streams["req_live_cancel_event"] = {
+        "handle": None,
+        "cancel_event": cancel_event,
+        "flush_progress": _flush_progress,
+    }
+    calls: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        payload = _json_request_body(request)
+        calls.append((path, payload))
+        if path == "/internal/conversations/52/tasks/req_live_cancel_event/assistant-terminal":
+            return httpx.Response(200, json={"success": True, "status": payload.get("terminal_status")})
+        if path == "/internal/quota/grants/grant-live-cancel-event/finalize":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-live-cancel-event", "counted": payload["success"], "idempotent": False}})
+        raise AssertionError(f"unexpected upstream path: {path}")
+
+    _set_task_transport(handler)
+    service = qa_task_module.QATaskService(
+        type(
+            "_Request",
+            (),
+            {
+                "app": app,
+                "base_url": "http://testserver/",
+                "state": type("_State", (), {"trace_id": "req_live_cancel_event"})(),
+            },
+        )()
+    )
+
+    summary = anyio.run(
+        lambda: service.cancel_task(
+            "req_live_cancel_event",
+            auth_context=AuthContext(user_id=42, role="user", username="user42"),
+        )
+    )
+
+    assert summary["status"] == "canceled"
+    assert cancel_event.is_set()
+    assert observed["set_before_flush"] is True
+
+
 def test_cancel_task_returns_terminal_summary_when_cas_conflict_races_with_existing_cancel(monkeypatch):
     _set_health_transport()
     queue_store = app.state.execution_queue_status_store
@@ -4056,9 +4120,24 @@ def test_admission_worker_cancel_midstream_stops_without_completed_terminal_or_s
     thread.start()
     assert first_chunk_released.wait(timeout=5)
 
-    client = TestClient(app)
-    response = client.post("/api/v1/tasks/req_worker_cancel/cancel")
-    assert response.status_code == 200
+    service = qa_task_module.QATaskService(
+        type(
+            "_Request",
+            (),
+            {
+                "app": app,
+                "base_url": "http://testserver/",
+                "state": type("_State", (), {"trace_id": "req_worker_cancel"})(),
+            },
+        )()
+    )
+    response = anyio.run(
+        lambda: service.cancel_task(
+            "req_worker_cancel",
+            auth_context=AuthContext(user_id=42, role="user", username="user42"),
+        )
+    )
+    assert response["status"] == "canceled"
     continue_event.set()
     thread.join(timeout=5)
     assert not thread.is_alive()
@@ -4141,10 +4220,25 @@ def test_admission_worker_cancel_aborts_upstream_stream_without_waiting_for_next
     thread.start()
     assert first_chunk_released.wait(timeout=5)
 
-    client = TestClient(app)
-    response = client.post("/api/v1/tasks/req_worker_abort_cancel/cancel")
+    service = qa_task_module.QATaskService(
+        type(
+            "_Request",
+            (),
+            {
+                "app": app,
+                "base_url": "http://testserver/",
+                "state": type("_State", (), {"trace_id": "req_worker_abort_cancel"})(),
+            },
+        )()
+    )
+    response = anyio.run(
+        lambda: service.cancel_task(
+            "req_worker_abort_cancel",
+            auth_context=AuthContext(user_id=42, role="user", username="user42"),
+        )
+    )
 
-    assert response.status_code == 200
+    assert response["status"] == "canceled"
     thread.join(timeout=5)
     assert not thread.is_alive()
     assert closed_event.is_set()
@@ -4152,6 +4246,158 @@ def test_admission_worker_cancel_aborts_upstream_stream_without_waiting_for_next
     assert result.outcome == "canceled"
     finalize_calls = [payload for path, payload in calls if path == "/internal/quota/grants/grant-worker-abort-cancel/finalize"]
     assert finalize_calls == [{"success": False}]
+
+
+def test_admission_worker_cancel_while_upstream_open_is_pending_returns_canceled(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    queue_store = app.state.execution_queue_status_store
+    relay_store = app.state.execution_event_relay_store
+    slot_store = app.state.execution_slot_lease_store
+    request_id = "req_worker_cancel_open_pending"
+    queue_store.put_request(
+        _queued_task_record(
+            request_id=request_id,
+            conversation_id=97,
+            assistant_message_id="msg_worker_cancel_open_pending",
+            quota_grant_id="grant-worker-cancel-open-pending",
+        ),
+        ttl_seconds=900,
+    )
+    relay_store.append_frame(request_id, {"type": "state", "status": "queued"}, ttl_seconds=900)
+    open_started = threading.Event()
+    release_open = threading.Event()
+    result_holder: dict[str, object] = {}
+    calls: list[tuple[str, dict]] = []
+
+    async def _blocked_open_json_stream(**kwargs):
+        open_started.set()
+        while not release_open.is_set():
+            await anyio.sleep(0.01)
+        raise AssertionError("open should not complete after cancel")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        payload = _json_request_body(request)
+        calls.append((path, payload))
+        if path == f"/internal/conversations/97/tasks/{request_id}/assistant-terminal":
+            return httpx.Response(200, json={"success": True, "status": payload.get("terminal_status")})
+        if path == f"/internal/conversations/97/tasks/{request_id}/assistant-progress":
+            return httpx.Response(200, json={"success": True, "status": payload.get("status")})
+        if path == "/internal/quota/grants/grant-worker-cancel-open-pending/finalize":
+            return httpx.Response(200, json={"success": True, "data": {"grant_id": "grant-worker-cancel-open-pending", "counted": payload["success"], "idempotent": False}})
+        raise AssertionError(f"unexpected upstream path: {path}")
+
+    _set_task_transport(handler)
+    monkeypatch.setattr(app.state.proxy_service, "open_json_stream", _blocked_open_json_stream)
+    dispatcher = ExecutionAdmissionDispatcher(
+        settings=app.state.settings,
+        queue_status_store=queue_store,
+        slot_lease_store=slot_store,
+    )
+    worker = ExecutionAdmissionWorker(
+        dispatcher=dispatcher,
+        owner_id="worker-cancel-open-pending",
+        executor=qa_task_module.GatewayTaskExecutor(app).execute,
+        timestamp_factory=lambda: "2026-04-06T10:00:05+00:00",
+    )
+
+    def _run_worker():
+        result_holder["result"] = worker.run_dispatch_cycle()
+
+    thread = threading.Thread(target=_run_worker, daemon=True)
+    thread.start()
+    assert open_started.wait(timeout=5)
+
+    service = qa_task_module.QATaskService(
+        type(
+            "_Request",
+            (),
+            {
+                "app": app,
+                "base_url": "http://testserver/",
+                "state": type("_State", (), {"trace_id": request_id})(),
+            },
+        )()
+    )
+    started = time.monotonic()
+    summary = anyio.run(
+        lambda: service.cancel_task(
+            request_id,
+            auth_context=AuthContext(user_id=42, role="user", username="user42"),
+        )
+    )
+    thread.join(timeout=1)
+    elapsed = time.monotonic() - started
+    release_open.set()
+
+    assert summary["status"] == "canceled"
+    assert elapsed < 0.5
+    assert not thread.is_alive()
+    result = result_holder["result"]
+    assert result.outcome == "canceled"
+    assert queue_store.get_request(request_id)["status"] == "cancelled"
+    terminal_calls = [payload for path, payload in calls if path == f"/internal/conversations/97/tasks/{request_id}/assistant-terminal"]
+    assert len(terminal_calls) == 1
+    assert terminal_calls[0]["terminal_status"] == "canceled"
+    assert terminal_calls[0]["answer_text"] == ""
+    finalize_calls = [payload for path, payload in calls if path == "/internal/quota/grants/grant-worker-cancel-open-pending/finalize"]
+    assert finalize_calls == [{"success": False}]
+
+
+def test_admission_worker_cancel_after_running_before_live_registration_does_not_open_upstream(monkeypatch):
+    monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
+    queue_store = app.state.execution_queue_status_store
+    relay_store = app.state.execution_event_relay_store
+    slot_store = app.state.execution_slot_lease_store
+    request_id = "req_worker_cancel_before_live"
+    queue_store.put_request(
+        _queued_task_record(
+            request_id=request_id,
+            conversation_id=98,
+            assistant_message_id="msg_worker_cancel_before_live",
+            quota_grant_id="grant-worker-cancel-before-live",
+        ),
+        ttl_seconds=900,
+    )
+    relay_store.append_frame(request_id, {"type": "state", "status": "queued"}, ttl_seconds=900)
+    original_register = qa_task_module.GatewayTaskExecutor._register_live_handle
+    calls: list[tuple[str, dict]] = []
+
+    def _cancel_before_register(self, task_id, handle):
+        queue_store.cancel_active_request(task_id, cancelled_at="2026-04-06T10:00:06+00:00")
+        return original_register(self, task_id, handle)
+
+    async def _unexpected_open_json_stream(**kwargs):
+        raise AssertionError("upstream should not open after task was cancelled before live registration")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        payload = _json_request_body(request)
+        calls.append((path, payload))
+        if path == f"/internal/conversations/98/tasks/{request_id}/assistant-progress":
+            return httpx.Response(200, json={"success": True, "status": payload.get("status")})
+        raise AssertionError(f"unexpected upstream path: {path}")
+
+    _set_task_transport(handler)
+    monkeypatch.setattr(qa_task_module.GatewayTaskExecutor, "_register_live_handle", _cancel_before_register)
+    monkeypatch.setattr(app.state.proxy_service, "open_json_stream", _unexpected_open_json_stream)
+    dispatcher = ExecutionAdmissionDispatcher(
+        settings=app.state.settings,
+        queue_status_store=queue_store,
+        slot_lease_store=slot_store,
+    )
+    worker = ExecutionAdmissionWorker(
+        dispatcher=dispatcher,
+        owner_id="worker-cancel-before-live",
+        executor=qa_task_module.GatewayTaskExecutor(app).execute,
+        timestamp_factory=lambda: "2026-04-06T10:00:05+00:00",
+    )
+
+    result = worker.run_dispatch_cycle()
+
+    assert result.outcome == "canceled"
+    assert queue_store.get_request(request_id)["status"] == "cancelled"
+    assert all(not path.startswith("/api/") for path, _payload in calls)
 
 
 def test_admission_worker_cancel_same_chunk_done_race_does_not_commit_completed_side_effects(monkeypatch):
@@ -4218,9 +4464,24 @@ def test_admission_worker_cancel_same_chunk_done_race_does_not_commit_completed_
     thread.start()
     assert progress_gate.wait(timeout=5)
 
-    client = TestClient(app)
-    response = client.post("/api/v1/tasks/req_worker_same_chunk_cancel/cancel")
-    assert response.status_code == 200
+    service = qa_task_module.QATaskService(
+        type(
+            "_Request",
+            (),
+            {
+                "app": app,
+                "base_url": "http://testserver/",
+                "state": type("_State", (), {"trace_id": "req_worker_same_chunk_cancel"})(),
+            },
+        )()
+    )
+    response = anyio.run(
+        lambda: service.cancel_task(
+            "req_worker_same_chunk_cancel",
+            auth_context=AuthContext(user_id=42, role="user", username="user42"),
+        )
+    )
+    assert response["status"] == "canceled"
     continue_progress.set()
     thread.join(timeout=5)
     assert not thread.is_alive()

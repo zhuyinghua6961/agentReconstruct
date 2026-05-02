@@ -125,6 +125,22 @@ def _payload_cache_hit(payload: dict[str, Any] | None) -> bool:
     return bool(metadata.get("cache_hit"))
 
 
+def _payload_cancelled(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    metadata = dict(payload.get("metadata") or {})
+    return bool(payload.get("cancelled") or metadata.get("cancelled"))
+
+
+def _should_cancelled(should_cancel: Any) -> bool:
+    if not callable(should_cancel):
+        return False
+    try:
+        return bool(should_cancel())
+    except Exception:
+        return False
+
+
 def _stage4_runtime_signature(runtime: Any) -> dict[str, Any]:
     retrieval_service = getattr(runtime, "retrieval_service", None)
     answer_builder = getattr(runtime, "answer_builder", None)
@@ -251,7 +267,7 @@ class PatentGenerationOrchestrator:
         timings[key] = round((time.perf_counter() - started) * 1000, 3)
         return result
 
-    def _run_cached_stage(self, *, stage: str, fingerprint: str, compute):
+    def _run_cached_stage(self, *, stage: str, fingerprint: str, compute, should_cancel=None):
         cache = self._execution_cache
         if cache is None or not bool(getattr(cache, "available", True)):
             return compute()
@@ -374,7 +390,7 @@ class PatentGenerationOrchestrator:
                 renew_thread.join(timeout=0.05)
                 if renew_thread.is_alive() and not renew_error:
                     renew_error.append(f"singleflight renew completion pending for {stage}")
-            if not renew_error:
+            if not renew_error and not _payload_cancelled(result) and not _should_cancelled(should_cancel):
                 try:
                     cache.set_stage_cache(
                         stage=stage,
@@ -405,6 +421,7 @@ class PatentGenerationOrchestrator:
         trace_id: str = "",
         progress_callback=None,
         content_callback=None,
+        should_cancel=None,
     ) -> PatentQaExecutionResult:
         timings: dict[str, float] = {}
         normalized_trace_id = str(trace_id or "").strip()
@@ -453,6 +470,7 @@ class PatentGenerationOrchestrator:
                     stage="stage1",
                     fingerprint=stage1_fingerprint,
                     compute=lambda: runtime.stage1_pre_answer_and_planning(question, conversation_context=conversation_context),
+                    should_cancel=should_cancel,
                 ),
             )
             retrieval_plan = _as_retrieval_plan(dict(stage1_result or {}).get("retrieval_plan"))
@@ -530,11 +548,12 @@ class PatentGenerationOrchestrator:
                 lambda: self._run_cached_stage(
                     stage="stage2",
                     fingerprint=stage2_fingerprint,
+                    should_cancel=should_cancel,
                     compute=lambda: (
                         runtime.stage2_targeted_retrieval(
                             retrieval_claims,
                             user_question=question,
-                            should_cancel=None,
+                            should_cancel=should_cancel,
                             active_stream_count=None,
                             conversation_context=conversation_context,
                         )
@@ -542,7 +561,7 @@ class PatentGenerationOrchestrator:
                         else runtime.stage2_targeted_retrieval(
                             retrieval_claims,
                             user_question=question,
-                            should_cancel=None,
+                            should_cancel=should_cancel,
                             active_stream_count=None,
                         )
                     ),
@@ -591,6 +610,7 @@ class PatentGenerationOrchestrator:
                         user_question=question,
                         source_ids=source_ids,
                     ),
+                    should_cancel=should_cancel,
                 ),
             )
             stage25_payload = dict(stage25_result or {})
@@ -624,10 +644,11 @@ class PatentGenerationOrchestrator:
                 lambda: self._run_cached_stage(
                     stage="stage3",
                     fingerprint=stage3_fingerprint,
+                    should_cancel=should_cancel,
                     compute=lambda: runtime.stage3_load_patent_evidence(
                         retrieval_results=stage3_input,
                         source_ids=stage_source_ids,
-                        should_cancel=None,
+                        should_cancel=should_cancel,
                     ),
                 ),
             )
@@ -662,7 +683,7 @@ class PatentGenerationOrchestrator:
                 "deep_answer": deep_answer,
                 "patent_evidence_bundle": stage3_result,
                 "retrieval_results": stage3_input,
-                "should_cancel": None,
+                "should_cancel": should_cancel,
                 "conversation_context": conversation_context,
             }
             if callable(content_callback) and _callable_accepts_keyword(stage4_fn, "content_callback"):
@@ -682,6 +703,7 @@ class PatentGenerationOrchestrator:
                     stage="stage4",
                     fingerprint=stage4_fingerprint,
                     compute=lambda: stage4_fn(**stage4_kwargs),
+                    should_cancel=should_cancel,
                 ),
             )
             final_payload = dict(stage4_result or {})

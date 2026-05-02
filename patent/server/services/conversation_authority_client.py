@@ -158,6 +158,7 @@ class ConversationAuthorityClient:
         original_links: list[dict[str, Any]] | None = None,
         used_files: list[dict[str, Any]] | None = None,
         timings: dict[str, Any] | None = None,
+        runtime_owner_token: str | None = None,
     ) -> dict[str, Any]:
         self._ensure_durable_authority_enabled()
         payload = AuthorityAssistantAsyncRequest(
@@ -169,6 +170,7 @@ class ConversationAuthorityClient:
             requested_mode=str(requested_mode),
             actual_mode=str(actual_mode),
             idempotency_key=self._idempotency_key(conversation_id=conversation_id, trace_id=trace_id, operation="assistant"),
+            runtime_owner_token=str(runtime_owner_token or "").strip() or None,
             final_event={
                 "done_seen": True,
                 "answer_text": str(answer_text),
@@ -211,6 +213,7 @@ class ConversationAuthorityClient:
         used_files: list[dict[str, Any]] | None = None,
         timings: dict[str, Any] | None = None,
         failure: dict[str, Any] | None = None,
+        runtime_owner_token: str | None = None,
     ) -> dict[str, Any]:
         self._ensure_durable_authority_enabled()
         payload = AuthorityAssistantTerminalAsyncRequest(
@@ -222,6 +225,7 @@ class ConversationAuthorityClient:
             requested_mode=str(requested_mode),
             actual_mode=str(actual_mode),
             idempotency_key=self._idempotency_key(conversation_id=conversation_id, trace_id=trace_id, operation="assistant"),
+            runtime_owner_token=str(runtime_owner_token or "").strip() or None,
             terminal_event={
                 "terminal_status": str(terminal_status),
                 "done_seen": str(terminal_status).strip().lower() == "done",

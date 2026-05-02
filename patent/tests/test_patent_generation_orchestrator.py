@@ -672,6 +672,137 @@ def test_orchestrator_continues_passing_none_for_should_cancel():
     assert captured["stage3_should_cancel"] is None
 
 
+def test_orchestrator_passes_should_cancel_to_cancellable_stages():
+    captured: dict[str, object] = {}
+
+    class _CancelCaptureRuntime(_FakeRuntime):
+        def stage2_targeted_retrieval(self, retrieval_plan: PatentRetrievalPlan, *, user_question: str, should_cancel=None, active_stream_count=None) -> dict[str, object]:
+            captured["stage2_should_cancel"] = should_cancel
+            return super().stage2_targeted_retrieval(
+                retrieval_plan,
+                user_question=user_question,
+                should_cancel=should_cancel,
+                active_stream_count=active_stream_count,
+            )
+
+        def stage3_load_patent_evidence(self, *, retrieval_results: dict[str, object], source_ids: list[str], should_cancel=None) -> dict[str, object]:
+            captured["stage3_should_cancel"] = should_cancel
+            return super().stage3_load_patent_evidence(
+                retrieval_results=retrieval_results,
+                source_ids=source_ids,
+                should_cancel=should_cancel,
+            )
+
+        def stage4_synthesis_with_patent_evidence(
+            self,
+            *,
+            user_question: str,
+            deep_answer: str,
+            patent_evidence_bundle: dict[str, object],
+            retrieval_results: dict[str, object] | None = None,
+            should_cancel=None,
+            conversation_context=None,
+        ) -> dict[str, object]:
+            captured["stage4_should_cancel"] = should_cancel
+            return super().stage4_synthesis_with_patent_evidence(
+                user_question=user_question,
+                deep_answer=deep_answer,
+                patent_evidence_bundle=patent_evidence_bundle,
+                retrieval_results=retrieval_results,
+                should_cancel=should_cancel,
+                conversation_context=conversation_context,
+            )
+
+    should_cancel = lambda: False
+
+    PatentGenerationOrchestrator().run(
+        question="How should we compare replacement risk?",
+        runtime=_CancelCaptureRuntime(),
+        conversation_context={"recent_turns_for_llm": [{"role": "user", "content": "Earlier context"}]},
+        should_cancel=should_cancel,
+    )
+
+    assert captured["stage2_should_cancel"] is should_cancel
+    assert captured["stage3_should_cancel"] is should_cancel
+    assert captured["stage4_should_cancel"] is should_cancel
+
+
+def test_orchestrator_does_not_cache_cancelled_stage_payloads():
+    class _CacheRecorder:
+        def __init__(self) -> None:
+            self.cached_stages: list[str] = []
+
+        def get_stage_cache(self, *, stage: str, fingerprint: str):
+            return None
+
+        def set_stage_cache(self, *, stage: str, fingerprint: str, payload, ttl_seconds: int):
+            self.cached_stages.append(stage)
+            return True
+
+        def claim_stage_singleflight(self, *, stage: str, fingerprint: str, ttl_seconds: int):
+            return f"token-{stage}"
+
+        def clear_stage_singleflight(self, *, stage: str, fingerprint: str, token: str):
+            return True
+
+    class _CancelledStage2Runtime(_FakeRuntime):
+        def stage2_targeted_retrieval(self, retrieval_plan: PatentRetrievalPlan, *, user_question: str, should_cancel=None, active_stream_count=None) -> dict[str, object]:
+            del retrieval_plan, user_question, should_cancel, active_stream_count
+            self.calls.append("stage2")
+            return {
+                "references": [],
+                "reference_objects": [],
+                "metadata": {"cancelled": True},
+            }
+
+    cache = _CacheRecorder()
+
+    result = PatentGenerationOrchestrator(execution_cache=cache).run(
+        question="How should we compare replacement risk?",
+        runtime=_CancelledStage2Runtime(),
+        conversation_context={"recent_turns_for_llm": [{"role": "user", "content": "Earlier context"}]},
+    )
+
+    assert result.metadata.stage_timings_ms["stage2"] >= 0
+    assert "stage2" not in cache.cached_stages
+
+
+def test_orchestrator_does_not_cache_stage_payload_when_cancel_flips_after_return():
+    class _CacheRecorder:
+        def __init__(self) -> None:
+            self.cached_stages: list[str] = []
+
+        def get_stage_cache(self, *, stage: str, fingerprint: str):
+            return None
+
+        def set_stage_cache(self, *, stage: str, fingerprint: str, payload, ttl_seconds: int):
+            self.cached_stages.append(stage)
+            return True
+
+        def claim_stage_singleflight(self, *, stage: str, fingerprint: str, ttl_seconds: int):
+            return f"token-{stage}"
+
+        def clear_stage_singleflight(self, *, stage: str, fingerprint: str, token: str):
+            return True
+
+    cache = _CacheRecorder()
+    cancel_checks = {"count": 0}
+
+    def _should_cancel() -> bool:
+        cancel_checks["count"] += 1
+        return cancel_checks["count"] >= 1
+
+    result = PatentGenerationOrchestrator(execution_cache=cache).run(
+        question="How should we compare replacement risk?",
+        runtime=_FakeRuntime(),
+        conversation_context={"recent_turns_for_llm": [{"role": "user", "content": "Earlier context"}]},
+        should_cancel=_should_cancel,
+    )
+
+    assert result.success is True
+    assert cache.cached_stages == []
+
+
 def test_orchestrator_waits_for_existing_singleflight_owner_to_fill_stage_cache():
     class _WaitingCache:
         def __init__(self) -> None:

@@ -29,6 +29,14 @@ def _epoch_ms() -> int:
     return max(0, int(time.time() * 1000))
 
 
+_CANCELLED_WORKER_JOIN_TIMEOUT_SECONDS = 0.2
+_CANCEL_QUEUE_POLL_SECONDS = 0.05
+
+
+class _PatentStreamCancelled(Exception):
+    pass
+
+
 def _attach_event_telemetry(event: dict[str, Any], telemetry: dict[str, Any]) -> dict[str, Any]:
     payload = dict(event or {})
     metadata = dict(payload.get("metadata") or {})
@@ -172,7 +180,13 @@ class AskService:
         finally:
             clear_trace_id(trace_token)
 
-    def stream_ask(self, request: PatentAskRequest, *, user_id: int | None) -> Iterator[dict[str, Any]]:
+    def stream_ask(
+        self,
+        request: PatentAskRequest,
+        *,
+        user_id: int | None,
+        cancel_event: threading.Event | None = None,
+    ) -> Iterator[dict[str, Any]]:
         trace_token = set_trace_id(str(request.trace_id))
         prepared: dict[str, Any] = {}
         trace_id = str(request.trace_id)
@@ -180,6 +194,8 @@ class AskService:
         telemetry: dict[str, int] = {}
         prepare_queue: queue.Queue[tuple[str, Any]] | None = None
         prepare_cancelled: threading.Event | None = None
+        execution_cancelled = threading.Event()
+        worker: threading.Thread | None = None
         stream_completed = False
         terminal_persisted = False
         turn_aborted = False
@@ -198,6 +214,15 @@ class AskService:
                 return
             self._abort_turn(prepared)
             turn_aborted = True
+
+        def _should_cancel_execution() -> bool:
+            return execution_cancelled.is_set() or (cancel_event is not None and cancel_event.is_set())
+
+        def _raise_if_cancelled() -> None:
+            if _should_cancel_execution():
+                if prepare_cancelled is not None:
+                    prepare_cancelled.set()
+                raise _PatentStreamCancelled("stream cancelled")
 
         try:
             if request.is_gateway_owned_persistence and request.is_durable:
@@ -242,11 +267,18 @@ class AskService:
                 _mark_telemetry_once("first_step_at_ms")
                 yield self._result_builder.build_step_event(seq=seq, step=_build_gateway_prestream_step())
                 seq += 1
-                prepare_result_type, prepare_payload = prepare_queue.get()
+                while True:
+                    _raise_if_cancelled()
+                    try:
+                        prepare_result_type, prepare_payload = prepare_queue.get(timeout=_CANCEL_QUEUE_POLL_SECONDS)
+                        break
+                    except queue.Empty:
+                        continue
                 if prepare_result_type == "exception":
                     raise prepare_payload
                 prepared = dict(prepare_payload or {})
                 trace_id = str(prepared.get("trace_id") or trace_id)
+                _raise_if_cancelled()
             preflight_steps = _build_context_ready_steps(
                 request=request,
                 raw_context=dict(prepared.get("context") or {}),
@@ -328,6 +360,7 @@ class AskService:
                             context=dict(prepared.get("context") or {}),
                             progress_callback=_progress_callback,
                             content_callback=_content_callback,
+                            should_cancel=_should_cancel_execution,
                         ),
                     )
                 except Exception as exc:  # pragma: no cover - exercised through stream error assertions
@@ -346,7 +379,12 @@ class AskService:
 
             execution_result: dict[str, Any] | None = None
             while execution_result is None:
-                event_type, payload = progress_queue.get()
+                _raise_if_cancelled()
+                try:
+                    event_type, payload = progress_queue.get(timeout=_CANCEL_QUEUE_POLL_SECONDS)
+                except queue.Empty:
+                    continue
+                _raise_if_cancelled()
                 if event_type == "progress":
                     _mark_telemetry_once("first_step_at_ms")
                     yield self._result_builder.build_step_event(seq=seq, step=dict(payload or {}))
@@ -385,6 +423,7 @@ class AskService:
                         execution_result=dict(payload or {}),
                         preflight_steps=preflight_steps,
                     )
+                    _raise_if_cancelled()
                     break
 
             if streamed_step_count == 0:
@@ -404,6 +443,7 @@ class AskService:
             else:
                 answer_text = str(execution_result.get("answer_text") or "")
                 if answer_text and streamed_content_count == 0:
+                    _raise_if_cancelled()
                     _mark_telemetry_once("first_content_at_ms")
                     yield self._build_single_answer_content_event(
                         request=request,
@@ -412,6 +452,7 @@ class AskService:
                     )
                     seq += 1
 
+            _raise_if_cancelled()
             turn_result = self._finalize_turn(
                 request=request,
                 prepared_turn=prepared,
@@ -419,6 +460,7 @@ class AskService:
             )
             trace_id = str(turn_result.get("trace_id") or trace_id)
             self._ensure_done_allowed(turn_result)
+            _raise_if_cancelled()
             stream_completed = True
             yield _attach_event_telemetry(
                 self._result_builder.build_done_event(
@@ -429,6 +471,11 @@ class AskService:
                 ),
                 telemetry,
             )
+        except _PatentStreamCancelled as exc:
+            terminal_persisted = True
+            self._persist_terminal_cancellation(request=request, prepared_turn=prepared)
+            _abort_turn_once()
+            yield self._build_error_event(trace_id=trace_id, seq=seq, exc=exc)
         except Exception as exc:
             self._logger.exception("stream_ask failed trace_id=%s error=%s", trace_id, exc)
             self._persist_terminal_failure(request=request, prepared_turn=prepared, exc=exc)
@@ -437,8 +484,28 @@ class AskService:
             yield self._build_error_event(trace_id=trace_id, seq=seq, exc=exc)
         finally:
             if not stream_completed:
+                execution_cancelled.set()
+                if worker is not None and worker.is_alive():
+                    worker.join(timeout=_CANCELLED_WORKER_JOIN_TIMEOUT_SECONDS)
+                    if worker.is_alive():
+                        self._logger.warning(
+                            "patent stream worker still running after cancellation trace_id=%s worker=%s",
+                            trace_id,
+                            worker.name,
+                        )
                 if prepare_cancelled is not None:
                     prepare_cancelled.set()
+                if prepare_queue is not None and not prepared:
+                    drain_deadline = time.monotonic() + _CANCELLED_WORKER_JOIN_TIMEOUT_SECONDS
+                    while time.monotonic() < drain_deadline:
+                        try:
+                            prepare_result_type, prepare_payload = prepare_queue.get_nowait()
+                        except queue.Empty:
+                            time.sleep(_CANCEL_QUEUE_POLL_SECONDS)
+                            continue
+                        if prepare_result_type == "prepared":
+                            prepared = dict(prepare_payload or {})
+                        break
                 if not terminal_persisted:
                     self._persist_terminal_cancellation(request=request, prepared_turn=prepared)
                 _abort_turn_once()
@@ -722,6 +789,7 @@ class AskService:
         context: dict[str, Any],
         progress_callback: Any | None = None,
         content_callback: Any | None = None,
+        should_cancel: Any | None = None,
     ) -> dict[str, Any]:
         execute_with_progress = getattr(self._patent_executor, "execute_with_progress", None)
         if callable(execute_with_progress):
@@ -731,6 +799,7 @@ class AskService:
                     context=context,
                     progress_callback=progress_callback,
                     content_callback=content_callback,
+                    should_cancel=should_cancel,
                 )
                 or {}
             )

@@ -192,6 +192,162 @@ def test_orchestrator_passes_conversation_context_to_stage1():
     }
 
 
+def test_orchestrator_passes_should_cancel_to_stage1():
+    runtime = _Runtime(
+        stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": []},
+        stage2_payload={"success": False, "error": "retrieval_failed"},
+        doi_payload=[],
+        stage25_payload={},
+        stage3_payload={},
+        stage4_payload=[],
+    )
+    captured: dict[str, object] = {}
+
+    class _Stage1:
+        def run(self, *, runtime, user_question, conversation_context=None, should_cancel=None):
+            captured["should_cancel"] = should_cancel
+            return {"success": True, "deep_answer": "deep", "retrieval_claims": []}
+
+    should_cancel = lambda: False
+    orchestrator = GenerationPipelineOrchestrator(stage1=_Stage1())
+
+    orchestrator.run(
+        question="hello",
+        runtime=runtime,
+        redis_service=None,
+        n_results_per_claim=5,
+        should_cancel=should_cancel,
+        active_stream_count=None,
+        logger=_logger(),
+    )
+
+    assert captured["should_cancel"] is should_cancel
+
+
+def test_orchestrator_does_not_cache_cancelled_stage1_result():
+    reset_cache_metrics()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    runtime = _Runtime(
+        stage1_payload={"success": False, "deep_answer": "", "retrieval_claims": [], "metadata": {"cancelled": True}},
+        stage2_payload={"success": False, "error": "retrieval_failed"},
+        doi_payload=[],
+        stage25_payload={},
+        stage3_payload={},
+        stage4_payload=[],
+    )
+    orchestrator = GenerationPipelineOrchestrator()
+
+    first = orchestrator.run(
+        question="hello",
+        runtime=runtime,
+        redis_service=redis_service,
+        n_results_per_claim=5,
+        should_cancel=lambda: True,
+        active_stream_count=None,
+        logger=_logger(),
+    )
+    second = orchestrator.run(
+        question="hello",
+        runtime=runtime,
+        redis_service=redis_service,
+        n_results_per_claim=5,
+        should_cancel=lambda: True,
+        active_stream_count=None,
+        logger=_logger(),
+    )
+
+    metrics = snapshot_cache_metrics()
+    assert first.success is False
+    assert second.success is False
+    assert metrics["stage1"].get("cache_hit", 0) == 0
+
+
+def test_orchestrator_does_not_cache_stage1_result_when_cancel_flips_after_return():
+    reset_cache_metrics()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    runtime = _Runtime(
+        stage1_payload={"success": False, "deep_answer": "", "retrieval_claims": [], "metadata": {}},
+        stage2_payload={"success": False, "error": "retrieval_failed"},
+        doi_payload=[],
+        stage25_payload={},
+        stage3_payload={},
+        stage4_payload=[],
+    )
+    orchestrator = GenerationPipelineOrchestrator()
+    cancel_checks = {"count": 0}
+
+    def _should_cancel() -> bool:
+        cancel_checks["count"] += 1
+        return cancel_checks["count"] >= 1
+
+    first = orchestrator.run(
+        question="hello",
+        runtime=runtime,
+        redis_service=redis_service,
+        n_results_per_claim=5,
+        should_cancel=_should_cancel,
+        active_stream_count=None,
+        logger=_logger(),
+    )
+    second = orchestrator.run(
+        question="hello",
+        runtime=runtime,
+        redis_service=redis_service,
+        n_results_per_claim=5,
+        should_cancel=_should_cancel,
+        active_stream_count=None,
+        logger=_logger(),
+    )
+
+    metrics = snapshot_cache_metrics()
+    assert first.success is False
+    assert second.success is False
+    assert metrics["stage1"].get("cache_hit", 0) == 0
+
+
+def test_orchestrator_does_not_cache_stage2_result_when_cancel_flips_after_return():
+    reset_cache_metrics()
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    runtime = _Runtime(
+        stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]},
+        stage2_payload={"success": False, "error": "retrieval_failed", "metadata": {}},
+        doi_payload=[],
+        stage25_payload={},
+        stage3_payload={},
+        stage4_payload=[],
+    )
+    orchestrator = GenerationPipelineOrchestrator()
+    cancel_checks = {"count": 0}
+
+    def _should_cancel() -> bool:
+        cancel_checks["count"] += 1
+        return cancel_checks["count"] >= 2
+
+    first = orchestrator.run(
+        question="hello",
+        runtime=runtime,
+        redis_service=redis_service,
+        n_results_per_claim=5,
+        should_cancel=_should_cancel,
+        active_stream_count=None,
+        logger=_logger(),
+    )
+    second = orchestrator.run(
+        question="hello",
+        runtime=runtime,
+        redis_service=redis_service,
+        n_results_per_claim=5,
+        should_cancel=_should_cancel,
+        active_stream_count=None,
+        logger=_logger(),
+    )
+
+    metrics = snapshot_cache_metrics()
+    assert first.success is True
+    assert second.success is True
+    assert metrics["stage2"].get("cache_hit", 0) == 0
+
+
 def test_orchestrator_stream_passes_conversation_context_to_stage4():
     runtime = _Runtime(
         stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]},

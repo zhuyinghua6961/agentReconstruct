@@ -40,6 +40,7 @@ _TERMINAL_SYNCABLE_STATUSES = {"completed", "failed", "canceled", "expired"}
 _TASK_EVENT_STREAM_POLL_SECONDS = 0.1
 _PROGRESS_FLUSH_MAX_PENDING_EVENTS = 5
 _PROGRESS_FLUSH_MAX_IDLE_SECONDS = 0.25
+_CANCEL_CLEANUP_TIMEOUT_SECONDS = 0.5
 _PATENT_STREAM_CAPABILITY_HEADER = b"x-patent-stream-capability"
 _PATENT_STREAM_CAPABILITY_OPTION = "patent_stream_capability"
 _PATENT_STREAM_CAPABILITY_PREVIEW_V1 = "preview_v1"
@@ -183,6 +184,24 @@ def _live_runtime_handle(entry: Any) -> Any:
     if isinstance(entry, dict):
         return entry.get("handle")
     return entry
+
+
+def _live_runtime_cancel_event(entry: Any) -> Any:
+    if isinstance(entry, dict):
+        return entry.get("cancel_event")
+    return None
+
+
+def _live_runtime_owner_loop(entry: Any) -> Any:
+    if isinstance(entry, dict):
+        return entry.get("owner_loop")
+    return None
+
+
+def _set_live_runtime_cancelled(entry: Any) -> None:
+    cancel_event = _live_runtime_cancel_event(entry)
+    if cancel_event is not None and hasattr(cancel_event, "set"):
+        cancel_event.set()
 
 
 def _live_runtime_flush_hook(entry: Any):
@@ -583,6 +602,7 @@ class QATaskService:
             self._assert_no_live_lease(task_id, record=cancelled)
             return self.build_task_summary(task_id, auth_context=auth_context)
         live_runtime = self._get_live_runtime(task_id)
+        _set_live_runtime_cancelled(live_runtime)
         await self._flush_live_progress(task_id, entry=live_runtime)
         terminal_snapshot = _live_runtime_terminal_snapshot(live_runtime)
         terminal_answer_text = str(terminal_snapshot.get("answer_text") or "")
@@ -994,9 +1014,16 @@ class QATaskService:
         handle = _live_runtime_handle(entry)
         if handle is None:
             return
+        owner_loop = _live_runtime_owner_loop(entry)
         try:
-            await handle.abort()
-        except Exception:
+            await self._run_live_cleanup(
+                entry=entry,
+                coroutine_factory=handle.abort,
+                label="abort",
+                task_id=task_id,
+                owner_loop=owner_loop,
+            )
+        except (asyncio.TimeoutError, Exception):
             logger.warning("gateway task live stream abort failed task_id=%s", task_id, exc_info=True)
 
     def _get_live_runtime(self, task_id: str) -> Any:
@@ -1012,10 +1039,36 @@ class QATaskService:
         flush_progress = _live_runtime_flush_hook(live_entry)
         if not callable(flush_progress):
             return
+        owner_loop = _live_runtime_owner_loop(live_entry)
         try:
-            await flush_progress(force=True)
-        except Exception:
+            await self._run_live_cleanup(
+                entry=live_entry,
+                coroutine_factory=lambda: flush_progress(force=True),
+                label="progress_flush",
+                task_id=task_id,
+                owner_loop=owner_loop,
+            )
+        except (asyncio.TimeoutError, Exception):
             logger.warning("gateway task live progress flush failed task_id=%s", task_id, exc_info=True)
+
+    async def _run_live_cleanup(self, *, entry: Any, coroutine_factory, label: str, task_id: str, owner_loop: Any = None) -> None:
+        owner = owner_loop if owner_loop is not None else _live_runtime_owner_loop(entry)
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        if owner is not None and owner is not current_loop and callable(getattr(owner, "is_running", None)) and owner.is_running():
+            future = asyncio.run_coroutine_threadsafe(coroutine_factory(), owner)
+            deadline = time.monotonic() + _CANCEL_CLEANUP_TIMEOUT_SECONDS
+            while not future.done() and time.monotonic() < deadline:
+                await asyncio.sleep(0.05)
+            if future.done():
+                future.result()
+            else:
+                future.cancel()
+                logger.warning("gateway task live %s timed out task_id=%s", label, task_id)
+            return
+        await asyncio.wait_for(coroutine_factory(), timeout=_CANCEL_CLEANUP_TIMEOUT_SECONDS)
 
     def _assert_task_create_admission(self, payload: AskRequest) -> None:
         decision = evaluate_task_create_admission(
@@ -1315,6 +1368,9 @@ class GatewayTaskExecutor:
         self.conversation_persistence_service = app.state.conversation_persistence_service
         self.quota_proxy_service = app.state.quota_proxy_service
 
+    class GatewayTaskCancelled(Exception):
+        pass
+
     def _new_progress_accumulator(self, *, persisted_last_seq: int = 0) -> dict[str, Any]:
         return {
             "status": "running",
@@ -1452,6 +1508,9 @@ class GatewayTaskExecutor:
         while True:
             runtime_lock = runtime["lock"]
             with runtime_lock:
+                cancel_event = runtime.get("cancel_event")
+                if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+                    return False
                 inflight_task = runtime.get("progress_flush_task")
                 if inflight_task is not None and not inflight_task.done():
                     wait_for = inflight_task
@@ -1495,10 +1554,17 @@ class GatewayTaskExecutor:
             if inflight_task is not None and not inflight_task.done():
                 if not force:
                     return False
-                await wait_for
+                if not await self._await_progress_flush_or_cancel(wait_for, cancel_event=cancel_event):
+                    return False
                 continue
-            await wait_for
-            return True
+            return await self._await_progress_flush_or_cancel(wait_for, cancel_event=cancel_event)
+
+    async def _await_progress_flush_or_cancel(self, wait_for: asyncio.Task, *, cancel_event: Any) -> bool:
+        while not wait_for.done():
+            if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+                return False
+            await asyncio.sleep(0.05)
+        return bool(await wait_for)
 
     def execute(self, request: dict[str, Any], lease: dict[str, Any], renew_lease=None):
         return anyio.run(self._execute_async, request or {}, lease or {}, renew_lease)
@@ -1527,6 +1593,53 @@ class GatewayTaskExecutor:
         if self.queue_store.put_request(updated, ttl_seconds=max(_RELAY_RETENTION_FLOOR_SECONDS, int(ttl_seconds))):
             request["telemetry"] = dict(updated.get("telemetry") or {})
         return dict(request.get("telemetry") or {})
+
+    async def _await_with_cancel(self, awaitable, *, cancel_event: threading.Event, request_id: str, label: str):
+        task = asyncio.create_task(awaitable)
+
+        def _cleanup_done(done_task: asyncio.Task) -> None:
+            if done_task.cancelled():
+                return
+            try:
+                result = done_task.result()
+            except BaseException:
+                return
+            abort = getattr(result, "abort", None)
+            if not callable(abort):
+                return
+            try:
+                asyncio.create_task(abort())
+            except RuntimeError:
+                logger.warning("gateway task cancelled %s cleanup could not schedule abort request_id=%s", label, request_id)
+
+        while not task.done():
+            if cancel_event.is_set():
+                task.add_done_callback(_cleanup_done)
+                task.cancel()
+                raise self.GatewayTaskCancelled(label)
+            await asyncio.sleep(0.05)
+        return await task
+
+    async def _next_chunk_with_cancel(self, iterator, *, handle: Any, cancel_event: threading.Event, request_id: str):
+        task = asyncio.create_task(anext(iterator))
+        while not task.done():
+            if cancel_event.is_set():
+                try:
+                    await asyncio.wait_for(handle.abort(), timeout=_CANCEL_CLEANUP_TIMEOUT_SECONDS)
+                except asyncio.TimeoutError:
+                    logger.warning("gateway task read abort timed out request_id=%s", request_id)
+                finally:
+                    task.cancel()
+                raise self.GatewayTaskCancelled("read")
+            await asyncio.sleep(0.05)
+        return await task
+
+    def _cancelled_execution_outcome(self, request_id: str) -> AdmissionExecutionOutcome:
+        return self._terminalized_execution_outcome(request_id) or AdmissionExecutionOutcome(
+            outcome="completed",
+            reason="task_cancelled",
+            terminal_status="cancelled",
+        )
 
     async def _execute_async(self, request: dict[str, Any], lease: dict[str, Any], renew_lease=None):
         request_id = str(request.get("request_id") or "").strip()
@@ -1564,14 +1677,51 @@ class GatewayTaskExecutor:
 
         target = self.backend_registry.get(str(request.get("actual_mode") or ""))
         path = f"/api/{str(request.get('actual_mode') or '').strip()}/ask_stream"
+        progress_accumulator = self._new_progress_accumulator(
+            persisted_last_seq=int(request.get("persisted_last_seq") or 0),
+        )
+        live_runtime = {
+            "handle": None,
+            "cancel_event": threading.Event(),
+            "owner_loop": asyncio.get_running_loop(),
+            "lock": threading.RLock(),
+            "request": request,
+            "internal_request": internal_request,
+            "progress_accumulator": progress_accumulator,
+            "progress_flush_task": None,
+            "answer_text": "",
+            "latest_steps": [],
+            "latest_observed_seq": 0,
+        }
+
+        async def _flush_live_progress(*, force: bool = False) -> bool:
+            return await self._flush_runtime_progress(live_runtime, force=force)
+
+        live_runtime["flush_progress"] = _flush_live_progress
+        self._register_live_handle(request_id, live_runtime)
+        cancel_event = live_runtime["cancel_event"]
+        terminalized = self._terminalized_execution_outcome(request_id)
+        if terminalized is not None:
+            cancel_event.set()
+            self._unregister_live_handle(request_id)
+            return terminalized
         try:
-            handle = await self.proxy_service.open_json_stream(
-                request=internal_request,
-                target=target,
-                path=path,
-                payload=self._upstream_payload(request),
+            handle = await self._await_with_cancel(
+                self.proxy_service.open_json_stream(
+                    request=internal_request,
+                    target=target,
+                    path=path,
+                    payload=self._upstream_payload(request),
+                ),
+                cancel_event=cancel_event,
+                request_id=request_id,
+                label="open",
             )
+        except self.GatewayTaskCancelled:
+            self._unregister_live_handle(request_id)
+            return self._cancelled_execution_outcome(request_id)
         except Exception as exc:
+            self._unregister_live_handle(request_id)
             await self._terminalize_failure(
                 request=request,
                 internal_request=internal_request,
@@ -1585,6 +1735,7 @@ class GatewayTaskExecutor:
             await handle.upstream.aclose()
             await handle.client.aclose()
             reason = body.decode("utf-8", errors="ignore") or "upstream_error"
+            self._unregister_live_handle(request_id)
             await self._terminalize_failure(
                 request=request,
                 internal_request=internal_request,
@@ -1602,27 +1753,7 @@ class GatewayTaskExecutor:
             status_code=handle.status_code,
             elapsed_ms=round((time.perf_counter() - execute_started) * 1000, 3),
         )
-
-        progress_accumulator = self._new_progress_accumulator(
-            persisted_last_seq=int(request.get("persisted_last_seq") or 0),
-        )
-        live_runtime = {
-            "handle": handle,
-            "lock": threading.RLock(),
-            "request": request,
-            "internal_request": internal_request,
-            "progress_accumulator": progress_accumulator,
-            "progress_flush_task": None,
-            "answer_text": "",
-            "latest_steps": [],
-            "latest_observed_seq": 0,
-        }
-
-        async def _flush_live_progress(*, force: bool = False) -> bool:
-            return await self._flush_runtime_progress(live_runtime, force=force)
-
-        live_runtime["flush_progress"] = _flush_live_progress
-        self._register_live_handle(request_id, live_runtime)
+        live_runtime["handle"] = handle
         idle_flush_stop = asyncio.Event()
 
         async def _idle_flush_loop() -> None:
@@ -1653,7 +1784,23 @@ class GatewayTaskExecutor:
         )
         await self._flush_runtime_progress(live_runtime, force=True)
         try:
-            async for chunk in handle.body_iter():
+            iterator = handle.body_iter().__aiter__()
+            while True:
+                try:
+                    chunk = await self._next_chunk_with_cancel(
+                        iterator,
+                        handle=handle,
+                        cancel_event=cancel_event,
+                        request_id=request_id,
+                    )
+                except StopAsyncIteration:
+                    break
+                except self.GatewayTaskCancelled:
+                    try:
+                        await asyncio.wait_for(handle.abort(), timeout=_CANCEL_CLEANUP_TIMEOUT_SECONDS)
+                    except asyncio.TimeoutError:
+                        logger.warning("gateway task cancelled stream abort timed out request_id=%s", request_id)
+                    return self._cancelled_execution_outcome(request_id)
                 terminalized = self._terminalized_execution_outcome(request_id)
                 if terminalized is not None:
                     return terminalized
@@ -1792,6 +1939,8 @@ class GatewayTaskExecutor:
                         terminalized = self._terminalized_execution_outcome(request_id)
                         if terminalized is not None:
                             return terminalized
+                        if cancel_event.is_set():
+                            return self._cancelled_execution_outcome(request_id)
                         answer_text = str(payload.get("final_answer") or "".join(content_parts)).strip()
                         self._runtime_observe_progress(
                             live_runtime,
@@ -1800,6 +1949,8 @@ class GatewayTaskExecutor:
                             steps=[step_map[key] for key in step_order],
                         )
                         await self._flush_runtime_progress(live_runtime, force=True)
+                        if cancel_event.is_set():
+                            return self._cancelled_execution_outcome(request_id)
                         try:
                             await self.conversation_persistence_service.terminal_task_assistant(
                                 request=internal_request,
@@ -1830,6 +1981,8 @@ class GatewayTaskExecutor:
                             )
                         request["persisted_last_seq"] = max(int(request.get("persisted_last_seq") or 0), int(latest_seq))
                         self._clear_progress_sync_pending(request_id, persisted_last_seq=latest_seq)
+                        if cancel_event.is_set():
+                            return self._cancelled_execution_outcome(request_id)
                         quota_result = await self._finalize_quota(
                             internal_request=internal_request,
                             grant_id=request.get("quota_grant_id"),

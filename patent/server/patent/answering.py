@@ -692,6 +692,7 @@ class PatentAnswerBuilder:
         question: str,
         retrieval_outcome: PatentRetrievalOutcome,
         context: dict[str, Any] | None = None,
+        should_cancel: Any | None = None,
     ) -> Iterator[str]:
         context = dict(context or {})
         allowed_patent_ids = _normalize_patent_id_list(
@@ -766,6 +767,9 @@ class PatentAnswerBuilder:
             allowed_patent_ids,
         )
         try:
+            if callable(should_cancel) and should_cancel():
+                _LOGGER.info("patent answer builder stream cancelled before request dispatch")
+                return
             request = None
             if hasattr(self._client, "build_request"):
                 request = self._client.build_request(
@@ -844,6 +848,14 @@ class PatentAnswerBuilder:
                     str(response.headers.get("content-type") or ""),
                 )
                 for line in response.iter_lines():
+                    if callable(should_cancel) and should_cancel():
+                        _LOGGER.info(
+                            "patent answer builder stream cancelled chunk_count=%s answer_chars=%s elapsed_ms=%.3f",
+                            chunk_count,
+                            answer_chars,
+                            (time.perf_counter() - stream_started) * 1000,
+                        )
+                        return
                     if line is None:
                         continue
                     line_text = line.decode("utf-8") if isinstance(line, bytes) else str(line)
@@ -889,6 +901,14 @@ class PatentAnswerBuilder:
                                 (time.perf_counter() - stream_started) * 1000,
                             )
                         yield fragment
+                        if callable(should_cancel) and should_cancel():
+                            _LOGGER.info(
+                                "patent answer builder stream cancelled chunk_count=%s answer_chars=%s elapsed_ms=%.3f",
+                                chunk_count,
+                                answer_chars,
+                                (time.perf_counter() - stream_started) * 1000,
+                            )
+                            return
             if streamed_any:
                 _LOGGER.info(
                     "patent answer builder stream completed chunk_count=%s answer_chars=%s elapsed_ms=%.3f",

@@ -578,7 +578,6 @@ class PatentRuntime:
         content_callback: Any | None = None,
         conversation_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        del should_cancel
         return run_stage4_synthesis_with_patent_evidence(
             user_question=user_question,
             deep_answer=deep_answer,
@@ -587,6 +586,7 @@ class PatentRuntime:
             answer_builder=self.answer_builder,
             content_callback=content_callback,
             conversation_context=conversation_context,
+            should_cancel=should_cancel,
         )
 
     def close(self) -> None:

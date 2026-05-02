@@ -93,6 +93,7 @@ class AuthorityAssistantFinalEvent(BaseModel):
 
 class AuthorityAssistantAsyncRequest(AuthorityRequestBase):
     idempotency_key: str = Field(min_length=1)
+    runtime_owner_token: str | None = None
     final_event: AuthorityAssistantFinalEvent
 
 
@@ -150,4 +151,5 @@ class AuthorityAssistantTerminalEvent(BaseModel):
 
 class AuthorityAssistantTerminalAsyncRequest(AuthorityRequestBase):
     idempotency_key: str = Field(min_length=1)
+    runtime_owner_token: str | None = None
     terminal_event: AuthorityAssistantTerminalEvent

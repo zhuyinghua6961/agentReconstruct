@@ -14,6 +14,7 @@ class Stage1Planner:
         user_question: str,
         conversation_context: dict[str, Any] | None = None,
         graph_evidence=None,
+        should_cancel=None,
     ) -> dict[str, Any]:
         stage1_fn = runtime.stage1_pre_answer_and_planning
         graph_context = getattr(graph_evidence, "stage1_context_block", "") if graph_evidence is not None else ""
@@ -29,6 +30,8 @@ class Stage1Planner:
                 kwargs["conversation_context"] = conversation_context
             if "graph_context" in parameters or supports_kwargs:
                 kwargs["graph_context"] = graph_context
+            if "should_cancel" in parameters or supports_kwargs:
+                kwargs["should_cancel"] = should_cancel
             if kwargs:
                 return stage1_fn(user_question, **kwargs)
         return stage1_fn(user_question)

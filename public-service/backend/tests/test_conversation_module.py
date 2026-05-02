@@ -1714,6 +1714,161 @@ def test_authority_assistant_async_accepts_patentqa_source_service():
         assert metadata["actual_mode"] == "patent"
 
 
+def test_patent_authority_assistant_async_rejects_stale_runtime_owner(monkeypatch):
+    monkeypatch.setenv("PATENT_ENV", "test")
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    fake_redis = _FakeRedis()
+    redis_service = RedisService.from_prefix(client=fake_redis, key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Stale Patent Owner")
+        conversation_id = int(created["data"]["conversation_id"])
+        fake_redis.set(f"patent:test:exec:turn:{conversation_id}:trace-stale", "owner-2")
+        fake_redis.set(f"patent:test:coord:inflight:{conversation_id}:trace-stale", "owner-2")
+
+        accepted = service.accept_authority_assistant_async(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-stale",
+            source_service="patentQA",
+            route="kb_qa",
+            requested_mode="patent",
+            actual_mode="patent",
+            idempotency_key=f"{conversation_id}:trace-stale:assistant",
+            runtime_owner_token="owner-1",
+            final_event={
+                "done_seen": True,
+                "answer_text": "Stale answer.",
+                "steps": [],
+                "references": [],
+                "used_files": [],
+                "timings": {},
+            },
+        )
+
+        assert accepted["success"] is False
+        assert accepted["code"] == "SERVICE_NOT_READY"
+        assert repo.assistant_tasks == {}
+
+
+def test_patent_runtime_owner_check_defaults_to_patent_dev_env_when_public_app_env_differs(monkeypatch):
+    monkeypatch.delenv("PATENT_ENV", raising=False)
+    monkeypatch.setenv("APP_ENV", "development")
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    fake_redis = _FakeRedis()
+    redis_service = RedisService.from_prefix(client=fake_redis, key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Patent Owner Env")
+        conversation_id = int(created["data"]["conversation_id"])
+        fake_redis.set(f"patent:dev:exec:turn:{conversation_id}:trace-dev-owner", "owner-1")
+        fake_redis.set(f"patent:dev:coord:inflight:{conversation_id}:trace-dev-owner", "owner-1")
+
+        accepted = service.accept_authority_assistant_async(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-dev-owner",
+            source_service="patentQA",
+            route="kb_qa",
+            requested_mode="patent",
+            actual_mode="patent",
+            idempotency_key=f"{conversation_id}:trace-dev-owner:assistant",
+            runtime_owner_token="owner-1",
+            final_event={
+                "done_seen": True,
+                "answer_text": "Owned answer.",
+                "steps": [],
+                "references": [],
+                "used_files": [],
+                "timings": {},
+            },
+        )
+
+        assert accepted["success"] is True
+        assert accepted["accepted"] is True
+
+
+def test_patent_authority_terminal_async_rejects_stale_runtime_owner(monkeypatch):
+    monkeypatch.setenv("PATENT_ENV", "test")
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+    fake_redis = _FakeRedis()
+    redis_service = RedisService.from_prefix(client=fake_redis, key_prefix="agentcode")
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=redis_service,
+        )
+
+        created = service.create_conversation(user_id=7, title="Stale Patent Terminal Owner")
+        conversation_id = int(created["data"]["conversation_id"])
+        fake_redis.set(f"patent:test:exec:turn:{conversation_id}:trace-terminal-stale", "owner-2")
+        fake_redis.set(f"patent:test:coord:inflight:{conversation_id}:trace-terminal-stale", "owner-2")
+
+        accepted = service.accept_authority_assistant_terminal_async(
+            user_id=7,
+            conversation_id=conversation_id,
+            trace_id="trace-terminal-stale",
+            source_service="patentQA",
+            route="kb_qa",
+            requested_mode="patent",
+            actual_mode="patent",
+            idempotency_key=f"{conversation_id}:trace-terminal-stale:assistant",
+            runtime_owner_token="owner-1",
+            terminal_event={
+                "terminal_status": "canceled",
+                "done_seen": False,
+                "answer_text": "",
+                "steps": [],
+                "references": [],
+                "used_files": [],
+                "timings": {},
+                "failure": {"message": "cancelled", "retriable": False},
+            },
+        )
+
+        assert accepted["success"] is False
+        assert accepted["code"] == "SERVICE_NOT_READY"
+        assert repo.assistant_tasks == {}
+
+
 def test_authority_context_snapshot_uses_last_assistant_state():
     repo = _MemoryConversationRepo()
     outbox = _OutboxRecorder()

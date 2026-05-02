@@ -62,6 +62,7 @@ class PatentKbService:
         conversation_context: dict[str, Any] | None = None,
         progress_callback: Any | None = None,
         content_callback: Any | None = None,
+        should_cancel: Any | None = None,
     ) -> dict[str, Any]:
         profile = get_patent_mode_profile(request.route)
         active_runtime = runtime if runtime is not None else self._runtime
@@ -104,6 +105,7 @@ class PatentKbService:
                 trace_id=request.trace_id,
                 progress_callback=progress_callback,
                 content_callback=content_callback,
+                should_cancel=should_cancel,
             )
             if not result.success:
                 raise _build_execution_failure_error(result)

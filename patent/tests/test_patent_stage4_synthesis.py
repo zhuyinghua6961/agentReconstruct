@@ -554,6 +554,90 @@ def test_stage4_streaming_respects_topk_whitelist_and_repairs_min_citations(monk
     assert "P3" not in streamed_text
 
 
+def test_stage4_synthesis_passes_should_cancel_to_streaming_answer_builder():
+    captured: dict[str, object] = {}
+
+    class _StreamingAnswerBuilder:
+        def __call__(self, **kwargs):
+            raise AssertionError("stream path should be preferred when available")
+
+        def stream(self, *, question, retrieval_outcome, context, should_cancel=None):
+            del question, retrieval_outcome, context
+            captured["should_cancel"] = should_cancel
+            yield "这是可取消流式输出 (patent_id=CN115132975B)。"
+
+    should_cancel = lambda: False
+
+    result = run_stage4_synthesis_with_patent_evidence(
+        user_question="如何评估该方案的替代窗口与风险？",
+        deep_answer="先比较安全性、倍率和量产一致性。",
+        patent_evidence_bundle=_sample_evidence_bundle(),
+        retrieval_results=_sample_retrieval_results(),
+        answer_builder=_StreamingAnswerBuilder(),
+        content_callback=lambda _chunk: None,
+        should_cancel=should_cancel,
+    )
+
+    assert result["success"] is True
+    assert captured["should_cancel"] is should_cancel
+
+
+def test_stage4_synthesis_does_not_fallback_to_sync_answer_after_stream_cancel():
+    class _StreamingAnswerBuilder:
+        def __call__(self, **kwargs):
+            raise AssertionError("sync answer builder should not run after stream cancellation")
+
+        def stream(self, *, question, retrieval_outcome, context, should_cancel=None):
+            del question, retrieval_outcome, context
+            if callable(should_cancel) and should_cancel():
+                return
+            yield "不应生成的内容"
+
+    result = run_stage4_synthesis_with_patent_evidence(
+        user_question="如何评估该方案的替代窗口与风险？",
+        deep_answer="先比较安全性、倍率和量产一致性。",
+        patent_evidence_bundle=_sample_evidence_bundle(),
+        retrieval_results=_sample_retrieval_results(),
+        answer_builder=_StreamingAnswerBuilder(),
+        content_callback=lambda _chunk: None,
+        should_cancel=lambda: True,
+    )
+
+    assert result["metadata"]["cancelled"] is True
+    assert result["metadata"]["citation_mode"] == "cancelled"
+    assert result["success"] is False
+
+
+def test_stage4_synthesis_marks_partial_stream_cancel_as_unsuccessful():
+    call_count = {"value": 0}
+
+    class _StreamingAnswerBuilder:
+        def __call__(self, **kwargs):
+            raise AssertionError("sync answer builder should not run after partial stream cancellation")
+
+        def stream(self, *, question, retrieval_outcome, context, should_cancel=None):
+            del question, retrieval_outcome, context
+            call_count["value"] += 1
+            yield "部分流式输出"
+            call_count["value"] += 1
+            if callable(should_cancel) and should_cancel():
+                return
+            yield "不应输出"
+
+    result = run_stage4_synthesis_with_patent_evidence(
+        user_question="如何评估该方案的替代窗口与风险？",
+        deep_answer="先比较安全性、倍率和量产一致性。",
+        patent_evidence_bundle=_sample_evidence_bundle(),
+        retrieval_results=_sample_retrieval_results(),
+        answer_builder=_StreamingAnswerBuilder(),
+        content_callback=lambda _chunk: None,
+        should_cancel=lambda: call_count["value"] >= 1,
+    )
+
+    assert result["metadata"]["cancelled"] is True
+    assert result["success"] is False
+
+
 def test_stage4_synthesis_forwards_streamed_chunks_and_sanitizes_final_answer():
     streamed_chunks: list[str] = []
 
@@ -1175,6 +1259,53 @@ def test_patent_answer_builder_stream_logs_prompt_and_evidence_chars(caplog):
     assert any("patent answer builder stream first payload received" in record.message and "elapsed_ms=" in record.message for record in caplog.records)
     assert any("patent answer builder stream first chunk" in record.message and "chunk_chars=" in record.message for record in caplog.records)
     assert any("patent answer builder stream completed" in record.message and "answer_chars=" in record.message for record in caplog.records)
+
+
+def test_patent_answer_builder_stream_stops_when_should_cancel_is_set(caplog):
+    line_count = {"value": 0}
+
+    class _StreamBody(httpx.SyncByteStream):
+        def __iter__(self):
+            for index in range(3):
+                line_count["value"] += 1
+                yield f'data: {{"choices":[{{"delta":{{"content":"chunk-{index}"}}}}]}}\n\n'.encode("utf-8")
+            yield b"data: [DONE]\n\n"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=_StreamBody())
+
+    builder = PatentAnswerBuilder(
+        api_key="test-key",
+        base_url="http://example.invalid",
+        model="test-model",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with caplog.at_level("INFO", logger="patent.answering"):
+        chunks = list(
+            builder.stream(
+                question="请总结 top1 证据",
+                retrieval_outcome=PatentRetrievalOutcome(
+                    retrieval_backend="vector_hybrid",
+                    retrieval_version="retrieval-v2",
+                    catalog_index_version="catalog-v2",
+                    references=["P1"],
+                    reference_objects=[],
+                    reference_links=[],
+                    original_links=[],
+                    evidences=[
+                        PatentEvidence(canonical_patent_id="P1", publication_number="P1", application_number=None, title="专利 P1", abstract_text="P1 abstract", matched_section_type="claim", matched_section_label="Claim 1", matched_snippet="P1 snippet"),
+                    ],
+                ),
+                context={"allowed_patent_ids": ["P1"]},
+                should_cancel=lambda: line_count["value"] >= 1,
+            )
+        )
+    builder.close()
+
+    assert chunks == []
+    assert line_count["value"] == 1
+    assert any("patent answer builder stream cancelled" in record.message for record in caplog.records)
 
 
 def test_patent_answer_builder_request_logs_prompt_and_evidence_chars(caplog):

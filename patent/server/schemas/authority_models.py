@@ -80,6 +80,7 @@ class AuthorityAssistantAsyncRequest(_StrictAuthorityModel):
     requested_mode: Literal["patent"] = "patent"
     actual_mode: Literal["patent"] = "patent"
     idempotency_key: str
+    runtime_owner_token: str | None = None
     final_event: AuthorityAssistantFinalEvent
 
 
@@ -115,4 +116,5 @@ class AuthorityAssistantTerminalAsyncRequest(_StrictAuthorityModel):
     requested_mode: Literal["patent"] = "patent"
     actual_mode: Literal["patent"] = "patent"
     idempotency_key: str
+    runtime_owner_token: str | None = None
     terminal_event: AuthorityAssistantTerminalEvent

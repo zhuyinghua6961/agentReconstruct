@@ -419,6 +419,49 @@ class ConversationService:
             self._redis_service = None
         return self._redis_service
 
+    @staticmethod
+    def _patent_runtime_key(*, scope: str, conversation_id: int, trace_id: str) -> str:
+        runtime_env = os.getenv("PATENT_ENV", "dev").strip() or "dev"
+        redis_key_prefix = os.getenv("PATENT_REDIS_KEY_PREFIX", "patent").strip() or "patent"
+        if scope == "turn":
+            return f"{redis_key_prefix}:{runtime_env}:exec:turn:{int(conversation_id)}:{str(trace_id or '').strip()}"
+        return f"{redis_key_prefix}:{runtime_env}:coord:{scope}:{int(conversation_id)}:{str(trace_id or '').strip()}"
+
+    def _verify_patent_runtime_owner(
+        self,
+        *,
+        source_service: str,
+        conversation_id: int,
+        trace_id: str,
+        runtime_owner_token: str | None,
+    ) -> dict[str, Any] | None:
+        owner = str(runtime_owner_token or "").strip()
+        if str(source_service or "").strip() != "patentQA" or not owner:
+            return None
+        redis_service = self._get_redis_service()
+        client = getattr(redis_service, "client", None)
+        if client is None:
+            return {"success": False, "error": "runtime_owner_unavailable", "code": "SERVICE_NOT_READY"}
+        keys = [
+            self._patent_runtime_key(scope="turn", conversation_id=conversation_id, trace_id=trace_id),
+            self._patent_runtime_key(scope="inflight", conversation_id=conversation_id, trace_id=trace_id),
+        ]
+        try:
+            values = [client.get(key) for key in keys]
+        except Exception as exc:
+            return {"success": False, "error": str(exc), "code": "SERVICE_NOT_READY"}
+        normalized: list[str] = []
+        for value in values:
+            if isinstance(value, bytes):
+                try:
+                    value = value.decode("utf-8")
+                except UnicodeDecodeError:
+                    value = ""
+            normalized.append(str(value or "").strip())
+        if normalized != [owner, owner]:
+            return {"success": False, "error": "runtime_owner_mismatch", "code": "SERVICE_NOT_READY"}
+        return None
+
     def _invalidate_list_cache(self, *, user_id: int) -> None:
         invalidate_conversation_list_cache(redis_service=self._get_redis_service(), user_id=user_id)
 
@@ -2450,6 +2493,7 @@ class ConversationService:
         actual_mode: str,
         idempotency_key: str,
         final_event: dict[str, Any],
+        runtime_owner_token: str | None = None,
     ) -> dict[str, Any]:
         idempotency_text = str(idempotency_key or "").strip()
         source_service_text = str(source_service or "").strip()
@@ -2460,6 +2504,14 @@ class ConversationService:
             return {"success": False, "error": "empty_answer_text", "code": "VALIDATION_ERROR"}
         if source_service_text not in {"fastQA", "highThinkingQA", "patentQA"}:
             return {"success": False, "error": "invalid_source_service", "code": "VALIDATION_ERROR"}
+        owner_error = self._verify_patent_runtime_owner(
+            source_service=source_service_text,
+            conversation_id=conversation_id,
+            trace_id=trace_id,
+            runtime_owner_token=runtime_owner_token,
+        )
+        if owner_error is not None:
+            return owner_error
         try:
             with self._json_store.conversation_lock(user_id=user_id, conversation_id=conversation_id):
                 row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id)
@@ -2532,6 +2584,7 @@ class ConversationService:
         actual_mode: str,
         idempotency_key: str,
         terminal_event: dict[str, Any],
+        runtime_owner_token: str | None = None,
     ) -> dict[str, Any]:
         idempotency_text = str(idempotency_key or "").strip()
         source_service_text = str(source_service or "").strip()
@@ -2539,6 +2592,14 @@ class ConversationService:
             return {"success": False, "error": "idempotency_key_required", "code": "VALIDATION_ERROR"}
         if source_service_text not in {"fastQA", "highThinkingQA", "patentQA"}:
             return {"success": False, "error": "invalid_source_service", "code": "VALIDATION_ERROR"}
+        owner_error = self._verify_patent_runtime_owner(
+            source_service=source_service_text,
+            conversation_id=conversation_id,
+            trace_id=trace_id,
+            runtime_owner_token=runtime_owner_token,
+        )
+        if owner_error is not None:
+            return owner_error
         try:
             with self._json_store.conversation_lock(user_id=user_id, conversation_id=conversation_id):
                 row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id)

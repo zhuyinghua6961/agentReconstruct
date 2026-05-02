@@ -82,6 +82,46 @@ def test_stage1_planning_parses_json_and_normalizes_claims():
     assert client.calls[0]["response_format"] == {"type": "json_object"}
 
 
+def test_stage1_planning_returns_cancelled_without_dispatching_llm_when_cancelled_first():
+    client = _FakeClient('{"deep_answer":"answer","retrieval_claims":[]}')
+
+    result = run_stage1_pre_answer_and_planning(
+        user_question="what is lfp?",
+        stage1_prompt="prompt",
+        vector_db_context="context",
+        client=client,
+        model="gpt-test",
+        logger=_Logger(),
+        should_cancel=lambda: True,
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["cancelled"] is True
+    assert client.calls == []
+
+
+def test_stage1_planning_marks_cancelled_after_llm_response():
+    client = _FakeClient('{"deep_answer":"answer","retrieval_claims":[{"claim":"c1"}]}')
+    calls = {"value": 0}
+
+    def _should_cancel() -> bool:
+        calls["value"] += 1
+        return calls["value"] >= 2
+
+    result = run_stage1_pre_answer_and_planning(
+        user_question="what is lfp?",
+        stage1_prompt="prompt",
+        vector_db_context="context",
+        client=client,
+        model="gpt-test",
+        logger=_Logger(),
+        should_cancel=_should_cancel,
+    )
+
+    assert result["success"] is False
+    assert result["metadata"]["cancelled"] is True
+
+
 def test_stage1_planning_falls_back_when_json_invalid():
     client = _FakeClient("not-json")
     result = run_stage1_pre_answer_and_planning(

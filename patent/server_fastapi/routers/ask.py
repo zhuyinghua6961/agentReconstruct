@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from functools import partial
+import inspect
 import json
 import logging
+import threading
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
@@ -259,13 +261,33 @@ def _acquire_stream_slot(request: Request):
     return lease
 
 
-async def _run_in_ask_executor(request: Request, fn, /, *args, **kwargs):
+async def _run_in_ask_executor(request: Request, fn, /, *args, abandon_on_cancel: bool = False, **kwargs):
     dispatcher = getattr(request.app.state, "runtime_dispatcher", None)
     limiter = getattr(dispatcher, "ask_limiter", None)
     return await anyio.to_thread.run_sync(
         partial(fn, *args, **kwargs),
         limiter=limiter,
+        abandon_on_cancel=abandon_on_cancel,
     )
+
+
+def _close_stream(stream: Iterator[dict[str, Any]] | None) -> None:
+    if stream is None:
+        return
+    close_stream = getattr(stream, "close", None)
+    if callable(close_stream):
+        close_stream()
+
+
+def _open_stream_ask(service: AskService, ask_request, *, user_id: int | None, cancel_event: threading.Event):
+    stream_ask = getattr(service, "stream_ask")
+    try:
+        signature = inspect.signature(stream_ask)
+    except (TypeError, ValueError):
+        return stream_ask(ask_request, user_id=user_id)
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()) or "cancel_event" in signature.parameters:
+        return stream_ask(ask_request, user_id=user_id, cancel_event=cancel_event)
+    return stream_ask(ask_request, user_id=user_id)
 
 
 
@@ -277,10 +299,24 @@ def _build_streaming_response(*, request: Request, ask_request, user_id: int | N
     async def _generate() -> Iterator[str]:
         seq = 0
         current_trace_id = trace_id or get_trace_id()
+        stream: Iterator[dict[str, Any]] | None = None
+        stream_cancel_event = threading.Event()
         try:
-            stream = await _run_in_ask_executor(request, service.stream_ask, ask_request, user_id=user_id)
+            stream = await _run_in_ask_executor(
+                request,
+                _open_stream_ask,
+                service,
+                ask_request,
+                user_id=user_id,
+                cancel_event=stream_cancel_event,
+            )
             while True:
-                payload = await _run_in_ask_executor(request, _next_stream_payload, stream)
+                payload = await _run_in_ask_executor(
+                    request,
+                    _next_stream_payload,
+                    stream,
+                    abandon_on_cancel=True,
+                )
                 if payload is None:
                     break
                 seq = int(payload.get("seq", seq))
@@ -293,6 +329,11 @@ def _build_streaming_response(*, request: Request, ask_request, user_id: int | N
         except Exception as exc:
             yield _to_sse_line(_error_event(trace_id=current_trace_id, seq=seq, exc=exc))
         finally:
+            stream_cancel_event.set()
+            try:
+                _close_stream(stream)
+            except Exception:
+                logger.warning("patent ask_stream close failed trace_id=%s", current_trace_id, exc_info=True)
             if lease is not None:
                 lease.release()
 

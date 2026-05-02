@@ -160,10 +160,13 @@ def pre_answer_all(
     if loop and loop.is_running():
         # 已在异步上下文中，创建新的事件循环线程
         import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as executor:
+        executor = concurrent.futures.ThreadPoolExecutor()
+        try:
             future = executor.submit(
                 asyncio.run, pre_answer_all_async(sub_questions, async_client=async_client)
             )
             return future.result()
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
     else:
         return asyncio.run(pre_answer_all_async(sub_questions, async_client=async_client))

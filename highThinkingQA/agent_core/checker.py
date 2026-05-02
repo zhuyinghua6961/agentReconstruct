@@ -406,28 +406,31 @@ def check_answer(
     issue_lists: list[list[dict]] = []
     slice_prompt_chars: list[int] = []
     max_workers = max(1, min(_CHECKER_MAX_PARALLEL_SLICES, len(slice_jobs)))
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [
-                executor.submit(
-                    _run_checker_slice,
-                    question=question,
-                    answer_block=str(job["answer_block"]),
-                    filtered_chunks=list(job["filtered_chunks"]),
-                    client=client,
-                )
-                for job in slice_jobs
-            ]
-            for future in futures:
-                try:
-                    passed, issues, meta = future.result()
-                except Exception as exc:
-                    if _is_timeout_error(exc):
-                        raise CheckerTimeoutError("checker llm request timed out") from exc
-                    raise
-                issue_lists.append(issues if not passed else [])
-                slice_prompt_chars.append(int(meta.get("prompt_chars") or 0))
+        futures = [
+            executor.submit(
+                _run_checker_slice,
+                question=question,
+                answer_block=str(job["answer_block"]),
+                filtered_chunks=list(job["filtered_chunks"]),
+                client=client,
+            )
+            for job in slice_jobs
+        ]
+        for future in futures:
+            try:
+                passed, issues, meta = future.result()
+            except Exception as exc:
+                if _is_timeout_error(exc):
+                    for pending in futures:
+                        pending.cancel()
+                    raise CheckerTimeoutError("checker llm request timed out") from exc
+                raise
+            issue_lists.append(issues if not passed else [])
+            slice_prompt_chars.append(int(meta.get("prompt_chars") or 0))
     finally:
+        executor.shutdown(wait=False, cancel_futures=True)
         logger.info("Checker llm elapsed=%.3fs", time.time() - llm_started_at)
 
     merged_issues = _merge_checker_issues(issue_lists)

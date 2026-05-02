@@ -337,6 +337,7 @@ def accept_assistant_event(
         actual_mode=payload.actual_mode,
         idempotency_key=payload.idempotency_key,
         final_event=payload.final_event.model_dump(),
+        runtime_owner_token=payload.runtime_owner_token,
     )
     _raise_service_error(result=result, ok_status=202)
     return JSONResponse(
@@ -381,6 +382,7 @@ def accept_assistant_terminal_event(
         actual_mode=payload.actual_mode,
         idempotency_key=payload.idempotency_key,
         terminal_event=payload.terminal_event.model_dump(exclude_none=True),
+        runtime_owner_token=payload.runtime_owner_token,
     )
     _raise_service_error(result=result, ok_status=202)
     return JSONResponse(

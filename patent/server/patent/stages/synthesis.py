@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import inspect
 from dataclasses import asdict
 from typing import Any, Callable
 
@@ -34,6 +35,16 @@ _BACKTICK_RENDERED_PATENT_CITATION_RE = re.compile(
     r"`[\(（][^`\n]*[A-Z]{2}\d{6,14}[A-Z]\d?[^`\n]*[\)）]`",
     re.IGNORECASE,
 )
+
+
+def _call_with_supported_kwargs(fn: Callable[..., Any], /, **kwargs: Any) -> Any:
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return fn(**kwargs)
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()):
+        return fn(**kwargs)
+    return fn(**{key: value for key, value in kwargs.items() if key in signature.parameters})
 
 
 def _truncate_log_excerpt(value: Any, *, limit: int = 220) -> str:
@@ -428,6 +439,7 @@ def run_stage4_synthesis_with_patent_evidence(
     answer_builder: Callable[..., str] | None = None,
     content_callback: Callable[[str], None] | None = None,
     conversation_context: dict[str, Any] | None = None,
+    should_cancel: Any | None = None,
 ) -> dict[str, Any]:
     retrieval_outcome = _retrieval_outcome_from_bundle(
         patent_evidence_bundle=patent_evidence_bundle,
@@ -482,6 +494,7 @@ def run_stage4_synthesis_with_patent_evidence(
         )
     if callable(answer_builder):
         raw_answer = ""
+        cancelled = False
         stream_builder = getattr(answer_builder, "stream", None)
         if callable(stream_builder):
             streamed_chunks: list[str] = []
@@ -490,14 +503,21 @@ def run_stage4_synthesis_with_patent_evidence(
             suspicious_visible_delta_samples: list[dict[str, Any]] = []
             suspicious_chunk_count = 0
             suspicious_visible_delta_count = 0
+            if callable(should_cancel) and should_cancel():
+                cancelled = True
             for chunk_index, chunk in enumerate(
-                stream_builder(
+                _call_with_supported_kwargs(
+                    stream_builder,
                     question=user_question,
                     retrieval_outcome=retrieval_outcome,
                     context=synthesis_context,
+                    should_cancel=should_cancel,
                 ),
                 start=1,
             ):
+                if callable(should_cancel) and should_cancel():
+                    cancelled = True
+                    break
                 text = str(chunk or "")
                 if not text:
                     continue
@@ -560,7 +580,9 @@ def run_stage4_synthesis_with_patent_evidence(
             raw_answer = "".join(streamed_chunks).strip()
             if raw_answer:
                 citation_mode = "answer_builder_stream"
-        if not raw_answer:
+            if not raw_answer and callable(should_cancel) and should_cancel():
+                cancelled = True
+        if not raw_answer and not cancelled:
             raw_answer = str(
                 answer_builder(
                     question=user_question,
@@ -570,6 +592,9 @@ def run_stage4_synthesis_with_patent_evidence(
                 or ""
             ).strip()
             citation_mode = "answer_builder"
+        if cancelled and not raw_answer:
+            raw_answer = str(deep_answer or "").strip()
+            citation_mode = "cancelled"
     else:
         raw_answer = build_fallback_patent_answer(
             question=user_question,
@@ -603,7 +628,9 @@ def run_stage4_synthesis_with_patent_evidence(
             "raw_answer_patent_publication_count": raw_answer_diagnostics.get("patent_publication_count"),
         },
     )
-    if stage4_allowed_patent_ids and len(cited_patent_ids) < stage4_min_citations_required and final_answer:
+    if citation_mode == "cancelled":
+        pass
+    elif stage4_allowed_patent_ids and len(cited_patent_ids) < stage4_min_citations_required and final_answer:
         repaired_candidate = _programmatic_repair_patent_citations(
             answer_text=final_answer,
             retrieval_outcome=retrieval_outcome,
@@ -642,6 +669,7 @@ def run_stage4_synthesis_with_patent_evidence(
         },
     )
     metadata = dict(dict(retrieval_results or {}).get("metadata") or {})
+    was_cancelled = citation_mode == "cancelled" or (callable(should_cancel) and should_cancel())
     metadata.update(
         {
             "source_ids": _normalize_source_ids(patent_evidence_bundle),
@@ -651,6 +679,7 @@ def run_stage4_synthesis_with_patent_evidence(
             "invalid_cited_patent_ids": list(invalid_cited_patent_ids),
             "citation_format": "(公开号)",
             "citation_mode": citation_mode,
+            "cancelled": was_cancelled,
             "stage4_reference_topk": stage4_reference_topk,
             "stage4_min_citations_configured": stage4_min_citations_configured,
             "stage4_min_citations_required": stage4_min_citations_required,
@@ -673,7 +702,7 @@ def run_stage4_synthesis_with_patent_evidence(
         }
     )
     result = PatentSynthesisResult(
-        success=bool(final_answer),
+        success=bool(final_answer) and not was_cancelled,
         final_answer=final_answer,
         references=list(retrieval_outcome.references),
         reference_objects=list(retrieval_outcome.reference_objects),

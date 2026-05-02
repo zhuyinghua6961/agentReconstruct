@@ -692,19 +692,20 @@ async def _collect_streaming_body(response) -> str:
 
 
 class _DisconnectingRequest:
-    def __init__(self, app):
+    def __init__(self, app, *, headers: dict[str, str] | None = None, disconnect_after_checks: int = 1):
         self.app = app
-        self.headers = {
+        self.headers = headers if headers is not None else {
             "X-Gateway-Task-Execution": "1",
             "X-Gateway-Owned-Persistence": "1",
             "X-Internal-Service-Name": "gateway",
             "X-Internal-Service-Token": str(os.getenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN") or ""),
         }
         self._checks = 0
+        self._disconnect_after_checks = disconnect_after_checks
 
     async def is_disconnected(self) -> bool:
         self._checks += 1
-        return self._checks > 1
+        return self._checks > self._disconnect_after_checks
 
 
 def test_gateway_owned_sync_disconnect_passes_cancel_event_to_execute_ask(monkeypatch):
@@ -758,7 +759,6 @@ def test_gateway_owned_stream_disconnect_passes_cancel_event_to_executor(monkeyp
 
     def fake_stream_ask_events(**kwargs):
         captured["cancel_event"] = kwargs.get("cancel_event")
-        yield {"type": "metadata", "query_mode": "thinking", "trace_id": kwargs["trace_id"]}
         cancel_event = kwargs.get("cancel_event")
         assert isinstance(cancel_event, threading.Event)
         deadline = time.time() + 0.5

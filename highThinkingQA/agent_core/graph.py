@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 _PARTIAL_RETRIEVAL_FLUSH_WAIT_SECONDS = 0.8
 _CHECKER_WALL_CLOCK_TIMEOUT_SECONDS = 60.0
 _REVISER_WALL_CLOCK_TIMEOUT_SECONDS = 60.0
+_CANCEL_WAIT_INTERVAL_SECONDS = 0.05
 
 
 def _trace_prefix(trace_id: str | None) -> str:
@@ -56,17 +57,49 @@ def _call_with_wall_clock_timeout(
     func: Callable[..., Any],
     timeout_seconds: float,
     timeout_error: Exception,
+    cancel_event: threading.Event | None = None,
+    cancel_error: Exception | None = None,
     **kwargs: Any,
 ) -> Any:
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     future = executor.submit(func, **kwargs)
     try:
-        return future.result(timeout=max(0.001, float(timeout_seconds)))
+        deadline = time.monotonic() + max(0.001, float(timeout_seconds))
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                future.cancel()
+                raise cancel_error or RuntimeError("cancelled")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                future.cancel()
+                raise timeout_error
+            try:
+                return future.result(timeout=min(_CANCEL_WAIT_INTERVAL_SECONDS, max(0.001, remaining)))
+            except concurrent.futures.TimeoutError as exc:
+                if future.done():
+                    raise timeout_error from exc
+                continue
     except concurrent.futures.TimeoutError as exc:
         future.cancel()
         raise timeout_error from exc
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _future_result_with_cancel(
+    future: concurrent.futures.Future,
+    *,
+    cancel_event: threading.Event | None,
+    interval_seconds: float = _CANCEL_WAIT_INTERVAL_SECONDS,
+) -> Any:
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            future.cancel()
+            raise RuntimeError("cancelled")
+        try:
+            return future.result(timeout=max(0.001, float(interval_seconds)))
+        except concurrent.futures.TimeoutError:
+            continue
 
 
 @dataclass
@@ -112,9 +145,14 @@ def _run_pre_answer_retrieval_pipeline(
     embedding_client,
     batch_size: int,
     progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
     trace_id: Optional[str] = None,
 ) -> tuple[list[str], list[list[RetrievedChunk]], dict[str, float]]:
     """流水线执行 Step2 预回答和 Step3 检索。"""
+
+    def _raise_if_cancelled() -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("cancelled")
 
     async def _pipeline() -> tuple[list[str], list[list[RetrievedChunk]], dict[str, float]]:
         sub_answers = [""] * len(sub_questions)
@@ -213,11 +251,14 @@ def _run_pre_answer_retrieval_pipeline(
             delayed_flush_task = asyncio.create_task(_flush_partial_batch_after_wait(executor))
 
         loop = asyncio.get_running_loop()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as retrieval_executor:
+        retrieval_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        try:
+            _raise_if_cancelled()
             async for index, answer in iter_pre_answers_async(
                 sub_questions,
                 async_client=async_llm_client,
             ):
+                _raise_if_cancelled()
                 completed_pre_answers += 1
                 logger.info(
                     "%sstep2 sub-question answered index=%s/%s answer_chars=%s question=%s",
@@ -250,6 +291,7 @@ def _run_pre_answer_retrieval_pipeline(
                 else:
                     _schedule_partial_flush(retrieval_executor)
 
+            _raise_if_cancelled()
             metrics["pre_answer_completed_at"] = time.time() - started_at
             if progress_callback:
                 progress_callback(
@@ -272,11 +314,16 @@ def _run_pre_answer_retrieval_pipeline(
                 for batch_no, indexes, wrapped_future in retrieval_jobs
             }
             while pending_retrievals:
+                _raise_if_cancelled()
                 done, _ = await asyncio.wait(
                     pending_retrievals.keys(),
                     return_when=asyncio.FIRST_COMPLETED,
+                    timeout=_CANCEL_WAIT_INTERVAL_SECONDS,
                 )
+                if not done:
+                    continue
                 for wrapped_future in done:
+                    _raise_if_cancelled()
                     batch_no, indexes = pending_retrievals.pop(wrapped_future)
                     logger.info(
                         "%sstep3 awaiting retrieval batch indexes=%s",
@@ -310,6 +357,9 @@ def _run_pre_answer_retrieval_pipeline(
                                 },
                             }
                         )
+        finally:
+            _cancel_delayed_flush()
+            retrieval_executor.shutdown(wait=False, cancel_futures=True)
 
         metrics["retrieval_completed_at"] = time.time() - started_at
         metrics["retrieval_total_batches"] = float(total_batches)
@@ -469,12 +519,16 @@ def run_agent(
             return questions, elapsed
 
         # 使用线程并行（因为两个都是同步调用外部 API）
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+        try:
             future_collection = executor.submit(get_or_create_collection)
             future_direct = executor.submit(_timed_direct_answer)
             future_decompose = executor.submit(_timed_decompose_question)
 
-            state.sub_questions, decompose_elapsed = future_decompose.result()
+            state.sub_questions, decompose_elapsed = _future_result_with_cancel(
+                future_decompose,
+                cancel_event=cancel_event,
+            )
             _emit_progress(
                 "step1",
                 "running",
@@ -492,7 +546,10 @@ def run_agent(
             t_step23 = time.time()
             if not future_collection.done():
                 logger.info("%sstep3 waiting for collection warmup", _trace_prefix(trace_id))
-            collection = future_collection.result()
+            collection = _future_result_with_cancel(
+                future_collection,
+                cancel_event=cancel_event,
+            )
             state.sub_answers, state.retrieved_chunks, pipeline_metrics = _run_pre_answer_retrieval_pipeline(
                 sub_questions=state.sub_questions,
                 retrieval_top_k=resolved_retrieval_top_k,
@@ -501,6 +558,7 @@ def run_agent(
                 embedding_client=embedding_client,
                 batch_size=resolved_retrieval_pipeline_batch_size,
                 progress_callback=progress_callback,
+                cancel_event=cancel_event,
                 trace_id=trace_id,
             )
             _raise_if_cancelled()
@@ -518,7 +576,26 @@ def run_agent(
                     sub_questions=len(state.sub_questions),
                     pre_answers=len(state.sub_answers),
                 )
-            state.direct_answer, direct_elapsed = future_direct.result()
+            try:
+                state.direct_answer, direct_elapsed = _future_result_with_cancel(
+                    future_direct,
+                    cancel_event=cancel_event,
+                )
+            except TimeoutError as exc:
+                direct_elapsed = 0.0
+                state.direct_answer = "直接回答超时，已改用检索结果生成答案。"
+                logger.warning(
+                    "%sstep1 direct_answer failed, continuing with retrieval-only synthesis: %s",
+                    _trace_prefix(trace_id),
+                    exc,
+                )
+                _emit_progress(
+                    "step1",
+                    "warning",
+                    "直接回答超时，继续使用检索结果生成答案",
+                    fallback=True,
+                    error=str(exc),
+                )
             _emit_progress(
                 "step1",
                 "running",
@@ -526,6 +603,8 @@ def run_agent(
                 direct_answer_chars=len(state.direct_answer),
                 direct_elapsed_seconds=round(float(direct_elapsed), 3),
             )
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
         _raise_if_cancelled()
         state.timings["step1_parallel"] = max(float(direct_elapsed or 0.0), float(decompose_elapsed or 0.0))
@@ -676,6 +755,8 @@ def run_agent(
                         func=check_answer,
                         timeout_seconds=_CHECKER_WALL_CLOCK_TIMEOUT_SECONDS,
                         timeout_error=CheckerTimeoutError("checker llm request timed out"),
+                        cancel_event=cancel_event,
+                        cancel_error=RuntimeError("cancelled"),
                         question=working_question,
                         answer=current_answer,
                         all_retrieved_chunks=state.retrieved_chunks,
@@ -750,6 +831,8 @@ def run_agent(
                         func=revise_answer,
                         timeout_seconds=_REVISER_WALL_CLOCK_TIMEOUT_SECONDS,
                         timeout_error=ReviserTimeoutError("reviser llm request timed out"),
+                        cancel_event=cancel_event,
+                        cancel_error=RuntimeError("cancelled"),
                         question=working_question,
                         answer=current_answer,
                         issues=issues,

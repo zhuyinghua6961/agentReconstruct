@@ -390,12 +390,19 @@ def _start_sync_stream_producer(*, iterator: Iterator[dict], queue: asyncio.Queu
 async def _monitor_request_disconnect(*, request: Request, cancel_event: threading.Event, stop_event: threading.Event) -> None:
     try:
         while not stop_event.is_set():
-            if await request.is_disconnected():
+            if await _request_disconnected(request):
                 cancel_event.set()
                 return
             await asyncio.sleep(0.05)
     except Exception:  # pragma: no cover - defensive isolation
         return
+
+
+async def _request_disconnected(request: Request) -> bool:
+    try:
+        return bool(await request.is_disconnected())
+    except Exception:  # pragma: no cover - defensive isolation
+        return False
 
 
 async def _execute_sync_ask_with_disconnect_support(*, request: Request, ask_request, trace_id: str) -> dict:
@@ -425,7 +432,7 @@ async def _execute_sync_ask_with_disconnect_support(*, request: Request, ask_req
 
 def _build_stream_response(*, request: Request, ask_request, trace_id: str, slot) -> StreamingResponse:
     gateway_task_mode = _gateway_owned_persistence(request)
-    cancel_event = threading.Event() if gateway_task_mode else None
+    cancel_event = threading.Event()
 
     async def _generate():
         seq = 0
@@ -492,6 +499,8 @@ def _build_stream_response(*, request: Request, ask_request, trace_id: str, slot
             nonlocal assistant_persisted
             if assistant_persisted:
                 return
+            if cancel_event.is_set():
+                return
             if not bool(summary.get("done_seen")):
                 return
             content = str(summary.get("assistant_content") or "").strip()
@@ -513,7 +522,7 @@ def _build_stream_response(*, request: Request, ask_request, trace_id: str, slot
             )
             assistant_persisted = True
         def _completion_callback(payload: dict) -> None:
-            if cancel_event is not None and cancel_event.is_set():
+            if cancel_event.is_set():
                 return
             with summary_lock:
                 _ingest_done_payload(payload)
@@ -531,19 +540,20 @@ def _build_stream_response(*, request: Request, ask_request, trace_id: str, slot
         )
         queue: asyncio.Queue[_SyncStreamItem] = asyncio.Queue()
         stop_event = threading.Event()
+        monitor_task = asyncio.create_task(
+            _monitor_request_disconnect(request=request, cancel_event=cancel_event, stop_event=stop_event)
+        )
         producer = _start_sync_stream_producer(iterator=source, queue=queue, loop=asyncio.get_running_loop(), stop_event=stop_event)
         disconnected = False
         try:
             while True:
-                if gateway_task_mode and await request.is_disconnected():
-                    disconnected = True
-                    stop_event.set()
-                    if cancel_event is not None:
-                        cancel_event.set()
-                    break
                 try:
                     item = await asyncio.wait_for(queue.get(), timeout=0.05)
                 except asyncio.TimeoutError:
+                    if cancel_event.is_set():
+                        disconnected = True
+                        stop_event.set()
+                        break
                     continue
                 if item.kind == _SYNC_STREAM_DONE:
                     break
@@ -589,7 +599,7 @@ def _build_stream_response(*, request: Request, ask_request, trace_id: str, slot
             )
         finally:
             stop_event.set()
-            if cancel_event is not None and disconnected:
+            if disconnected:
                 cancel_event.set()
             try:
                 if not disconnected:
@@ -598,6 +608,8 @@ def _build_stream_response(*, request: Request, ask_request, trace_id: str, slot
             except Exception as exc:  # pragma: no cover
                 request.app.logger.warning("assistant persistence hook failed: %s", exc)
             await asyncio.to_thread(producer.join, 0.5)
+            if not monitor_task.done():
+                monitor_task.cancel()
             slot.release()
 
     return StreamingResponse(

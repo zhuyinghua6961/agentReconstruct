@@ -872,6 +872,71 @@ def test_busy_path_does_not_clear_foreign_inflight_marker():
     assert redis.get("patent:test:coord:inflight:123:req_123") == "1"
 
 
+def test_abort_turn_does_not_clear_runtime_markers_owned_by_later_attempt():
+    service, _, redis = _build_service()
+    prepared = service.prepare_turn(request=_make_request(), user_id=42)
+    runtime_state = prepared["_state"]
+    original_owner = runtime_state["owner_token"]
+    assert original_owner
+
+    redis.set("patent:test:coord:inflight:123:req_123", "later-owner", ex=30, nx=False)
+    redis.set("patent:test:exec:turn:123:req_123", "later-owner", ex=30, nx=False)
+
+    service.abort_turn(prepared)
+
+    assert redis.get("patent:test:coord:inflight:123:req_123") == "later-owner"
+    assert redis.get("patent:test:exec:turn:123:req_123") == "later-owner"
+
+
+def test_finalize_turn_fails_closed_when_inflight_owner_changes_before_commit():
+    service, authority, redis = _build_service()
+    prepared = service.prepare_turn(request=_make_request(), user_id=42)
+    redis.set("patent:test:coord:inflight:123:req_123", "later-owner", ex=30, nx=False)
+
+    with pytest.raises(APIError) as exc_info:
+        service.finalize_turn(
+            prepared,
+            request=_make_request(),
+            execution_result={"answer_text": "stale answer", "timings": {"total_ms": 12}},
+        )
+
+    assert exc_info.value.code == codes.SERVICE_NOT_READY
+    assert authority.assistant_accepts == []
+    assert service.execution_cache.get_turn_result(conversation_id=123, trace_id="req_123") is None
+    assert redis.get("patent:test:coord:inflight:123:req_123") == "later-owner"
+
+
+def test_finalize_turn_fails_closed_when_pending_owner_changes_before_commit():
+    service, authority, redis = _build_service()
+    prepared = service.prepare_turn(
+        request=_make_request(
+            options={
+                "gateway_task_execution": True,
+                "gateway_owned_persistence": True,
+            }
+        ),
+        user_id=42,
+    )
+    redis.set("patent:test:coord:pending-turn:123", "req_123|written|later-owner", ex=30, nx=False)
+
+    with pytest.raises(APIError) as exc_info:
+        service.finalize_turn(
+            prepared,
+            request=_make_request(
+                options={
+                    "gateway_task_execution": True,
+                    "gateway_owned_persistence": True,
+                }
+            ),
+            execution_result={"answer_text": "stale answer", "timings": {"total_ms": 12}},
+        )
+
+    assert exc_info.value.code == codes.SERVICE_NOT_READY
+    assert authority.assistant_accepts == []
+    assert service.execution_cache.get_turn_result(conversation_id=123, trace_id="req_123") is None
+    assert redis.get("patent:test:coord:pending-turn:123") == "req_123|written|later-owner"
+
+
 def test_user_write_failure_maps_to_authority_unavailable():
     authority = _FakeAuthorityClient(snapshot_payload={}, fail_user_write=True)
     service, authority, _ = _build_service(authority_client=authority)

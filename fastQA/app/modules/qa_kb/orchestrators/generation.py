@@ -50,6 +50,22 @@ def _consume_stage4_result(stage4_output: Any, logger: Any) -> dict[str, Any]:
     return {"success": False, "error": "stage4_output_invalid"}
 
 
+def _payload_cancelled(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    return bool(payload.get("cancelled") or metadata.get("cancelled"))
+
+
+def _should_cancelled(should_cancel: Callable[[], bool] | None) -> bool:
+    if not callable(should_cancel):
+        return False
+    try:
+        return bool(should_cancel())
+    except Exception:
+        return False
+
+
 
 
 def _final_query_mode(*, provided: Any, skip_pdf: bool) -> str:
@@ -161,6 +177,7 @@ class GenerationPipelineOrchestrator:
         redis_service: RedisService | None,
         conversation_context: dict[str, Any] | None = None,
         graph_evidence: GraphRagPayload | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         cached = get_cached_stage1_result(
             redis_service=redis_service,
@@ -182,15 +199,18 @@ class GenerationPipelineOrchestrator:
             }
             if self._supports_kwarg(self.stage1.run, "graph_evidence"):
                 kwargs["graph_evidence"] = graph_evidence
+            if self._supports_kwarg(self.stage1.run, "should_cancel"):
+                kwargs["should_cancel"] = should_cancel
             result = self.stage1.run(**kwargs)
-            cache_stage1_result(
-                redis_service=redis_service,
-                runtime=runtime,
-                question=question,
-                stage1_result=result,
-                conversation_context=conversation_context,
-                graph_cache_fingerprint=self._graph_cache_fingerprint(graph_evidence),
-            )
+            if not _payload_cancelled(result) and not _should_cancelled(should_cancel):
+                cache_stage1_result(
+                    redis_service=redis_service,
+                    runtime=runtime,
+                    question=question,
+                    stage1_result=result,
+                    conversation_context=conversation_context,
+                    graph_cache_fingerprint=self._graph_cache_fingerprint(graph_evidence),
+                )
             return result
 
         if redis_service is None or not redis_service.available:
@@ -253,15 +273,16 @@ class GenerationPipelineOrchestrator:
             if self._supports_kwarg(self.stage2.run, "graph_evidence"):
                 kwargs["graph_evidence"] = graph_evidence
             result = self.stage2.run(**kwargs)
-            cache_stage2_result(
-                redis_service=redis_service,
-                runtime=runtime,
-                question=question,
-                retrieval_claims=retrieval_claims,
-                n_results_per_claim=n_results_per_claim,
-                stage2_result=result,
-                graph_cache_fingerprint=self._graph_cache_fingerprint(graph_evidence),
-            )
+            if not _payload_cancelled(result) and not _should_cancelled(should_cancel):
+                cache_stage2_result(
+                    redis_service=redis_service,
+                    runtime=runtime,
+                    question=question,
+                    retrieval_claims=retrieval_claims,
+                    n_results_per_claim=n_results_per_claim,
+                    stage2_result=result,
+                    graph_cache_fingerprint=self._graph_cache_fingerprint(graph_evidence),
+                )
             return result
 
         if redis_service is None or not redis_service.available:
@@ -297,6 +318,7 @@ class GenerationPipelineOrchestrator:
         retrieval_results: dict[str, Any],
         dois: list[str],
         redis_service: RedisService | None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         cached = get_cached_stage25_result(
             redis_service=redis_service,
@@ -312,14 +334,15 @@ class GenerationPipelineOrchestrator:
 
         def _compute() -> dict[str, Any]:
             result = self.stage25.run(runtime=runtime, retrieval_results=retrieval_results, user_question=question, dois=dois)
-            cache_stage25_result(
-                redis_service=redis_service,
-                runtime=runtime,
-                question=question,
-                retrieval_results=retrieval_results,
-                dois=dois,
-                stage25_result=result,
-            )
+            if not _payload_cancelled(result) and not _should_cancelled(should_cancel):
+                cache_stage25_result(
+                    redis_service=redis_service,
+                    runtime=runtime,
+                    question=question,
+                    retrieval_results=retrieval_results,
+                    dois=dois,
+                    stage25_result=result,
+                )
             return result
 
         if redis_service is None or not redis_service.available:
@@ -366,12 +389,13 @@ class GenerationPipelineOrchestrator:
 
         def _compute() -> dict[str, list[dict[str, Any]]]:
             result = self.stage3.run(runtime=runtime, dois=dois, max_chunks_per_doi=max_chunks_per_doi, should_cancel=should_cancel)
-            cache_stage3_result(
-                redis_service=redis_service,
-                dois=dois,
-                max_chunks_per_doi=max_chunks_per_doi,
-                stage3_result=result,
-            )
+            if not _payload_cancelled(result) and not _should_cancelled(should_cancel):
+                cache_stage3_result(
+                    redis_service=redis_service,
+                    dois=dois,
+                    max_chunks_per_doi=max_chunks_per_doi,
+                    stage3_result=result,
+                )
             return result
 
         if redis_service is None or not redis_service.available:
@@ -437,6 +461,7 @@ class GenerationPipelineOrchestrator:
                 redis_service=redis_service,
                 conversation_context=conversation_context,
                 graph_evidence=graph_evidence,
+                should_cancel=should_cancel,
             ),
         )
         if not stage1_result.get("success"):
@@ -526,6 +551,7 @@ class GenerationPipelineOrchestrator:
                     retrieval_results=stage2_result,
                     dois=dois,
                     redis_service=redis_service,
+                    should_cancel=should_cancel,
                 ),
             )
         except Exception as exc:
@@ -698,6 +724,7 @@ class GenerationPipelineOrchestrator:
                 redis_service=redis_service,
                 conversation_context=conversation_context,
                 graph_evidence=graph_evidence,
+                should_cancel=should_cancel,
             ),
         )
         logger.info(
@@ -815,6 +842,7 @@ class GenerationPipelineOrchestrator:
                     retrieval_results=stage2_result,
                     dois=dois,
                     redis_service=redis_service,
+                    should_cancel=should_cancel,
                 ),
             )
             logger.info(

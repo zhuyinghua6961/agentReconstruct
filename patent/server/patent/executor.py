@@ -161,6 +161,7 @@ class PatentExecutor:
         context: dict[str, Any] | None = None,
         progress_callback: Any | None = None,
         content_callback: Any | None = None,
+        should_cancel: Any | None = None,
     ) -> dict[str, Any]:
         self._ensure_runtime_ready(request=request)
         _LOGGER.info(
@@ -189,6 +190,7 @@ class PatentExecutor:
             conversation_context=normalized_context,
             progress_callback=progress_callback,
             content_callback=content_callback,
+            should_cancel=should_cancel,
         )
 
     def _execute_file_route(

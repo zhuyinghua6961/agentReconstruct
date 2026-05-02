@@ -525,6 +525,26 @@ def test_execution_cache_claims_turn_identity_with_conversation_and_trace():
     assert redis.store["patent:test:exec:turn:123:req_123"] == "1"
 
 
+def test_execution_cache_turn_identity_owner_token_guards_clear():
+    redis = _FakeRedis()
+    cache = ExecutionCache(redis, PatentKeyFactory(env="test"))
+
+    token = cache.claim_turn_identity(conversation_id=123, trace_id="req_123", ttl_seconds=30, owner_token="owner-1")
+    redis.store["patent:test:exec:turn:123:req_123"] = "owner-2"
+
+    assert token is True
+    assert cache.clear_turn_identity(conversation_id=123, trace_id="req_123", owner_token="owner-1") is False
+    assert redis.store["patent:test:exec:turn:123:req_123"] == "owner-2"
+
+
+def test_execution_cache_turn_identity_legacy_value_still_clears_without_owner_token():
+    redis = _FakeRedis()
+    cache = ExecutionCache(redis, PatentKeyFactory(env="test"))
+
+    assert cache.claim_turn_identity(conversation_id=123, trace_id="req_123", ttl_seconds=30) is True
+    assert cache.clear_turn_identity(conversation_id=123, trace_id="req_123") is True
+
+
 def test_execution_cache_marks_inflight_with_coord_namespace():
     redis = _FakeRedis()
     cache = ExecutionCache(redis, PatentKeyFactory(env="test"))
@@ -532,6 +552,28 @@ def test_execution_cache_marks_inflight_with_coord_namespace():
     assert cache.mark_turn_inflight(conversation_id=123, trace_id="req_123", ttl_seconds=30) is True
     assert cache.mark_turn_inflight(conversation_id=123, trace_id="req_123", ttl_seconds=30) is False
     assert redis.store["patent:test:coord:inflight:123:req_123"] == "1"
+
+
+def test_execution_cache_inflight_owner_token_guards_renew_and_clear():
+    redis = _FakeRedis()
+    cache = ExecutionCache(redis, PatentKeyFactory(env="test"))
+
+    assert cache.mark_turn_inflight(conversation_id=123, trace_id="req_123", ttl_seconds=30, owner_token="owner-1") is True
+    assert redis.store["patent:test:coord:inflight:123:req_123"] == "owner-1"
+    redis.store["patent:test:coord:inflight:123:req_123"] = "owner-2"
+
+    assert cache.renew_turn_inflight(conversation_id=123, trace_id="req_123", ttl_seconds=30, owner_token="owner-1") is False
+    assert cache.clear_turn_inflight(conversation_id=123, trace_id="req_123", owner_token="owner-1") is False
+    assert redis.store["patent:test:coord:inflight:123:req_123"] == "owner-2"
+
+
+def test_execution_cache_inflight_legacy_value_still_renews_and_clears_without_owner_token():
+    redis = _FakeRedis()
+    cache = ExecutionCache(redis, PatentKeyFactory(env="test"))
+
+    assert cache.mark_turn_inflight(conversation_id=123, trace_id="req_123", ttl_seconds=30) is True
+    assert cache.renew_turn_inflight(conversation_id=123, trace_id="req_123", ttl_seconds=45) is True
+    assert cache.clear_turn_inflight(conversation_id=123, trace_id="req_123") is True
 
 
 def test_execution_cache_clears_overlay_when_authority_catches_up():
@@ -701,6 +743,83 @@ def test_execution_cache_tracks_pending_turn_per_conversation():
     assert cache.clear_pending_turn(conversation_id=123, trace_id="req_456") is False
     assert cache.clear_pending_turn(conversation_id=123, trace_id="req_123") is True
     assert cache.get_pending_turn(conversation_id=123) == ""
+
+
+def test_execution_cache_pending_turn_owner_token_guards_advance_and_clear():
+    redis = _FakeRedis()
+    cache = ExecutionCache(redis, PatentKeyFactory(env="test"))
+
+    assert cache.claim_pending_turn(
+        conversation_id=123,
+        trace_id="req_123",
+        ttl_seconds=30,
+        owner_token="owner-1",
+    ) is True
+    state = cache.get_pending_turn_state(conversation_id=123)
+    assert state["trace_id"] == "req_123"
+    assert state["owner_token"] == "owner-1"
+
+    assert cache.mark_pending_turn_user_written(
+        conversation_id=123,
+        trace_id="req_123",
+        ttl_seconds=30,
+        owner_token="owner-2",
+    ) is False
+    assert cache.get_pending_turn_state(conversation_id=123)["user_written"] is False
+
+    assert cache.clear_pending_turn(
+        conversation_id=123,
+        trace_id="req_123",
+        owner_token="owner-2",
+    ) is False
+    assert cache.get_pending_turn(conversation_id=123) == "req_123"
+
+    assert cache.mark_pending_turn_user_written(
+        conversation_id=123,
+        trace_id="req_123",
+        ttl_seconds=30,
+        owner_token="owner-1",
+    ) is True
+    assert cache.get_pending_turn_state(conversation_id=123)["user_written"] is True
+    assert cache.clear_pending_turn(
+        conversation_id=123,
+        trace_id="req_123",
+        owner_token="owner-1",
+    ) is True
+
+
+def test_execution_cache_can_transfer_pending_turn_owner_for_same_trace_retry():
+    redis = _FakeRedis()
+    cache = ExecutionCache(redis, PatentKeyFactory(env="test"))
+
+    assert cache.claim_pending_turn(
+        conversation_id=123,
+        trace_id="req_123",
+        ttl_seconds=30,
+        user_written=True,
+        owner_token="owner-1",
+    ) is True
+    assert cache.transfer_pending_turn_owner(
+        conversation_id=123,
+        trace_id="req_123",
+        ttl_seconds=30,
+        owner_token="owner-2",
+    ) is True
+
+    state = cache.get_pending_turn_state(conversation_id=123)
+    assert state["trace_id"] == "req_123"
+    assert state["user_written"] is True
+    assert state["owner_token"] == "owner-2"
+    assert cache.clear_pending_turn(
+        conversation_id=123,
+        trace_id="req_123",
+        owner_token="owner-1",
+    ) is False
+    assert cache.clear_pending_turn(
+        conversation_id=123,
+        trace_id="req_123",
+        owner_token="owner-2",
+    ) is True
 
 
 def test_execution_cache_refuses_non_atomic_pending_turn_clear():

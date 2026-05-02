@@ -2,6 +2,7 @@ import asyncio
 import concurrent.futures
 import logging
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -768,7 +769,7 @@ from server.schemas.response_models import ErrorEvent
 from server.services.ask_service import AskService
 from server.runtime.request_context import clear_trace_id, set_trace_id
 from server_fastapi.app import create_app
-from server_fastapi.routers.ask import _build_streaming_response
+from server_fastapi.routers.ask import _build_streaming_response, _close_stream, _open_stream_ask, _run_in_ask_executor
 
 
 class _FakePersistenceService:
@@ -1100,6 +1101,120 @@ def test_stream_ask_emits_stage_progress_before_later_stage_completion():
     assert remaining_events[-1]["type"] == "done"
 
 
+def test_closing_stream_ask_signals_cancellation_to_running_stages():
+    stage2_entered = threading.Event()
+    cancel_seen = threading.Event()
+    allow_stage2_finish = threading.Event()
+
+    class _CancelAwareRuntime(_StageRuntime):
+        def stage2_targeted_retrieval(self, retrieval_plan, *, user_question: str, should_cancel=None, active_stream_count=None) -> dict[str, object]:
+            stage2_entered.set()
+            while not allow_stage2_finish.wait(timeout=0.01):
+                if callable(should_cancel) and should_cancel():
+                    cancel_seen.set()
+                    break
+            return super().stage2_targeted_retrieval(
+                retrieval_plan,
+                user_question=user_question,
+                should_cancel=should_cancel,
+                active_stream_count=active_stream_count,
+            )
+
+    service = AskService(
+        patent_executor=PatentExecutor(runtime=_CancelAwareRuntime()),
+        persistence_service=_FakePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    stream = service.stream_ask(parse_patent_request(_base_payload()), user_id=42)
+    assert next(stream)["type"] == "metadata"
+    assert next(stream)["step"] == "context_ready"
+    assert next(stream)["step"] == "stage1"
+    assert stage2_entered.wait(timeout=1), "stage2 did not start"
+
+    stream.close()
+    try:
+        assert cancel_seen.wait(timeout=1), "stage2 did not observe cancellation"
+    finally:
+        allow_stage2_finish.set()
+
+
+def test_stream_ask_external_cancel_event_signals_running_stages():
+    stage2_entered = threading.Event()
+    cancel_seen = threading.Event()
+    allow_stage2_finish = threading.Event()
+    cancel_event = threading.Event()
+
+    class _CancelAwareRuntime(_StageRuntime):
+        def stage2_targeted_retrieval(self, retrieval_plan, *, user_question: str, should_cancel=None, active_stream_count=None) -> dict[str, object]:
+            stage2_entered.set()
+            while not allow_stage2_finish.wait(timeout=0.01):
+                if callable(should_cancel) and should_cancel():
+                    cancel_seen.set()
+                    break
+            return super().stage2_targeted_retrieval(
+                retrieval_plan,
+                user_question=user_question,
+                should_cancel=should_cancel,
+                active_stream_count=active_stream_count,
+            )
+
+    service = AskService(
+        patent_executor=PatentExecutor(runtime=_CancelAwareRuntime()),
+        persistence_service=_FakePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    stream = service.stream_ask(parse_patent_request(_base_payload()), user_id=42, cancel_event=cancel_event)
+    assert next(stream)["type"] == "metadata"
+    assert next(stream)["step"] == "context_ready"
+    assert next(stream)["step"] == "stage1"
+    assert stage2_entered.wait(timeout=1), "stage2 did not start"
+
+    cancel_event.set()
+    try:
+        assert cancel_seen.wait(timeout=1), "stage2 did not observe external cancellation"
+    finally:
+        allow_stage2_finish.set()
+        stream.close()
+
+
+def test_closing_stream_ask_logs_when_worker_does_not_exit(caplog):
+    stage2_entered = threading.Event()
+    allow_stage2_finish = threading.Event()
+
+    class _StuckRuntime(_StageRuntime):
+        def stage2_targeted_retrieval(self, retrieval_plan, *, user_question: str, should_cancel=None, active_stream_count=None) -> dict[str, object]:
+            del should_cancel
+            stage2_entered.set()
+            assert allow_stage2_finish.wait(timeout=2), "stage2 finish gate was not released"
+            return super().stage2_targeted_retrieval(
+                retrieval_plan,
+                user_question=user_question,
+                should_cancel=None,
+                active_stream_count=active_stream_count,
+            )
+
+    service = AskService(
+        patent_executor=PatentExecutor(runtime=_StuckRuntime()),
+        persistence_service=_FakePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    stream = service.stream_ask(parse_patent_request(_base_payload()), user_id=42)
+    assert next(stream)["type"] == "metadata"
+    assert next(stream)["step"] == "context_ready"
+    assert next(stream)["step"] == "stage1"
+    assert stage2_entered.wait(timeout=1), "stage2 did not start"
+
+    with caplog.at_level(logging.WARNING, logger="patent.ask_service"):
+        stream.close()
+    try:
+        assert any("patent stream worker still running after cancellation" in record.message for record in caplog.records)
+    finally:
+        allow_stage2_finish.set()
+
+
 def test_gateway_owned_stream_ask_emits_stage1_before_slow_prepare_turn_finishes():
     prepare_started = threading.Event()
     allow_prepare_finish = threading.Event()
@@ -1183,6 +1298,156 @@ def test_gateway_owned_stream_ask_failure_still_emits_stage1_before_prepare_erro
 
     remaining_events = list(stream)
     assert remaining_events[-1]["type"] == "error"
+
+
+def test_gateway_owned_stream_ask_external_cancel_does_not_block_on_prepare_queue():
+    prepare_started = threading.Event()
+    cancel_event = threading.Event()
+
+    class _StuckGatewayPersistence(_FakePersistenceService):
+        def prepare_turn(self, *, request, user_id):
+            prepare_started.set()
+            assert cancel_event.wait(timeout=2), "cancel event was not set"
+            time.sleep(1)
+            return super().prepare_turn(request=request, user_id=user_id)
+
+    request_payload = _base_payload()
+    request_payload["options"] = {
+        "gateway_task_execution": True,
+        "gateway_owned_persistence": True,
+    }
+    service = AskService(
+        patent_executor=PatentExecutor(),
+        persistence_service=_StuckGatewayPersistence(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    stream = service.stream_ask(
+        parse_patent_request(request_payload),
+        user_id=42,
+        cancel_event=cancel_event,
+    )
+    assert next(stream)["type"] == "metadata"
+    assert next(stream)["step"] == "stage1"
+    assert prepare_started.wait(timeout=1), "prepare did not start"
+
+    cancel_event.set()
+    started_at = time.monotonic()
+    event = next(stream)
+    elapsed = time.monotonic() - started_at
+    stream.close()
+
+    assert elapsed < 0.25
+    assert event["type"] == "error"
+    assert event["code"] == "ASK_CANCELLED"
+
+
+def test_gateway_owned_stream_ask_cancel_after_prepare_result_aborts_prepared_turn():
+    cancel_event = threading.Event()
+
+    class _CancelAfterPreparePersistence(_FakePersistenceService):
+        def prepare_turn(self, *, request, user_id):
+            prepared = super().prepare_turn(request=request, user_id=user_id)
+            cancel_event.set()
+            return prepared
+
+    request_payload = _base_payload()
+    request_payload["options"] = {
+        "gateway_task_execution": True,
+        "gateway_owned_persistence": True,
+    }
+    persistence = _CancelAfterPreparePersistence()
+    service = AskService(
+        patent_executor=PatentExecutor(),
+        persistence_service=persistence,
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    events = list(
+        service.stream_ask(
+            parse_patent_request(request_payload),
+            user_id=42,
+            cancel_event=cancel_event,
+        )
+    )
+
+    assert events[-1]["type"] == "error"
+    assert events[-1]["code"] == "ASK_CANCELLED"
+    assert [call["op"] for call in persistence.calls] == ["prepare", "abort"]
+
+
+def test_stream_ask_external_cancel_after_result_does_not_finalize_success():
+    cancel_event = threading.Event()
+
+    class _CancelAfterExecuteRuntime(_StageRuntime):
+        def stage4_synthesis_with_patent_evidence(self, **kwargs):
+            kwargs.pop("content_callback", None)
+            result = super().stage4_synthesis_with_patent_evidence(**kwargs)
+            cancel_event.set()
+            return result
+
+    persistence = _FakePersistenceService()
+    service = AskService(
+        patent_executor=PatentExecutor(runtime=_CancelAfterExecuteRuntime()),
+        persistence_service=persistence,
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    events = list(
+        service.stream_ask(
+            parse_patent_request(_base_payload()),
+            user_id=42,
+            cancel_event=cancel_event,
+        )
+    )
+
+    assert events[-1]["type"] == "error"
+    assert events[-1]["code"] == "ASK_CANCELLED"
+    assert all(event["type"] != "done" for event in events)
+    assert [call["op"] for call in persistence.calls] == ["prepare", "abort"]
+
+
+def test_stream_ask_external_cancel_does_not_block_on_progress_queue():
+    stage2_entered = threading.Event()
+    cancel_event = threading.Event()
+
+    class _StuckRuntime(_StageRuntime):
+        def stage2_targeted_retrieval(self, retrieval_plan, *, user_question: str, should_cancel=None, active_stream_count=None) -> dict[str, object]:
+            stage2_entered.set()
+            assert cancel_event.wait(timeout=2), "cancel event was not set"
+            time.sleep(1)
+            return super().stage2_targeted_retrieval(
+                retrieval_plan,
+                user_question=user_question,
+                should_cancel=should_cancel,
+                active_stream_count=active_stream_count,
+            )
+
+    service = AskService(
+        patent_executor=PatentExecutor(runtime=_StuckRuntime()),
+        persistence_service=_FakePersistenceService(),
+        now_factory=lambda: "2026-03-26T00:00:00Z",
+    )
+
+    stream = service.stream_ask(
+        parse_patent_request(_base_payload()),
+        user_id=42,
+        cancel_event=cancel_event,
+    )
+    assert next(stream)["type"] == "metadata"
+    assert next(stream)["step"] == "context_ready"
+    assert next(stream)["step"] == "stage1"
+    assert stage2_entered.wait(timeout=1), "stage2 did not start"
+
+    cancel_event.set()
+    started_at = time.monotonic()
+    event = next(stream)
+    elapsed = time.monotonic() - started_at
+    stream.close()
+
+    assert elapsed < 0.25
+    assert event["type"] == "error"
+    assert event["code"] == "ASK_CANCELLED"
 
 
 def test_stream_ask_emits_streaming_content_before_done_when_stage4_streams():
@@ -2278,6 +2543,40 @@ class _ResolvedTraceStreamAskService:
                 },
             ]
         )
+
+
+class _ClosableStreamAskService:
+    def __init__(self) -> None:
+        self.closed = threading.Event()
+
+    def sync_ask(self, request, *, user_id):
+        raise NotImplementedError
+
+    def stream_ask(self, request, *, user_id):
+        closed = self.closed
+
+        class _Stream:
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return {
+                    "type": "metadata",
+                    "requested_mode": "patent",
+                    "actual_mode": "patent",
+                    "route": "kb_qa",
+                    "query_mode": "patent_kb_qa",
+                    "source_scope": "kb",
+                    "metadata": {},
+                    "trace_id": request.trace_id,
+                    "seq": 0,
+                    "ts": "2026-03-26T00:00:00Z",
+                }
+
+            def close(self):
+                closed.set()
+
+        return _Stream()
 
 
 @pytest.fixture(autouse=True)
@@ -4779,6 +5078,65 @@ def test_stream_terminal_error_uses_middleware_trace_before_first_frame():
 
     assert payloads[-1]["type"] == "error"
     assert payloads[-1]["trace_id"] == "req_generated"
+
+
+def test_close_stream_closes_inner_stream_on_disconnect_cleanup():
+    service = _ClosableStreamAskService()
+    ask_request = type("_AskRequest", (), {"trace_id": "req_123"})()
+    stream = service.stream_ask(ask_request, user_id=42)
+
+    _close_stream(stream)
+
+    assert service.closed.is_set() is True
+
+
+def test_run_in_ask_executor_can_abandon_blocking_next_on_cancel():
+    started = threading.Event()
+    release = threading.Event()
+    request = type(
+        "_Request",
+        (),
+        {"app": type("_App", (), {"state": type("_State", (), {"runtime_dispatcher": None})()})()},
+    )()
+
+    def _blocking_next():
+        started.set()
+        release.wait(timeout=2)
+        return None
+
+    async def _cancel_blocking_call() -> bool:
+        task = asyncio.create_task(_run_in_ask_executor(request, _blocking_next, abandon_on_cancel=True))
+        for _ in range(100):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.001)
+        assert started.is_set()
+        task.cancel()
+        try:
+            await asyncio.wait_for(task, timeout=0.2)
+        except asyncio.CancelledError:
+            return True
+        finally:
+            release.set()
+        return False
+
+    assert asyncio.run(_cancel_blocking_call()) is True
+
+
+def test_open_stream_ask_passes_cancel_event_when_supported():
+    captured: dict[str, object] = {}
+
+    class _CancelAwareService:
+        def stream_ask(self, request, *, user_id, cancel_event=None):
+            captured["cancel_event"] = cancel_event
+            return iter(())
+
+    cancel_event = threading.Event()
+    request = type("_AskRequest", (), {"trace_id": "req_123"})()
+
+    _open_stream_ask(_CancelAwareService(), request, user_id=42, cancel_event=cancel_event)
+
+    assert captured["cancel_event"] is cancel_event
 
 
 def test_success_stream_carries_resolved_trace_id_to_later_frames():

@@ -57,5 +57,4 @@ async def cancel_task(
     auth_context: AuthContext = Depends(require_auth_context),
 ):
     service = QATaskService(request)
-    await service.reconcile_pending_terminal_tasks(task_ids={task_id})
     return await service.cancel_task(task_id, auth_context=auth_context)

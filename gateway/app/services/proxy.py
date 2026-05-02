@@ -190,7 +190,11 @@ class ProxyService:
             headers=headers,
             content=request.stream(),
         )
-        upstream = await client.send(upstream_request, stream=True)
+        try:
+            upstream = await client.send(upstream_request, stream=True)
+        except BaseException:
+            await client.aclose()
+            raise
         response_headers = self._filter_response_headers(dict(upstream.headers))
         response_headers.setdefault("X-Gateway-Backend", plan.backend)
         return StreamingProxyHandle(
@@ -218,7 +222,11 @@ class ProxyService:
             headers=headers,
             json=payload,
         )
-        upstream = await client.send(upstream_request, stream=True)
+        try:
+            upstream = await client.send(upstream_request, stream=True)
+        except BaseException:
+            await client.aclose()
+            raise
         response_headers = self._filter_response_headers(dict(upstream.headers))
         response_headers.setdefault("X-Gateway-Backend", plan.backend)
         return StreamingProxyHandle(

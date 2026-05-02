@@ -184,6 +184,14 @@ class PatentResultBuilder:
     def to_api_error(self, exc: Exception) -> APIError:
         if isinstance(exc, APIError):
             return exc
+        if type(exc).__name__ == "_PatentStreamCancelled":
+            return APIError(
+                code="ASK_CANCELLED",
+                message="cancelled",
+                status_code=499,
+                error="cancelled",
+                retriable=False,
+            )
         if isinstance(exc, TimeoutError):
             return APIError(
                 code=codes.INTERNAL_ERROR,

@@ -4,7 +4,7 @@ import asyncio
 import threading
 import time
 
-from agent_core.graph import _run_pre_answer_retrieval_pipeline, run_agent
+from agent_core.graph import _call_with_wall_clock_timeout, _run_pre_answer_retrieval_pipeline, run_agent
 
 
 def test_run_agent_starts_pipeline_after_decompose_without_waiting_for_direct(monkeypatch):
@@ -409,3 +409,131 @@ def test_run_agent_forces_output_when_reviser_times_out(monkeypatch):
     assert state.check_passed is False
     revise_error = next(item for item in progress_events if item["stage"] == "step5_revise" and item["status"] == "error")
     assert "超时" in revise_error["message"]
+
+
+def test_run_agent_cancel_while_waiting_for_collection_does_not_wait_for_threadpool_shutdown(monkeypatch):
+    cancel_event = threading.Event()
+    collection_started = threading.Event()
+    direct_started = threading.Event()
+    decompose_started = threading.Event()
+
+    monkeypatch.setattr("agent_core.graph.get_llm_client", lambda *args, **kwargs: object())
+    monkeypatch.setattr("agent_core.graph.get_async_llm_client", lambda: object())
+    monkeypatch.setattr("agent_core.graph.get_embedding_client", lambda: object())
+
+    def slow_collection():
+        collection_started.set()
+        time.sleep(1.0)
+        return object()
+
+    def slow_direct(*args, **kwargs):
+        direct_started.set()
+        time.sleep(1.0)
+        return "direct"
+
+    def fast_decompose(*args, **kwargs):
+        decompose_started.set()
+        return ["q1"]
+
+    monkeypatch.setattr("agent_core.graph.get_or_create_collection", slow_collection)
+    monkeypatch.setattr("agent_core.graph.direct_answer", slow_direct)
+    monkeypatch.setattr("agent_core.graph.decompose_question", fast_decompose)
+    monkeypatch.setattr(
+        "agent_core.graph._run_pre_answer_retrieval_pipeline",
+        lambda **kwargs: (["a1"], [[]], {"pre_answer_completed_at": 0.1, "retrieval_completed_at": 0.2}),
+    )
+
+    def trigger_cancel():
+        collection_started.wait(timeout=0.5)
+        decompose_started.wait(timeout=0.5)
+        cancel_event.set()
+
+    cancel_thread = threading.Thread(target=trigger_cancel, daemon=True)
+    cancel_thread.start()
+    started_at = time.monotonic()
+    state = run_agent("demo", cancel_event=cancel_event, max_check_loops=0)
+    elapsed = time.monotonic() - started_at
+    cancel_thread.join(timeout=0.5)
+
+    assert direct_started.is_set()
+    assert state.error == "cancelled"
+    assert elapsed < 0.5
+
+
+def test_wall_clock_timeout_helper_observes_cancel_without_waiting_for_worker_exit():
+    cancel_event = threading.Event()
+    worker_started = threading.Event()
+
+    def slow_call():
+        worker_started.set()
+        time.sleep(1.0)
+        return "late"
+
+    def trigger_cancel():
+        worker_started.wait(timeout=0.5)
+        time.sleep(0.05)
+        cancel_event.set()
+
+    cancel_thread = threading.Thread(target=trigger_cancel, daemon=True)
+    cancel_thread.start()
+    started_at = time.monotonic()
+    try:
+        _call_with_wall_clock_timeout(
+            func=slow_call,
+            timeout_seconds=5.0,
+            timeout_error=TimeoutError("timed out"),
+            cancel_event=cancel_event,
+            cancel_error=RuntimeError("cancelled"),
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "cancelled"
+    else:  # pragma: no cover
+        raise AssertionError("expected cancellation")
+    elapsed = time.monotonic() - started_at
+    cancel_thread.join(timeout=0.5)
+
+    assert elapsed < 0.5
+
+
+def test_pre_answer_retrieval_pipeline_observes_cancel_while_retrieval_is_blocked(monkeypatch):
+    cancel_event = threading.Event()
+    retrieval_started = threading.Event()
+
+    async def fake_iter_pre_answers_async(sub_questions, async_client=None):
+        yield 0, "a1"
+
+    def slow_batch_retrieve(*args, **kwargs):
+        retrieval_started.set()
+        time.sleep(1.0)
+        return [[object()]]
+
+    monkeypatch.setattr("agent_core.graph.iter_pre_answers_async", fake_iter_pre_answers_async)
+    monkeypatch.setattr("agent_core.graph.batch_retrieve", slow_batch_retrieve)
+
+    def trigger_cancel():
+        retrieval_started.wait(timeout=0.5)
+        time.sleep(0.05)
+        cancel_event.set()
+
+    cancel_thread = threading.Thread(target=trigger_cancel, daemon=True)
+    cancel_thread.start()
+    started_at = time.monotonic()
+    try:
+        _run_pre_answer_retrieval_pipeline(
+            sub_questions=["q1"],
+            retrieval_top_k=3,
+            async_llm_client=object(),
+            collection=object(),
+            embedding_client=object(),
+            batch_size=1,
+            cancel_event=cancel_event,
+            trace_id="req_cancel",
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "cancelled"
+    else:  # pragma: no cover
+        raise AssertionError("expected cancellation")
+    elapsed = time.monotonic() - started_at
+    cancel_thread.join(timeout=0.5)
+
+    assert elapsed < 0.5
