@@ -69,8 +69,12 @@ test('Home uses absolute message identity in the render list wiring', () => {
 
 test('Home renders QA stage timing summary and details in the processing panel', () => {
   assert.match(source, /getMessageStageTimingModel/)
+  assert.match(source, /getStepTimingDurationLabel\s+as\s+getStepTimingDurationLabelFromModel/)
   assert.match(source, /hasProcessPanel/)
   assert.match(source, /getStepTimingDurationLabel/)
+  assert.match(source, /return 'skipped'/)
+  assert.match(source, /step-icon-skipped/)
+  assert.match(source, /normalizeStepStatus\(steps\[activeIdx\]\.status\) === 'processing'/)
   assert.match(source, /stage-timing-summary/)
   assert.match(source, /stage-step-duration/)
   assert.doesNotMatch(source, /stage-timing-list/)

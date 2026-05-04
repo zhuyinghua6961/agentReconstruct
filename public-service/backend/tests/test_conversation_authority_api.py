@@ -346,11 +346,15 @@ def test_internal_task_terminal_logs_task_id(monkeypatch, caplog):
                     "answer_text": "done",
                     "steps": [],
                     "failure": {},
+                    "timings": {"stage4": 444},
                 },
                 headers=_internal_headers("gateway"),
             )
+            detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
 
     assert response.status_code == 200
+    assistant = detail["data"]["messages"][-1]
+    assert assistant["metadata"]["timings"] == {"stage4": 444}
     assert any(
         "task_id=task_terminal_log_001" in record.getMessage()
         and "answer_chars=4" in record.getMessage()
@@ -437,6 +441,45 @@ def test_internal_task_terminal_rejects_wrong_source_service(monkeypatch):
 
     assert response.status_code == 403
     assert response.json()["code"] == "INTERNAL_SOURCE_SERVICE_FORBIDDEN"
+
+
+def test_internal_task_terminal_ignores_malformed_timings(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="task terminal malformed timings")
+        conversation_id = int(created["data"]["conversation_id"])
+        service.start_authority_task_assistant(
+            user_id=7,
+            conversation_id=conversation_id,
+            task_id="task_terminal_bad_timings",
+            trace_id="task-terminal-bad-timings",
+            source_service="fastQA",
+            route="kb_qa",
+            requested_mode="fast",
+            actual_mode="fast",
+            status="queued",
+        )
+        response = client.post(
+            f"/internal/conversations/{conversation_id}/tasks/task_terminal_bad_timings/assistant-terminal",
+            json={
+                "conversation_id": conversation_id,
+                "user_id": 7,
+                "task_id": "task_terminal_bad_timings",
+                "terminal_status": "completed",
+                "last_seq": 2,
+                "answer_text": "done",
+                "steps": [],
+                "failure": {},
+                "timings": "bad",
+            },
+            headers=_internal_headers("gateway"),
+        )
+        detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
+
+    assert response.status_code == 200
+    assistant = detail["data"]["messages"][-1]
+    assert "timings" not in assistant["metadata"]
 
 
 def test_internal_task_routes_allow_gateway_caller_for_gateway_owned_task_runtime(monkeypatch):

@@ -221,6 +221,77 @@ test('chat store reload path restores durable content and does not revive stale 
   assert.equal(persistedChats[0].messages[2].metadata.terminal_status, 'failed')
 })
 
+test('chat store reload path preserves skipped QA steps with timings', async () => {
+  installLocalStorageMock({
+    lfp_chats: JSON.stringify([
+      {
+        id: 'chat-skipped',
+        title: 'Skipped timing',
+        messages: [
+          { role: 'user', content: 'q' },
+          {
+            role: 'assistant',
+            content: 'a',
+            steps: [
+              {
+                step: 'stage25',
+                title: '阶段二点五',
+                status: 'skipped',
+                message: '阶段二点五：已跳过MD原文扩展',
+              },
+            ],
+            metadata: { timings: { stage25: 0 } },
+          },
+        ],
+      },
+    ]),
+    lfp_current_chat_id: 'chat-skipped',
+  })
+
+  const { createPinia, setActivePinia } = await import('pinia')
+  const { useChatStore } = await import('./chatStore.js')
+
+  setActivePinia(createPinia())
+  const store = useChatStore()
+  await store.loadChats()
+
+  const restored = store.currentMessages[1]
+  assert.equal(restored.steps[0].status, 'skipped')
+  assert.deepEqual(restored.metadata.timings, { stage25: 0 })
+})
+
+test('chat store reload merges terminal metadata timings over stale top-level partial timings', async () => {
+  installLocalStorageMock({
+    lfp_chats: JSON.stringify([
+      {
+        id: 'timing-chat',
+        messages: [
+          {
+            role: 'assistant',
+            content: 'answer',
+            timings: { stage1: 1000 },
+            metadata: {
+              stage_timings_ms: { stage1: 1000 },
+              timings: { stage1: 1100, stage2: 2200 },
+            },
+          },
+        ],
+      },
+    ]),
+    lfp_current_chat_id: 'timing-chat',
+  })
+
+  const { createPinia, setActivePinia } = await import('pinia')
+  const { useChatStore } = await import('./chatStore.js')
+
+  setActivePinia(createPinia())
+  const store = useChatStore()
+  await store.loadChats()
+
+  assert.deepEqual(store.currentMessages[0].metadata.timings, { stage1: 1100, stage2: 2200 })
+  assert.deepEqual(store.currentMessages[0].timings, { stage1: 1100, stage2: 2200 })
+})
+
 test('chat store loadChats clears runtime-only busy state before restoring durable content', async () => {
   installLocalStorageMock({
     lfp_chats: JSON.stringify([

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   formatStageDuration,
   getMessageStageTimingModel,
+  getStepTimingDurationLabel,
   normalizeStageTimings,
 } from './stageTimings.js'
 
@@ -65,6 +66,20 @@ test('extracts timings from message metadata fallbacks', () => {
   assert.equal(model.entries[0].durationLabel, '1.0s')
 })
 
+test('metadata terminal timings override stale top-level partial timings after reload', () => {
+  const model = getMessageStageTimingModel({
+    timings: { stage1: 1000 },
+    metadata: {
+      timings: { stage1: 1100, stage2: 2200 },
+    },
+  })
+
+  assert.deepEqual(model.entries.map((entry) => [entry.key, entry.durationLabel]), [
+    ['stage1', '1.1s'],
+    ['stage2', '2.2s'],
+  ])
+})
+
 test('ignores invalid timing values', () => {
   const model = normalizeStageTimings({
     stage1: 'bad',
@@ -74,4 +89,50 @@ test('ignores invalid timing values', () => {
   })
 
   assert.deepEqual(model.entries.map((entry) => entry.key), ['stage4'])
+})
+
+test('maps highThinking visible step keys to detailed timing keys', () => {
+  const message = {
+    timings: {
+      step1_parallel: 3.2,
+      step2_pre_answer: 1.1,
+      step3_retrieval: 7.8,
+      step4_synthesis: 11.4,
+      step5_check_revise: 2.5,
+      total: 26.0,
+    },
+  }
+
+  assert.equal(getStepTimingDurationLabel(message, { step: 'step1', title: '阶段1' }), '3.2s')
+  assert.equal(getStepTimingDurationLabel(message, { step: 'step2', title: '阶段2' }), '1.1s')
+  assert.equal(getStepTimingDurationLabel(message, { step: 'step3', title: '阶段3' }), '7.8s')
+  assert.equal(getStepTimingDurationLabel(message, { step: 'step4', title: '阶段4' }), '11.4s')
+})
+
+test('prefers specific highThinking step5 totals before aggregate fallback', () => {
+  const message = {
+    timings: {
+      step5_check_revise: 9.0,
+      step5_check_total: 3.0,
+      step5_revise_total: 6.0,
+    },
+  }
+
+  assert.equal(getStepTimingDurationLabel(message, { step: 'step5_check', title: '阶段5A' }), '3.0s')
+  assert.equal(getStepTimingDurationLabel(message, { step: 'step5_revise', title: '阶段5B' }), '6.0s')
+  assert.equal(getStepTimingDurationLabel(message, { step: 'step5', title: '阶段5' }), '9.0s')
+})
+
+test('maps generation stage titles and keys to stage timing labels', () => {
+  const message = {
+    metadata: {
+      timings: {
+        stage1: 1000,
+        stage25: 2500,
+      },
+    },
+  }
+
+  assert.equal(getStepTimingDurationLabel(message, { step: 'stage1', title: '阶段一' }), '1.0s')
+  assert.equal(getStepTimingDurationLabel(message, { step: 'stage25', title: '阶段二点五' }), '2.5s')
 })

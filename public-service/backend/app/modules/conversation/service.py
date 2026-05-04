@@ -2379,6 +2379,7 @@ class ConversationService:
         answer_text: str = "",
         steps: list[dict[str, Any]] | None = None,
         failure: dict[str, Any] | None = None,
+        timings: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         normalized_status = self._normalize_terminal_status(terminal_status, default="completed")
         if normalized_status not in {"completed", "failed", "canceled", "expired"}:
@@ -2437,6 +2438,9 @@ class ConversationService:
                 metadata["last_seq"] = max(0, int(last_seq))
                 if steps is not None:
                     metadata["steps"] = list(steps)
+                timings_payload = dict(timings) if isinstance(timings, dict) else {}
+                if timings_payload:
+                    metadata["timings"] = timings_payload
                 failure_payload = dict(failure or {})
                 if failure_payload:
                     metadata["failure"] = failure_payload

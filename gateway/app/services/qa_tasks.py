@@ -890,6 +890,7 @@ class QATaskService:
                 answer_text=str(sync_payload.get("answer_text") or ""),
                 steps=list(sync_payload.get("steps") or []),
                 failure=dict(sync_payload.get("failure") or {}),
+                timings=dict(sync_payload.get("timings") or {}),
             )
         quota_result = await self._finalize_quota_grant(
             grant_id=str(record.get("quota_grant_id") or ""),
@@ -1040,6 +1041,8 @@ class QATaskService:
         if not callable(flush_progress):
             return
         owner_loop = _live_runtime_owner_loop(live_entry)
+        if isinstance(live_entry, dict):
+            live_entry["cancel_progress_flush_allowed"] = True
         try:
             await self._run_live_cleanup(
                 entry=live_entry,
@@ -1050,6 +1053,9 @@ class QATaskService:
             )
         except (asyncio.TimeoutError, Exception):
             logger.warning("gateway task live progress flush failed task_id=%s", task_id, exc_info=True)
+        finally:
+            if isinstance(live_entry, dict):
+                live_entry.pop("cancel_progress_flush_allowed", None)
 
     async def _run_live_cleanup(self, *, entry: Any, coroutine_factory, label: str, task_id: str, owner_loop: Any = None) -> None:
         owner = owner_loop if owner_loop is not None else _live_runtime_owner_loop(entry)
@@ -1509,7 +1515,12 @@ class GatewayTaskExecutor:
             runtime_lock = runtime["lock"]
             with runtime_lock:
                 cancel_event = runtime.get("cancel_event")
-                if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+                allow_cancelled_flush = bool(runtime.get("cancel_progress_flush_allowed"))
+                if (
+                    cancel_event is not None
+                    and getattr(cancel_event, "is_set", lambda: False)()
+                    and not allow_cancelled_flush
+                ):
                     return False
                 inflight_task = runtime.get("progress_flush_task")
                 if inflight_task is not None and not inflight_task.done():
@@ -1554,14 +1565,26 @@ class GatewayTaskExecutor:
             if inflight_task is not None and not inflight_task.done():
                 if not force:
                     return False
-                if not await self._await_progress_flush_or_cancel(wait_for, cancel_event=cancel_event):
+                if not await self._await_progress_flush_or_cancel(
+                    wait_for,
+                    cancel_event=cancel_event,
+                    allow_cancelled_flush=allow_cancelled_flush,
+                ):
                     return False
                 continue
-            return await self._await_progress_flush_or_cancel(wait_for, cancel_event=cancel_event)
+            return await self._await_progress_flush_or_cancel(
+                wait_for,
+                cancel_event=cancel_event,
+                allow_cancelled_flush=allow_cancelled_flush,
+            )
 
-    async def _await_progress_flush_or_cancel(self, wait_for: asyncio.Task, *, cancel_event: Any) -> bool:
+    async def _await_progress_flush_or_cancel(self, wait_for: asyncio.Task, *, cancel_event: Any, allow_cancelled_flush: bool = False) -> bool:
         while not wait_for.done():
-            if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+            if (
+                cancel_event is not None
+                and getattr(cancel_event, "is_set", lambda: False)()
+                and not allow_cancelled_flush
+            ):
                 return False
             await asyncio.sleep(0.05)
         return bool(await wait_for)
@@ -1825,7 +1848,11 @@ class GatewayTaskExecutor:
                     if event_type == "metadata":
                         if _normalized_epoch_ms(merged_telemetry.get("backend_stream_opened_at_ms")) is None:
                             self._persist_request_telemetry(request, backend_stream_opened_at_ms=_epoch_ms())
-                        continue
+                        if not (
+                            isinstance(payload.get("stage_timings_ms"), dict)
+                            or isinstance(payload.get("timings"), dict)
+                        ):
+                            continue
                     appended = self.relay_store.append_frame(
                         request_id,
                         payload,
@@ -1942,6 +1969,9 @@ class GatewayTaskExecutor:
                         if cancel_event.is_set():
                             return self._cancelled_execution_outcome(request_id)
                         answer_text = str(payload.get("final_answer") or "".join(content_parts)).strip()
+                        done_timings = payload.get("timings")
+                        if not isinstance(done_timings, dict):
+                            done_timings = {}
                         self._runtime_observe_progress(
                             live_runtime,
                             status="running",
@@ -1962,6 +1992,7 @@ class GatewayTaskExecutor:
                                 answer_text=answer_text,
                                 steps=[step_map[key] for key in step_order],
                                 failure={},
+                                timings=dict(done_timings),
                             )
                         except Exception:
                             logger.warning("gateway task terminal write failed after done request_id=%s", request_id, exc_info=True)
@@ -1972,6 +2003,7 @@ class GatewayTaskExecutor:
                                 answer_text=answer_text,
                                 steps=[step_map[key] for key in step_order],
                                 failure={},
+                                timings=dict(done_timings),
                                 quota_success=True,
                             )
                             return AdmissionExecutionOutcome(
@@ -1997,6 +2029,7 @@ class GatewayTaskExecutor:
                                 answer_text=answer_text,
                                 steps=[step_map[key] for key in step_order],
                                 failure={},
+                                timings=dict(done_timings),
                                 quota_success=True,
                             )
                         return AdmissionExecutionOutcome(
@@ -2027,6 +2060,13 @@ class GatewayTaskExecutor:
             idle_flush_task.cancel()
             with suppress(asyncio.CancelledError):
                 await idle_flush_task
+            if cancel_event.is_set():
+                try:
+                    await asyncio.wait_for(handle.abort(), timeout=_CANCEL_CLEANUP_TIMEOUT_SECONDS)
+                except asyncio.TimeoutError:
+                    logger.warning("gateway task cancelled stream abort timed out request_id=%s", request_id)
+                except Exception:
+                    logger.warning("gateway task cancelled stream abort failed request_id=%s", request_id, exc_info=True)
             self._unregister_live_handle(request_id)
 
         terminalized = self._terminalized_execution_outcome(request_id)
@@ -2238,6 +2278,7 @@ class GatewayTaskExecutor:
         steps: list[dict[str, Any]] | None,
         failure: dict[str, Any] | None,
         quota_success: bool,
+        timings: dict[str, Any] | None = None,
     ) -> None:
         request["post_complete_record_updates"] = {
             "terminal_sync_pending": True,
@@ -2247,6 +2288,7 @@ class GatewayTaskExecutor:
                 "answer_text": str(answer_text or ""),
                 "steps": list(steps or []),
                 "failure": dict(failure or {}),
+                "timings": dict(timings or {}),
                 "quota_success": bool(quota_success),
             },
         }

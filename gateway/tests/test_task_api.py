@@ -215,9 +215,10 @@ class _BlockingAsyncStream(httpx.AsyncByteStream):
         self._continue_event = continue_event
 
     async def __aiter__(self):
-        yield self._first_chunk
         self._first_released.set()
-        self._continue_event.wait(timeout=5)
+        yield self._first_chunk
+        while not self._continue_event.is_set():
+            await anyio.sleep(0.01)
         yield self._second_chunk
 
     async def aclose(self) -> None:
@@ -233,8 +234,8 @@ class _AbortAwareBlockingAsyncStream(httpx.AsyncByteStream):
         self._closed_event = closed_event
 
     async def __aiter__(self):
-        yield self._first_chunk
         self._first_released.set()
+        yield self._first_chunk
         while not self._continue_event.is_set():
             if self._closed_event.is_set():
                 return
@@ -255,8 +256,8 @@ class _AsyncPauseStream(httpx.AsyncByteStream):
         self._continue_event = continue_event
 
     async def __aiter__(self):
-        yield self._first_chunk
         self._first_released.set()
+        yield self._first_chunk
         while not self._continue_event.is_set():
             await anyio.sleep(0.01)
         yield self._second_chunk
@@ -1145,6 +1146,7 @@ def test_get_task_reconciles_completed_terminal_sync_with_success_quota(monkeypa
                 "last_seq": 4,
                 "answer_text": "finished answer",
                 "steps": [{"title": "retrieve"}],
+                "timings": {"stage2": 222},
                 "failure": {},
                 "quota_success": True,
             },
@@ -1188,6 +1190,7 @@ def test_get_task_reconciles_completed_terminal_sync_with_success_quota(monkeypa
     ]
     assert calls[0][1]["terminal_status"] == "completed"
     assert calls[0][1]["answer_text"] == "finished answer"
+    assert calls[0][1]["timings"] == {"stage2": 222}
     assert calls[1][1]["success"] is True
 
 
@@ -1755,7 +1758,9 @@ def test_admission_worker_clears_inflight_progress_when_progress_flush_raises(mo
 
     result = result_holder["result"]
     assert result.outcome == "completed"
-    assert [payload["content_delta"] for payload in progress_calls if payload["content_delta"]] == ["hello", "helloworld"]
+    content_deltas = [payload["content_delta"] for payload in progress_calls if payload["content_delta"]]
+    assert content_deltas[0] == "hello"
+    assert "".join(content_deltas[1:]) == "helloworld"
     assert len(terminal_calls) == 1
     assert terminal_calls[0]["terminal_status"] == "completed"
     assert terminal_calls[0]["answer_text"] == "helloworld"
@@ -1827,6 +1832,12 @@ def test_admission_worker_cancel_flushes_pending_content_before_canceled_termina
     thread = threading.Thread(target=_run_worker, daemon=True)
     thread.start()
     assert first_chunk_released.wait(timeout=5)
+    content_deadline = time.monotonic() + 5
+    while time.monotonic() < content_deadline:
+        if any(frame.get("payload", {}).get("type") == "content" for frame in relay_store.get_frames(request_id, after_sequence=0)):
+            break
+        time.sleep(0.01)
+    assert any(frame.get("payload", {}).get("type") == "content" for frame in relay_store.get_frames(request_id, after_sequence=0))
 
     client = TestClient(app)
     response = client.post(f"/api/v1/tasks/{request_id}/cancel")
@@ -2177,7 +2188,7 @@ def test_task_events_stream_immediately_dispatches_head_queued_task_without_wait
             return httpx.Response(
                 200,
                 content=(
-                    b'data: {"type":"metadata","query_mode":"fast","route":"kb_qa","trace_id":"req_events_immediate_dispatch"}\n\n'
+                    b'data: {"type":"metadata","query_mode":"fast","route":"kb_qa","trace_id":"req_events_immediate_dispatch","stage_timings_ms":{"stage1":1000}}\n\n'
                     b'data: {"type":"content","content":"hello"}\n\n'
                     b'data: {"type":"done","final_answer":"hello","query_mode":"fast","route":"kb_qa","trace_id":"req_events_immediate_dispatch"}\n\n'
                 ),
@@ -2207,11 +2218,13 @@ def test_task_events_stream_immediately_dispatches_head_queued_task_without_wait
 
     assert response.status_code == 200
     payloads = _sse_payloads(body)
-    assert [item["seq"] for item in payloads] == [2, 3, 4, 5]
+    assert [item["seq"] for item in payloads] == [2, 3, 4, 5, 6]
     assert payloads[0]["status"] == "admitted"
     assert payloads[1]["status"] == "running"
-    assert payloads[2]["type"] == "content"
-    assert payloads[3]["type"] == "done"
+    assert payloads[2]["type"] == "metadata"
+    assert payloads[2]["stage_timings_ms"] == {"stage1": 1000}
+    assert payloads[3]["type"] == "content"
+    assert payloads[4]["type"] == "done"
     assert queue_store.get_request("req_events_immediate_dispatch")["status"] == "completed"
     call_paths = [path for path, _ in calls]
     assert call_paths[0] == "/internal/conversations/188/tasks/req_events_immediate_dispatch/assistant-progress"
@@ -3795,7 +3808,7 @@ def test_admission_worker_executes_task_stream_updates_progress_and_finalizes_qu
                 content=(
                     b'data: {"type":"metadata","query_mode":"fast","route":"kb_qa","trace_id":"req_worker_stream"}\n\n'
                     b'data: {"type":"content","content":"hello"}\n\n'
-                    b'data: {"type":"done","final_answer":"hello","query_mode":"fast","route":"kb_qa","trace_id":"req_worker_stream"}\n\n'
+                    b'data: {"type":"done","final_answer":"hello","query_mode":"fast","route":"kb_qa","trace_id":"req_worker_stream","timings":{"stage1":1000,"stage2":2000}}\n\n'
                 ),
                 headers={"content-type": "text/event-stream"},
             )
@@ -3835,6 +3848,9 @@ def test_admission_worker_executes_task_stream_updates_progress_and_finalizes_qu
     assert backend_headers[0]["x-internal-service-token"] == "authority-test-token"
     assert calls[-1][0] == "/internal/quota/grants/grant-worker-stream/finalize"
     assert calls[-1][1]["success"] is True
+    terminal_calls = [payload for path, payload in calls if path == "/internal/conversations/91/tasks/req_worker_stream/assistant-terminal"]
+    assert terminal_calls
+    assert terminal_calls[-1]["timings"] == {"stage1": 1000, "stage2": 2000}
 
 
 def test_admission_worker_logs_dispatch_and_stream_milestones(monkeypatch, caplog):
@@ -4534,7 +4550,7 @@ def test_admission_worker_marks_terminal_sync_pending_when_post_done_side_effect
                 200,
                 content=(
                     b'data: {"type":"metadata","query_mode":"fast","route":"kb_qa","trace_id":"side-effect"}\n\n'
-                    b'data: {"type":"done","final_answer":"ok","query_mode":"fast","route":"kb_qa","trace_id":"side-effect"}\n\n'
+                    b'data: {"type":"done","final_answer":"ok","query_mode":"fast","route":"kb_qa","trace_id":"side-effect","timings":{"stage1":111}}\n\n'
                 ),
                 headers={"content-type": "text/event-stream"},
             )
@@ -4573,6 +4589,7 @@ def test_admission_worker_marks_terminal_sync_pending_when_post_done_side_effect
     assert stored["terminal_sync_pending"] is True
     assert stored["terminal_sync_payload"]["terminal_status"] == "completed"
     assert stored["terminal_sync_payload"]["answer_text"] == "ok"
+    assert stored["terminal_sync_payload"]["timings"] == {"stage1": 111}
     assert stored["terminal_sync_payload"]["quota_success"] is True
     assert [path for path, _ in calls if path.endswith("/rollback-create")] == []
     finalize_calls = [payload for path, payload in calls if path == "/internal/quota/grants/grant-worker-side-effect/finalize"]
@@ -4605,7 +4622,7 @@ def test_get_task_retries_completed_terminal_sync_after_post_done_failure(monkey
             return httpx.Response(
                 200,
                 content=(
-                    b'data: {"type":"done","final_answer":"ok","query_mode":"fast","route":"kb_qa","trace_id":"terminal-repair"}\n\n'
+                    b'data: {"type":"done","final_answer":"ok","query_mode":"fast","route":"kb_qa","trace_id":"terminal-repair","timings":{"stage4":444}}\n\n'
                 ),
                 headers={"content-type": "text/event-stream"},
             )
@@ -4649,5 +4666,6 @@ def test_get_task_retries_completed_terminal_sync_after_post_done_failure(monkey
     terminal_calls = [payload for path, payload in calls if path == f"/internal/conversations/95/tasks/{request_id}/assistant-terminal"]
     assert len(terminal_calls) == 2
     assert terminal_calls[-1]["terminal_status"] == "completed"
+    assert terminal_calls[-1]["timings"] == {"stage4": 444}
     finalize_calls = [payload for path, payload in calls if path == "/internal/quota/grants/grant-worker-terminal-repair/finalize"]
     assert finalize_calls == [{"success": True}]

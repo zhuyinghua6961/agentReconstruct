@@ -312,6 +312,7 @@ class ConversationPersistenceService:
         answer_text: str = "",
         steps: list[dict[str, Any]] | None = None,
         failure: dict[str, Any] | None = None,
+        timings: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         cid = _conversation_id_int(conversation_id)
         uid = _conversation_id_int(user_id)
@@ -326,6 +327,7 @@ class ConversationPersistenceService:
             "answer_text": str(answer_text or ""),
             "steps": list(steps or []),
             "failure": dict(failure or {}),
+            "timings": dict(timings or {}),
         }
         return await self._post_internal_json(
             request=request,

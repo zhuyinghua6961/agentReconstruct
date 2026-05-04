@@ -82,6 +82,19 @@ export function mergeRoutingMetadata(existingMeta = {}, event = {}) {
   if (next.error) metadata.error_name = String(next.error)
   if (next.message) metadata.error_message = String(next.message)
   if (typeof next.retriable === 'boolean') metadata.retriable = next.retriable
+  if (next.stage_timings_ms && typeof next.stage_timings_ms === 'object' && !Array.isArray(next.stage_timings_ms)) {
+    metadata.stage_timings_ms = { ...next.stage_timings_ms }
+    metadata.timings = {
+      ...(metadata.timings && typeof metadata.timings === 'object' && !Array.isArray(metadata.timings) ? metadata.timings : {}),
+      ...next.stage_timings_ms,
+    }
+  }
+  if (next.timings && typeof next.timings === 'object' && !Array.isArray(next.timings)) {
+    metadata.timings = {
+      ...(metadata.timings && typeof metadata.timings === 'object' && !Array.isArray(metadata.timings) ? metadata.timings : {}),
+      ...next.timings,
+    }
+  }
 
   return metadata
 }

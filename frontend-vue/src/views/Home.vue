@@ -10,7 +10,7 @@ import { resolveStreamingTarget } from '../utils/streamingTarget'
 import { buildChatRequestContext } from '../utils/chatRequestContext'
 import { focusQuestionItem } from '../utils/questionFocus'
 import { buildQuestionOutlineItems, buildQuestionOutlineSignature, getLastQuestionOutlineItem, getQuestionAnchorId } from '../utils/questionOutline'
-import { getMessageStageTimingModel } from '../utils/stageTimings'
+import { getMessageStageTimingModel, getStepTimingDurationLabel as getStepTimingDurationLabelFromModel } from '../utils/stageTimings'
 import { DEFAULT_NEAR_BOTTOM_THRESHOLD_PX, isNearBottom, shouldAutoScroll } from '../utils/scrollFollow'
 import { mergeSelectedFileIdsAfterUpload, resolveUploadedFileDisplayNumber } from '../utils/fileSelection'
 import { shouldIgnoreLateStreamContent, shouldIgnoreLateStreamError } from '../utils/streamingLifecycle'
@@ -777,6 +777,7 @@ function buildStepPayload(data, fallbackKey, fallbackStatus = 'processing') {
 function getStepIcon(step) {
   const status = normalizeStepStatus(step?.status)
   if (status === 'success') return '●'
+  if (status === 'skipped') return '●'
   if (status === 'error') return '●'
   return '●'
 }
@@ -797,24 +798,11 @@ function getStepDetail(step) {
 }
 
 function getStepTimingDurationLabel(msg, step) {
-  const title = getStepTitle(step).replace(/\s+/g, '')
-  const stepKey = String(step?.step || '').trim()
-  const keyByTitle = {
-    阶段一: 'stage1',
-    阶段二: 'stage2',
-    阶段二点五: 'stage25',
-    阶段2点5: 'stage25',
-    '阶段2.5': 'stage25',
-    阶段三: 'stage3',
-    阶段四: 'stage4',
-  }
-  const candidateKeys = [
-    stepKey,
-    keyByTitle[title],
-  ].filter(Boolean)
-  const model = getStageTimingModel(msg)
-  const entry = model.entries.find((timing) => candidateKeys.includes(timing.key) || candidateKeys.includes(timing.label.replace(/\s+/g, '')))
-  return entry?.durationLabel || ''
+  return getStepTimingDurationLabelFromModel(msg, {
+    ...step,
+    title: getStepTitle(step),
+    message: step?.message,
+  })
 }
 
 function getStepCount(step) {
@@ -827,10 +815,11 @@ function getStepOverview(msg) {
   if (steps.length === 0) return ''
   const processing = steps.filter((step) => normalizeStepStatus(step?.status) === 'processing').length
   const success = steps.filter((step) => normalizeStepStatus(step?.status) === 'success').length
+  const skipped = steps.filter((step) => normalizeStepStatus(step?.status) === 'skipped').length
   const error = steps.filter((step) => normalizeStepStatus(step?.status) === 'error').length
-  if (error > 0) return `失败 ${error} · 完成 ${success}`
-  if (processing > 0) return `进行中 ${processing} · 完成 ${success}`
-  return `已完成 ${success}`
+  if (error > 0) return `失败 ${error} · 完成 ${success}${skipped ? ` · 跳过 ${skipped}` : ''}`
+  if (processing > 0) return `进行中 ${processing} · 完成 ${success}${skipped ? ` · 跳过 ${skipped}` : ''}`
+  return skipped > 0 ? `已完成 ${success} · 跳过 ${skipped}` : `已完成 ${success}`
 }
 
 function getCollapsedStepSummary(msg) {
@@ -868,6 +857,7 @@ function upsertStreamingStep(chatId, stepPayload, activeStepKey, { markPreviousA
 function normalizeStepStatus(status, fallback = 'processing') {
   const raw = String(status || '').trim().toLowerCase()
   if (['processing', 'in_progress', 'running', 'pending'].includes(raw)) return 'processing'
+  if (['skipped', 'skip', 'skipping'].includes(raw)) return 'skipped'
   if (['success', 'succeeded', 'completed', 'complete', 'done', 'ok'].includes(raw)) return 'success'
   if (['error', 'failed', 'fail', 'failure'].includes(raw)) return 'error'
   return fallback
@@ -1026,6 +1016,9 @@ function applyGatewayEvent(chatId, data, runtime = getStreamRuntime(chatId)) {
     const targetMessage = getStreamingTargetMessage(chatId)?.message || {}
     const existingMeta = (targetMessage.metadata && typeof targetMessage.metadata === 'object') ? targetMessage.metadata : {}
     const mergedMeta = mergeRoutingMetadata(existingMeta, data)
+    const mergedTimings = (mergedMeta.timings && typeof mergedMeta.timings === 'object' && !Array.isArray(mergedMeta.timings))
+      ? { ...mergedMeta.timings }
+      : null
     const modeFromExpert = data.expert === 'neo4j'
       ? '知识图谱'
       : data.expert === 'community'
@@ -1036,7 +1029,8 @@ function applyGatewayEvent(chatId, data, runtime = getStreamRuntime(chatId)) {
     updateStreamingTargetMessage(chatId, {
       expert: data.expert,
       queryMode: getFallbackQueryModeLabel(data, mergedMeta) || modeFromExpert,
-      metadata: mergedMeta
+      metadata: mergedMeta,
+      ...(mergedTimings ? { timings: mergedTimings } : {}),
     })
     return { terminal: false }
   }
@@ -1097,7 +1091,7 @@ function applyGatewayEvent(chatId, data, runtime = getStreamRuntime(chatId)) {
     const finalizedSteps = updateStreamingSteps(chatId, (steps) => {
       if (eventState.activeStepKey) {
         const activeIdx = steps.findIndex((step) => step.step === eventState.activeStepKey)
-        if (activeIdx >= 0) {
+        if (activeIdx >= 0 && normalizeStepStatus(steps[activeIdx].status) === 'processing') {
           steps[activeIdx] = { ...steps[activeIdx], status: 'success', updatedAt: new Date().toISOString() }
         }
       }
@@ -1121,6 +1115,9 @@ function applyGatewayEvent(chatId, data, runtime = getStreamRuntime(chatId)) {
       streaming_terminal_event: 'done',
       used_files: Array.isArray(data.used_files) ? data.used_files : (existingMeta.used_files || []),
       timings: (data.timings && typeof data.timings === 'object') ? data.timings : (existingMeta.timings || {}),
+    }
+    if (updates.metadata.timings && typeof updates.metadata.timings === 'object' && !Array.isArray(updates.metadata.timings)) {
+      updates.timings = { ...updates.metadata.timings }
     }
     if (!targetMessage.queryMode) {
       updates.queryMode = getFallbackQueryModeLabel(data, mergedMeta)
@@ -3503,6 +3500,10 @@ watch(
 
 .step-icon-success {
   color: #16a34a;
+}
+
+.step-icon-skipped {
+  color: #64748b;
 }
 
 .step-icon-error {

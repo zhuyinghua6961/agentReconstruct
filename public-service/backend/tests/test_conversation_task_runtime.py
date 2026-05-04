@@ -255,6 +255,7 @@ def test_task_assistant_terminal_clears_active_task_and_finalizes_same_placehold
             task_id="task_004",
             terminal_status="expired",
             last_seq=7,
+            timings={"stage1": 1000},
         )
         detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
         document = service._json_store.load_document(user_id=7, conversation_id=conversation_id)
@@ -270,6 +271,7 @@ def test_task_assistant_terminal_clears_active_task_and_finalizes_same_placehold
     assert assistant["metadata"]["failure_message"] == "已过期"
     assert assistant["metadata"]["retriable"] is False
     assert assistant["metadata"]["last_seq"] == 7
+    assert assistant["metadata"]["timings"] == {"stage1": 1000}
     assert document["meta"].get("active_task_id") in {None, ""}
 
 
@@ -334,6 +336,7 @@ def test_task_assistant_conflicting_second_terminal_does_not_override_first_term
             task_id="task_006",
             terminal_status="expired",
             last_seq=7,
+            timings={"stage1": 1000},
         )
 
         second_terminal = service.terminal_authority_task_assistant(
@@ -343,6 +346,7 @@ def test_task_assistant_conflicting_second_terminal_does_not_override_first_term
             terminal_status="failed",
             last_seq=8,
             failure={"message": "should-be-ignored"},
+            timings={"stage2": 2000},
         )
         detail = service.get_conversation_detail(user_id=7, conversation_id=conversation_id)
 
@@ -351,6 +355,7 @@ def test_task_assistant_conflicting_second_terminal_does_not_override_first_term
     assistant = detail["data"]["messages"][1]
     assert assistant["status"] == "expired"
     assert assistant["metadata"]["terminal_status"] == "expired"
+    assert assistant["metadata"]["timings"] == {"stage1": 1000}
 
 
 def test_task_assistant_repeated_start_after_terminal_does_not_reopen_placeholder():

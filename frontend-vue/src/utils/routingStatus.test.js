@@ -28,6 +28,28 @@ test('mergeRoutingMetadata keeps route context from metadata and error events', 
   assert.equal(metadata.retriable, true)
 })
 
+test('mergeRoutingMetadata preserves timing metadata for live stage display', () => {
+  const fromStageTimings = mergeRoutingMetadata(
+    { route: 'kb_qa' },
+    { stage_timings_ms: { stage1: 1000, stage2: 2000 } }
+  )
+  assert.deepEqual(fromStageTimings.timings, { stage1: 1000, stage2: 2000 })
+  assert.deepEqual(fromStageTimings.stage_timings_ms, { stage1: 1000, stage2: 2000 })
+
+  const fromTimings = mergeRoutingMetadata(
+    { timings: { stage1: 1000 } },
+    { timings: { stage1: 1000, stage2: 2000 } }
+  )
+  assert.deepEqual(fromTimings.timings, { stage1: 1000, stage2: 2000 })
+
+  const incremental = mergeRoutingMetadata(
+    { timings: { stage1: 1000 } },
+    { stage_timings_ms: { stage2: 2000 } }
+  )
+  assert.deepEqual(incremental.timings, { stage1: 1000, stage2: 2000 })
+  assert.deepEqual(incremental.stage_timings_ms, { stage2: 2000 })
+})
+
 test('buildRoutingErrorMarkdown formats clarification with candidate list', () => {
   const markdown = buildRoutingErrorMarkdown({
     code: 'FILE_SELECTION_CLARIFICATION_REQUIRED',

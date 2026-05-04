@@ -110,6 +110,7 @@ function normalizeConversationSummary(item) {
 function normalizeStepStatus(status) {
   const raw = String(status || '').trim().toLowerCase();
   if (['processing', 'in_progress', 'running', 'pending'].includes(raw)) return 'processing';
+  if (['skipped', 'skip', 'skipping'].includes(raw)) return 'skipped';
   if (['success', 'succeeded', 'completed', 'complete', 'done', 'ok'].includes(raw)) return 'success';
   if (['error', 'failed', 'fail', 'failure'].includes(raw)) return 'error';
   return 'processing';
@@ -248,7 +249,11 @@ function normalizeMessage(item) {
   const failureCode = String(item?.failureCode || item?.failure_code || metadata?.failure_code || '').trim()
   const doneSeen = item?.doneSeen ?? item?.done_seen ?? metadata?.done_seen
   const retriable = item?.retriable ?? metadata?.retriable
-  const timings = item?.timings ?? metadata?.timings ?? metadata?.stage_timings_ms
+  const timings = {
+    ...((item?.timings && typeof item.timings === 'object' && !Array.isArray(item.timings)) ? item.timings : {}),
+    ...((metadata?.stage_timings_ms && typeof metadata.stage_timings_ms === 'object' && !Array.isArray(metadata.stage_timings_ms)) ? metadata.stage_timings_ms : {}),
+    ...((metadata?.timings && typeof metadata.timings === 'object' && !Array.isArray(metadata.timings)) ? metadata.timings : {}),
+  }
   const normalizedTerminalStatus = terminalStatus.toLowerCase()
   const terminalCompleted = ['done', 'failed', 'canceled'].includes(normalizedTerminalStatus)
 
@@ -285,7 +290,7 @@ function normalizeMessage(item) {
   if (retriable !== undefined) {
     metadata.retriable = Boolean(retriable);
   }
-  if (timings && typeof timings === 'object' && !Array.isArray(timings)) {
+  if (Object.keys(timings).length > 0) {
     metadata.timings = { ...timings };
   }
 

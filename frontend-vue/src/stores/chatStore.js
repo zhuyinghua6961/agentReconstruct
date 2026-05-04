@@ -294,6 +294,7 @@ export const useChatStore = defineStore('chat', () => {
   function normalizeStepStatus(status, fallback = 'processing') {
     const raw = String(status || '').trim().toLowerCase()
     if (['processing', 'in_progress', 'running', 'pending'].includes(raw)) return 'processing'
+    if (['skipped', 'skip', 'skipping'].includes(raw)) return 'skipped'
     if (['success', 'succeeded', 'completed', 'complete', 'done', 'ok'].includes(raw)) return 'success'
     if (['error', 'failed', 'fail', 'failure'].includes(raw)) return 'error'
     return fallback
@@ -455,7 +456,11 @@ export const useChatStore = defineStore('chat', () => {
     ).trim()
     const doneSeen = message?.doneSeen ?? message?.done_seen ?? metadata?.done_seen
     const retriable = message?.retriable ?? metadata?.retriable
-    const timings = message?.timings ?? metadata?.timings ?? metadata?.stage_timings_ms
+    const timings = {
+      ...((message?.timings && typeof message.timings === 'object' && !Array.isArray(message.timings)) ? message.timings : {}),
+      ...((metadata?.stage_timings_ms && typeof metadata.stage_timings_ms === 'object' && !Array.isArray(metadata.stage_timings_ms)) ? metadata.stage_timings_ms : {}),
+      ...((metadata?.timings && typeof metadata.timings === 'object' && !Array.isArray(metadata.timings)) ? metadata.timings : {}),
+    }
     const normalizedTerminalStatus = terminalStatus.toLowerCase()
     const terminalCompleted = ['done', 'failed', 'canceled'].includes(normalizedTerminalStatus)
 
@@ -492,7 +497,7 @@ export const useChatStore = defineStore('chat', () => {
     if (retriable !== undefined) {
       metadata.retriable = Boolean(retriable)
     }
-    if (timings && typeof timings === 'object' && !Array.isArray(timings)) {
+    if (Object.keys(timings).length > 0) {
       metadata.timings = { ...timings }
     }
 

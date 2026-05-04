@@ -541,6 +541,7 @@ def terminal_task_assistant(
         answer_text=payload.answer_text,
         steps=payload.steps,
         failure=payload.failure,
+        timings=payload.timings,
     )
     _raise_service_error(result=result, ok_status=200)
     logger.info(

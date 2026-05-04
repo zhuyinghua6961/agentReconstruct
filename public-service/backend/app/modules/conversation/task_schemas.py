@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.modules.conversation.authority_schemas import (
     AuthorityContextHints,
@@ -44,6 +44,12 @@ class AuthorityTaskAssistantTerminalRequest(BaseModel):
     answer_text: str = ""
     steps: list[dict[str, Any]] = Field(default_factory=list)
     failure: dict[str, Any] = Field(default_factory=dict)
+    timings: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("timings", mode="before")
+    @classmethod
+    def _coerce_timings(cls, value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
 
 
 class AuthorityTaskCreateRollbackRequest(BaseModel):

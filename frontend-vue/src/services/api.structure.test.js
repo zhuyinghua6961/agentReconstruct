@@ -139,16 +139,19 @@ test('api exposes streaming document translation for incremental full-document r
 })
 
 test('api normalizeMessage preserves terminal failure fields from conversation detail payloads', () => {
+  assert.match(source, /\['skipped',\s*'skip',\s*'skipping'\]\.includes\(raw\)\)\s*return 'skipped'/)
   assert.match(source, /const terminalStatus = String\(item\?\.terminalStatus \|\| item\?\.terminal_status \|\| item\?\.status \|\| metadata\?\.terminal_status \|\| metadata\?\.status \|\| ''\)\.trim\(\)/)
   assert.match(source, /const failureMessage = String\(item\?\.failureMessage \|\| item\?\.failure_message \|\| metadata\?\.failure_message \|\| ''\)\.trim\(\)/)
   assert.match(source, /const failureCode = String\(item\?\.failureCode \|\| item\?\.failure_code \|\| metadata\?\.failure_code \|\| ''\)\.trim\(\)/)
   assert.match(source, /const doneSeen = item\?\.doneSeen \?\? item\?\.done_seen \?\? metadata\?\.done_seen/)
-  assert.match(source, /const timings = item\?\.timings \?\? metadata\?\.timings \?\? metadata\?\.stage_timings_ms/)
+  assert.match(source, /const timings = \{\s*\.\.\.\(\(item\?\.timings/s)
+  assert.match(source, /\.\.\.\(\(metadata\?\.stage_timings_ms/)
+  assert.match(source, /\.\.\.\(\(metadata\?\.timings/)
   assert.match(source, /metadata\.terminal_status = terminalStatus/)
   assert.match(source, /metadata\.failure_message = failureMessage/)
   assert.match(source, /metadata\.failure_code = failureCode/)
   assert.match(source, /metadata\.done_seen = Boolean\(doneSeen\)/)
-  assert.match(source, /metadata\.timings = \{ \.\.\.timings \}/)
+  assert.match(source, /if \(Object\.keys\(timings\)\.length > 0\) \{\s*metadata\.timings = \{ \.\.\.timings \}/s)
   assert.match(source, /\.\.\.\(metadata\.timings \? \{ timings: metadata\.timings \} : \{\}\)/)
 })
 

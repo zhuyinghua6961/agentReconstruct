@@ -31,6 +31,26 @@ const THINKING_COUNTER_KEYS = new Set([
   'step5_revise_rounds',
 ])
 
+const GENERATION_STEP_KEY_BY_TITLE = {
+  阶段一: 'stage1',
+  阶段二: 'stage2',
+  阶段二点五: 'stage25',
+  阶段2点5: 'stage25',
+  '阶段2.5': 'stage25',
+  阶段三: 'stage3',
+  阶段四: 'stage4',
+}
+
+const THINKING_TIMING_KEYS_BY_STEP = {
+  step1: ['step1_parallel'],
+  step2: ['step2_pre_answer'],
+  step3: ['step3_retrieval'],
+  step4: ['step4_synthesis'],
+  step5: ['step5_check_revise', 'step5_check_total', 'step5_revise_total'],
+  step5_check: ['step5_check_total', 'step5_check_revise'],
+  step5_revise: ['step5_revise_total', 'step5_check_revise'],
+}
+
 function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
@@ -134,6 +154,35 @@ export function normalizeStageTimings(rawTimings) {
 
 export function getMessageStageTimingModel(message) {
   const metadata = isPlainObject(message?.metadata) ? message.metadata : {}
-  const rawTimings = message?.timings ?? metadata.timings ?? metadata.stage_timings_ms
+  const rawTimings = {
+    ...(isPlainObject(message?.timings) ? message.timings : {}),
+    ...(isPlainObject(metadata.stage_timings_ms) ? metadata.stage_timings_ms : {}),
+    ...(isPlainObject(metadata.timings) ? metadata.timings : {}),
+  }
   return normalizeStageTimings(rawTimings)
+}
+
+function normalizeStepTitleForTiming(step = {}) {
+  const rawTitle = String(step?.title || '').trim()
+  const rawMessage = String(step?.message || step?.content || '').trim()
+  const title = rawTitle || rawMessage.split(/[：:]/)[0] || ''
+  return title.replace(/\s+/g, '')
+}
+
+export function getStepTimingDurationLabel(message, step = {}) {
+  const stepKey = String(step?.step || '').trim()
+  const title = normalizeStepTitleForTiming(step)
+  const candidateKeys = [
+    stepKey,
+    GENERATION_STEP_KEY_BY_TITLE[title],
+    ...(THINKING_TIMING_KEYS_BY_STEP[stepKey] || []),
+  ].filter(Boolean)
+  const model = getMessageStageTimingModel(message)
+  const entriesByKey = new Map()
+  model.entries.forEach((timing) => {
+    entriesByKey.set(timing.key, timing)
+    entriesByKey.set(String(timing.label || '').replace(/\s+/g, ''), timing)
+  })
+  const entry = candidateKeys.map((key) => entriesByKey.get(key)).find(Boolean)
+  return entry?.durationLabel || ''
 }
