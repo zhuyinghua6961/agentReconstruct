@@ -1,4 +1,4 @@
-from server.utils.doi import extract_dois, normalize_doi
+from server.utils.doi import extract_dois, extract_dois_from_answer_text, normalize_doi
 
 
 def test_normalize_doi_handles_polluted_reference_tokens():
@@ -50,3 +50,10 @@ def test_extract_dois_repairs_square_bracket_merged_second_doi_missing_leading_s
 
 def test_extract_dois_does_not_fabricate_doi_from_non_doi_suffix():
     assert extract_dois("(n=5)1002.alpha") == []
+
+
+def test_extract_dois_from_answer_text_dedupes_like_extract_references():
+    refs = extract_dois_from_answer_text(
+        "A [10.1007_s11581-021-04073-2, Results] and doi:10.1007/s11581-021-04073-2)."
+    )
+    assert refs == ["10.1007/s11581-021-04073-2"]

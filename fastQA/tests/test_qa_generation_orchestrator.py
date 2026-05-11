@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from app.integrations.redis import RedisService
 from app.modules.graph_kb.models import GraphRagPayload
 from app.modules.qa_cache import reset_cache_metrics, snapshot_cache_metrics
-from app.modules.qa_kb.orchestrators.generation import GenerationPipelineOrchestrator
+from app.modules.qa_kb.orchestrators.generation import GenerationPipelineOrchestrator, select_source_dois_for_evidence
 
 
 @dataclass
@@ -19,12 +19,26 @@ class _Runtime:
     stage4_payload: list
     model: str = "qwen-test"
     stage1_prompt: str = "prompt"
+    comparison_profile_payload: dict | None = None
+    comparison_profile_calls: list[dict] | None = None
 
     def _get_vector_db_context_for_prompt(self) -> str:
         return "context"
 
     def stage1_pre_answer_and_planning(self, user_question: str) -> dict:
         return dict(self.stage1_payload)
+
+    def generate_comparison_retrieval_profile(self, *, user_question: str, comparison_plan: dict, retrieval_claims: list[dict]) -> dict:
+        if self.comparison_profile_calls is not None:
+            self.comparison_profile_calls.append(
+                {
+                    "user_question": user_question,
+                    "comparison_plan": comparison_plan,
+                    "retrieval_claims": retrieval_claims,
+                    "model": self.model,
+                }
+            )
+        return dict(self.comparison_profile_payload or {})
 
     def stage2_targeted_retrieval(self, retrieval_claims, n_results_per_claim=10, user_question=None, should_cancel=None, active_stream_count=None) -> dict:
         return dict(self.stage2_payload)
@@ -147,6 +161,329 @@ def test_orchestrator_run_returns_final_result_when_stage4_succeeds():
     assert result.metadata.doi_count == 1
     assert result.metadata.chunk_count == 1
     assert result.metadata.source_count == 1
+
+
+def test_orchestrator_passes_reranked_evidence_chunks_to_stage4(monkeypatch):
+    monkeypatch.setenv("QA_STAGE35_EVIDENCE_RERANK_ENABLED", "true")
+    seen_stage4_chunks: dict[str, list[dict]] = {}
+    runtime = _Runtime(
+        stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]},
+        stage2_payload={"success": True, "documents": ["doc"], "metadatas": [{"doi": "10.1"}], "distances": [0.1]},
+        doi_payload=["10.1"],
+        stage25_payload={"enabled": False, "applied": False, "md_chunks_by_doi": {}, "stats": {}},
+        stage3_payload={"10.1": [{"text": "raw"}]},
+        stage4_payload=[{"success": True, "final_answer": "final", "references": [{"doi": "10.1"}]}],
+    )
+
+    def _rerank(**kwargs):
+        assert kwargs["pdf_chunks"] == {"10.1": [{"text": "raw"}]}
+        return {
+            "pdf_chunks": {"10.1": [{"text": "reranked", "evidence_score": 0.9}]},
+            "stats": {"before_chunk_count": 1, "after_chunk_count": 1},
+        }
+
+    class _Stage4:
+        def stream(self, **kwargs):
+            seen_stage4_chunks.update(kwargs["pdf_chunks"])
+            return runtime.stage4_synthesis_with_pdf_chunks(
+                user_question=kwargs["user_question"],
+                deep_answer=kwargs["deep_answer"],
+                pdf_chunks=kwargs["pdf_chunks"],
+                retrieval_results=kwargs["retrieval_results"],
+                should_cancel=kwargs["should_cancel"],
+                conversation_context=kwargs["conversation_context"],
+            )
+
+    orchestrator = GenerationPipelineOrchestrator(stage4=_Stage4(), evidence_rerank_fn=_rerank)
+
+    result = orchestrator.run(
+        question="hello",
+        runtime=runtime,
+        redis_service=None,
+        n_results_per_claim=5,
+        should_cancel=None,
+        active_stream_count=None,
+        logger=_logger(),
+    )
+
+    assert result.success is True
+    assert seen_stage4_chunks == {"10.1": [{"text": "reranked", "evidence_score": 0.9}]}
+    assert result.raw["evidence_rerank"]["stats"]["after_chunk_count"] == 1
+
+
+def test_orchestrator_uses_answer_plan_for_retrieval_and_stage4():
+    captured: dict = {}
+    runtime = _Runtime(
+        stage1_payload={
+            "success": True,
+            "deep_answer": "draft",
+            "answer_plan": {
+                "answer_type": "process_comparison",
+                "dimensions": [{"name": "成本", "evidence_needed": "原料成本和规模化生产数据"}],
+                "object_analysis_plan": [
+                    {"object": "铁红", "must_verify_with_evidence": ["还原气氛要求", "产物电化学性能"]}
+                ],
+            },
+            "retrieval_claims": [{"claim": "base claim"}],
+        },
+        stage2_payload={
+            "success": True,
+            "documents": ["doc"],
+            "metadatas": [{"doi": "10.1"}],
+            "distances": [0.1],
+            "claim_to_results": {},
+            "unique_count": 1,
+            "total_count": 1,
+        },
+        doi_payload=["10.1"],
+        stage25_payload={"enabled": False, "applied": False, "md_chunks_by_doi": {}, "stats": {}},
+        stage3_payload={"10.1": [{"text": "evidence"}]},
+        stage4_payload=[],
+    )
+
+    class _Stage2:
+        def run(self, *, runtime, retrieval_claims, **kwargs):
+            _ = (runtime, kwargs)
+            captured["retrieval_claims"] = retrieval_claims
+            return dict(runtime.stage2_payload)
+
+    class _Stage4:
+        def stream(self, *, answer_plan=None, **kwargs):
+            _ = kwargs
+            captured["answer_plan"] = answer_plan
+            yield {"success": True, "final_answer": "final", "references": [{"doi": "10.1"}]}
+
+    orchestrator = GenerationPipelineOrchestrator(stage2=_Stage2(), stage4=_Stage4())
+
+    result = orchestrator.run(
+        question="铁红作为原料有什么优劣势？",
+        runtime=runtime,
+        redis_service=None,
+        n_results_per_claim=3,
+        should_cancel=None,
+        active_stream_count=None,
+        logger=_logger(),
+    )
+
+    claim_texts = [item["claim"] for item in captured["retrieval_claims"]]
+    assert result.final_answer == "final"
+    assert "base claim" in claim_texts
+    assert any("原料成本和规模化生产数据" in claim for claim in claim_texts)
+    assert any("铁红" in claim and "还原气氛要求" in claim for claim in claim_texts)
+    assert captured["answer_plan"]["answer_type"] == "process_comparison"
+
+
+def test_orchestrator_builds_comparison_claims_when_stage1_has_no_claims():
+    runtime = _Runtime(
+        stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": []},
+        stage2_payload={"success": True, "documents": ["doc"], "metadatas": [{"doi": "10.1"}], "distances": [0.1]},
+        doi_payload=["10.1"],
+        stage25_payload={"enabled": False, "applied": False, "md_chunks_by_doi": {}, "stats": {}},
+        stage3_payload={"10.1": [{"text": "evidence"}]},
+        stage4_payload=[{"success": True, "final_answer": "final", "query_mode": "生成驱动检索（PDF溯源）", "references": [{"doi": "10.1"}]}],
+    )
+    captured: dict[str, object] = {}
+
+    class _Stage2:
+        def run(
+            self,
+            *,
+            runtime,
+            retrieval_claims,
+            n_results_per_claim,
+            user_question,
+            should_cancel=None,
+            active_stream_count=None,
+            graph_evidence=None,
+            comparison_plan=None,
+        ):
+            captured["retrieval_claims"] = retrieval_claims
+            captured["comparison_plan"] = comparison_plan
+            return dict(runtime.stage2_payload)
+
+    orchestrator = GenerationPipelineOrchestrator(stage2=_Stage2())
+
+    result = orchestrator.run(
+        question="磷酸铁、草酸亚铁、铁红作为原料制备磷酸铁锂粉体各有什么优劣势？",
+        runtime=runtime,
+        redis_service=None,
+        n_results_per_claim=3,
+        should_cancel=None,
+        active_stream_count=None,
+        logger=_logger(),
+    )
+
+    assert result.success is True
+    assert captured["comparison_plan"]["enabled"] is True
+    assert [claim["comparison_object"] for claim in captured["retrieval_claims"]] == ["磷酸铁", "草酸亚铁", "铁红"]
+    assert result.raw["comparison_plan"]["enabled"] is True
+
+
+def test_orchestrator_uses_llm_comparison_retrieval_profile():
+    calls: list[dict] = []
+    runtime = _Runtime(
+        stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": []},
+        stage2_payload={"success": True, "documents": ["doc"], "metadatas": [{"doi": "10.1/fe-po4"}], "distances": [0.1]},
+        doi_payload=["10.1/fe-po4"],
+        stage25_payload={"enabled": False, "applied": False, "md_chunks_by_doi": {}, "stats": {}},
+        stage3_payload={"10.1/fe-po4": [{"text": "evidence"}]},
+        stage4_payload=[{"success": True, "final_answer": "final", "references": [{"doi": "10.1/fe-po4"}]}],
+        comparison_profile_calls=calls,
+        comparison_profile_payload={
+            "enabled": True,
+            "objects": [
+                {
+                    "label": "磷酸铁",
+                    "aliases": ["FePO4", "iron phosphate"],
+                    "retrieval_queries": ["FePO4 as iron source precursor for LiFePO4 synthesis advantages disadvantages"],
+                    "must_include_any": ["磷酸铁", "FePO4", "iron phosphate"],
+                    "positive_context_terms": ["LiFePO4 synthesis", "iron source", "precursor"],
+                    "negative_context_terms": ["recycling", "spent battery", "wastewater"],
+                },
+                {
+                    "label": "草酸亚铁",
+                    "aliases": ["FeC2O4", "ferrous oxalate"],
+                    "retrieval_queries": ["FeC2O4 as iron source for LiFePO4 synthesis advantages disadvantages"],
+                    "must_include_any": ["草酸亚铁", "FeC2O4", "ferrous oxalate"],
+                    "positive_context_terms": ["LiFePO4 synthesis", "iron source"],
+                    "negative_context_terms": ["recycling", "spent battery"],
+                },
+                {
+                    "label": "铁红",
+                    "aliases": ["Fe2O3", "hematite"],
+                    "retrieval_queries": ["Fe2O3 hematite as iron source for LiFePO4 synthesis advantages disadvantages"],
+                    "must_include_any": ["铁红", "Fe2O3", "hematite"],
+                    "positive_context_terms": ["LiFePO4 synthesis", "iron source", "reduction"],
+                    "negative_context_terms": ["recycling", "spent battery"],
+                },
+            ],
+        },
+    )
+    captured: dict[str, object] = {}
+
+    class _Stage2:
+        def run(
+            self,
+            *,
+            runtime,
+            retrieval_claims,
+            n_results_per_claim,
+            user_question,
+            should_cancel=None,
+            active_stream_count=None,
+            graph_evidence=None,
+            comparison_plan=None,
+        ):
+            _ = (runtime, n_results_per_claim, user_question, should_cancel, active_stream_count, graph_evidence)
+            captured["retrieval_claims"] = retrieval_claims
+            captured["comparison_plan"] = comparison_plan
+            return dict(runtime.stage2_payload)
+
+    orchestrator = GenerationPipelineOrchestrator(stage2=_Stage2())
+
+    result = orchestrator.run(
+        question="磷酸铁、草酸亚铁、铁红作为原料制备磷酸铁锂粉体各有什么优劣势？",
+        runtime=runtime,
+        redis_service=None,
+        n_results_per_claim=3,
+        should_cancel=None,
+        active_stream_count=None,
+        logger=_logger(),
+    )
+
+    claims = captured["retrieval_claims"]
+    assert result.success is True
+    assert calls and calls[0]["model"] == "qwen-test"
+    assert claims[0]["query"] == "FePO4 as iron source precursor for LiFePO4 synthesis advantages disadvantages"
+    assert claims[0]["positive_context_terms"] == ["LiFePO4 synthesis", "iron source", "precursor"]
+    assert claims[0]["negative_context_terms"] == ["recycling", "spent battery", "wastewater"]
+    assert captured["comparison_plan"]["objects"][0]["retrieval_queries"] == [
+        "FePO4 as iron source precursor for LiFePO4 synthesis advantages disadvantages"
+    ]
+
+
+def test_select_source_dois_limits_comparison_dois_per_object(monkeypatch):
+    monkeypatch.setenv("QA_SOURCE_DOI_MAX_PER_COMPARISON_OBJECT", "2")
+    monkeypatch.setenv("QA_SOURCE_DOI_MAX_TOTAL", "5")
+    retrieval_results = {
+        "comparison_groups": [
+            {"label": "磷酸铁", "doi_candidates": ["10.1/a", "10.1/b", "10.1/c"]},
+            {"label": "草酸亚铁", "doi_candidates": ["10.2/a", "10.2/b", "10.2/c"]},
+            {"label": "铁红", "doi_candidates": ["10.3/a", "10.3/b", "10.3/c"]},
+        ]
+    }
+
+    selected = select_source_dois_for_evidence(
+        retrieval_results=retrieval_results,
+        dois=["10.1/a", "10.1/b", "10.1/c", "10.2/a", "10.2/b", "10.2/c", "10.3/a", "10.3/b", "10.3/c"],
+    )
+
+    assert selected == ["10.1/a", "10.2/a", "10.3/a", "10.1/b", "10.2/b"]
+
+
+def test_orchestrator_passes_selected_dois_to_stage25_and_stage3(monkeypatch):
+    monkeypatch.setenv("QA_SOURCE_DOI_MAX_PER_COMPARISON_OBJECT", "1")
+    monkeypatch.setenv("QA_SOURCE_DOI_MAX_TOTAL", "3")
+    runtime = _Runtime(
+        stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": []},
+        stage2_payload={
+            "success": True,
+            "documents": ["doc"],
+            "metadatas": [{"doi": "10.1/a"}],
+            "distances": [0.1],
+            "comparison_groups": [
+                {"label": "磷酸铁", "doi_candidates": ["10.1/a", "10.1/b"]},
+                {"label": "草酸亚铁", "doi_candidates": ["10.2/a", "10.2/b"]},
+                {"label": "铁红", "doi_candidates": ["10.3/a", "10.3/b"]},
+            ],
+        },
+        doi_payload=["10.1/a", "10.1/b", "10.2/a", "10.2/b", "10.3/a", "10.3/b"],
+        stage25_payload={"enabled": False, "applied": False, "md_chunks_by_doi": {}, "stats": {}},
+        stage3_payload={
+            "10.1/a": [{"text": "a"}],
+            "10.2/a": [{"text": "b"}],
+            "10.3/a": [{"text": "c"}],
+        },
+        stage4_payload=[{"success": True, "final_answer": "final", "references": []}],
+    )
+
+    class _RecordingStage25:
+        def __init__(self):
+            self.dois = None
+
+        def run(self, *, runtime, retrieval_results, user_question, dois):
+            _ = (runtime, retrieval_results, user_question)
+            self.dois = list(dois)
+            return {"enabled": False, "applied": False, "md_chunks_by_doi": {}, "stats": {}}
+
+    class _RecordingStage3:
+        def __init__(self):
+            self.dois = None
+
+        def run(self, *, runtime, dois, max_chunks_per_doi=3, should_cancel=None):
+            _ = (runtime, max_chunks_per_doi, should_cancel)
+            self.dois = list(dois)
+            return {doi: [{"text": doi}] for doi in dois}
+
+    stage25 = _RecordingStage25()
+    stage3 = _RecordingStage3()
+    orchestrator = GenerationPipelineOrchestrator(stage25=stage25, stage3=stage3)
+
+    result = orchestrator.run(
+        question="磷酸铁、草酸亚铁、铁红作为原料制备磷酸铁锂粉体各有什么优劣势？",
+        runtime=runtime,
+        redis_service=None,
+        n_results_per_claim=3,
+        should_cancel=None,
+        active_stream_count=None,
+        logger=_logger(),
+    )
+
+    assert result.success is True
+    assert stage25.dois == ["10.1/a", "10.2/a", "10.3/a"]
+    assert stage3.dois == ["10.1/a", "10.2/a", "10.3/a"]
+    assert result.raw["dois"] == ["10.1/a", "10.2/a", "10.3/a"]
+    assert result.raw["all_stage2_dois"] == ["10.1/a", "10.1/b", "10.2/a", "10.2/b", "10.3/a", "10.3/b"]
 
 
 

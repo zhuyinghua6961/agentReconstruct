@@ -464,6 +464,38 @@ textarea::placeholder {
   padding-left: 1.35rem;
 }
 
+/* 公式主体：含分式/上下标的段落保持连续块，避免视觉上与列表项同级 */
+.message-content .message-markdown-content p:has(.math-frac),
+.message-content .message-markdown-content p:has(sub),
+.message-content .message-markdown-content p:has(sup) {
+  padding: 8px 12px;
+  margin: 8px 0 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  line-height: 1.65;
+}
+
+.message-content .message-markdown-content .math-frac {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+  margin: 0 2px;
+  font-size: 0.95em;
+}
+
+/* 参数说明：标题（加粗或小标题）后的列表作为次级说明区 */
+.message-content .message-markdown-content strong + ul,
+.message-content .message-markdown-content h4 + ul,
+.message-content .message-markdown-content h5 + ul {
+  margin-top: 4px;
+  padding-left: 1.1rem;
+  border-left: 3px solid #cbd5e1;
+  list-style-position: outside;
+}
+
 .message-content h2 + p,
 .message-content h3 + p,
 .message-content h2 + ul,

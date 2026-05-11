@@ -23,10 +23,12 @@ FASTQA_SRC_DEFAULT="$(prefer_existing_path \
 HIGHTHINKINGQA_SRC_DEFAULT="$(prefer_existing_path \
   "$ROOT_DIR/resource/highThinkingQA" \
   "$ROOT_DIR/resource/state/dev/highThinkingQA")"
+PATENTQA_SRC_DEFAULT="$ROOT_DIR/resource/patentQA"
 
 PUBLIC_SERVICE_SRC="${PUBLIC_SERVICE_SRC:-$PUBLIC_SERVICE_SRC_DEFAULT}"
 FASTQA_SRC="${FASTQA_SRC:-$FASTQA_SRC_DEFAULT}"
 HIGHTHINKINGQA_SRC="${HIGHTHINKINGQA_SRC:-$HIGHTHINKINGQA_SRC_DEFAULT}"
+PATENTQA_SRC="${PATENTQA_SRC:-$PATENTQA_SRC_DEFAULT}"
 
 CLEAN=0
 
@@ -40,6 +42,7 @@ Environment overrides:
   PUBLIC_SERVICE_SRC
   FASTQA_SRC
   HIGHTHINKINGQA_SRC
+  PATENTQA_SRC
 USAGE
 }
 
@@ -97,12 +100,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-mkdir -p "$SEED_DIR/public-service" "$SEED_DIR/fastQA" "$SEED_DIR/highThinkingQA"
+mkdir -p "$SEED_DIR/public-service" "$SEED_DIR/fastQA" "$SEED_DIR/highThinkingQA" "$SEED_DIR/patentQA"
 
 if [[ "$CLEAN" == "1" ]]; then
   clean_target_dir "$SEED_DIR/public-service"
   clean_target_dir "$SEED_DIR/fastQA"
   clean_target_dir "$SEED_DIR/highThinkingQA"
+  clean_target_dir "$SEED_DIR/patentQA"
 fi
 
 copy_dir "$PUBLIC_SERVICE_SRC/vector_database" "$SEED_DIR/public-service/vector_database"
@@ -118,5 +122,8 @@ copy_file "$FASTQA_SRC/vector_db_topic_index.json" "$SEED_DIR/fastQA/vector_db_t
 
 copy_dir "$HIGHTHINKINGQA_SRC/vectordb" "$SEED_DIR/highThinkingQA/vectordb"
 copy_dir "$HIGHTHINKINGQA_SRC/papers" "$SEED_DIR/highThinkingQA/papers"
+
+copy_dir "$PATENTQA_SRC/vector_db_patent_abstracts" "$SEED_DIR/patentQA/vector_db_patent_abstracts"
+copy_dir "$PATENTQA_SRC/vector_db_patent_chunks" "$SEED_DIR/patentQA/vector_db_patent_chunks"
 
 echo "seed-data collection complete"

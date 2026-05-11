@@ -213,7 +213,7 @@ def test_run_agent_emits_step3_retrieval_progress(monkeypatch):
     monkeypatch.setattr("agent_core.graph.synthesize_answer", lambda **kwargs: "draft")
     monkeypatch.setattr("agent_core.graph.config.RETRIEVAL_PIPELINE_BATCH_SIZE", 1)
 
-    async def fake_iter_pre_answers_async(sub_questions, async_client=None):
+    async def fake_iter_pre_answers_async(sub_questions, async_client=None, **kwargs):
         for index, _question in enumerate(sub_questions):
             yield index, f"a{index + 1}"
             await asyncio.sleep(0)
@@ -237,7 +237,7 @@ def test_run_agent_emits_step3_retrieval_progress(monkeypatch):
 def test_pre_answer_pipeline_flushes_partial_batch_after_wait(monkeypatch):
     monkeypatch.setattr("agent_core.graph._PARTIAL_RETRIEVAL_FLUSH_WAIT_SECONDS", 0.01)
 
-    async def fake_iter_pre_answers_async(sub_questions, async_client=None):
+    async def fake_iter_pre_answers_async(sub_questions, async_client=None, **kwargs):
         yield 0, "a1"
         await asyncio.sleep(0)
         yield 1, "a2"
@@ -499,7 +499,7 @@ def test_pre_answer_retrieval_pipeline_observes_cancel_while_retrieval_is_blocke
     cancel_event = threading.Event()
     retrieval_started = threading.Event()
 
-    async def fake_iter_pre_answers_async(sub_questions, async_client=None):
+    async def fake_iter_pre_answers_async(sub_questions, async_client=None, **kwargs):
         yield 0, "a1"
 
     def slow_batch_retrieve(*args, **kwargs):

@@ -101,6 +101,73 @@ test('formatStreamingAnswer preserves inline math markup during streaming', () =
   assert.match(html, /<sup>2<\/sup>/i)
 })
 
+test('formatAnswer does not split dollar-math with internal minus after colon into bullet list', () => {
+  installMinimalDom()
+  const input = '其中：$\\sigma_{eff} = \\sigma_{bulk} - \\sigma_{loss}$ 为等效应力。'
+
+  const html = formatAnswer(input)
+
+  assert.doesNotMatch(html, /<ul>/i)
+  assert.match(html, /σ|eff|bulk|loss/i)
+})
+
+test('formatAnswer does not split LaTeX-like minus chain after colon into markdown list', () => {
+  installMinimalDom()
+  const input = '式中：-\\sigma_{f} - \\delta_{s} 为修正项。'
+
+  const html = formatAnswer(input)
+
+  assert.doesNotMatch(html, /<ul>/i)
+})
+
+test('formatAnswer keeps hyphen-minus lines inside fenced code as a single code block', () => {
+  installMinimalDom()
+  const input = '示例：\n```\na - b - c\n```\n'
+
+  const html = formatAnswer(input)
+
+  assert.match(html, /<pre>[\s\S]*a - b - c[\s\S]*<\/pre>/i)
+})
+
+test('formatAnswer merges list soft-wrap after fullwidth colon before decimal range', () => {
+  installMinimalDom()
+  const input = '- 二次颗粒D50：\n4. 5-5.4 μm 良好。'
+
+  const html = formatAnswer(input)
+
+  assert.doesNotMatch(html, /<ol start="4">/i)
+  assert.match(html, /4\. 5-5\.4 μm/u)
+})
+
+test('formatAnswer merges formula plus-continuation lines inside one list item', () => {
+  installMinimalDom()
+  const input =
+    '- **正相关性模型** Y = -4925 + 8.03X - 0.000693X² + 500(b-8.5)\n+ 50(c-0.5)，其中X = 142。'
+
+  const html = formatAnswer(input)
+
+  assert.equal((html.match(/<ul>/gi) || []).length, 1)
+  assert.match(html, /500\(b-8\.5\)[\s\S]*?50\(c-0\.5\)/i)
+})
+
+test('formatAnswer collapses accidental space in DOI prefix to avoid ordered-list parsing', () => {
+  installMinimalDom()
+  const input = '见 [10. 1007/s11581-019-03025-1]。'
+
+  const html = formatAnswer(input)
+
+  assert.doesNotMatch(html, /<ol start="10">/i)
+})
+
+test('formatAnswer merges square-bracket citation lines split mid-DOI list', () => {
+  installMinimalDom()
+  const input = '见文献 [10.1007/s11581-019-03025-1;\n10.1007/s11581-019-03162-7]。'
+
+  const html = formatAnswer(input)
+
+  assert.ok((html.match(/class="doi-link"/gi) || []).length >= 2)
+})
+
 test('formatStreamingAnswer does not render malformed DOI underscores as subscripts', () => {
   installMinimalDom()
   const input = '参考 doi:10.10881742-6596_25841_012046) 的实验设置。'

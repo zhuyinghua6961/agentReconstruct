@@ -214,12 +214,45 @@ class StorageService:
         backend = get_storage_backend(project_root=project_root)
         if isinstance(backend, MinIOStorageBackend):
             try:
-                if backend.object_exists(object_name=self.build_paper_object_name(normalized)):
+                resolved = self.resolve_minio_paper_object_name(
+                    backend=backend,
+                    normalized_doi=normalized,
+                    logger=logger,
+                )
+                if resolved and backend.object_exists(object_name=resolved):
                     return True
             except Exception as exc:
                 if logger is not None:
                     logger.warning(f"paper exists check via object storage failed: {exc}")
         return local_path.exists() and local_path.is_file()
+
+    @classmethod
+    def resolve_minio_paper_object_name(
+        cls,
+        *,
+        backend: MinIOStorageBackend,
+        normalized_doi: str,
+        logger: Any | None,
+    ) -> str | None:
+        """Map canonical DOI to MinIO object key; support disambiguated filenames (stem_suffix.pdf)."""
+        exact = cls.build_paper_object_name(normalized_doi)
+        if backend.object_exists(object_name=exact):
+            return exact
+        stem = Path(cls.build_paper_filename(normalized_doi)).stem
+        prefix = f"papers/{stem}"
+        pattern = re.compile(rf"^papers/{re.escape(stem)}(_[^/]+)?\.pdf$")
+        try:
+            names = backend.list_object_names(prefix=prefix, max_keys=80)
+        except Exception:
+            return None
+        matches = [n for n in names if pattern.match(n)]
+        if not matches:
+            return None
+        exact_named = f"papers/{stem}.pdf"
+        choice = exact_named if exact_named in matches else sorted(matches)[0]
+        if logger is not None and choice != exact:
+            logger.info("paper doi %s resolved to object %s (disambiguated key)", normalized_doi, choice)
+        return choice
 
     def ensure_local_paper_pdf(
         self,
@@ -238,7 +271,14 @@ class StorageService:
         with lock:
             backend = get_storage_backend(project_root=project_root)
             if isinstance(backend, MinIOStorageBackend):
-                object_name = self.build_paper_object_name(normalized)
+                object_name = (
+                    self.resolve_minio_paper_object_name(
+                        backend=backend,
+                        normalized_doi=normalized,
+                        logger=logger,
+                    )
+                    or self.build_paper_object_name(normalized)
+                )
                 if local_path.exists() and local_path.is_file():
                     null_logger = logger or type("_NullLogger", (), {"warning": lambda *args, **kwargs: None})()
                     if not backend.object_exists(object_name=object_name):

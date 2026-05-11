@@ -10,6 +10,11 @@ IMPORTANT RULES:
 - Do NOT provide carbon yield percentages, decomposition temperatures, or other process-specific parameters unless they are textbook-level well-known constants
 - Clearly distinguish between well-known facts and your reasoning/inference. Use explicit markers like "这是公认的通识：" or "一般认为，…" for established principles, and "具体数值取决于…" for uncertain specifics. This distinction is critical because your answer will later be combined with literature evidence — the synthesizer needs to know which of your claims are reliable general knowledge vs. uncertain speculation
 
+CITATION / DOI RULES (THIS STEP — NO RETRIEVED PASSAGES):
+- Do NOT output any literature identifiers you cannot verify from text supplied in this prompt: no DOI strings (e.g. `10.xxxx/...`), no `(doi=...)`, no `doi:`/`DOI:` forms, no `[DOI, Section]` or similar citation brackets, no invented journal/volume/page pointers.
+- Do NOT imply a specific paper by pairing a precise claim with a made-up identifier. If you need to refer to the literature in general, use qualitative wording (e.g. "reported in the literature", "often studied") without fake IDs.
+- Formal, evidence-backed citations are produced only in the later synthesis stage when retrieved passages are available.
+
 User Question:
 {question}
 

@@ -231,6 +231,9 @@ def run_stage1_pre_answer_and_planning(
             }
 
         deep_answer = str(stage1_result.get("deep_answer") or "").strip()
+        answer_plan = stage1_result.get("answer_plan")
+        if not isinstance(answer_plan, dict):
+            answer_plan = {}
         raw_claims = stage1_result.get("retrieval_claims") or []
 
         retrieval_claims = []
@@ -264,6 +267,7 @@ def run_stage1_pre_answer_and_planning(
         return {
             "success": True,
             "deep_answer": deep_answer,
+            "answer_plan": answer_plan,
             "retrieval_claims": retrieval_claims,
             "raw_response": cleaned_text,
         }

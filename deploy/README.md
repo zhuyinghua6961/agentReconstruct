@@ -1,5 +1,7 @@
 # Deployment Bundle README
 
+Chinese version: [`README.zh-CN.md`](README.zh-CN.md)
+
 ## Goal
 
 This directory is the portable Docker deployment bundle for:
@@ -8,6 +10,8 @@ This directory is the portable Docker deployment bundle for:
 - `public-service`
 - `fastQA`
 - `highThinkingQA`
+- `patentQA`
+- `frontend nginx`
 - `mysql`
 - `redis`
 - `minio`
@@ -44,18 +48,38 @@ The deployment target is:
 - `scripts/preflight_check.sh`
   - validate env, assets, and compose wiring before release
 - `scripts/export_images.sh`
-  - export the four service images into one tarball
+  - export service and infrastructure images into one tarball
+
+## Existing Docker Config Files
+
+The Docker deployment config already exists in this directory:
+
+- `deploy/docker-compose.yml`
+  - starts MySQL, Redis, MinIO, one-shot init jobs, backend services, and the frontend nginx container
+- `deploy/.env.production.example`
+  - production-oriented template for image names, ports, passwords, model endpoints, and API keys
+- `deploy/.env.example`
+  - shorter example template
+- `deploy/.env`
+  - local working deployment env; do not treat placeholder values as final secrets
+
+Runtime values are injected from `deploy/.env` into containers by Compose. The
+`resource/config` files inside the image are fallback/default config only; an
+environment variable injected by Compose takes precedence over the same key in
+`resource/config`.
 
 ## Important Deployment Rule
 
 This deployment bundle assumes model access is URL-based:
 
-- `highThinkingQA` LLM uses `HIGHTHINKINGQA_LLM_BASE_URL`
+- `fastQA`, `highThinkingQA`, `patentQA`, and `public-service` use the shared `LLM_BASE_URL`, `LLM_MODEL`, and optional `LLM_API_KEY`
+- `fastQA` and `patentQA` share the existing BGE-compatible embedding endpoint through `QA_EMBEDDING_BASE_URL`, `QA_EMBEDDING_MODEL`, and optional `QA_EMBEDDING_API_KEY`
 - `highThinkingQA` embedding uses `HIGHTHINKINGQA_EMBEDDING_BASE_URL`
-- `fastQA` embedding uses `FASTQA_EMBEDDING_API_URL`
-- `public-service` and `fastQA` generation use `OPENAI_BASE_URL` or `DASHSCOPE_BASE_URL`
+- `fastQA` and `patentQA` share `RERANK_PROVIDER`, `RERANK_BASE_URL`, `RERANK_MODEL`, and optional `RERANK_API_KEY`
 
-Do not deploy with local BGE model paths for this bundle.
+Do not deploy with in-process local BGE model paths for this bundle. If the
+model is deployed inside the customer's offline network, still use `remote`
+mode and point the URL variables at that internal HTTP service.
 
 ## 1. Prepare Deployment Env
 
@@ -69,8 +93,11 @@ Then edit `deploy/.env` and set at minimum:
 
 - image names and tags
 - MySQL, Redis, and MinIO passwords
-- remote LLM and embedding URLs
-- API keys
+- `LLM_BASE_URL` and `LLM_MODEL`
+- `QA_EMBEDDING_BASE_URL` and `QA_EMBEDDING_MODEL`
+- `HIGHTHINKINGQA_EMBEDDING_BASE_URL` and `HIGHTHINKINGQA_EMBEDDING_MODEL`
+- `RERANK_PROVIDER`; if it is not `none`, also set `RERANK_BASE_URL`
+- API keys if the target model service requires them
 - published ports
 - Docker bridge subnet and gateway if the target host has network conflicts
 
@@ -84,6 +111,11 @@ docker build -f deploy/docker/Dockerfile.gateway -t ghcr.io/example/highthinking
 docker build -f deploy/docker/Dockerfile.public-service -t ghcr.io/example/highthinking-public-service:latest .
 docker build -f deploy/docker/Dockerfile.fastqa -t ghcr.io/example/highthinking-fastqa:latest .
 docker build -f deploy/docker/Dockerfile.highthinkingqa -t ghcr.io/example/highthinking-highthinkingqa:latest .
+docker build -f deploy/docker/Dockerfile.patent -t ghcr.io/example/highthinking-patent:latest .
+
+cd frontend-vue && npm ci && npm run build
+cd ..
+docker build -f deploy/docker/Dockerfile.frontend-nginx -t ghcr.io/example/highthinking-frontend:latest .
 ```
 
 ## 3. Collect Seed Data
@@ -117,12 +149,15 @@ The helper script defaults to these source roots:
   - prefer `/home/cqy/worktrees/highThinking/resource/highThinkingQA/papers`
   - fallback `/home/cqy/worktrees/highThinking/resource/state/dev/highThinkingQA/vectordb`
   - fallback `/home/cqy/worktrees/highThinking/resource/state/dev/highThinkingQA/papers`
+- `patentQA`
+  - `/home/cqy/worktrees/highThinking/resource/patentQA/vector_db_patent_abstracts`
+  - `/home/cqy/worktrees/highThinking/resource/patentQA/vector_db_patent_chunks`
 
 You can override the source roots with environment variables when needed.
 
 ## 5. Collect MinIO Object Seed
 
-If you want deployment to auto-import `papers` into MinIO, run:
+If you want deployment to auto-import papers and patent originals into MinIO, run:
 
 ```bash
 bash deploy/scripts/collect_minio_seed.sh agentcode --clean
@@ -131,11 +166,28 @@ bash deploy/scripts/collect_minio_seed.sh agentcode --clean
 This populates:
 
 - `deploy/minio-seed/agentcode/papers/`
+- `deploy/minio-seed/agentcode/patent/originals/`
 
 In the current worktree, this command resolves to `resource/fastqa/papers`
 as the primary corpus source, which is the large 7000+ paper set. `fastQA`
 itself does not copy that corpus into `seed-data/fastQA`; the papers are packed
 once through MinIO object seed only.
+
+Patent originals are converted into the runtime MinIO object layout, for
+example:
+
+- `patent/originals/<patent_id>/manifest.json`
+- `patent/originals/<patent_id>/structured/claims.json`
+- `patent/originals/<patent_id>/structured/description.json`
+- `patent/originals/<patent_id>/structured/bibliography.json`
+- `patent/originals/<patent_id>/fulltext/original.pdf`
+- `patent/originals/<patent_id>/figures/...`
+
+To collect only patent originals:
+
+```bash
+bash deploy/scripts/collect_minio_seed.sh agentcode --patent-only
+```
 
 ## 6. Run Preflight Check
 
@@ -149,7 +201,8 @@ This checks:
 
 - required deployment files exist
 - required env variables are present
-- `fastQA` embedding mode is `remote`
+- shared QA embedding mode is `remote`
+- rerank provider is valid, and rerank URL is present when rerank is enabled
 - seed-data directories are not silently empty
 - MinIO object seed directories are not silently empty
 - `docker compose config` resolves correctly
@@ -161,6 +214,11 @@ If the target machine has no registry access, export tarballs:
 ```bash
 bash deploy/scripts/export_images.sh deploy/.env deploy/highthinking-images.tar
 ```
+
+The export includes the service images plus runtime infrastructure images:
+
+- `gateway`, `public-service`, `fastQA`, `highThinkingQA`, `patentQA`, `frontend`
+- `mysql`, `redis`, `minio/minio`, `minio/mc`, `alpine`, `nginx`
 
 On the target machine:
 
@@ -178,6 +236,7 @@ Before first start, confirm these assets are present:
 - `deploy/seed-data/public-service/`
 - `deploy/seed-data/fastQA/`
 - `deploy/seed-data/highThinkingQA/`
+- `deploy/seed-data/patentQA/`
 
 `seed-data/` should contain the vector DB and retrieval state that must exist immediately after startup.
 `minio-seed/` should contain object prefixes such as `papers/` that should be restored into MinIO automatically.
@@ -204,10 +263,12 @@ docker compose --env-file deploy/.env -f deploy/docker-compose.yml logs -f gatew
 
 Expected ports:
 
+- frontend nginx: `8080` by default
 - gateway: `8101`
 - public-service: `8102`
 - fastQA: `8008`
 - highThinkingQA: `8009`
+- patentQA: `8010`
 - mysql: `3306`
 - redis: `6379`
 - minio api: `9000`

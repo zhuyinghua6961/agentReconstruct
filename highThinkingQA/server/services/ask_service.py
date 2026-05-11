@@ -18,9 +18,8 @@ from server.schemas.request_models import AskRequest
 from server.services.conversation_context_service import ConversationContext, build_conversation_context, sanitize_conversation_context
 from server.services.mode_profiles import RuntimeProfile, get_runtime_profile
 from server.services.query_rewrite_service import QuestionRewriteResult, rewrite_question
-from server.utils.doi import extract_dois, normalize_doi
+from server.utils.doi import extract_dois, extract_dois_from_answer_text, normalize_doi
 
-_DOI_PATTERN = re.compile(r"10\.\d{1,9}[-._;()/:A-Z0-9]+", re.IGNORECASE)
 _BRACKET_CITATION_PATTERN = re.compile(r"\[(10\.\d{1,9}[-._;()/:A-Z0-9]+)(?:,\s*[^\]]+)?\]", re.IGNORECASE)
 _DOI_TAG_PATTERN = re.compile(r"\[DOI:\s*([^\]]+)\]", re.IGNORECASE)
 logger = logging.getLogger(__name__)
@@ -350,18 +349,7 @@ def _progress_to_step_event(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _extract_references(text: str) -> list[str]:
-    seen: set[str] = set()
-    refs: list[str] = []
-    for match in _DOI_PATTERN.finditer(str(text or "")):
-        doi = normalize_doi(match.group(0))
-        if not doi or "/" not in doi:
-            continue
-        key = doi.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        refs.append(doi)
-    return refs
+    return extract_dois_from_answer_text(text)
 
 
 def _build_reference_links(references: list[str]) -> list[dict[str, str]]:

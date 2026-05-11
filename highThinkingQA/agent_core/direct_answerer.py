@@ -10,6 +10,7 @@ from openai import OpenAI
 
 import config
 from agent_core.llm_client import chat_completion_stream, load_prompt_template
+from agent_core.question_anchor import prepend_question_anchor
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ def direct_answer(
         LLM 直接回答文本
     """
     template = load_prompt_template("direct_answer.txt")
-    prompt = template.format(question=question)
+    prompt = prepend_question_anchor(template.format(question=question), question)
 
     chunks = list(
         chat_completion_stream(

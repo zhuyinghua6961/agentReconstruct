@@ -14,6 +14,71 @@ from app.modules.generation_pipeline.feature_flags import env_int
 _SENTENCE_WITH_SUFFIX_RE = re.compile(r".*?(?<=[。！？?!.；;])\s*|.+$", re.DOTALL)
 
 
+def rank_pdf_chunks_for_stage4_evidence(
+    pdf_chunks: Dict[str, List[Dict[str, Any]]],
+    user_question: str,
+    logger: Any,
+    *,
+    max_dois: int = 10,
+    keywords_with_weights: Dict[str, float] | None = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Score and sort DOI groups the same way as format_pdf_chunks_evidence.
+
+    Each item: doi, chunks, score, matched_keywords, core_match_count.
+    Returns (relevant_dois, filtered_dois) where relevant_dois has at most max_dois entries.
+    """
+    if not pdf_chunks:
+        return [], []
+
+    kww = keywords_with_weights if keywords_with_weights is not None else extract_question_keywords_with_weights(user_question)
+    logger.debug(f"   🔑 从问题中提取的关键词: {list(kww.keys())}")
+
+    doi_scores: List[Dict[str, Any]] = []
+    for doi, chunks in pdf_chunks.items():
+        if not chunks:
+            continue
+
+        score = 0.0
+        matched_keywords: set[str] = set()
+        core_match_count = 0
+
+        for chunk in chunks:
+            text = str(chunk.get("text", "") or "").lower()
+            for kw, weight in kww.items():
+                if kw.lower() in text:
+                    matched_keywords.add(kw)
+                    if weight >= 3.0:
+                        score += float(weight)
+                        core_match_count += 1
+                    else:
+                        score += float(weight) * 0.5
+
+        doi_scores.append(
+            {
+                "doi": doi,
+                "chunks": chunks,
+                "score": score,
+                "matched_keywords": matched_keywords,
+                "core_match_count": core_match_count,
+            }
+        )
+
+    doi_scores.sort(key=lambda item: (item["score"], item["core_match_count"]), reverse=True)
+
+    logger.debug("   📊 DOI相关性排序（Top 10）:")
+    for i, info in enumerate(doi_scores[:10]):
+        logger.debug(
+            f"      {i + 1}. {info['doi']}: 得分={info['score']:.1f}, "
+            f"核心匹配={info['core_match_count']}, 匹配词={list(info['matched_keywords'])[:3]}"
+        )
+
+    cap = max(1, int(max_dois))
+    relevant_dois = doi_scores[:cap]
+    filtered_dois = doi_scores[cap:]
+    logger.debug(f"   ✅ 保留 {len(relevant_dois)} 个高相关性DOI（过滤 {len(filtered_dois)} 个低相关性DOI）")
+    return relevant_dois, filtered_dois
+
+
 def _iter_sentence_units(answer: str) -> list[tuple[str, str]]:
     units: list[tuple[str, str]] = []
     for chunk in _SENTENCE_WITH_SUFFIX_RE.findall(answer or ""):
@@ -190,51 +255,13 @@ def format_pdf_chunks_evidence(
     )
 
     keywords_with_weights = extract_question_keywords_with_weights(user_question)
-    logger.debug(f"   🔑 从问题中提取的关键词: {list(keywords_with_weights.keys())}")
-
-    doi_scores = []
-    for doi, chunks in pdf_chunks.items():
-        if not chunks:
-            continue
-
-        score = 0.0
-        matched_keywords = set()
-        core_match_count = 0
-
-        for chunk in chunks:
-            text = chunk.get("text", "").lower()
-            for kw, weight in keywords_with_weights.items():
-                if kw.lower() in text:
-                    matched_keywords.add(kw)
-                    if weight >= 3.0:
-                        score += weight
-                        core_match_count += 1
-                    else:
-                        score += weight * 0.5
-
-        doi_scores.append(
-            {
-                "doi": doi,
-                "chunks": chunks,
-                "score": score,
-                "matched_keywords": matched_keywords,
-                "core_match_count": core_match_count,
-            }
-        )
-
-    doi_scores.sort(key=lambda item: (item["score"], item["core_match_count"]), reverse=True)
-
-    logger.debug("   📊 DOI相关性排序（Top 10）:")
-    for i, info in enumerate(doi_scores[:10]):
-        logger.debug(
-            f"      {i + 1}. {info['doi']}: 得分={info['score']:.1f}, "
-            f"核心匹配={info['core_match_count']}, 匹配词={list(info['matched_keywords'])[:3]}"
-        )
-
-    max_relevant_doi = 10
-    relevant_dois = doi_scores[:max_relevant_doi]
-    filtered_dois = doi_scores[max_relevant_doi:]
-    logger.debug(f"   ✅ 保留 {len(relevant_dois)} 个高相关性DOI（过滤 {len(filtered_dois)} 个低相关性DOI）")
+    relevant_dois, filtered_dois = rank_pdf_chunks_for_stage4_evidence(
+        pdf_chunks,
+        user_question,
+        logger,
+        max_dois=10,
+        keywords_with_weights=keywords_with_weights,
+    )
 
     lines = ["## 支持性文献原文（来自PDF溯源，按相关性排序）", ""]
     lines.append(f"**用户问题**: {user_question}")

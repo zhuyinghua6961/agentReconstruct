@@ -116,6 +116,37 @@ def _row_doi(meta: Dict[str, Any]) -> str:
     return ""
 
 
+def _contains_any_term(text: str, terms: List[str]) -> bool:
+    normalized = str(text or "").lower()
+    for term in terms:
+        item = str(term or "").strip().lower()
+        if item and item in normalized:
+            return True
+    return False
+
+
+def _filter_comparison_chunks(
+    *,
+    chunks: List[Dict[str, Any]],
+    must_include_any: List[str],
+    positive_context_terms: List[str],
+    negative_context_terms: List[str],
+) -> List[Dict[str, Any]]:
+    if not chunks:
+        return chunks
+    if not must_include_any and not positive_context_terms and not negative_context_terms:
+        return chunks
+    filtered: List[Dict[str, Any]] = []
+    for chunk in chunks:
+        text = str((chunk or {}).get("text") or "")
+        has_anchor = _contains_any_term(text, must_include_any) if must_include_any else True
+        has_positive = _contains_any_term(text, positive_context_terms) if positive_context_terms else True
+        if not has_anchor or not has_positive:
+            continue
+        filtered.append(chunk)
+    return filtered
+
+
 def _convert_rows_to_chunks(
     *,
     rows: List[Tuple[str, Dict[str, Any], float]],
@@ -249,6 +280,91 @@ def _search_md_global_supplement(
         if len(by_doi) >= max_new_dois:
             break
     return by_doi, candidate_count
+
+
+def _comparison_groups_from_retrieval(retrieval_results: Dict[str, Any]) -> List[Dict[str, Any]]:
+    groups = retrieval_results.get("comparison_groups") if isinstance(retrieval_results, dict) else None
+    if not isinstance(groups, list):
+        return []
+    return [dict(group) for group in groups if isinstance(group, dict) and str(group.get("label") or "").strip()]
+
+
+def _run_comparison_md_expansion(
+    *,
+    base_payload: Dict[str, Any],
+    retrieval_results: Dict[str, Any],
+    user_question: str,
+    dois: List[str],
+    emb_model: Any,
+    collection: Any,
+    cfg: Dict[str, Any],
+) -> Dict[str, Any] | None:
+    comparison_groups = _comparison_groups_from_retrieval(retrieval_results)
+    if not comparison_groups:
+        return None
+
+    allowed_dois = set(str(doi or "").strip() for doi in list(dois or []) if str(doi or "").strip())
+    md_chunks_by_doi: Dict[str, List[Dict[str, Any]]] = {}
+    updated_groups: List[Dict[str, Any]] = []
+    processed_dois: set[str] = set()
+
+    for group in comparison_groups:
+        queries = [str(item or "").strip() for item in list(group.get("queries") or []) if str(item or "").strip()]
+        query = queries[0] if queries else str(user_question or "").strip()
+        query_embedding = _normalize_query_embedding(emb_model, query)
+        group_dois = [str(item or "").strip() for item in list(group.get("doi_candidates") or []) if str(item or "").strip()]
+        must_include_any = [str(item or "").strip() for item in list(group.get("must_include_any") or []) if str(item or "").strip()]
+        positive_context_terms = [str(item or "").strip() for item in list(group.get("positive_context_terms") or []) if str(item or "").strip()]
+        negative_context_terms = [str(item or "").strip() for item in list(group.get("negative_context_terms") or []) if str(item or "").strip()]
+        if allowed_dois:
+            group_dois = [doi for doi in group_dois if doi in allowed_dois]
+        if not group_dois:
+            group_dois = list(allowed_dois)
+
+        md_hits: List[Dict[str, Any]] = []
+        if query_embedding:
+            for doi in list(dict.fromkeys(group_dois))[: cfg["max_dois"]]:
+                processed_dois.add(doi)
+                chunks = _search_md_chunks_for_doi(
+                    collection=collection,
+                    query_embedding=query_embedding,
+                    doi=doi,
+                    n_results=cfg["n_md_chunks_per_doi"],
+                )
+                chunks = _filter_comparison_chunks(
+                    chunks=chunks,
+                    must_include_any=must_include_any,
+                    positive_context_terms=positive_context_terms,
+                    negative_context_terms=negative_context_terms,
+                )
+                if not chunks:
+                    continue
+                md_chunks_by_doi.setdefault(doi, [])
+                md_chunks_by_doi[doi].extend(chunks)
+                md_hits.extend(chunks)
+
+        next_group = dict(group)
+        next_group["md_hits"] = md_hits
+        if md_hits:
+            next_group["evidence_status"] = "sufficient"
+            next_group["missing_evidence_reason"] = ""
+        elif str(next_group.get("evidence_status") or "") != "sufficient":
+            next_group["missing_evidence_reason"] = str(next_group.get("missing_evidence_reason") or "md_hits_below_threshold")
+        updated_groups.append(next_group)
+
+    total_md_chunks = sum(len(chunks) for chunks in md_chunks_by_doi.values())
+    base_payload["comparison_groups"] = updated_groups
+    base_payload["md_chunks_by_doi"] = md_chunks_by_doi
+    base_payload["stats"]["processed_doi_count"] = len(processed_dois) if processed_dois else len(allowed_dois)
+    base_payload["stats"]["hit_doi_count"] = len(md_chunks_by_doi)
+    base_payload["stats"]["total_md_chunks"] = total_md_chunks
+    base_payload["stats"]["global_fallback_reason"] = "comparison_mode"
+    if total_md_chunks <= 0:
+        base_payload["stats"]["fallback_reason"] = "no_md_match"
+        return base_payload
+    base_payload["applied"] = True
+    base_payload["stats"]["fallback_reason"] = ""
+    return base_payload
 
 
 def evaluate_stage3_pdf_skip(
@@ -387,6 +503,18 @@ def run_stage25_md_expansion(
             return base_payload
 
     emb_model = getattr(literature_expert, "embedding_model", None)
+    comparison_payload = _run_comparison_md_expansion(
+        base_payload=base_payload,
+        retrieval_results=retrieval_results,
+        user_question=user_question,
+        dois=dois,
+        emb_model=emb_model,
+        collection=collection,
+        cfg=cfg,
+    )
+    if comparison_payload is not None:
+        return comparison_payload
+
     query_embedding = _normalize_query_embedding(emb_model, user_question)
     if not query_embedding:
         base_payload["stats"]["fallback_reason"] = "embedding_unavailable"

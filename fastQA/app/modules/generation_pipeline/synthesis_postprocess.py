@@ -24,7 +24,7 @@ ELEMENT_SYNONYM_GROUPS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
 )
 
 DOI_BRACKET_PATTERN = re.compile(
-    r"\((?:doi\s*=|DOI:\s*)(10\.(?:[^\s,()]+|\([^\s,()]+\))+)\)",
+    r"\(\s*(?:doi\s*=|DOI:\s*)?(10\.(?:[^\s,()]+|\([^\s,()]+\))+)\s*\)",
     re.IGNORECASE,
 )
 DOI_INLINE_PATTERN = re.compile(
@@ -42,7 +42,7 @@ def resolve_stage4_reference_policy(
     """Resolve stage4 citation policy from optional params + env."""
     resolved_topk = env_int("QA_STAGE4_REFERENCE_TOPK", 5, minimum=3, maximum=20) if topk is None else max(3, min(int(topk), 20))
     resolved_min_citations = (
-        env_int("QA_STAGE4_MIN_CITATIONS", 10, minimum=1, maximum=20)
+        env_int("QA_STAGE4_MIN_CITATIONS", 4, minimum=1, maximum=20)
         if min_citations is None
         else max(1, min(int(min_citations), 20))
     )
@@ -198,7 +198,7 @@ def build_top5_reference_context(
         retrieval_results=retrieval_results,
         logger=logger,
         topk=kwargs.get("topk", 5),
-        min_citations=kwargs.get("min_citations", 10),
+        min_citations=kwargs.get("min_citations", 4),
         element_guard=kwargs.get("element_guard"),
         user_question=kwargs.get("user_question", ""),
         pdf_chunks=kwargs.get("pdf_chunks"),

@@ -18,6 +18,9 @@ Expected subdirectories:
 - `highThinkingQA/`
   - `vectordb/`
   - `papers/`
+- `patentQA/`
+  - `vector_db_patent_abstracts/`
+  - `vector_db_patent_chunks/`
 
 Recommended collection command:
 
@@ -30,6 +33,7 @@ Default source paths used by the helper script:
 - `public-service`: `public-service/data/runtime/`
 - `fastQA`: prefer `resource/fastqa/`, fallback `resource/state/dev/fastQA/`
 - `highThinkingQA`: prefer `resource/highThinkingQA/`, fallback `resource/state/dev/highThinkingQA/`
+- `patentQA`: `resource/patentQA/`
 
 `fastQA` papers are intentionally excluded from `seed-data/` because the portable
 deployment bundle carries them through `deploy/minio-seed/<bucket>/papers/`.
@@ -41,5 +45,6 @@ You can override the source roots with environment variables:
 PUBLIC_SERVICE_SRC=/path/to/public-service/runtime \
 FASTQA_SRC=/path/to/fastqa/data-root \
 HIGHTHINKINGQA_SRC=/path/to/highthinkingqa/data-root \
+PATENTQA_SRC=/path/to/patentqa/data-root \
 bash deploy/scripts/collect_seed_data.sh --clean
 ```

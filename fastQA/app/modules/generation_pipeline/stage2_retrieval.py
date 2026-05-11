@@ -13,6 +13,7 @@ from app.modules.graph_kb.models import GraphRagPayload
 from app.modules.generation_pipeline.feature_flags import env_bool, env_int
 from app.modules.generation_pipeline.retrieval_validation import validate_retrieval_relevance
 from app.modules.generation_pipeline.text_processing import extract_question_keywords, preprocess_retrieval_query
+from app.modules.qa_kb.comparison_intent import build_retrieval_claims_from_comparison_plan
 
 
 ELEMENT_SYNONYM_GROUPS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
@@ -372,6 +373,21 @@ def merge_graph_hints_into_retrieval(
     return preprocess_retrieval_query_fn(" ".join(prefixes + [query]))
 
 
+def _ensure_comparison_object_lock(
+    *,
+    query: str,
+    must_include_any: Iterable[Any],
+    preprocess_retrieval_query_fn: Callable[[str], str],
+) -> tuple[str, list[str]]:
+    tokens = [str(item or "").strip() for item in list(must_include_any or []) if str(item or "").strip()]
+    if not tokens:
+        return query, []
+    if any(_contains_keyword(query, token) for token in tokens):
+        return query, []
+    locked = preprocess_retrieval_query_fn(" ".join([tokens[0], query]))
+    return locked, [tokens[0]]
+
+
 def _search_with_optional_rerank(
     *,
     literature_expert: Any,
@@ -410,6 +426,66 @@ def _search_with_optional_rerank(
             reduced_kwargs.pop("use_rerank", None)
             reduced_kwargs.pop("rerank_candidates", None)
             return literature_expert.search(combined_query, **reduced_kwargs)
+
+
+def _extract_dois_from_metadatas(metadatas: Iterable[Any]) -> list[str]:
+    dois: list[str] = []
+    seen: set[str] = set()
+    for meta in metadatas:
+        if not isinstance(meta, dict):
+            continue
+        doi = str(meta.get("doi") or meta.get("DOI") or meta.get("source_doi") or "").strip()
+        if not doi or doi in seen:
+            continue
+        seen.add(doi)
+        dois.append(doi)
+    return dois
+
+
+def _build_comparison_groups(
+    *,
+    comparison_plan: dict[str, Any] | None,
+    claim_outputs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not isinstance(comparison_plan, dict) or not comparison_plan.get("enabled"):
+        return []
+    min_docs = int(comparison_plan.get("min_docs_per_object") or 1)
+    groups: list[dict[str, Any]] = []
+    for item in list(comparison_plan.get("objects") or []):
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()
+        if not label:
+            continue
+        outputs = [output for output in claim_outputs if str(output.get("comparison_object") or "") == label and output.get("ok")]
+        documents: list[Any] = []
+        metadatas: list[Any] = []
+        distances: list[Any] = []
+        queries: list[str] = []
+        for output in outputs:
+            documents.extend(list(output.get("documents") or []))
+            metadatas.extend(list(output.get("metadatas") or []))
+            distances.extend(list(output.get("distances") or []))
+            query = str(output.get("query") or "").strip()
+            if query:
+                queries.append(query)
+        evidence_status = "sufficient" if len(documents) >= min_docs else "insufficient"
+        groups.append(
+            {
+                "label": label,
+                "aliases": list(item.get("aliases") or []),
+                "queries": queries,
+                "abstract_hits": [
+                    {"document": documents[idx], "metadata": metadatas[idx] if idx < len(metadatas) else {}, "distance": distances[idx] if idx < len(distances) else None}
+                    for idx in range(len(documents))
+                ],
+                "md_hits": [],
+                "doi_candidates": _extract_dois_from_metadatas(metadatas),
+                "evidence_status": evidence_status,
+                "missing_evidence_reason": "" if evidence_status == "sufficient" else "abstract_hits_below_threshold",
+            }
+        )
+    return groups
 
 
 def _generate_ai_query(
@@ -609,6 +685,7 @@ def run_stage2_targeted_retrieval(
     use_rerank: Optional[bool] = None,
     rerank_candidates: Optional[int] = None,
     graph_evidence: GraphRagPayload | None = None,
+    comparison_plan: dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     def _cancelled() -> bool:
         if should_cancel is None:
@@ -636,6 +713,7 @@ def run_stage2_targeted_retrieval(
     logger.info("\n%s", "=" * 60)
     logger.info("🔍 阶段二：基于检索指令的精准检索")
     logger.info("%s", "=" * 60)
+    comparison_enabled = bool(isinstance(comparison_plan, dict) and comparison_plan.get("enabled"))
     logger.info("检索指令数量: %s", len(retrieval_claims))
     logger.info("每个指令检索数量: %s", n_results_per_claim)
     logger.info(
@@ -695,6 +773,10 @@ def run_stage2_targeted_retrieval(
         }
 
     claims = list(retrieval_claims or [])
+    if comparison_enabled:
+        comparison_claims = build_retrieval_claims_from_comparison_plan(comparison_plan or {})
+        if comparison_claims:
+            claims = comparison_claims
     if not claims:
         return {
             "success": True,
@@ -702,6 +784,8 @@ def run_stage2_targeted_retrieval(
             "metadatas": [],
             "distances": [],
             "claim_to_results": {},
+            "comparison_plan": comparison_plan if comparison_enabled else None,
+            "comparison_groups": [],
             "unique_count": 0,
             "total_count": 0,
         }
@@ -736,14 +820,30 @@ def run_stage2_targeted_retrieval(
 
         if isinstance(claim, dict):
             claim_text = str(claim.get("claim") or "").strip()
+            profile_query = str(claim.get("query") or "").strip()
             keywords = [str(item).strip() for item in list(claim.get("keywords") or []) if str(item or "").strip()]
             preferred_sections = [str(item).strip() for item in list(claim.get("preferred_sections") or claim.get("preferred") or []) if str(item or "").strip()]
             filters = dict(claim.get("filters") or {}) if isinstance(claim.get("filters"), dict) else {}
+            comparison_group = bool(claim.get("comparison_group"))
+            comparison_object = str(claim.get("comparison_object") or "").strip()
+            comparison_aliases = [str(item).strip() for item in list(claim.get("comparison_aliases") or []) if str(item or "").strip()]
+            must_include_any = [str(item).strip() for item in list(claim.get("must_include_any") or []) if str(item or "").strip()]
+            avoid_confusions = [str(item).strip() for item in list(claim.get("avoid_confusions") or []) if str(item or "").strip()]
+            positive_context_terms = [str(item).strip() for item in list(claim.get("positive_context_terms") or []) if str(item or "").strip()]
+            negative_context_terms = [str(item).strip() for item in list(claim.get("negative_context_terms") or []) if str(item or "").strip()]
         else:
             claim_text = str(claim or "").strip()
+            profile_query = ""
             keywords = []
             preferred_sections = []
             filters = {}
+            comparison_group = False
+            comparison_object = ""
+            comparison_aliases = []
+            must_include_any = []
+            avoid_confusions = []
+            positive_context_terms = []
+            negative_context_terms = []
 
         claim_key = claim_text or f"claim_{index}"
         query_guardrail_details = {"injected_keywords": [], "injected_entities": []}
@@ -801,7 +901,9 @@ def run_stage2_targeted_retrieval(
             logger.warning("AI查询生成失败，使用传统方法: %s", exc)
 
         if not combined_query:
-            if keywords:
+            if profile_query:
+                combined_query = preprocess_fn(profile_query)
+            elif keywords:
                 combined_query = preprocess_fn(f"{' '.join(keywords)} {claim_text}".strip())
             else:
                 combined_query = preprocess_fn(claim_text)
@@ -814,6 +916,14 @@ def run_stage2_targeted_retrieval(
                 query_expansion_ms = (time.monotonic() - query_expansion_started_at) * 1000.0
                 if expanded_query:
                     combined_query = preprocess_fn(expanded_query)
+                    if comparison_group:
+                        combined_query, locked_tokens = _ensure_comparison_object_lock(
+                            query=combined_query,
+                            must_include_any=must_include_any,
+                            preprocess_retrieval_query_fn=preprocess_fn,
+                        )
+                        if locked_tokens:
+                            query_guardrail_details["comparison_object_lock"] = locked_tokens
                     logger.info("[%s/%s] 查询扩展后: %s...", index, len(claims), combined_query[:200])
             except Exception as exc:
                 raise_if_upstream_pool_timeout(exc)
@@ -832,6 +942,14 @@ def run_stage2_targeted_retrieval(
             preprocess_retrieval_query_fn=preprocess_fn,
             graph_evidence=graph_evidence,
         )
+        if comparison_group:
+            combined_query, locked_tokens = _ensure_comparison_object_lock(
+                query=combined_query,
+                must_include_any=must_include_any,
+                preprocess_retrieval_query_fn=preprocess_fn,
+            )
+            if locked_tokens:
+                query_guardrail_details["comparison_object_lock"] = locked_tokens
         if query_guardrail_details["injected_keywords"] or query_guardrail_details["injected_entities"]:
             logger.info(
                 "[%s/%s] 查询约束生效: injected_keywords=%s injected_entities=%s",
@@ -863,6 +981,12 @@ def run_stage2_targeted_retrieval(
             documents = list(validated_results.get("documents") or [])
             metadatas = list(validated_results.get("metadatas") or [])
             distances = list(validated_results.get("distances") or [])
+            noise_filter = {
+                "enabled": False,
+                "before": len(documents),
+                "after": len(documents),
+                "reason": "disabled_stage2_preserve_rerank_candidates" if comparison_group else "not_comparison_group",
+            }
             after_count = len(documents)
             claim_total_ms = (time.monotonic() - claim_started_at) * 1000.0
             logger.info(
@@ -900,6 +1024,14 @@ def run_stage2_targeted_retrieval(
                 "query_guardrail": query_guardrail_details,
                 "rerank": rerank_meta,
                 "relevance_validation": {"before": before_count, "after": after_count},
+                "comparison_group": comparison_group,
+                "comparison_object": comparison_object,
+                "comparison_aliases": comparison_aliases,
+                "must_include_any": must_include_any,
+                "avoid_confusions": avoid_confusions,
+                "positive_context_terms": positive_context_terms,
+                "negative_context_terms": negative_context_terms,
+                "noise_filter": noise_filter,
                 "timing": {
                     "ai_query_ms": ai_query_ms,
                     "query_expansion_ms": query_expansion_ms,
@@ -1036,7 +1168,10 @@ def run_stage2_targeted_retrieval(
             "query_guardrail": dict(output.get("query_guardrail") or {}),
             "rerank": dict(output.get("rerank") or {}),
             "relevance_validation": dict(output.get("relevance_validation") or {}),
+            "noise_filter": dict(output.get("noise_filter") or {}),
         }
+        if output.get("comparison_group"):
+            claim_to_results[output["claim_key"]]["comparison_object"] = str(output.get("comparison_object") or "")
         all_documents.extend(output["documents"])
         all_metadatas.extend(output["metadatas"])
         all_distances.extend(output["distances"])
@@ -1099,6 +1234,11 @@ def run_stage2_targeted_retrieval(
         "metadatas": unique_metadatas,
         "distances": unique_distances,
         "claim_to_results": claim_to_results,
+        "comparison_plan": comparison_plan if comparison_enabled else None,
+        "comparison_groups": _build_comparison_groups(
+            comparison_plan=comparison_plan if comparison_enabled else None,
+            claim_outputs=claim_outputs,
+        ),
         "unique_count": len(unique_documents),
         "total_count": len(all_documents),
     }

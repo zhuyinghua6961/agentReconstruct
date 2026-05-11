@@ -12,6 +12,7 @@ from typing import Any, Callable, DefaultDict
 
 import config
 from agent_core.llm_client import load_prompt_template
+from agent_core.question_anchor import ANCHOR_PROMPT_SALT
 from server.services.redis_client import RedisService, get_redis_service
 
 
@@ -104,7 +105,8 @@ def _hash_payload(value: Any) -> str:
 
 def _prompt_hash(template_name: str) -> str:
     try:
-        return hashlib.sha256(str(load_prompt_template(template_name) or "").encode("utf-8")).hexdigest()[:16]
+        body = str(load_prompt_template(template_name) or "") + ANCHOR_PROMPT_SALT
+        return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
     except Exception:
         return "unknown"
 

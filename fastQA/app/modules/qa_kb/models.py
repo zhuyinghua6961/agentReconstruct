@@ -23,6 +23,7 @@ class GenerationRuntime(Protocol):
         should_cancel: Any | None = None,
         active_stream_count: int | None = None,
         graph_evidence: GraphRagPayload | None = None,
+        comparison_plan: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         ...
 

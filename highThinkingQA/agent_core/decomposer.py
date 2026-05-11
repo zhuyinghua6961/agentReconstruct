@@ -12,6 +12,7 @@ from openai import OpenAI
 
 import config
 from agent_core.llm_client import chat_completion, load_prompt_template
+from agent_core.question_anchor import prepend_question_anchor
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ def decompose_question(
         5 个子问题的列表
     """
     template = load_prompt_template("decompose.txt")
-    prompt = template.format(question=question)
+    prompt = prepend_question_anchor(template.format(question=question), question)
 
     target_count = int(num_sub_questions) if num_sub_questions is not None else int(config.NUM_SUB_QUESTIONS)
     if target_count <= 0:

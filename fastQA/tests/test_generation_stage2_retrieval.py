@@ -109,6 +109,199 @@ def test_stage2_targeted_retrieval_applies_keyword_and_entity_guardrails(monkeyp
     assert client.calls[0]["model"] == "gpt-test"
 
 
+def test_stage2_targeted_retrieval_groups_comparison_objects(monkeypatch):
+    monkeypatch.setenv("QA_STAGE2_FORCE_KEYWORD_INJECTION", "false")
+    monkeypatch.setenv("QA_STAGE2_ENTITY_LOCK_ENABLED", "false")
+    monkeypatch.setenv("QA_STAGE2_QUERY_EXPANSION_ENABLED", "false")
+    comparison_plan = {
+        "enabled": True,
+        "objects": [
+            {
+                "label": "草酸亚铁",
+                "aliases": ["FeC2O4", "ferrous oxalate"],
+                "must_include_any": ["草酸亚铁", "FeC2O4", "ferrous oxalate"],
+                "avoid_confusions": [],
+            },
+            {
+                "label": "铁红",
+                "aliases": ["Fe2O3", "hematite", "red iron oxide"],
+                "must_include_any": ["铁红", "Fe2O3", "hematite", "red iron oxide"],
+                "avoid_confusions": [],
+            },
+        ],
+        "dimensions": ["优势", "劣势"],
+        "context_keywords": ["LFP"],
+        "min_docs_per_object": 1,
+    }
+    expert = _Expert(
+        default_response={
+            "documents": ["doc"],
+            "metadatas": [{"doi": "10.1/group"}],
+            "distances": [0.1],
+        }
+    )
+
+    result = run_stage2_targeted_retrieval(
+        retrieval_claims=[],
+        n_results_per_claim=1,
+        user_question="草酸亚铁、铁红作为原料各有什么优劣势？",
+        literature_expert=expert,
+        logger=logging.getLogger("test.stage2"),
+        client=None,
+        model=None,
+        preprocess_retrieval_query_fn=lambda query: query,
+        validate_retrieval_relevance_fn=lambda results, query, claim: results,
+        comparison_plan=comparison_plan,
+    )
+
+    assert result["success"] is True
+    assert [group["label"] for group in result["comparison_groups"]] == ["草酸亚铁", "铁红"]
+    assert [group["evidence_status"] for group in result["comparison_groups"]] == ["sufficient", "sufficient"]
+    assert len(expert.calls) == 2
+    assert "FeC2O4" in expert.calls[0]["query"]
+    assert "Fe2O3" in expert.calls[1]["query"]
+
+
+def test_stage2_comparison_keeps_reranked_candidates_without_hard_noise_filter(monkeypatch):
+    monkeypatch.setenv("QA_STAGE2_FORCE_KEYWORD_INJECTION", "false")
+    monkeypatch.setenv("QA_STAGE2_ENTITY_LOCK_ENABLED", "false")
+    monkeypatch.setenv("QA_STAGE2_QUERY_EXPANSION_ENABLED", "false")
+    comparison_plan = {
+        "enabled": True,
+        "objects": [
+            {
+                "label": "磷酸铁",
+                "aliases": ["FePO4", "iron phosphate"],
+                "must_include_any": ["磷酸铁", "FePO4", "iron phosphate"],
+                "positive_context_terms": ["LiFePO4 synthesis", "iron source", "precursor"],
+                "negative_context_terms": ["recycling", "spent battery", "wastewater"],
+                "retrieval_queries": ["FePO4 as iron source precursor for LiFePO4 synthesis advantages disadvantages"],
+            }
+        ],
+        "dimensions": ["优势", "劣势"],
+        "context_keywords": ["LFP"],
+        "min_docs_per_object": 1,
+    }
+    expert = _Expert(
+        default_response={
+            "documents": [
+                "FePO4 is used as an iron source precursor for LiFePO4 synthesis and improves phase purity.",
+                "Spent battery recycling recovers FePO4 from wastewater separation residue.",
+                "General LiFePO4 energy storage application review without iron phosphate route details.",
+            ],
+            "metadatas": [{"doi": "10.1/good"}, {"doi": "10.1/recycling"}, {"doi": "10.1/application"}],
+            "distances": [0.1, 0.2, 0.3],
+            "rerank": {"enabled": True, "applied": True},
+        }
+    )
+
+    result = run_stage2_targeted_retrieval(
+        retrieval_claims=[],
+        n_results_per_claim=3,
+        user_question="磷酸铁作为原料制备磷酸铁锂粉体有什么优劣势？",
+        literature_expert=expert,
+        logger=logging.getLogger("test.stage2"),
+        client=None,
+        model=None,
+        preprocess_retrieval_query_fn=lambda query: query,
+        validate_retrieval_relevance_fn=lambda results, query, claim: results,
+        comparison_plan=comparison_plan,
+    )
+
+    assert result["documents"] == [
+        "FePO4 is used as an iron source precursor for LiFePO4 synthesis and improves phase purity.",
+        "Spent battery recycling recovers FePO4 from wastewater separation residue.",
+        "General LiFePO4 energy storage application review without iron phosphate route details.",
+    ]
+    assert result["metadatas"] == [{"doi": "10.1/good"}, {"doi": "10.1/recycling"}, {"doi": "10.1/application"}]
+    assert result["comparison_groups"][0]["doi_candidates"] == ["10.1/good", "10.1/recycling", "10.1/application"]
+    assert result["claim_to_results"]["比较对象“磷酸铁”在当前问题中的优势、劣势、适用场景和限制"]["noise_filter"] == {
+        "enabled": False,
+        "before": 3,
+        "after": 3,
+        "reason": "disabled_stage2_preserve_rerank_candidates",
+    }
+
+
+def test_stage2_comparison_uses_profile_retrieval_query(monkeypatch):
+    monkeypatch.setenv("QA_STAGE2_FORCE_KEYWORD_INJECTION", "false")
+    monkeypatch.setenv("QA_STAGE2_ENTITY_LOCK_ENABLED", "false")
+    monkeypatch.setenv("QA_STAGE2_QUERY_EXPANSION_ENABLED", "false")
+    comparison_plan = {
+        "enabled": True,
+        "objects": [
+            {
+                "label": "磷酸铁",
+                "aliases": ["FePO4"],
+                "must_include_any": ["磷酸铁", "FePO4"],
+                "retrieval_queries": ["FePO4 as iron source precursor for LiFePO4 synthesis route evidence"],
+            }
+        ],
+        "dimensions": ["优势", "劣势"],
+        "context_keywords": ["LFP"],
+        "min_docs_per_object": 1,
+    }
+    expert = _Expert(default_response={"documents": ["doc"], "metadatas": [{"doi": "10.1/a"}], "distances": [0.1]})
+
+    result = run_stage2_targeted_retrieval(
+        retrieval_claims=[],
+        n_results_per_claim=1,
+        user_question="磷酸铁作为原料有什么优劣势？",
+        literature_expert=expert,
+        logger=logging.getLogger("test.stage2"),
+        client=None,
+        model=None,
+        preprocess_retrieval_query_fn=lambda query: query,
+        validate_retrieval_relevance_fn=lambda results, query, claim: results,
+        comparison_plan=comparison_plan,
+    )
+
+    assert result["success"] is True
+    assert expert.calls[0]["query"] == "FePO4 as iron source precursor for LiFePO4 synthesis route evidence"
+    assert result["comparison_groups"][0]["queries"] == [
+        "FePO4 as iron source precursor for LiFePO4 synthesis route evidence"
+    ]
+
+
+def test_stage2_comparison_query_expansion_keeps_object_lock(monkeypatch):
+    monkeypatch.setenv("QA_STAGE2_FORCE_KEYWORD_INJECTION", "false")
+    monkeypatch.setenv("QA_STAGE2_ENTITY_LOCK_ENABLED", "false")
+    monkeypatch.setenv("QA_STAGE2_QUERY_EXPANSION_ENABLED", "true")
+    comparison_plan = {
+        "enabled": True,
+        "objects": [
+            {
+                "label": "草酸亚铁",
+                "aliases": ["FeC2O4", "ferrous oxalate"],
+                "must_include_any": ["草酸亚铁", "FeC2O4", "ferrous oxalate"],
+                "avoid_confusions": [],
+            }
+        ],
+        "dimensions": ["优势", "劣势"],
+        "context_keywords": ["LFP"],
+        "min_docs_per_object": 1,
+    }
+    expert = _Expert(default_response={"documents": ["doc"], "metadatas": [{"doi": "10.1/a"}], "distances": [0.1]})
+
+    result = run_stage2_targeted_retrieval(
+        retrieval_claims=[],
+        n_results_per_claim=1,
+        user_question="草酸亚铁作为原料有什么优劣势？",
+        literature_expert=expert,
+        logger=logging.getLogger("test.stage2"),
+        client=None,
+        model=None,
+        preprocess_retrieval_query_fn=lambda query: query,
+        validate_retrieval_relevance_fn=lambda results, query, claim: results,
+        expand_query_fn=lambda query: "generic LFP synthesis advantages disadvantages",
+        comparison_plan=comparison_plan,
+    )
+
+    assert result["success"] is True
+    assert "草酸亚铁" in expert.calls[0]["query"] or "FeC2O4" in expert.calls[0]["query"]
+    assert result["comparison_groups"][0]["queries"] == [expert.calls[0]["query"]]
+
+
 def test_stage2_query_generation_uses_leased_chat_lane(monkeypatch):
     monkeypatch.setenv("QA_STAGE2_FORCE_KEYWORD_INJECTION", "false")
     monkeypatch.setenv("QA_STAGE2_ENTITY_LOCK_ENABLED", "false")

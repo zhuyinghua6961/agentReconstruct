@@ -21,6 +21,14 @@ required_vars=(
   PUBLIC_SERVICE_IMAGE
   FASTQA_IMAGE
   HIGHTHINKINGQA_IMAGE
+  PATENT_IMAGE
+  FRONTEND_IMAGE
+  MYSQL_IMAGE_TAG
+  REDIS_IMAGE_TAG
+  MINIO_IMAGE_TAG
+  MINIO_MC_IMAGE_TAG
+  ALPINE_IMAGE_TAG
+  NGINX_IMAGE_TAG
 )
 
 for var_name in "${required_vars[@]}"; do
@@ -35,6 +43,14 @@ images=(
   "$PUBLIC_SERVICE_IMAGE"
   "$FASTQA_IMAGE"
   "$HIGHTHINKINGQA_IMAGE"
+  "$PATENT_IMAGE"
+  "$FRONTEND_IMAGE"
+  "mysql:${MYSQL_IMAGE_TAG}"
+  "redis:${REDIS_IMAGE_TAG}"
+  "minio/minio:${MINIO_IMAGE_TAG}"
+  "minio/mc:${MINIO_MC_IMAGE_TAG}"
+  "alpine:${ALPINE_IMAGE_TAG}"
+  "nginx:${NGINX_IMAGE_TAG}"
 )
 
 for image in "${images[@]}"; do

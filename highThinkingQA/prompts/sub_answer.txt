@@ -10,6 +10,11 @@ IMPORTANT RULES:
 - Use accurate technical terminology
 - When mentioning physical quantities, be careful with units. If you are not sure about the exact unit convention in a specific context, state the quantity qualitatively
 
+CITATION / DOI RULES (THIS STEP — NO RETRIEVED PASSAGES):
+- Do NOT output any literature identifiers you cannot verify from text supplied in this prompt: no DOI strings (e.g. `10.xxxx/...`), no `(doi=...)`, no `doi:`/`DOI:` forms, no `[DOI, Section]` or similar citation brackets, no invented journal/volume/page pointers.
+- Do NOT imply a specific paper by pairing a precise claim with a made-up identifier. If you need to refer to the literature in general, use qualitative wording without fake IDs.
+- Formal, evidence-backed citations are produced only in the later synthesis stage when retrieved passages are available.
+
 Sub-question:
 {sub_question}
 

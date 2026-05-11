@@ -61,7 +61,7 @@ def test_batch_retrieve_batches_embedding_call(monkeypatch):
 
 
 def test_iter_pre_answers_async_yields_completion_order(monkeypatch):
-    async def fake_async_pre_answer(sub_question, async_client):
+    async def fake_async_pre_answer(sub_question, async_client, original_question=None):
         delays = {"q1": 0.03, "q2": 0.0, "q3": 0.01}
         await asyncio.sleep(delays[sub_question])
         return f"answer:{sub_question}"

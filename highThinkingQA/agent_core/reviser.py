@@ -12,6 +12,7 @@ from openai import OpenAI
 
 import config
 from agent_core.llm_client import chat_completion, get_llm_client, load_prompt_template
+from agent_core.question_anchor import prepend_question_anchor
 
 logger = logging.getLogger(__name__)
 
@@ -75,10 +76,13 @@ def revise_answer(
     issues_text = _format_issues(issues)
 
     template = load_prompt_template("revise.txt")
-    prompt = template.format(
-        question=question,
-        answer=answer,
-        issues=issues_text,
+    prompt = prepend_question_anchor(
+        template.format(
+            question=question,
+            answer=answer,
+            issues=issues_text,
+        ),
+        question,
     )
 
     try:

@@ -17,6 +17,8 @@ _DOI_EXTRACT_RE = re.compile(
     r"10\.\d{1,9}/[-._;()/:A-Z0-9]+?(?=(?:[\]\)\s,;:]*)10\.\d{1,9}/|[\]\)\s,;:]*$)",
     re.IGNORECASE,
 )
+# Loose scan over arbitrary prose / markdown (parity with ask_service historical _extract_references).
+_ANSWER_TEXT_DOI_PATTERN = re.compile(r"10\.\d{1,9}[-._;()/:A-Z0-9]+", re.IGNORECASE)
 
 
 def _repair_missing_separator(text: str) -> str:
@@ -68,6 +70,22 @@ def normalize_doi(value: str) -> str:
     if "_" in text and "/" not in text and text.startswith("10.") and not filename_like_source:
         text = text.replace("_", "/", 1)
     return text.strip()
+
+
+def extract_dois_from_answer_text(text: str) -> list[str]:
+    """Scan arbitrary assistant text for DOI-like tokens (same rules as ask_service._extract_references)."""
+    seen: set[str] = set()
+    refs: list[str] = []
+    for match in _ANSWER_TEXT_DOI_PATTERN.finditer(str(text or "")):
+        doi = normalize_doi(match.group(0))
+        if not doi or "/" not in doi:
+            continue
+        key = doi.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        refs.append(doi)
+    return refs
 
 
 def extract_dois(value: str) -> list[str]:

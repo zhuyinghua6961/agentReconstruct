@@ -133,6 +133,21 @@ class MinIOStorageBackend(StorageBackend):
             expires=timedelta(seconds=max(60, int(expires_seconds))),
         )
 
+    def list_object_names(self, *, prefix: str, bucket: str | None = None, max_keys: int = 100) -> list[str]:
+        """Return object names under prefix (for disambiguated paper keys such as stem_timestamp)."""
+        target_bucket = str(bucket or "").strip() or self._bucket
+        names: list[str] = []
+        try:
+            for obj in self._client.list_objects(target_bucket, prefix=prefix, recursive=True):
+                oname = getattr(obj, "object_name", None)
+                if isinstance(oname, str) and oname:
+                    names.append(oname)
+                    if len(names) >= int(max_keys):
+                        break
+        except Exception:
+            return []
+        return names
+
     def delete_object(self, *, object_name: str, bucket: str | None = None) -> bool:
         target_bucket = str(bucket or "").strip() or self._bucket
         try:

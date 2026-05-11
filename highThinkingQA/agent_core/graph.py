@@ -13,6 +13,7 @@ LangGraph 流程编排
 
 import concurrent.futures
 import logging
+import os
 import time
 import asyncio
 import threading
@@ -26,6 +27,7 @@ from agent_core.answer_summary import apply_answer_summary_experiment, summary_e
 from agent_core.llm_client import get_async_llm_client, get_llm_client
 from agent_core.sub_answerer import iter_pre_answers_async, pre_answer_all
 from agent_core.synthesizer import synthesize_answer, synthesize_answer_stream
+from agent_core.doi_diagnostics import build_preanswer_blob, doi_diagnostics_enabled, log_doi_trace
 from agent_core.checker import CheckerTimeoutError, check_answer
 from agent_core.reviser import ReviserTimeoutError, revise_answer
 from retriever.vector_retriever import batch_retrieve, RetrievedChunk
@@ -147,6 +149,7 @@ def _run_pre_answer_retrieval_pipeline(
     progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
     cancel_event: Optional[threading.Event] = None,
     trace_id: Optional[str] = None,
+    original_question: str | None = None,
 ) -> tuple[list[str], list[list[RetrievedChunk]], dict[str, float]]:
     """流水线执行 Step2 预回答和 Step3 检索。"""
 
@@ -257,6 +260,7 @@ def _run_pre_answer_retrieval_pipeline(
             async for index, answer in iter_pre_answers_async(
                 sub_questions,
                 async_client=async_llm_client,
+                original_question=original_question,
             ):
                 _raise_if_cancelled()
                 completed_pre_answers += 1
@@ -560,6 +564,7 @@ def run_agent(
                 progress_callback=progress_callback,
                 cancel_event=cancel_event,
                 trace_id=trace_id,
+                original_question=working_question,
             )
             _raise_if_cancelled()
             state.retrieval_queries = [
@@ -713,6 +718,16 @@ def run_agent(
                 state.timings["step4_synthesis"],
             )
 
+        if doi_diagnostics_enabled():
+            log_doi_trace(
+                logger,
+                trace_prefix=_trace_prefix(trace_id),
+                phase="draft_after_step4",
+                answer_text=state.draft_answer,
+                pre_blob=build_preanswer_blob(state.direct_answer, state.sub_answers),
+                all_chunks=state.retrieved_chunks,
+            )
+
         # ============================================================
         # Step 5: Checker-Reviser 引用验证循环
         # ============================================================
@@ -809,6 +824,17 @@ def run_agent(
                     f"Step 5 - 第 {loop_i + 1} 轮检查未通过，"
                     f"发现 {len(issues)} 个问题，交由 Reviser 修改"
                 )
+                for idx, issue in enumerate(issues[:12]):
+                    if not isinstance(issue, dict):
+                        continue
+                    logger.info(
+                        "%sStep 5 - checker issue detail [%s/%s] problem=%s citation=%s",
+                        _trace_prefix(trace_id),
+                        idx + 1,
+                        len(issues),
+                        issue.get("problem"),
+                        issue.get("citation"),
+                    )
                 _emit_progress(
                     "step5_check",
                     "success",
@@ -882,6 +908,15 @@ def run_agent(
             state.final_answer,
             enabled=resolved_summary_experiment,
         )
+        if doi_diagnostics_enabled():
+            log_doi_trace(
+                logger,
+                trace_prefix=_trace_prefix(trace_id),
+                phase="final_after_step5",
+                answer_text=state.final_answer,
+                pre_blob=build_preanswer_blob(state.direct_answer, state.sub_answers),
+                all_chunks=state.retrieved_chunks,
+            )
         logger.info(
             "%sanswer summary experiment enabled=%s generated=%s format=%s length=%s has_citation=%s skipped_reason=%s",
             _trace_prefix(trace_id),

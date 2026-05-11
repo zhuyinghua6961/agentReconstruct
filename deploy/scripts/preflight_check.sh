@@ -18,26 +18,37 @@ required_vars=(
   PUBLIC_SERVICE_IMAGE
   FASTQA_IMAGE
   HIGHTHINKINGQA_IMAGE
+  PATENT_IMAGE
+  FRONTEND_IMAGE
+  FRONTEND_PUBLISH_PORT
+  NGINX_IMAGE_TAG
   MYSQL_ROOT_PASSWORD
   MYSQL_DATABASE
   MYSQL_APP_USER
   MYSQL_APP_PASSWORD
   REDIS_PASSWORD
+  JWT_SECRET
+  PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN
   MINIO_ROOT_USER
   MINIO_ROOT_PASSWORD
   MINIO_BUCKET
-  FASTQA_EMBEDDING_MODEL_TYPE
-  FASTQA_EMBEDDING_API_URL
-  FASTQA_EMBEDDING_API_MODEL
-  HIGHTHINKINGQA_LLM_BASE_URL
-  HIGHTHINKINGQA_LLM_MODEL
+  LLM_BASE_URL
+  LLM_MODEL
+  QA_EMBEDDING_MODEL_TYPE
+  QA_EMBEDDING_BASE_URL
+  QA_EMBEDDING_MODEL
   HIGHTHINKINGQA_EMBEDDING_BASE_URL
   HIGHTHINKINGQA_EMBEDDING_MODEL
+  RERANK_PROVIDER
+  RERANK_MODEL
+  PATENT_NEO4J_USERNAME
+  PATENT_NEO4J_DATABASE
 )
 
 placeholder_patterns=(
   'change_me_'
   'ghcr.io/example/'
+  'replace_with_real_'
 )
 
 check_seed_dir() {
@@ -83,8 +94,21 @@ for var_name in "${required_vars[@]}"; do
   fi
 done
 
-if [[ "${FASTQA_EMBEDDING_MODEL_TYPE}" != "remote" ]]; then
-  echo "invalid FASTQA_EMBEDDING_MODEL_TYPE: expected remote, got ${FASTQA_EMBEDDING_MODEL_TYPE}" >&2
+if [[ "${QA_EMBEDDING_MODEL_TYPE}" != "remote" ]]; then
+  echo "invalid QA_EMBEDDING_MODEL_TYPE: expected remote, got ${QA_EMBEDDING_MODEL_TYPE}" >&2
+  exit 1
+fi
+
+case "${RERANK_PROVIDER}" in
+  local|dashscope|none|off|disabled) ;;
+  *)
+    echo "invalid RERANK_PROVIDER: expected local, dashscope, none, off, or disabled; got ${RERANK_PROVIDER}" >&2
+    exit 1
+    ;;
+esac
+
+if [[ "${RERANK_PROVIDER}" != "none" && "${RERANK_PROVIDER}" != "off" && "${RERANK_PROVIDER}" != "disabled" && -z "${RERANK_BASE_URL:-}" ]]; then
+  echo "missing required variable in $ENV_FILE: RERANK_BASE_URL is required when RERANK_PROVIDER=${RERANK_PROVIDER}" >&2
   exit 1
 fi
 
@@ -97,6 +121,7 @@ done
 check_seed_dir "$DEPLOY_DIR/seed-data/public-service"
 check_seed_dir "$DEPLOY_DIR/seed-data/fastQA"
 check_seed_dir "$DEPLOY_DIR/seed-data/highThinkingQA"
+check_seed_dir "$DEPLOY_DIR/seed-data/patentQA"
 check_optional_seed_dir "$DEPLOY_DIR/minio-seed/$MINIO_BUCKET"
 
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" config >/dev/null

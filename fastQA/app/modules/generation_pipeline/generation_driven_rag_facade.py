@@ -53,6 +53,7 @@ from app.modules.generation_pipeline.runtime_bootstrap import (
     resolve_generation_runtime_inputs as resolve_generation_runtime_inputs_impl,
 )
 from app.modules.generation_pipeline.text_processing import extract_question_keywords, preprocess_retrieval_query
+from app.modules.qa_kb.comparison_intent import generate_comparison_retrieval_profile as generate_comparison_retrieval_profile_impl
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -228,6 +229,22 @@ class GenerationDrivenRAG:
             should_cancel=should_cancel,
         )
 
+    def generate_comparison_retrieval_profile(
+        self,
+        *,
+        user_question: str,
+        comparison_plan: dict[str, Any],
+        retrieval_claims: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return generate_comparison_retrieval_profile_impl(
+            user_question=user_question,
+            comparison_plan=comparison_plan,
+            retrieval_claims=retrieval_claims,
+            client=self.client,
+            model=self.model,
+            logger=logger,
+        )
+
     def stage2_targeted_retrieval(
         self,
         retrieval_claims,
@@ -236,6 +253,7 @@ class GenerationDrivenRAG:
         should_cancel=None,
         active_stream_count=None,
         graph_evidence: GraphRagPayload | None = None,
+        comparison_plan: dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         return run_stage2_targeted_retrieval_impl(
             retrieval_claims=list(retrieval_claims or []),
@@ -261,6 +279,7 @@ class GenerationDrivenRAG:
             should_cancel=should_cancel,
             active_stream_count=active_stream_count,
             graph_evidence=graph_evidence,
+            comparison_plan=comparison_plan,
         )
 
     def stage25_md_expansion(self, *, retrieval_results: dict[str, Any], user_question: str, dois: list[str]) -> dict[str, Any]:

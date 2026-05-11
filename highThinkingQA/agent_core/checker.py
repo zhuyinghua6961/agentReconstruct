@@ -15,6 +15,7 @@ from openai import OpenAI
 
 import config
 from agent_core.llm_client import chat_completion, get_llm_client, load_prompt_template
+from agent_core.question_anchor import prepend_question_anchor
 from agent_core.synthesizer import format_retrieved_passages
 from retriever.vector_retriever import RetrievedChunk
 
@@ -298,10 +299,13 @@ def _run_checker_slice(
 ) -> tuple[bool, list[dict], dict[str, int]]:
     retrieved_passages = format_retrieved_passages(filtered_chunks)
     template = load_prompt_template("check.txt")
-    prompt = template.format(
-        question=question,
-        answer=answer_block,
-        retrieved_passages=retrieved_passages,
+    prompt = prepend_question_anchor(
+        template.format(
+            question=question,
+            answer=answer_block,
+            retrieved_passages=retrieved_passages,
+        ),
+        question,
     )
     raw = chat_completion(
         prompt=prompt,

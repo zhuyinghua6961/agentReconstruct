@@ -15,6 +15,7 @@ class Stage4Synthesizer:
         deep_answer: str,
         pdf_chunks: dict[str, list[dict[str, Any]]],
         retrieval_results: dict[str, Any] | None = None,
+        answer_plan: dict[str, Any] | None = None,
         should_cancel: Any | None = None,
         conversation_context: dict[str, Any] | None = None,
         graph_evidence=None,
@@ -36,6 +37,8 @@ class Stage4Synthesizer:
         if signature is not None:
             parameters = signature.parameters
             supports_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+            if "answer_plan" in parameters or supports_kwargs:
+                kwargs["answer_plan"] = answer_plan
             if "graph_fact_block" in parameters or supports_kwargs:
                 kwargs["graph_fact_block"] = (
                     getattr(graph_evidence, "stage4_fact_block", "") if graph_evidence is not None else ""

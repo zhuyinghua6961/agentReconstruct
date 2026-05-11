@@ -1,0 +1,5 @@
+FROM highthinking-python-base:latest
+
+WORKDIR /app
+EXPOSE 8010
+CMD ["gunicorn", "server_fastapi.asgi:app", "--chdir", "/app/patent", "-c", "/app/patent/server_fastapi/gunicorn.conf.py"]

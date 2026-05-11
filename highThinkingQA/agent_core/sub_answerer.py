@@ -12,6 +12,7 @@ from openai import AsyncOpenAI, OpenAI
 
 import config
 from agent_core.llm_client import get_async_llm_client, load_prompt_template
+from agent_core.question_anchor import prepend_question_anchor
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +31,15 @@ def _build_sub_answer_kwargs(prompt: str) -> dict:
 def pre_answer_sub_question(
     sub_question: str,
     client: Optional[OpenAI] = None,
+    *,
+    original_question: str | None = None,
 ) -> str:
     """
     LLM 预回答单个子问题。
 
     Args:
         sub_question: 子问题
+        original_question: 用户原始问题（置于 prompt 顶部锚点，减轻偏题；缺省则仅锚子问题）
         client: OpenAI 客户端
 
     Returns:
@@ -46,7 +50,8 @@ def pre_answer_sub_question(
         client = get_llm_client()
 
     template = load_prompt_template("sub_answer.txt")
-    prompt = template.format(sub_question=sub_question)
+    body = template.format(sub_question=sub_question)
+    prompt = prepend_question_anchor(body, str(original_question or "").strip() or sub_question)
 
     kwargs = _build_sub_answer_kwargs(prompt)
     response = client.chat.completions.create(**kwargs)
@@ -57,10 +62,13 @@ def pre_answer_sub_question(
 async def _async_pre_answer(
     sub_question: str,
     async_client: AsyncOpenAI,
+    *,
+    original_question: str | None = None,
 ) -> str:
     """异步预回答单个子问题"""
     template = load_prompt_template("sub_answer.txt")
-    prompt = template.format(sub_question=sub_question)
+    body = template.format(sub_question=sub_question)
+    prompt = prepend_question_anchor(body, str(original_question or "").strip() or sub_question)
 
     kwargs = _build_sub_answer_kwargs(prompt)
     response = await async_client.chat.completions.create(**kwargs)
@@ -71,6 +79,8 @@ async def _async_pre_answer(
 async def pre_answer_all_async(
     sub_questions: list[str],
     async_client: Optional[AsyncOpenAI] = None,
+    *,
+    original_question: str | None = None,
 ) -> list[str]:
     """
     异步并行预回答所有子问题。
@@ -85,7 +95,7 @@ async def pre_answer_all_async(
         async_client = get_async_llm_client()
 
     tasks = [
-        _async_pre_answer(sq, async_client)
+        _async_pre_answer(sq, async_client, original_question=original_question)
         for sq in sub_questions
     ]
 
@@ -107,6 +117,8 @@ async def pre_answer_all_async(
 async def iter_pre_answers_async(
     sub_questions: list[str],
     async_client: Optional[AsyncOpenAI] = None,
+    *,
+    original_question: str | None = None,
 ) -> AsyncGenerator[tuple[int, str], None]:
     """
     按完成顺序返回子问题预回答结果。
@@ -119,7 +131,7 @@ async def iter_pre_answers_async(
 
     async def _indexed_answer(index: int, sub_question: str) -> tuple[int, str]:
         try:
-            answer = await _async_pre_answer(sub_question, async_client)
+            answer = await _async_pre_answer(sub_question, async_client, original_question=original_question)
             return index, answer
         except Exception as exc:
             logger.error(f"子问题 Q{index+1} 预回答失败: {exc}")
@@ -142,6 +154,8 @@ async def iter_pre_answers_async(
 def pre_answer_all(
     sub_questions: list[str],
     async_client: Optional[AsyncOpenAI] = None,
+    *,
+    original_question: str | None = None,
 ) -> list[str]:
     """
     并行预回答所有子问题（同步入口）。
@@ -163,10 +177,10 @@ def pre_answer_all(
         executor = concurrent.futures.ThreadPoolExecutor()
         try:
             future = executor.submit(
-                asyncio.run, pre_answer_all_async(sub_questions, async_client=async_client)
+                asyncio.run, pre_answer_all_async(sub_questions, async_client=async_client, original_question=original_question)
             )
             return future.result()
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
     else:
-        return asyncio.run(pre_answer_all_async(sub_questions, async_client=async_client))
+        return asyncio.run(pre_answer_all_async(sub_questions, async_client=async_client, original_question=original_question))

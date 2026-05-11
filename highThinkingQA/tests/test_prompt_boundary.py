@@ -259,5 +259,7 @@ def test_highthinking_synthesis_prompt_includes_summary_instruction_when_enabled
         summary_enabled=True,
     )
 
+    assert "USER QUESTION ANCHOR" in prompt
+    assert "为什么厚电极在高倍率下极化严重？" in prompt
     assert "## 总结" in prompt
     assert build_thinking_summary_instruction(enabled=True).strip() in prompt

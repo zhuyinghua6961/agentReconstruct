@@ -17,6 +17,7 @@ class Stage2Retriever:
         should_cancel: Any | None = None,
         active_stream_count: int | None = None,
         graph_evidence=None,
+        comparison_plan: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         stage2_fn = runtime.stage2_targeted_retrieval
         try:
@@ -36,6 +37,8 @@ class Stage2Retriever:
             supports_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
             if "graph_evidence" in parameters or supports_kwargs:
                 kwargs["graph_evidence"] = graph_evidence
+            if "comparison_plan" in parameters or supports_kwargs:
+                kwargs["comparison_plan"] = comparison_plan
         return stage2_fn(**kwargs)
 
 

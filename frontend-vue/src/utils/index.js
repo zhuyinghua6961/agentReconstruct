@@ -10,6 +10,128 @@ marked.setOptions({
   headerIds: false,
 })
 
+/** 避免将公式 / 方程中的 “-” 误判为 Markdown 列表切分 */
+function looksInlineMathOrParamBlock(text) {
+  const t = String(text || '')
+  if (!t) return false
+  if (/\\[a-zA-Z]+|\\frac|\\mathrm|\\times|\\cdot|\\sum|\\int|\\sqrt|\^\{|\^\d|_\{|_=|[α-ωΑ-Ω∑∫±≤≥×·Δ]/.test(t)) return true
+  if (/[=≈∝]\s*[^\n，。]{0,120}/.test(t) && /[-−]\s*[^\n，。]{0,40}/.test(t) && /[α-ωσλεΔ]|[\\^_{}]/.test(t)) return true
+  return false
+}
+
+function isProbablyInlineMathContent(inner) {
+  const s = String(inner || '').trim()
+  if (!s) return false
+  if (/^[\d.,\s$€£¥]+$/.test(s)) return false
+  if (s.length > 200) return true
+  if (/[_\\^={}]|\\[a-zA-Z]|[α-ωΑ-ΩΔ∑∫±≤≥×·∝]/.test(s)) return true
+  return false
+}
+
+function findClosingDollar(source, fromIndex) {
+  const src = String(source || '')
+  for (let j = fromIndex; j < src.length; j += 1) {
+    if (src[j] !== '$') continue
+    if (src[j - 1] === '\\') continue
+    if (src[j + 1] === '$') continue
+    return j
+  }
+  return -1
+}
+
+/**
+ * 在 normalizeMarkdownForRender 之前遮蔽代码块与数学片段，
+ * 防止行内 “：- a - b” 列表规范化破坏公式连续性。
+ */
+function maskMarkdownProtections(sourceText) {
+  const src = String(sourceText || '')
+  const segments = []
+  let out = ''
+  let i = 0
+  let seq = 0
+  const push = (start, end) => {
+    const body = src.slice(start, end)
+    const token = `\u27e6mdp${seq}\u27e7`
+    seq += 1
+    segments.push({ token, body })
+    out += token
+    i = end
+  }
+
+  while (i < src.length) {
+    if (src.startsWith('```', i)) {
+      const nl = src.indexOf('\n', i + 3)
+      if (nl < 0) {
+        out += src[i]
+        i += 1
+        continue
+      }
+      const close = src.indexOf('\n```', nl)
+      const end = close >= 0 ? close + 4 : src.length
+      push(i, end)
+      continue
+    }
+
+    if (src.startsWith('$$', i)) {
+      const end = src.indexOf('$$', i + 2)
+      if (end < 0) {
+        out += src[i]
+        i += 1
+        continue
+      }
+      push(i, end + 2)
+      continue
+    }
+
+    if (src.startsWith('\\[', i)) {
+      const end = src.indexOf('\\]', i + 2)
+      if (end < 0) {
+        out += src[i]
+        i += 1
+        continue
+      }
+      push(i, end + 2)
+      continue
+    }
+
+    if (src.startsWith('\\(', i)) {
+      const end = src.indexOf('\\)', i + 2)
+      if (end < 0) {
+        out += src[i]
+        i += 1
+        continue
+      }
+      push(i, end + 2)
+      continue
+    }
+
+    if (src[i] === '$' && src[i + 1] !== '$') {
+      const end = findClosingDollar(src, i + 1)
+      if (end < 0 || !isProbablyInlineMathContent(src.slice(i + 1, end))) {
+        out += src[i]
+        i += 1
+        continue
+      }
+      push(i, end + 1)
+      continue
+    }
+
+    out += src[i]
+    i += 1
+  }
+
+  return {
+    text: out,
+    restore(text) {
+      let r = String(text || '')
+      for (const { token, body } of segments) {
+        r = r.split(token).join(body)
+      }
+      return r
+    },
+  }
+}
+
 function isDigit(char) {
   return char >= '0' && char <= '9'
 }
@@ -704,14 +826,97 @@ function normalizeStructuredSectionSubheadings(text) {
   return normalized.join('\n').replace(/\n{3,}/g, '\n\n')
 }
 
+function squareBracketDepth(text) {
+  let depth = 0
+  for (const ch of String(text || '')) {
+    if (ch === '[') depth += 1
+    else if (ch === ']') depth = Math.max(0, depth - 1)
+  }
+  return depth
+}
+
+function isMarkdownListItemLine(line) {
+  return /^\s{0,3}(?:[-*+]|\d+[.)])\s+/.test(String(line || ''))
+}
+
+/**
+ * 修复 LLM / 复制粘贴产生的「软换行」：GFM 会把 `4. 5-…` 当成新有序列表、
+ * `10. 1007/…` 当成第 10 条列表、列表项后的 `+ …` 当成新无序列表，从而拆碎 DOI 与公式。
+ * 仅在非 ``` 围栏段内做保守合并。
+ */
+function repairMarkdownSoftBreaksForRender(text) {
+  let source = String(text || '').replace(/\r\n/g, '\n')
+  source = source.replace(/\b10\.\s+(\d{4}\/)/g, '10.$1')
+
+  const lines = source.split('\n')
+  const out = []
+  let inFence = false
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const raw = lines[i]
+    if (raw.trimStart().startsWith('```')) {
+      inFence = !inFence
+      out.push(raw)
+      continue
+    }
+    if (inFence) {
+      out.push(raw)
+      continue
+    }
+
+    let acc = raw
+    let j = i + 1
+    while (j < lines.length) {
+      const next = lines[j]
+      if (next.trimStart().startsWith('```')) break
+
+      const first = acc.split('\n')[0]
+      const last = acc.split('\n').pop() || ''
+      const lastTrim = last.trimEnd()
+      const listHead = isMarkdownListItemLine(first)
+
+      let merged = false
+      if (squareBracketDepth(acc) > 0) {
+        acc = `${acc} ${String(next).trimStart()}`
+        merged = true
+      } else if (
+        listHead
+        && /：\s*$/.test(lastTrim)
+        && /^\s*\d{1,2}\.\s+\d/.test(next)
+      ) {
+        acc = `${acc} ${String(next).trimStart()}`
+        merged = true
+      } else if (
+        listHead
+        && lastTrim.includes('=')
+        && lastTrim.endsWith(')')
+        && /^\s*\+\s*\d/.test(next)
+      ) {
+        acc = `${acc} ${String(next).trimStart()}`
+        merged = true
+      } else if (listHead && /\+\s*$/.test(lastTrim) && /^\s*\+\s/.test(next)) {
+        acc = `${acc} ${String(next).trimStart()}`
+        merged = true
+      }
+
+      if (!merged) break
+      j += 1
+    }
+    i = j - 1
+    out.push(acc)
+  }
+
+  return out.join('\n')
+}
+
 function normalizeMarkdownForRender(text) {
+  const crNorm = String(text || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\u00a0/g, ' ')
+    .replace(/([。！？：:；;）)】\]])\s*(#{1,6}\s+)/g, '$1\n\n$2')
+
   const input = normalizeInlineMarkdownBoundaries(
-    normalizeStructuredSectionSubheadings(
-      String(text || '')
-      .replace(/\r\n/g, '\n')
-      .replace(/\u00a0/g, ' ')
-      .replace(/([。！？：:；;）)】\]])\s*(#{1,6}\s+)/g, '$1\n\n$2')
-    )
+    normalizeStructuredSectionSubheadings(repairMarkdownSoftBreaksForRender(crNorm))
   )
 
   const lines = input.split('\n')
@@ -765,12 +970,14 @@ function normalizeInlineMarkdownBoundaries(text) {
     let line = String(lines[index] || '')
 
     line = line.replace(/([。！？：:；;）)】\]])\s+((?:[-*+]\s+.+))$/, (_match, prefix, inlineList) => {
+      if (looksInlineMathOrParamBlock(inlineList)) return `${prefix} ${inlineList}`
       const items = splitInlineBulletItems(inlineList)
       if (!items || items.length < 2) return `${prefix} ${inlineList}`
       return `${prefix}\n\n${items.map(({ marker, text: itemText }) => `${marker} ${itemText}`).join('\n')}`
     })
 
     line = line.replace(/([。！？：:；;）)】\]])\s*((?:\d+[.)]\s+.+))$/, (_match, prefix, inlineList) => {
+      if (looksInlineMathOrParamBlock(inlineList)) return `${prefix} ${inlineList}`
       const items = splitInlineOrderedItems(inlineList)
       if (!items) return `${prefix} ${inlineList}`
       return `${prefix}\n\n${items.map(({ marker, text: itemText }) => `${marker} ${itemText}`).join('\n')}`
@@ -801,8 +1008,10 @@ function normalizeInlineBulletListLine(line) {
   const triggerMatch = source.match(/^(.*?[：:；;])\s*([-*+])\s+(.+)$/)
   if (!triggerMatch) return source
 
-  const prefix = triggerMatch[1]
   const inlineSource = `${triggerMatch[2]} ${triggerMatch[3].trim()}`
+  if (looksInlineMathOrParamBlock(inlineSource)) return source
+
+  const prefix = triggerMatch[1]
   const items = splitInlineBulletItems(inlineSource)
   if (!items) return source
 
@@ -811,6 +1020,7 @@ function normalizeInlineBulletListLine(line) {
 
 function normalizeInlineOrderedListLine(line) {
   const source = String(line || '')
+  if (looksInlineMathOrParamBlock(source)) return source
 
   const prefixedMatch = source.match(/^(.+?[：:；;])\s*(\d+[.)].+)$/)
   if (prefixedMatch) {
@@ -1043,7 +1253,9 @@ function formatStreamingFallback(text) {
 
 function normalizeAnswerMarkdown(text, options = {}) {
   const { renderMath = true } = options
-  let normalizedText = normalizeMarkdownForRender(text)
+  const prot = maskMarkdownProtections(text)
+  let normalizedText = normalizeMarkdownForRender(prot.text)
+  normalizedText = prot.restore(normalizedText)
   normalizedText = dedupeTrailingPatentCitations(normalizedText)
   normalizedText = fixTableFormat(normalizedText)
   if (renderMath) {

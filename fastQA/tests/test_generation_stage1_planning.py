@@ -82,6 +82,35 @@ def test_stage1_planning_parses_json_and_normalizes_claims():
     assert client.calls[0]["response_format"] == {"type": "json_object"}
 
 
+def test_stage1_planning_preserves_structured_answer_plan():
+    client = _FakeClient(
+        """{
+          "deep_answer": "answer",
+          "answer_plan": {
+            "answer_type": "multi_object_comparison",
+            "objects": [{"label": "磷酸铁"}, {"label": "草酸亚铁"}],
+            "dimensions": [{"name": "成本", "evidence_needed": "原料成本和规模化生产数据"}],
+            "summary_plan": {"decision_axes": ["高性能选型", "低成本选型"]}
+          },
+          "retrieval_claims": []
+        }"""
+    )
+
+    result = run_stage1_pre_answer_and_planning(
+        user_question="磷酸铁、草酸亚铁各有什么优劣势？",
+        stage1_prompt="prompt",
+        vector_db_context="context",
+        client=client,
+        model="gpt-test",
+        logger=_Logger(),
+    )
+
+    assert result["success"] is True
+    assert result["answer_plan"]["answer_type"] == "multi_object_comparison"
+    assert [item["label"] for item in result["answer_plan"]["objects"]] == ["磷酸铁", "草酸亚铁"]
+    assert result["answer_plan"]["dimensions"][0]["evidence_needed"] == "原料成本和规模化生产数据"
+
+
 def test_stage1_planning_returns_cancelled_without_dispatching_llm_when_cancelled_first():
     client = _FakeClient('{"deep_answer":"answer","retrieval_claims":[]}')
 

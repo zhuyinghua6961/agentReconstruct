@@ -16,6 +16,7 @@ from agent_core.llm_client import (
     chat_completion_stream,
     load_prompt_template,
 )
+from agent_core.question_anchor import prepend_question_anchor
 from retriever.vector_retriever import RetrievedChunk
 
 logger = logging.getLogger(__name__)
@@ -76,7 +77,7 @@ def _build_synthesis_prompt(
     summary_instruction = build_summary_instruction(enabled=summary_enabled)
     if summary_instruction:
         prompt = f"{prompt}{summary_instruction}"
-    return prompt
+    return prepend_question_anchor(prompt, question)
 
 
 def synthesize_answer(
