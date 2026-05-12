@@ -936,27 +936,18 @@ class PatentAnswerBuilder:
     def from_env(*, http_client: Any | None = None) -> "PatentAnswerBuilder":
         return PatentAnswerBuilder(
             api_key=str(
-                os.getenv("PATENT_OPENAI_API_KEY")
-                or os.getenv("LLM_API_KEY")
-                or os.getenv("OPENAI_API_KEY")
-                or os.getenv("DASHSCOPE_API_KEY")
+                os.getenv("LLM_API_KEY")
                 or ""
             ).strip(),
             base_url=str(
-                os.getenv("PATENT_OPENAI_BASE_URL")
-                or os.getenv("LLM_BASE_URL")
-                or os.getenv("OPENAI_BASE_URL")
-                or os.getenv("DASHSCOPE_BASE_URL")
+                os.getenv("LLM_BASE_URL")
                 or "https://dashscope.aliyuncs.com/compatible-mode/v1"
             ).strip(),
             model=str(
-                os.getenv("PATENT_OPENAI_MODEL")
-                or os.getenv("LLM_MODEL")
-                or os.getenv("OPENAI_MODEL")
-                or os.getenv("DASHSCOPE_MODEL")
+                os.getenv("LLM_MODEL")
                 or "deepseek-v3.1"
             ).strip(),
-            timeout_seconds=float(str(os.getenv("PATENT_OPENAI_TIMEOUT_SECONDS") or "30").strip()),
+            timeout_seconds=float(str(os.getenv("LLM_READ_TIMEOUT_SECONDS") or "30").strip()),
             http_client=http_client,
         )
 

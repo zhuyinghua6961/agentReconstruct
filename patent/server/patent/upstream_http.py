@@ -55,7 +55,7 @@ class PatentSharedUpstreamHttpConfig:
     @classmethod
     def from_env(cls) -> "PatentSharedUpstreamHttpConfig":
         return cls(
-            enabled=_env_flag("PATENT_LLM_HTTP_SHARED_POOL_ENABLED", default=False),
+            enabled=True,
             connect_timeout_seconds=_env_float("PATENT_LLM_HTTP_CONNECT_TIMEOUT_SECONDS", 15.0),
             read_timeout_seconds=_env_float("PATENT_LLM_HTTP_READ_TIMEOUT_SECONDS", 180.0),
             stream_read_timeout_seconds=_env_float("PATENT_LLM_HTTP_STREAM_READ_TIMEOUT_SECONDS", 600.0),
@@ -70,7 +70,7 @@ class PatentSharedUpstreamHttpConfig:
     def from_settings(cls, settings: Any) -> "PatentSharedUpstreamHttpConfig":
         llm_http = getattr(settings, "llm_http", settings)
         return cls(
-            enabled=bool(getattr(llm_http, "shared_pool_enabled", False)),
+            enabled=True,
             connect_timeout_seconds=float(getattr(llm_http, "connect_timeout_seconds", 15.0)),
             read_timeout_seconds=float(getattr(llm_http, "read_timeout_seconds", 180.0)),
             stream_read_timeout_seconds=float(getattr(llm_http, "stream_read_timeout_seconds", 600.0)),

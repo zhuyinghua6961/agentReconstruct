@@ -31,3 +31,14 @@ def test_remote_embedding_client_uses_configurable_timeout(monkeypatch):
     assert output.shape == (1, 2)
     assert requests_module.calls[0]["timeout"] == 150.0
     assert requests_module.calls[0]["json"]["model"] == "bge-local"
+
+
+def test_remote_embedding_client_uses_embedding_api_model_over_legacy_model_name(monkeypatch):
+    requests_module = _Requests()
+    monkeypatch.setenv("EMBEDDING_API_MODEL", "target-model")
+    monkeypatch.setenv("EMBEDDING_MODEL_NAME", "legacy-model")
+
+    client = RemoteEmbeddingClient("http://127.0.0.1:8001/v1/embeddings", requests_module)
+    client.encode(["hello"])
+
+    assert requests_module.calls[0]["json"]["model"] == "target-model"

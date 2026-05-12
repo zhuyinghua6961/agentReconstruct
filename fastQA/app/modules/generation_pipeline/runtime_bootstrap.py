@@ -7,7 +7,7 @@ from typing import Any, Callable, Optional
 
 from app.core.config import SERVICE_ASSET_ROOT, SERVICE_STATE_ROOT
 from app.integrations.llm import SharedHttpPoolConfig, build_chat_completions_client
-from app.integrations.llm.openai_compat import DEFAULT_OPENAI_COMPATIBLE_BASE_URL
+from app.integrations.llm.openai_compat import DEFAULT_LLM_COMPATIBLE_BASE_URL
 
 
 def _env_first(*names: str, default: str = "") -> str:
@@ -75,14 +75,12 @@ def resolve_generation_runtime_inputs(
         embedding_model_path = config.get("embedding_model_path")
         chroma_db_path = config.get("chroma_db_path")
 
-    resolved_api_key = api_key or _env_first("LLM_API_KEY", "OPENAI_API_KEY", "DASHSCOPE_API_KEY")
+    resolved_api_key = api_key or _env_first("LLM_API_KEY")
     resolved_base_url = base_url or _env_first(
         "LLM_BASE_URL",
-        "OPENAI_BASE_URL",
-        "DASHSCOPE_BASE_URL",
-        default=DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+        default=DEFAULT_LLM_COMPATIBLE_BASE_URL,
     )
-    resolved_model = model or _env_first("LLM_MODEL", "OPENAI_MODEL", "DASHSCOPE_MODEL", default="qwen-plus")
+    resolved_model = model or _env_first("LLM_MODEL", default="qwen-plus")
 
     if embedding_model_type is None:
         embedding_model_type = _env_first("EMBEDDING_MODEL_TYPE", default="local")

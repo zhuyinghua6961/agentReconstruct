@@ -103,3 +103,37 @@ def test_extracts_patent_count_intent_without_confusing_attribute_value():
     for question in count_cases:
         slots = extract_patent_graph_slots(question)
         assert slots.asks_count is True
+
+
+def test_extracts_analytical_relation_intent_for_parameter_performance_questions():
+    cases = [
+        "磷酸铁锂磨砂粒径与产品性能间的关系",
+        "磷酸铁锂粒径对倍率性能的影响",
+        "磷酸铁锂颗粒尺寸和循环性能有什么关系",
+        "烧结温度与磷酸铁锂循环性能的关系",
+        "磷酸铁锂D50对放电容量的影响",
+        "宁德时代磷酸铁锂粒径与性能关系",
+        "H01M10 磷酸铁锂粒径与性能关系",
+    ]
+
+    for question in cases:
+        slots = extract_patent_graph_slots(question)
+        assert slots.asks_analytical_relation is True
+
+
+def test_analytical_relation_signal_does_not_replace_explicit_patent_lookup_intent():
+    cases = [
+        "涉及磷酸铁锂粒径调控的专利有哪些",
+        "磷酸铁锂产品性能相关专利有多少",
+        "H01M10 下有哪些专利",
+    ]
+
+    for question in cases:
+        slots = extract_patent_graph_slots(question)
+        assert slots.asks_list or slots.asks_count
+
+
+def test_relation_word_without_anchor_is_not_analytical_relation_signal():
+    slots = extract_patent_graph_slots("前者和后者之间有什么关系")
+
+    assert slots.asks_analytical_relation is False

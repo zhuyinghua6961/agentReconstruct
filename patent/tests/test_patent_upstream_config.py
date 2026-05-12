@@ -9,7 +9,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 
 
 def test_get_settings_reads_patent_shared_http_timeout_fields(monkeypatch):
-    monkeypatch.setenv("PATENT_LLM_HTTP_SHARED_POOL_ENABLED", "true")
+    monkeypatch.setenv("PATENT_LLM_HTTP_SHARED_POOL_ENABLED", "false")
     monkeypatch.setenv("PATENT_LLM_HTTP_CONNECT_TIMEOUT_SECONDS", "11")
     monkeypatch.setenv("PATENT_LLM_HTTP_READ_TIMEOUT_SECONDS", "121")
     monkeypatch.setenv("PATENT_LLM_HTTP_STREAM_READ_TIMEOUT_SECONDS", "601")
@@ -37,7 +37,7 @@ def test_get_settings_reads_patent_shared_http_timeout_fields(monkeypatch):
 def test_config_shared_env_example_documents_patent_shared_http_timeout_defaults():
     content = (ROOT_DIR / "config.shared.env.example").read_text(encoding="utf-8")
 
-    assert "PATENT_LLM_HTTP_SHARED_POOL_ENABLED=false" in content
+    assert "PATENT_LLM_HTTP_SHARED_POOL_ENABLED" not in content
     assert "PATENT_LLM_HTTP_CONNECT_TIMEOUT_SECONDS=15" in content
     assert "PATENT_LLM_HTTP_READ_TIMEOUT_SECONDS=180" in content
     assert "PATENT_LLM_HTTP_STREAM_READ_TIMEOUT_SECONDS=600" in content
@@ -49,7 +49,7 @@ def test_config_shared_env_example_documents_patent_shared_http_timeout_defaults
 
 
 def test_get_settings_reads_patent_planning_gate_fields(monkeypatch):
-    monkeypatch.setenv("PATENT_PLANNING_UPSTREAM_GATE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_PLANNING_UPSTREAM_GATE_ENABLED", "false")
     monkeypatch.setenv("PATENT_PLANNING_UPSTREAM_GATE_LIMIT", "3")
 
     settings = patent_config.get_settings()
@@ -63,5 +63,5 @@ def test_get_settings_reads_patent_planning_gate_fields(monkeypatch):
 def test_config_shared_env_example_documents_patent_planning_gate_defaults():
     content = (ROOT_DIR / "config.shared.env.example").read_text(encoding="utf-8")
 
-    assert "PATENT_PLANNING_UPSTREAM_GATE_ENABLED=false" in content
+    assert "PATENT_PLANNING_UPSTREAM_GATE_ENABLED" not in content
     assert "PATENT_PLANNING_UPSTREAM_GATE_LIMIT=1" in content

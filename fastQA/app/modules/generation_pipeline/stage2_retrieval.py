@@ -69,7 +69,7 @@ def resolve_stage2_runtime_toggles(
             else bool(entity_lock_enabled)
         ),
         use_rerank=(
-            env_bool("QA_RETRIEVAL_RERANK_ENABLED", True)
+            True
             if use_rerank is None
             else bool(use_rerank)
         ),

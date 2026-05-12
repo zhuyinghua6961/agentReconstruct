@@ -99,6 +99,10 @@ def test_system_service_clear_cache_contract():
 
 def test_system_service_kb_info_without_agent():
     runtime = create_runtime(get_settings())
+    runtime.agent = None
+    runtime.vector_db_client = None
+    runtime.vector_collection = None
+    runtime.neo4j_client = None
 
     payload, status_code = system_service.build_kb_info(runtime)
 

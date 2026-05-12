@@ -89,6 +89,25 @@ def _summarize_public_event_batch(events: list[dict[str, Any]]) -> dict[str, Any
     }
 
 
+def _relay_payload_is_terminal(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    event_type = str(payload.get("type") or "").strip().lower()
+    if event_type in {"done", "error"}:
+        return True
+    return event_type == "state" and normalize_public_task_status(payload.get("status")) in _TERMINAL_TASK_STATUSES
+
+
+def _relay_frames_have_terminal(frames: list[dict[str, Any]]) -> bool:
+    for frame in frames:
+        if not isinstance(frame, dict):
+            continue
+        payload = frame.get("payload")
+        if _relay_payload_is_terminal(payload if isinstance(payload, dict) else None):
+            return True
+    return False
+
+
 def _normalized_positive_int(value: Any) -> int | None:
     try:
         normalized = int(value)
@@ -544,6 +563,7 @@ class QATaskService:
                 await self._ensure_task_record_ready(task_id, auth_context=auth_context)
                 summary = self.build_task_summary(task_id, auth_context=auth_context)
                 frames = self.relay_store.get_frames(task_id, after_sequence=next_after)
+                replay_has_terminal = _relay_frames_have_terminal(frames)
                 events = [self._frame_to_public_event(summary=summary, frame=frame) for frame in frames]
                 if debug_enabled and events:
                     logger.info(
@@ -558,7 +578,22 @@ class QATaskService:
                     yield self._encode_sse_event(event)
                 relay_state = self.relay_store.describe_request(task_id)
                 latest_seq = int(relay_state.get("latest_sequence") or 0)
+                relay_has_terminal = replay_has_terminal
                 if bool(summary.get("terminal")) and latest_seq <= next_after:
+                    if not relay_has_terminal:
+                        relay_has_terminal = _relay_frames_have_terminal(
+                            self.relay_store.get_frames(task_id, after_sequence=0)
+                        )
+                    if not relay_has_terminal:
+                        terminal_status = normalize_public_task_status(summary.get("status"))
+                        appended = self._append_state_frame(task_id, status=terminal_status)
+                        if not bool(appended.get("ignored")):
+                            continue
+                        relay_has_terminal = _relay_frames_have_terminal(
+                            self.relay_store.get_frames(task_id, after_sequence=0)
+                        )
+                    if not relay_has_terminal:
+                        continue
                     if debug_enabled:
                         logger.info(
                             "gateway task events stream stop task_id=%s reason=terminal-drained status=%s latest_seq=%s next_after=%s",

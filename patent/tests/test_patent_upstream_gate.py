@@ -7,6 +7,16 @@ from types import SimpleNamespace
 from server.patent.upstream_gate import PatentPlanningUpstreamGate, PatentPlanningUpstreamGateCancelled
 
 
+def test_patent_upstream_gate_from_env_ignores_disabled_switch(monkeypatch):
+    monkeypatch.setenv("PATENT_PLANNING_UPSTREAM_GATE_ENABLED", "false")
+    monkeypatch.setenv("PATENT_PLANNING_UPSTREAM_GATE_LIMIT", "3")
+
+    gate = PatentPlanningUpstreamGate.from_env()
+
+    assert gate is not None
+    assert gate.limit == 3
+
+
 def test_patent_upstream_gate_enforces_configured_concurrency():
     gate = PatentPlanningUpstreamGate(name="planning", limit=1, poll_interval_seconds=0.01)
     first_entered = threading.Event()

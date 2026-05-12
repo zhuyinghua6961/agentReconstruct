@@ -65,7 +65,7 @@ def _positive_int_env(*names: str, default: int) -> int:
 
 
 def _resolve_local_embedding_model_path(repo_root: Path) -> str:
-    configured = _first_env("PATENT_EMBEDDING_MODEL_PATH", "EMBEDDING_MODEL_PATH")
+    configured = _first_env("EMBEDDING_MODEL_PATH")
     if configured:
         candidate = Path(configured).expanduser()
         if not candidate.is_absolute():
@@ -255,34 +255,10 @@ class PatentPlanningClient:
 
 
 def _resolve_patent_planning_runtime_config() -> tuple[str, str, str, float]:
-    shared_api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("DASHSCOPE_API_KEY") or ""
-    shared_base_url = os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL") or os.getenv("DASHSCOPE_BASE_URL") or ""
-    shared_model = os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL") or os.getenv("DASHSCOPE_MODEL") or ""
-    api_key = str(
-        os.getenv("PATENT_STAGE1_OPENAI_API_KEY")
-        or os.getenv("PATENT_OPENAI_API_KEY")
-        or shared_api_key
-        or ""
-    ).strip()
-    base_url = str(
-        os.getenv("PATENT_STAGE1_OPENAI_BASE_URL")
-        or os.getenv("PATENT_OPENAI_BASE_URL")
-        or shared_base_url
-        or ""
-    ).strip()
-    model = str(
-        os.getenv("PATENT_STAGE1_OPENAI_MODEL")
-        or os.getenv("PATENT_OPENAI_MODEL")
-        or shared_model
-        or ""
-    ).strip()
-    timeout_seconds = float(
-        str(
-            os.getenv("PATENT_STAGE1_OPENAI_TIMEOUT_SECONDS")
-            or os.getenv("PATENT_OPENAI_TIMEOUT_SECONDS")
-            or "30"
-        ).strip()
-    )
+    api_key = str(os.getenv("LLM_API_KEY") or "").strip()
+    base_url = str(os.getenv("LLM_BASE_URL") or "").strip()
+    model = str(os.getenv("LLM_MODEL") or "").strip()
+    timeout_seconds = float(str(os.getenv("LLM_READ_TIMEOUT_SECONDS") or "30").strip())
     return api_key, base_url, model, timeout_seconds
 
 
@@ -322,10 +298,15 @@ def build_patent_planning_runtime_inputs(*, http_client: Any | None = None) -> t
 class PatentEmbeddingClient:
     def __init__(self) -> None:
         self._repo_root = Path(__file__).resolve().parents[3]
-        self._mode = _first_env("PATENT_EMBEDDING_MODEL_TYPE", "EMBEDDING_MODEL_TYPE", default="remote").lower()
-        self._http = httpx.Client(timeout=float(str(os.getenv("PATENT_EMBEDDING_API_TIMEOUT_SECONDS") or os.getenv("EMBEDDING_API_TIMEOUT_SECONDS") or "20").strip()))
-        self._api_url = _first_env("PATENT_EMBEDDING_API_URL", "EMBEDDING_API_URL", default="http://127.0.0.1:8001/v1/embeddings")
-        self._api_model = _first_env("PATENT_EMBEDDING_API_MODEL", "EMBEDDING_API_MODEL", default="bge-local")
+        self._mode = _first_env("EMBEDDING_MODEL_TYPE", default="remote").lower()
+        self._http = httpx.Client(
+            timeout=float(str(os.getenv("EMBEDDING_API_TIMEOUT_SECONDS") or "120").strip())
+        )
+        self._api_url = _first_env(
+            "EMBEDDING_API_URL",
+            default="http://127.0.0.1:8001/v1/embeddings",
+        )
+        self._api_model = _first_env("EMBEDDING_API_MODEL", default="bge-local")
         self._local_model_path = _resolve_local_embedding_model_path(self._repo_root)
         self._local_model = None
 

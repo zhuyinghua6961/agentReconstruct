@@ -24,10 +24,10 @@ import config
 logger = logging.getLogger(__name__)
 
 # 百炼 text-embedding-v4 单次最多 10 条
-BATCH_SIZE = config.EMBED_BATCH_SIZE
+BATCH_SIZE = config.HIGHTHINKINGQA_EMBEDDING_BATCH_SIZE
 
 # 全局信号量：限制跨所有线程的并发 API 请求数，防止连接雪崩
-_embed_semaphore = threading.Semaphore(config.EMBED_MAX_CONCURRENT_REQUESTS)
+_embed_semaphore = threading.Semaphore(config.HIGHTHINKINGQA_EMBEDDING_MAX_CONCURRENT_REQUESTS)
 
 # token 编码器（与 chunker 一致）
 _encoder = tiktoken.get_encoding(config.TIKTOKEN_ENCODING)
@@ -45,7 +45,7 @@ def get_embedding_client() -> OpenAI:
     获取 Embedding API 客户端。
     max_retries=0 禁用 SDK 内置重试（我们自己做重试控制）。
     """
-    api_key = _require_api_key(api_key=config.EMBEDDING_API_KEY, env_name="DASHSCOPE_API_KEY")
+    api_key = _require_api_key(api_key=config.EMBEDDING_API_KEY, env_name="HIGHTHINKINGQA_EMBEDDING_API_KEY")
     return OpenAI(
         api_key=api_key,
         base_url=config.EMBEDDING_BASE_URL,
@@ -60,7 +60,7 @@ def _truncate_text(text: str, max_tokens: int = None) -> str:
     作为防御性兜底（正常情况下 chunker 已保证 <= 2048 tokens）。
     """
     if max_tokens is None:
-        max_tokens = config.EMBED_MAX_INPUT_TOKENS
+        max_tokens = config.HIGHTHINKINGQA_EMBEDDING_MAX_INPUT_TOKENS
     tokens = _encoder.encode(text)
     if len(tokens) <= max_tokens:
         return text
@@ -79,7 +79,7 @@ def embed_texts(
 
     安全措施：
       - 跳过空文本（用零向量占位保持索引对齐）
-      - 截断超长文本到 EMBED_MAX_INPUT_TOKENS
+      - 截断超长文本到 HIGHTHINKINGQA_EMBEDDING_MAX_INPUT_TOKENS
       - 全局信号量限制并发 API 请求
       - 400 错误不重试，Connection/Rate 错误指数退避重试
 
@@ -123,7 +123,7 @@ def embed_texts(
         batch_texts = [item[1] for item in batch_items]
 
         retry_count = 0
-        max_retries = config.EMBED_MAX_RETRIES
+        max_retries = config.HIGHTHINKINGQA_EMBEDDING_MAX_RETRIES
 
         while retry_count < max_retries:
             try:

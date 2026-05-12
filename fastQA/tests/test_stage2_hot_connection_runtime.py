@@ -94,10 +94,10 @@ def test_bootstrap_generation_runtime_uses_dedicated_rerank_api_key_for_warmup(m
     )
     calls: dict[str, object] = {}
 
-    monkeypatch.setenv("QA_RETRIEVAL_RERANK_PROVIDER", "dashscope")
-    monkeypatch.setenv("QA_RETRIEVAL_RERANK_API_KEY", "rerank-key")
-    monkeypatch.setenv("QA_RETRIEVAL_RERANK_BASE_URL", "https://rerank.example.com")
-    monkeypatch.setenv("QA_RETRIEVAL_RERANK_MODEL", "rerank-model")
+    monkeypatch.setenv("RERANK_PROVIDER", "dashscope")
+    monkeypatch.setenv("RERANK_API_KEY", "rerank-key")
+    monkeypatch.setenv("RERANK_BASE_URL", "https://rerank.example.com")
+    monkeypatch.setenv("RERANK_MODEL", "rerank-model")
     monkeypatch.setattr(
         "app.modules.generation_pipeline.runtime_bootstrap.resolve_generation_runtime_inputs",
         lambda **kwargs: SimpleNamespace(api_key="chat-key", base_url="https://example.com/v1", model="m"),
@@ -150,11 +150,11 @@ def test_bootstrap_generation_runtime_uses_local_rerank_warmup_protocol(monkeypa
     )
     calls: dict[str, object] = {}
 
-    monkeypatch.setenv("QA_RETRIEVAL_RERANK_PROVIDER", "local")
-    monkeypatch.delenv("QA_RETRIEVAL_RERANK_API_KEY", raising=False)
-    monkeypatch.delenv("QA_RETRIEVAL_RERANK_BASE_URL", raising=False)
+    monkeypatch.setenv("RERANK_PROVIDER", "local")
+    monkeypatch.delenv("RERANK_API_KEY", raising=False)
+    monkeypatch.delenv("RERANK_BASE_URL", raising=False)
     monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-key")
-    monkeypatch.setenv("QA_RETRIEVAL_RERANK_MODEL", "rerank-model")
+    monkeypatch.setenv("RERANK_MODEL", "rerank-model")
     monkeypatch.setattr(
         "app.modules.generation_pipeline.runtime_bootstrap.resolve_generation_runtime_inputs",
         lambda **kwargs: SimpleNamespace(api_key="chat-key", base_url="https://example.com/v1", model="m"),
@@ -265,6 +265,14 @@ def test_bootstrap_generation_runtime_marks_hot_pool_status_degraded_when_runtim
     monkeypatch.setattr(
         "app.modules.generation_pipeline.runtime_bootstrap.resolve_generation_runtime_inputs",
         lambda **kwargs: SimpleNamespace(api_key="k", base_url="https://example.com/v1", model="m"),
+    )
+    monkeypatch.setattr(
+        "app.core.runtime.ChatHotLanePool",
+        lambda **kwargs: SimpleNamespace(close=lambda: None, snapshot=lambda: {}),
+    )
+    monkeypatch.setattr(
+        "app.core.runtime.RerankSessionPool",
+        lambda **kwargs: SimpleNamespace(close=lambda: None, snapshot=lambda: {}),
     )
     monkeypatch.setattr(
         "app.modules.generation_pipeline.generation_driven_rag_facade.GenerationDrivenRAG",

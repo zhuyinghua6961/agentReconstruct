@@ -14,8 +14,7 @@ Patent owns:
 - patent route/runtime behavior flags and patent LLM pool behavior
 
 Shared config owns service ports, Redis/MySQL/MinIO defaults, model endpoints, embedding
-endpoints, and graph endpoints. Use service-specific `PATENT_OPENAI_*` only as explicit
-overrides, not as duplicated defaults.
+endpoints, and graph endpoints. Patent LLM calls use the unified `LLM_*` namespace.
 
 `resource/config/services/patent/config.shared.env` is local/operator-owned in this
 workspace. Put local overrides in `config.env`; do not commit local secrets or

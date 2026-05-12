@@ -117,9 +117,9 @@ def test_tabular_answer_client_from_env_uses_injected_http_client_without_taking
         def close(self) -> None:
             self.closed = True
 
-    monkeypatch.setenv("PATENT_OPENAI_API_KEY", "key")
-    monkeypatch.setenv("PATENT_OPENAI_BASE_URL", "https://example.com")
-    monkeypatch.setenv("PATENT_OPENAI_MODEL", "tabular-model")
+    monkeypatch.setenv("LLM_API_KEY", "key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://example.com")
+    monkeypatch.setenv("LLM_MODEL", "tabular-model")
     http_client = _FakeHttpClient()
 
     client = PatentTabularAnswerClient.from_env(http_client=http_client)
@@ -128,6 +128,53 @@ def test_tabular_answer_client_from_env_uses_injected_http_client_without_taking
     assert client._client is http_client
     client.close()
     assert http_client.closed is False
+
+
+def test_tabular_answer_client_from_env_prefers_unified_llm_namespace(monkeypatch):
+    class _FakeHttpClient:
+        def close(self) -> None:
+            raise AssertionError("injected client should not be closed by this test")
+
+    monkeypatch.setenv("LLM_API_KEY", "llm-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("LLM_MODEL", "llm-model")
+    monkeypatch.setenv("LLM_READ_TIMEOUT_SECONDS", "46")
+    monkeypatch.setenv("PATENT_OPENAI_API_KEY", "patent-key")
+    monkeypatch.setenv("PATENT_OPENAI_BASE_URL", "https://patent.example/v1")
+    monkeypatch.setenv("PATENT_OPENAI_MODEL", "patent-model")
+    monkeypatch.setenv("PATENT_OPENAI_TIMEOUT_SECONDS", "99")
+
+    client = PatentTabularAnswerClient.from_env(http_client=_FakeHttpClient())
+
+    assert client is not None
+    assert client._api_key == "llm-key"
+    assert client._base_url == "https://llm.example/v1"
+    assert client._model == "llm-model"
+    assert client._timeout_seconds == 46.0
+
+
+def test_patent_answer_builder_from_env_prefers_unified_llm_namespace(monkeypatch):
+    from server.patent.answering import PatentAnswerBuilder
+
+    class _FakeHttpClient:
+        def close(self) -> None:
+            raise AssertionError("injected client should not be closed by this test")
+
+    monkeypatch.setenv("LLM_API_KEY", "llm-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("LLM_MODEL", "llm-model")
+    monkeypatch.setenv("LLM_READ_TIMEOUT_SECONDS", "48")
+    monkeypatch.setenv("PATENT_OPENAI_API_KEY", "patent-key")
+    monkeypatch.setenv("PATENT_OPENAI_BASE_URL", "https://patent.example/v1")
+    monkeypatch.setenv("PATENT_OPENAI_MODEL", "patent-model")
+    monkeypatch.setenv("PATENT_OPENAI_TIMEOUT_SECONDS", "99")
+
+    builder = PatentAnswerBuilder.from_env(http_client=_FakeHttpClient())
+
+    assert builder.api_key == "llm-key"
+    assert builder.base_url == "https://llm.example/v1"
+    assert builder.model == "llm-model"
+    assert builder.timeout_seconds == 48.0
 
 
 def test_tabular_answer_client_uses_injected_http_client_and_preserves_timeout_dimensions():

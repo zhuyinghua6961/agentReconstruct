@@ -16,11 +16,11 @@ Expected runtime contract:
 fastQA owns:
 
 - Gunicorn worker counts
-- QA, graph KB, file-QA, SSE, cache, and retrieval feature flags
-- service-specific LLM choices such as `QUERY_EXPANSION_MODEL` and `PDF_QA_MODEL`
+- QA, graph KB, file-QA, SSE, cache, and retrieval tuning
+- unified LLM choices through shared `LLM_*` settings
 - fastQA vector database, paper, prompt, JSON, cache, and runtime paths
 - `REDIS_KEY_PREFIX=fastqa`
-- fastQA-specific rerank candidates, API key, and warmup behavior
+- fastQA-specific rerank candidates
 
 Shared config owns service ports, Redis/MySQL/MinIO defaults, model endpoints, graph endpoints,
 local embedding aliases, and local rerank endpoint defaults. Put local overrides in `config.env`;

@@ -26,7 +26,7 @@ def _require_api_key(*, api_key: str, env_name: str) -> str:
 
 def get_llm_client(*, max_retries: int | None = None) -> OpenAI:
     """获取 LLM API 客户端"""
-    api_key = _require_api_key(api_key=config.LLM_API_KEY, env_name="DASHSCOPE_API_KEY")
+    api_key = _require_api_key(api_key=config.LLM_API_KEY, env_name="LLM_API_KEY")
     kwargs = {
         "api_key": api_key,
         "base_url": config.LLM_BASE_URL,
@@ -38,7 +38,7 @@ def get_llm_client(*, max_retries: int | None = None) -> OpenAI:
 
 def get_async_llm_client(*, max_retries: int | None = None) -> AsyncOpenAI:
     """获取异步 LLM API 客户端。"""
-    api_key = _require_api_key(api_key=config.LLM_API_KEY, env_name="DASHSCOPE_API_KEY")
+    api_key = _require_api_key(api_key=config.LLM_API_KEY, env_name="LLM_API_KEY")
     kwargs = {
         "api_key": api_key,
         "base_url": config.LLM_BASE_URL,
@@ -64,7 +64,7 @@ def _build_kwargs(
     - max_tokens 自动扩大（思考 + 回答都计入 max_tokens）
     - 不主动设 temperature，使用模型默认值
     """
-    thinking = enable_thinking if enable_thinking is not None else config.LLM_ENABLE_THINKING
+    thinking = enable_thinking if enable_thinking is not None else config.MAIN_LLM_THINKING_ENABLED
 
     kwargs = {
         "model": model or config.LLM_MODEL,

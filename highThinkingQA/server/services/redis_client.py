@@ -140,7 +140,7 @@ def _resolved_redis_url() -> str:
 
 def get_redis_settings() -> RedisSettings:
     return RedisSettings(
-        enabled=_get_bool("REDIS_ENABLED", False),
+        enabled=True,
         resolved_url=_resolved_redis_url(),
         key_prefix=str(os.getenv("REDIS_KEY_PREFIX", "highthinkingqa") or "highthinkingqa").strip() or "highthinkingqa",
         socket_connect_timeout_sec=_get_int("REDIS_SOCKET_CONNECT_TIMEOUT_SEC", 2, minimum=1, maximum=60),

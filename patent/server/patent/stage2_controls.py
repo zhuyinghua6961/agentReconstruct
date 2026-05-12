@@ -37,6 +37,14 @@ def _env_float(name: str, default: float, *, minimum: float, maximum: float) -> 
     return max(float(minimum), min(float(maximum), value))
 
 
+def _first_env(*names: str, default: str = "") -> str:
+    for name in names:
+        raw = str(os.getenv(name, "") or "").strip()
+        if raw:
+            return raw
+    return default
+
+
 @dataclass(frozen=True)
 class PatentStage2RuntimeToggles:
     convergence_enabled: bool
@@ -64,7 +72,7 @@ def resolve_stage2_runtime_toggles() -> PatentStage2RuntimeToggles:
         convergence_enabled=_env_bool("PATENT_STAGE2_CONVERGENCE_ENABLED", False),
         force_keyword_injection_enabled=_env_bool("PATENT_STAGE2_FORCE_KEYWORD_INJECTION", True),
         entity_lock_enabled=_env_bool("PATENT_STAGE2_ENTITY_LOCK_ENABLED", True),
-        rerank_enabled=_env_bool("PATENT_STAGE2_RERANK_ENABLED", True),
+        rerank_enabled=True,
         rerank_candidates=_env_int("PATENT_STAGE2_RERANK_CANDIDATES", 80, minimum=5, maximum=200),
         rerank_top_patents=_env_int("PATENT_STAGE2_RERANK_TOP_PATENTS", 20, minimum=1, maximum=100),
         min_results_per_claim=_env_int("PATENT_STAGE2_MIN_RESULTS_PER_CLAIM", 2, minimum=0, maximum=20),
@@ -74,11 +82,11 @@ def resolve_stage2_runtime_toggles() -> PatentStage2RuntimeToggles:
         c_patent_scoring_enabled=_env_bool("PATENT_STAGE2_C_PATENT_SCORING_ENABLED", False),
         c_global_chunk_recall_enabled=_env_bool("PATENT_STAGE2_C_GLOBAL_CHUNK_RECALL_ENABLED", False),
         c_table_metric_boost_enabled=_env_bool("PATENT_STAGE2_C_TABLE_METRIC_BOOST_ENABLED", False),
-        rerank_provider=str(os.getenv("PATENT_STAGE2_RERANK_PROVIDER", "none")).strip().lower() or "none",
-        rerank_model=str(os.getenv("PATENT_STAGE2_RERANK_MODEL", "")).strip(),
-        rerank_base_url=str(os.getenv("PATENT_STAGE2_RERANK_BASE_URL", "")).strip(),
-        rerank_timeout_seconds=_env_float("PATENT_STAGE2_RERANK_TIMEOUT_SECONDS", 20.0, minimum=0.5, maximum=300.0),
-        rerank_endpoint_family=str(os.getenv("PATENT_STAGE2_RERANK_ENDPOINT_FAMILY", "")).strip(),
+        rerank_provider=_first_env("RERANK_PROVIDER", default="none").lower() or "none",
+        rerank_model=_first_env("RERANK_MODEL"),
+        rerank_base_url=_first_env("RERANK_BASE_URL"),
+        rerank_timeout_seconds=_env_float("RERANK_TIMEOUT_SECONDS", 20.0, minimum=0.5, maximum=300.0),
+        rerank_endpoint_family=_first_env("RERANK_PROVIDER", default="none").lower() or "none",
     )
 
 

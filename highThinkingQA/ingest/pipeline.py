@@ -3,12 +3,12 @@
 
 架构：
   OCR 线程池（40 并发）  -->  embed_queue  -->  多 Embed 消费线程
-  论文1..N OCR ──> Queue(maxsize=EMBED_QUEUE_SIZE) ──> EMBED_CONCURRENCY 个 Embed 线程
+  论文1..N VLM parse ──> Queue(maxsize=HIGHTHINKINGQA_EMBEDDING_QUEUE_SIZE) ──> HIGHTHINKINGQA_EMBEDDING_CONCURRENCY 个 Embed 线程
   每个 Embed 线程独立 API 客户端，分块+向量化+写 Chroma（Chroma 支持并发 upsert）。
 
 约定：
   - 分块以「一篇文献」为单位：队列里每条是单篇论文的 markdown，消费线程内对该篇做 chunk_document → embed → add_chunks，不会跨篇混合。
-  - OCR 单次 API 请求：config.OCR_PAGES_PER_BATCH 页图片（当前为 3 页）一次调用。
+  - VLM 单次 API 请求：config.VLM_PAGES_PER_BATCH 页图片（当前为 3 页）一次调用。
 支持：
   - --start / --end 分批处理
   - skip_parsed：已解析的 PDF 跳过 OCR，直接进 Embed 队列
@@ -267,8 +267,8 @@ def run_pipeline(
     stats_lock = threading.Lock()
 
     # 队列：OCR 线程 -> 多 Embed 消费线程
-    embed_queue = Queue(maxsize=config.EMBED_QUEUE_SIZE)
-    embed_concurrency = config.EMBED_CONCURRENCY
+    embed_queue = Queue(maxsize=config.HIGHTHINKINGQA_EMBEDDING_QUEUE_SIZE)
+    embed_concurrency = config.HIGHTHINKINGQA_EMBEDDING_CONCURRENCY
 
     # 进度条（tqdm.update 线程安全）
     pbar = tqdm(total=len(pdf_files), desc="入库进度")
@@ -286,7 +286,7 @@ def run_pipeline(
         t.start()
 
     # OCR 并发处理
-    ocr_concurrency = config.OCR_CONCURRENCY
+    ocr_concurrency = config.VLM_CONCURRENCY
     with ThreadPoolExecutor(max_workers=ocr_concurrency) as ocr_pool:
         futures = {
             ocr_pool.submit(

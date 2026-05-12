@@ -94,7 +94,7 @@ def _conversation_context_hash(conversation_context: dict[str, Any] | None) -> s
 
 
 def _runtime_model_name(runtime: Any) -> str:
-    raw = str(getattr(runtime, "model", "") or os.getenv("DASHSCOPE_MODEL", "unknown")).strip()
+    raw = str(getattr(runtime, "model", "") or os.getenv("LLM_MODEL", "unknown")).strip()
     return raw or "unknown"
 
 

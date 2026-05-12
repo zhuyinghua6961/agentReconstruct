@@ -76,8 +76,6 @@ class PatentPlanningUpstreamGate:
         limit_provider: Callable[[], int] | None = None,
         poll_interval_seconds: float = 0.1,
     ) -> "PatentPlanningUpstreamGate | None":
-        if not _env_flag("PATENT_PLANNING_UPSTREAM_GATE_ENABLED", False):
-            return None
         return cls(
             name=name,
             limit=max(1, _env_int("PATENT_PLANNING_UPSTREAM_GATE_LIMIT", 1)),
@@ -97,8 +95,6 @@ class PatentPlanningUpstreamGate:
         poll_interval_seconds: float = 0.1,
     ) -> "PatentPlanningUpstreamGate | None":
         gate_settings = getattr(settings, "planning_upstream_gate", settings)
-        if not bool(getattr(gate_settings, "enabled", False)):
-            return None
         return cls(
             name=name,
             limit=max(1, int(getattr(gate_settings, "limit", 1) or 1)),

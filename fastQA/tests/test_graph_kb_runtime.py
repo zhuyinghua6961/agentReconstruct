@@ -41,7 +41,7 @@ def test_settings_default_graph_kb_always_on(monkeypatch):
     get_settings.cache_clear()
 
 
-def test_settings_allows_hidden_graph_kb_rollback_env(monkeypatch):
+def test_settings_ignores_hidden_graph_kb_rollback_env(monkeypatch):
     monkeypatch.setenv("FASTQA_GRAPH_KB_ENABLED", "false")
     monkeypatch.setenv("FASTQA_GRAPH_KB_V2_ENABLED", "false")
     monkeypatch.setenv("FASTQA_GRAPH_KB_RAG_INJECTION_ENABLED", "false")
@@ -49,9 +49,9 @@ def test_settings_allows_hidden_graph_kb_rollback_env(monkeypatch):
     get_settings.cache_clear()
     settings = get_settings()
 
-    assert settings.graph_kb_enabled is False
-    assert settings.graph_kb_v2_enabled is False
-    assert settings.graph_kb_rag_injection_enabled is False
+    assert settings.graph_kb_enabled is True
+    assert settings.graph_kb_v2_enabled is True
+    assert settings.graph_kb_rag_injection_enabled is True
 
     get_settings.cache_clear()
 

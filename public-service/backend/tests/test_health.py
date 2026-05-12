@@ -22,7 +22,7 @@ def test_health_returns_runtime_payload():
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["status"] in {"starting", "degraded"}
+    assert payload["status"] in {"healthy", "starting", "degraded"}
     assert "qa_cache" in payload
     assert "components" in payload
 

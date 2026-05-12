@@ -8,6 +8,18 @@
 
 方法说明：表格由 `resource/config` 变量清单和生产代码直接字符串引用生成；“代码默认值/硬编码值”是启发式提取，复杂 shell 参数展开或多层 Python fallback 需要到列出的代码位置复核。
 
+## 2026-05-11 实施后状态
+
+2026-05-11 的 resource config simplification 已按目标命名完成代码和 `resource/config/**` 清理。本文档后半部分的“自动排查项”和逐变量命中表是 2026-05-10 的迁移前扫描快照，只作为历史定位依据；判断当前配置面时，以本节和上方“最终精简策略”为准，并以当前代码/配置 grep 为最终依据。
+
+当前运行契约：
+
+- 文档问答 LLM 只使用统一 `LLM_*` 命名；`OPENAI_*`、`DASHSCOPE_*`、`PATENT_OPENAI_*`、阶段专属 model key 和 thinking 开关不再作为运行配置。
+- fastQA/patent rerank endpoint 只使用统一 `RERANK_*` 命名；保留 `QA_RETRIEVAL_RERANK_CANDIDATES`、`PATENT_STAGE2_RERANK_CANDIDATES`、`PATENT_STAGE2_RERANK_TOP_PATENTS` 作为检索规模参数。
+- fastQA/patent embedding 使用共享 `EMBEDDING_*` / `EMBEDDING_API_*`；highThinkingQA embedding 使用专属 `HIGHTHINKINGQA_EMBEDDING_*`。
+- Redis、MinIO proxy、chat persistence、upload processing、gateway admission、graph KB、rerank 主流程、patent shared pool / hot pool / upstream gate 等已确认能力在代码中固定启用；warmup/preheat 类能力固定关闭。
+- 仍保留连接、凭据、路径、容量、超时、worker、graph、auth 和检索规模类配置。
+
 ## Subagent 审查修正说明
 
 2026-05-10 使用 `gpt-5.5` / `xhigh` subagent 对本文档做了只读审查。结论是全量映射和 secret 脱敏大体可信，但本文档不能直接作为删配置清单使用，原因如下：
@@ -134,9 +146,9 @@
 - 自动聚合统计中，有代码默认值且至少一个非 secret 配置值与某处代码默认值相同的变量：176 个。该数字只表示“可优先排查”，不是删除数量。
 - 自动聚合统计中，有代码默认值但至少一个配置文件值与某处代码默认值不同的变量：83 个。该数字只提示存在环境差异风险，需要按服务和配置条目复核；`.env.example` 仅表示模板差异。
 
-## 与代码默认值相同的自动排查项
+## 与代码默认值相同的自动排查项（2026-05-10 历史快照）
 
-下表只列“至少有一个配置值与某处代码默认值相同”的自动候选。它只能作为排查入口，不能逐行直接删除；需要先套用“最终精简策略”的不写死规则，再按服务、配置文件条目、加载顺序和当前运行值逐项复核。`.env.example` 模板值不应作为当前运行配置参与删除决策。
+下表只列 2026-05-10 扫描时“至少有一个配置值与某处代码默认值相同”的自动候选。它只能作为历史排查入口，不能逐行直接删除；需要先套用“最终精简策略”的不写死规则，再按服务、配置文件条目、加载顺序和当前运行值逐项复核。`.env.example` 模板值不应作为当前运行配置参与删除决策。
 
 | 变量 | 配置位置和值 | 代码默认值/位置 |
 | --- | --- | --- |

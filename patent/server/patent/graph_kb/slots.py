@@ -90,6 +90,19 @@ _METRIC_TERMS = (
     "振实密度",
     "电导率",
 )
+_RELATION_ANALYSIS_TERMS = ("关系", "相关性", "关联", "影响", "作用", "机制")
+_PARAMETER_TERMS = ("粒径", "颗粒尺寸", "d50", "d90", "磨砂粒径", "比表面积", "一次粒径", "二次粒径", "烧结温度")
+_PERFORMANCE_RELATION_TERMS = (
+    "性能",
+    "产品性能",
+    "电化学性能",
+    "倍率性能",
+    "循环性能",
+    "容量保持率",
+    "放电容量",
+    "压实密度",
+    "振实密度",
+)
 _ATMOSPHERE_TERMS = ("气氛", "氮气", "空气", "惰性气氛", "氩气", "氧气", "atmosphere")
 _ATTRIBUTE_VALUE_TERMS = (
     "电压范围",
@@ -154,6 +167,7 @@ class PatentGraphQuestionSlots:
     asks_trend_landscape: bool = False
     asks_followup: bool = False
     asks_attribute_value: bool = False
+    asks_analytical_relation: bool = False
     has_doi: bool = False
 
     def diagnostics(self) -> dict[str, Any]:
@@ -187,6 +201,7 @@ class PatentGraphQuestionSlots:
             "asks_trend_landscape": self.asks_trend_landscape,
             "asks_followup": self.asks_followup,
             "asks_attribute_value": self.asks_attribute_value,
+            "asks_analytical_relation": self.asks_analytical_relation,
             "has_doi": self.has_doi,
         }
 
@@ -229,6 +244,20 @@ def _asks_count_intent(text: str) -> bool:
     if "多少" in text and _contains_any(text, _COUNT_OBJECT_HINTS):
         return True
     return False
+
+
+def _asks_analytical_relation(
+    text: str,
+    *,
+    material_terms: tuple[str, ...],
+    process_terms: tuple[str, ...],
+    metric_terms: tuple[str, ...],
+) -> bool:
+    has_relation = _contains_any(text, _RELATION_ANALYSIS_TERMS)
+    has_parameter = _contains_any(text, _PARAMETER_TERMS)
+    has_performance = bool(metric_terms) or _contains_any(text, _PERFORMANCE_RELATION_TERMS)
+    has_material_or_process_context = bool(material_terms or process_terms)
+    return bool(has_relation and has_parameter and has_performance and has_material_or_process_context)
 
 
 def _regex_name(pattern: re.Pattern[str], text: str) -> tuple[str, ...]:
@@ -321,5 +350,11 @@ def extract_patent_graph_slots(question: str) -> PatentGraphQuestionSlots:
         asks_trend_landscape=_contains_any(text, _TREND_HINTS),
         asks_followup=_contains_any(text, _FOLLOWUP_HINTS),
         asks_attribute_value=_asks_attribute_value(text),
+        asks_analytical_relation=_asks_analytical_relation(
+            text,
+            material_terms=material_terms,
+            process_terms=process_terms,
+            metric_terms=metric_terms,
+        ),
         has_doi=bool(_DOI_PATTERN.search(text)),
     )

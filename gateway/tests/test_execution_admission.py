@@ -44,7 +44,8 @@ def test_build_admission_status_exposes_task_api_defaults(monkeypatch):
         ),
     )
 
-    assert payload["enabled"] is False
+    assert payload["enabled"] is True
+    assert payload["dispatcher_enabled"] is True
     assert payload["runtime_role"] == "web"
     assert payload["worker_script_supported"] is True
     assert payload["request_path_cutover_enabled"] is True
@@ -68,14 +69,27 @@ def test_run_admission_worker_rejects_wrong_runtime_role(monkeypatch):
     assert run_admission_worker(settings=settings, redis_runtime=redis_runtime) == 2
 
 
-def test_run_admission_worker_exits_cleanly_when_disabled(monkeypatch):
+def test_run_admission_worker_ignores_disabled_env_and_requires_shared_redis(monkeypatch):
     monkeypatch.setenv("GATEWAY_RUNTIME_ROLE", "admission_worker")
     monkeypatch.setenv("GATEWAY_ADMISSION_ENABLED", "0")
+    monkeypatch.setenv("GATEWAY_ADMISSION_DISPATCHER_ENABLED", "0")
 
     settings = GatewaySettings.from_env()
-    redis_runtime = bootstrap_redis_runtime(settings.redis)
+    redis_runtime = GatewayRedisRuntime(
+        client=None,
+        service=RedisService.from_prefix(client=None, key_prefix="gateway"),
+        status=GatewayRedisRuntimeStatus(
+            enabled=True,
+            available=False,
+            dependency_available=True,
+            client_source="test_unavailable",
+            key_prefix="gateway",
+        ),
+    )
 
-    assert run_admission_worker(settings=settings, redis_runtime=redis_runtime) == 0
+    assert settings.admission.enabled is True
+    assert settings.admission.dispatcher_enabled is True
+    assert run_admission_worker(settings=settings, redis_runtime=redis_runtime) == 3
 
 
 class _DeadRedis:

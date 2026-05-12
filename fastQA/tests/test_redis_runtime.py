@@ -36,7 +36,7 @@ def test_settings_resolve_redis_defaults(monkeypatch):
     _reset_settings_cache()
     settings = get_settings()
 
-    assert settings.redis_enabled is False
+    assert settings.redis_enabled is True
     assert settings.redis_password == "123456"
     assert settings.redis_key_prefix == "fastqa"
     assert settings.resolved_redis_url == "redis://:123456@127.0.0.1:6379/0"
@@ -51,41 +51,42 @@ def test_fastqa_shared_config_enables_redis_by_default():
     infrastructure_content = infrastructure_env.read_text(encoding="utf-8")
     service_content = service_env.read_text(encoding="utf-8")
 
-    assert "REDIS_ENABLED=1" in infrastructure_content
+    assert "REDIS_ENABLED" not in infrastructure_content
     assert "REDIS_KEY_PREFIX=fastqa" in service_content
 
 
 def test_fastqa_shared_config_defines_shared_llm_pool_defaults():
     repo_root = Path(__file__).resolve().parents[2]
     shared_env = repo_root / "resource/config/services/fastQA/config.shared.env"
+    model_endpoints_env = repo_root / "resource/config/shared/model-endpoints.shared.env"
     content = shared_env.read_text(encoding="utf-8")
+    model_content = model_endpoints_env.read_text(encoding="utf-8")
 
     assert "FASTQA_LLM_HTTP_SHARED_POOL_ENABLED=1" in content
-    assert "FASTQA_LLM_HTTP_CONNECT_TIMEOUT_SECONDS=15" in content
-    assert "FASTQA_LLM_HTTP_READ_TIMEOUT_SECONDS=180" in content
-    assert "FASTQA_LLM_HTTP_STREAM_READ_TIMEOUT_SECONDS=600" in content
-    assert "FASTQA_LLM_HTTP_WRITE_TIMEOUT_SECONDS=180" in content
-    assert "FASTQA_LLM_HTTP_KEEPALIVE_EXPIRY_SECONDS=90" in content
-    assert "FASTQA_LLM_HTTP_MAX_CONNECTIONS=160" in content
-    assert "FASTQA_LLM_HTTP_MAX_KEEPALIVE_CONNECTIONS=64" in content
-    assert "FASTQA_LLM_HTTP_POOL_TIMEOUT_SECONDS=30" in content
+    assert "LLM_CONNECT_TIMEOUT_SECONDS=15" in model_content
+    assert "LLM_READ_TIMEOUT_SECONDS=180" in model_content
+    assert "LLM_STREAM_READ_TIMEOUT_SECONDS=600" in model_content
+    assert "LLM_WRITE_TIMEOUT_SECONDS=180" in model_content
+    assert "LLM_KEEPALIVE_EXPIRY_SECONDS=120" in model_content
+    assert "LLM_MAX_CONNECTIONS=160" in model_content
+    assert "LLM_MAX_KEEPALIVE_CONNECTIONS=64" in model_content
+    assert "LLM_POOL_TIMEOUT_SECONDS=30" in model_content
 
 
 def test_redact_redis_url_masks_password():
     assert redact_redis_url("redis://:123456@127.0.0.1:6379/0") == "redis://:***@127.0.0.1:6379/0"
 
 
-def test_build_redis_bindings_skips_when_disabled(monkeypatch):
+def test_build_redis_bindings_ignores_disabled_env(monkeypatch):
     monkeypatch.setenv("REDIS_ENABLED", "0")
 
     _reset_settings_cache()
     settings = get_settings()
     bindings = build_redis_bindings(settings=settings, redis_lib=None)
 
-    assert bindings.enabled is False
-    assert bindings.available is False
-    assert bindings.client is None
-    assert bindings.detail == "redis disabled by config"
+    assert settings.redis_enabled is True
+    assert bindings.enabled is True
+    assert bindings.detail != "redis disabled by config"
 
     _reset_settings_cache()
 
@@ -176,6 +177,23 @@ def test_bootstrap_generation_runtime_skips_when_disabled():
     assert runtime.generation_runtime_ready is False
     assert runtime.component_status["generation_runtime"]["status"] == "skipped"
     assert generation_runtime_is_ready(runtime) is False
+
+
+def test_settings_hardcode_warmup_and_chat_persistence(monkeypatch):
+    monkeypatch.setenv("FASTQA_STAGE2_CHAT_WARMUP_ENABLED", "1")
+    monkeypatch.setenv("FASTQA_STAGE2_RERANK_WARMUP_ENABLED", "1")
+    monkeypatch.setenv("CHAT_PERSIST_ENABLED", "0")
+    monkeypatch.setenv("CHAT_PERSIST_ASYNC", "0")
+
+    _reset_settings_cache()
+    settings = get_settings()
+
+    assert settings.stage2_chat_warmup_enabled is False
+    assert settings.stage2_rerank_warmup_enabled is False
+    assert settings.chat_persist_enabled is True
+    assert settings.chat_persist_async is True
+
+    _reset_settings_cache()
 
 
 def test_bootstrap_generation_runtime_degrades_when_required_env_missing(monkeypatch):

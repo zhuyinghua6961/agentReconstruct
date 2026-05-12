@@ -530,6 +530,56 @@ def test_kb_service_v2_skip_graph_leaves_staged_runtime_unchanged():
     assert "graph_kb_mode" not in execution_result["metadata"]
 
 
+def test_kb_service_analytical_relation_skip_graph_uses_staged_runtime():
+    captured = {}
+
+    class _RecordingOrchestrator:
+        def run(self, *, question: str, runtime, conversation_context=None) -> PatentQaExecutionResult:
+            captured["question"] = question
+            captured["conversation_context"] = conversation_context
+            return PatentQaExecutionResult(
+                success=True,
+                final_answer="generated analytical relation answer",
+                metadata=PatentQaExecutionMetadata(route="kb_qa", query_mode="patent staged qa"),
+                raw={
+                    "references": [],
+                    "reference_objects": [],
+                    "reference_links": [],
+                    "original_links": [],
+                    "metadata": {},
+                    "steps": [],
+                },
+            )
+
+    service = PatentKbService(
+        orchestrator=_RecordingOrchestrator(),
+        graph_kb_client=object(),
+        graph_kb_enabled=True,
+        graph_kb_v2_enabled=True,
+        graph_kb_rag_injection_enabled=True,
+        graph_kb_service_v2=lambda **kwargs: PatentGraphRoutingResult(
+            mode="skip_graph",
+            diagnostics={
+                "matched_rule": "analytical_relation_question",
+                "tri_state_mode": "skip_graph",
+            },
+        ),
+    )
+
+    execution_result = service.run(
+        request=_make_request(question="磷酸铁锂磨砂粒径与产品性能间的关系"),
+        runtime=_FakeStagedRuntime(),
+        conversation_context={"recent_turns_for_llm": []},
+    )
+
+    assert captured["question"] == "磷酸铁锂磨砂粒径与产品性能间的关系"
+    assert captured["conversation_context"] == {"recent_turns_for_llm": []}
+    assert execution_result["answer_text"] == "generated analytical relation answer"
+    assert execution_result["query_mode"] == "patent_kb_qa"
+    assert execution_result["metadata"].get("graph_kb_mode") is None
+    assert execution_result["metadata"].get("query_mode") != "patent_graph_kb"
+
+
 def test_kb_service_v2_graph_routing_exception_falls_back_silently():
     class _RecordingOrchestrator:
         def __init__(self) -> None:

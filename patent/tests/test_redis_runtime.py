@@ -159,15 +159,15 @@ def test_bootstrap_redis_sets_component_status(monkeypatch):
     assert callable(state.redis_bindings.client.compare_set)
 
 
-def test_build_redis_bindings_marks_disabled_config(monkeypatch):
+def test_build_redis_bindings_ignores_disabled_config(monkeypatch):
     monkeypatch.setenv("PATENT_REDIS_ENABLED", "false")
     monkeypatch.delenv("PATENT_REDIS_KEY_PREFIX", raising=False)
 
     bindings = build_redis_bindings()
 
-    assert bindings.enabled is False
+    assert bindings.enabled is True
     assert bindings.available is False
-    assert bindings.detail == "redis disabled by config"
+    assert bindings.detail != "redis disabled by config"
     assert bindings.key_prefix == "patent"
 
 

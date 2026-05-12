@@ -277,7 +277,7 @@ def get_settings() -> Settings:
         ),
         redis=RedisSettings(
             url=os.getenv("PATENT_REDIS_URL", "redis://localhost:6379/0"),
-            enabled=_read_bool("PATENT_REDIS_ENABLED", False),
+            enabled=True,
             key_prefix=redis_key_prefix,
             socket_connect_timeout_sec=_read_float("PATENT_REDIS_SOCKET_CONNECT_TIMEOUT_SEC", 1.5),
             socket_timeout_sec=_read_float("PATENT_REDIS_SOCKET_TIMEOUT_SEC", 1.5),
@@ -294,7 +294,7 @@ def get_settings() -> Settings:
             jwt_compatible_access_salts=compat_salts,
         ),
         llm_http=LlmHttpSettings(
-            shared_pool_enabled=_read_bool("PATENT_LLM_HTTP_SHARED_POOL_ENABLED", False),
+            shared_pool_enabled=True,
             connect_timeout_seconds=_read_float("PATENT_LLM_HTTP_CONNECT_TIMEOUT_SECONDS", 15.0),
             read_timeout_seconds=_read_float("PATENT_LLM_HTTP_READ_TIMEOUT_SECONDS", 180.0),
             stream_read_timeout_seconds=_read_float("PATENT_LLM_HTTP_STREAM_READ_TIMEOUT_SECONDS", 600.0),
@@ -305,21 +305,21 @@ def get_settings() -> Settings:
             max_connections=max(1, _read_int("PATENT_LLM_HTTP_MAX_CONNECTIONS", 100)),
         ),
         planning_hot_pool=PlanningHotPoolSettings(
-            enabled=_read_bool("PATENT_PLANNING_HOT_POOL_ENABLED", False),
+            enabled=True,
             lane_count=max(1, _read_int("PATENT_PLANNING_HOT_POOL_LANE_COUNT", 2)),
-            warmup_enabled=_read_bool("PATENT_PLANNING_HOT_POOL_WARMUP_ENABLED", False),
-            warm_interval_seconds=max(1.0, _read_float("PATENT_PLANNING_HOT_POOL_WARM_INTERVAL_SECONDS", 7200.0)),
-            warm_timeout_seconds=max(1.0, _read_float("PATENT_PLANNING_HOT_POOL_WARM_TIMEOUT_SECONDS", 30.0)),
-            warm_jitter_seconds=max(0.0, _read_float("PATENT_PLANNING_HOT_POOL_WARM_JITTER_SECONDS", 0.0)),
+            warmup_enabled=False,
+            warm_interval_seconds=7200.0,
+            warm_timeout_seconds=30.0,
+            warm_jitter_seconds=0.0,
             lane_degraded_after_seconds=max(
                 1.0,
                 _read_float("PATENT_PLANNING_HOT_POOL_LANE_DEGRADED_AFTER_SECONDS", 7200.0),
             ),
-            warm_active_start_hour=max(0, min(23, _read_int("PATENT_PLANNING_HOT_POOL_WARM_ACTIVE_START_HOUR", 8))),
-            warm_active_end_hour=max(1, min(24, _read_int("PATENT_PLANNING_HOT_POOL_WARM_ACTIVE_END_HOUR", 18))),
+            warm_active_start_hour=0,
+            warm_active_end_hour=24,
         ),
         planning_upstream_gate=PlanningUpstreamGateSettings(
-            enabled=_read_bool("PATENT_PLANNING_UPSTREAM_GATE_ENABLED", False),
+            enabled=True,
             limit=max(1, _read_int("PATENT_PLANNING_UPSTREAM_GATE_LIMIT", 1)),
         ),
         graph_kb=PatentGraphSettings(

@@ -109,7 +109,7 @@ def test_app_bootstrap_wires_execution_cache_into_runtime_retrieval_service(monk
     fake_runtime = _FakeRuntime(fake_retrieval_service)
 
     def _build_runtime(*, execution_cache=None, http_client=None):
-        assert http_client is None
+        assert http_client is not None
         fake_retrieval_service._execution_cache = execution_cache
         return fake_runtime
 
@@ -247,6 +247,112 @@ def test_build_default_patent_runtime_wires_stage1_planner_from_env(monkeypatch,
     assert runtime is not None
     assert runtime.planning_model == "planner-model"
     assert runtime.planning_client is not None
+
+
+def test_patent_planning_runtime_prefers_unified_llm_namespace(monkeypatch):
+    from server.patent.runtime import _resolve_patent_planning_runtime_config
+
+    monkeypatch.setenv("LLM_API_KEY", "llm-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("LLM_MODEL", "llm-model")
+    monkeypatch.setenv("LLM_READ_TIMEOUT_SECONDS", "55")
+    monkeypatch.setenv("PATENT_STAGE1_OPENAI_API_KEY", "stage-key")
+    monkeypatch.setenv("PATENT_STAGE1_OPENAI_BASE_URL", "https://stage.example/v1")
+    monkeypatch.setenv("PATENT_STAGE1_OPENAI_MODEL", "stage-model")
+    monkeypatch.setenv("PATENT_STAGE1_OPENAI_TIMEOUT_SECONDS", "66")
+    monkeypatch.setenv("PATENT_OPENAI_API_KEY", "patent-key")
+    monkeypatch.setenv("PATENT_OPENAI_BASE_URL", "https://patent.example/v1")
+    monkeypatch.setenv("PATENT_OPENAI_MODEL", "patent-model")
+    monkeypatch.setenv("PATENT_OPENAI_TIMEOUT_SECONDS", "77")
+
+    api_key, base_url, model, timeout_seconds = _resolve_patent_planning_runtime_config()
+
+    assert api_key == "llm-key"
+    assert base_url == "https://llm.example/v1"
+    assert model == "llm-model"
+    assert timeout_seconds == 55.0
+
+
+def test_patent_planning_runtime_ignores_retired_llm_aliases(monkeypatch):
+    from server.patent.runtime import _resolve_patent_planning_runtime_config
+
+    for name in ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL", "LLM_READ_TIMEOUT_SECONDS"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openai.example/v1")
+    monkeypatch.setenv("OPENAI_MODEL", "openai-model")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dash-key")
+    monkeypatch.setenv("DASHSCOPE_BASE_URL", "https://dash.example/v1")
+    monkeypatch.setenv("DASHSCOPE_MODEL", "dash-model")
+    monkeypatch.setenv("PATENT_STAGE1_OPENAI_API_KEY", "stage-key")
+    monkeypatch.setenv("PATENT_STAGE1_OPENAI_BASE_URL", "https://stage.example/v1")
+    monkeypatch.setenv("PATENT_STAGE1_OPENAI_MODEL", "stage-model")
+    monkeypatch.setenv("PATENT_STAGE1_OPENAI_TIMEOUT_SECONDS", "66")
+    monkeypatch.setenv("PATENT_OPENAI_API_KEY", "patent-key")
+    monkeypatch.setenv("PATENT_OPENAI_BASE_URL", "https://patent.example/v1")
+    monkeypatch.setenv("PATENT_OPENAI_MODEL", "patent-model")
+    monkeypatch.setenv("PATENT_OPENAI_TIMEOUT_SECONDS", "77")
+
+    api_key, base_url, model, timeout_seconds = _resolve_patent_planning_runtime_config()
+
+    assert api_key == ""
+    assert base_url == ""
+    assert model == ""
+    assert timeout_seconds == 30.0
+
+
+def test_patent_embedding_client_prefers_unified_embedding_namespace(monkeypatch):
+    from server.patent.runtime import PatentEmbeddingClient
+
+    class _FakeHttpClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        def close(self):
+            return None
+
+    monkeypatch.setenv("EMBEDDING_MODEL_TYPE", "remote")
+    monkeypatch.setenv("EMBEDDING_API_TIMEOUT_SECONDS", "33")
+    monkeypatch.setenv("EMBEDDING_API_URL", "https://embedding.example/v1/embeddings")
+    monkeypatch.setenv("EMBEDDING_API_MODEL", "embedding-target")
+    monkeypatch.setenv("PATENT_EMBEDDING_MODEL_TYPE", "local")
+    monkeypatch.setenv("PATENT_EMBEDDING_API_TIMEOUT_SECONDS", "44")
+    monkeypatch.setenv("PATENT_EMBEDDING_API_URL", "https://legacy.example/v1/embeddings")
+    monkeypatch.setenv("PATENT_EMBEDDING_API_MODEL", "legacy-embedding")
+    monkeypatch.setattr("server.patent.runtime.httpx.Client", _FakeHttpClient)
+
+    client = PatentEmbeddingClient()
+
+    assert client._mode == "remote"
+    assert client._http.timeout == 33.0
+    assert client._api_url == "https://embedding.example/v1/embeddings"
+    assert client._api_model == "embedding-target"
+
+
+def test_patent_embedding_client_ignores_retired_embedding_aliases(monkeypatch):
+    from server.patent.runtime import PatentEmbeddingClient
+
+    class _FakeHttpClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        def close(self):
+            return None
+
+    for name in ("EMBEDDING_MODEL_TYPE", "EMBEDDING_API_TIMEOUT_SECONDS", "EMBEDDING_API_URL", "EMBEDDING_API_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("PATENT_EMBEDDING_MODEL_TYPE", "local")
+    monkeypatch.setenv("PATENT_EMBEDDING_API_TIMEOUT_SECONDS", "44")
+    monkeypatch.setenv("PATENT_EMBEDDING_API_URL", "https://legacy.example/v1/embeddings")
+    monkeypatch.setenv("PATENT_EMBEDDING_API_MODEL", "legacy-embedding")
+    monkeypatch.setattr("server.patent.runtime.httpx.Client", _FakeHttpClient)
+
+    client = PatentEmbeddingClient()
+
+    assert client._mode == "remote"
+    assert client._http.timeout == 120.0
+    assert client._api_url == "http://127.0.0.1:8001/v1/embeddings"
+    assert client._api_model == "bge-local"
 
 
 def test_build_default_patent_runtime_passes_injected_http_client_to_llm_wrappers(monkeypatch, tmp_path: Path):

@@ -29,14 +29,9 @@ class SmartTranslator:
         base_url: str | None = None,
         model: str | None = None,
     ):
-        self.api_key = api_key or _first_env("LLM_API_KEY", "OPENAI_API_KEY", "DASHSCOPE_API_KEY")
-        self.base_url = base_url or _first_env(
-            "LLM_BASE_URL",
-            "OPENAI_BASE_URL",
-            "DASHSCOPE_BASE_URL",
-            default=DEFAULT_LLM_BASE_URL,
-        )
-        self.model = model or _first_env("LLM_MODEL", "OPENAI_MODEL", "DASHSCOPE_MODEL", default="deepseek-v3.1")
+        self.api_key = api_key or _first_env("LLM_API_KEY")
+        self.base_url = base_url or _first_env("LLM_BASE_URL", default=DEFAULT_LLM_BASE_URL)
+        self.model = model or _first_env("LLM_MODEL", default="deepseek-v3.1")
 
         if not self.api_key:
             self.client = None

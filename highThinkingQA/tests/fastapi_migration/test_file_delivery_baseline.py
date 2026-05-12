@@ -23,12 +23,15 @@ def test_resolve_uploaded_file_delivery_prefers_existing_local_path(tmp_path):
     assert plan.download_name == "demo.pdf"
 
 
-def test_resolve_uploaded_file_delivery_builds_redirect_for_minio(monkeypatch):
+def test_resolve_uploaded_file_delivery_uses_proxy_for_minio_when_env_disabled(monkeypatch):
     class DummyBackend:
-        def get_file_url(self, *, object_name, expires_seconds):
+        def download_file(self, *, object_name, local_path):
             assert object_name == "folder/demo.pdf"
-            assert expires_seconds == 3600
-            return "https://example.com/download/demo.pdf"
+            Path(local_path).write_bytes(b"pdf")
+            return True
+
+        def get_file_url(self, *, object_name, expires_seconds):
+            raise AssertionError("MINIO_USE_PROXY=0 must not disable proxy delivery")
 
     monkeypatch.setattr(
         "server.storage.file_delivery_service.get_storage_backend",
@@ -46,6 +49,7 @@ def test_resolve_uploaded_file_delivery_builds_redirect_for_minio(monkeypatch):
     )
 
     assert plan is not None
-    assert plan.kind == "redirect"
-    assert plan.redirect_url == "https://example.com/download/demo.pdf"
+    assert plan.kind == "file"
+    assert plan.local_path
+    assert Path(plan.local_path).exists()
     assert plan.download_name == "demo.pdf"

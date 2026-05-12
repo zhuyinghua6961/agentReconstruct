@@ -243,6 +243,59 @@ def test_classifier_v2_keeps_single_patent_attribute_question_direct():
     assert decision.diagnostics["matched_rule"] == "patent_lookup"
 
 
+def test_classifier_v2_skips_analytical_relation_questions_before_graph_candidates():
+    cases = [
+        "磷酸铁锂磨砂粒径与产品性能间的关系",
+        "磷酸铁锂粒径对倍率性能的影响",
+        "磷酸铁锂颗粒尺寸和循环性能有什么关系",
+        "烧结温度与磷酸铁锂循环性能的关系",
+        "磷酸铁锂D50对放电容量的影响",
+        "宁德时代磷酸铁锂粒径与性能关系",
+        "H01M10 磷酸铁锂粒径与性能关系",
+    ]
+
+    for question in cases:
+        decision = classify_patent_graph_question_v2(question=question, conversation_context={})
+        assert decision.mode == "skip_graph"
+        assert decision.route_family == "semantic"
+        assert decision.diagnostics["matched_rule"] == "analytical_relation_question"
+
+
+def test_classifier_v2_preserves_explicit_material_patent_lookup_with_relation_terms():
+    cases = [
+        "涉及磷酸铁锂粒径调控的专利有哪些",
+        "磷酸铁锂产品性能相关专利有多少",
+        "宁德时代有哪些磷酸铁锂粒径相关专利",
+        "H01M10 下有哪些磷酸铁锂粒径相关专利",
+    ]
+
+    for question in cases:
+        decision = classify_patent_graph_question_v2(question=question, conversation_context={})
+        assert decision.mode == "direct_answer"
+        assert decision.route_family == "precise"
+
+
+def test_classifier_v2_preserves_single_patent_relation_question():
+    decision = classify_patent_graph_question_v2(
+        question="CN100355122C 的粒径与性能关系是什么",
+        conversation_context={},
+    )
+
+    assert decision.mode == "direct_answer"
+    assert decision.route_family == "precise"
+
+
+def test_classifier_v2_preserves_generic_material_impact_graph_for_rag():
+    decision = classify_patent_graph_question_v2(
+        question="石墨烯材料对性能有什么影响？",
+        conversation_context={},
+    )
+
+    assert decision.mode == "graph_for_rag"
+    assert decision.route_family == "hybrid"
+    assert decision.diagnostics["matched_rule"] == "hybrid_graph_anchor"
+
+
 def test_classifier_v2_routes_applicant_landscape_to_community():
     decision = classify_patent_graph_question_v2(
         question="宁德时代在磷酸铁锂方面的工艺路线有什么特点？",

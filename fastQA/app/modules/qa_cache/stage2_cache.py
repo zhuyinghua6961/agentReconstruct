@@ -75,7 +75,7 @@ def _claims_hash(retrieval_claims: list[dict[str, Any]] | list[Any]) -> str:
 
 
 def _runtime_model_name(runtime: Any) -> str:
-    raw = str(getattr(runtime, "model", "") or os.getenv("DASHSCOPE_MODEL", "unknown")).strip()
+    raw = str(getattr(runtime, "model", "") or os.getenv("LLM_MODEL", "unknown")).strip()
     return raw or "unknown"
 
 
@@ -83,12 +83,12 @@ def _flags_hash() -> str:
     payload = {
         "force_keyword_injection": str(os.getenv("QA_STAGE2_FORCE_KEYWORD_INJECTION", "1") or "1").strip(),
         "entity_lock_enabled": str(os.getenv("QA_STAGE2_ENTITY_LOCK_ENABLED", "1") or "1").strip(),
-        "use_rerank": str(os.getenv("QA_RETRIEVAL_RERANK_ENABLED", "1") or "1").strip(),
+        "rerank": "enabled",
         "rerank_candidates": str(os.getenv("QA_RETRIEVAL_RERANK_CANDIDATES", "50") or "50").strip(),
-        "rerank_provider": str(os.getenv("QA_RETRIEVAL_RERANK_PROVIDER", "dashscope") or "dashscope").strip(),
-        "rerank_model": str(os.getenv("QA_RETRIEVAL_RERANK_MODEL", "qwen3-vl-rerank") or "qwen3-vl-rerank").strip(),
+        "rerank_provider": str(os.getenv("RERANK_PROVIDER", "local") or "local").strip(),
+        "rerank_model": str(os.getenv("RERANK_MODEL", "qwen3-vl-rerank") or "qwen3-vl-rerank").strip(),
         "query_expansion_enabled": str(os.getenv("QA_STAGE2_QUERY_EXPANSION_ENABLED", "0") or "0").strip(),
-        "query_expansion_model": str(os.getenv("QUERY_EXPANSION_MODEL", "qwen3-8b") or "qwen3-8b").strip(),
+        "query_expansion_model": str(os.getenv("LLM_MODEL", "qwen-plus") or "qwen-plus").strip(),
     }
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]

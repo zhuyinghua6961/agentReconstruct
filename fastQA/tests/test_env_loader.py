@@ -9,6 +9,20 @@ import pytest
 import app.core.env_loader as env_loader
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _env_keys(path: Path) -> set[str]:
+    keys: set[str] = set()
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key = line.split("=", 1)[0].removeprefix("export ").strip()
+        keys.add(key)
+    return keys
+
+
 def _reload_config_module():
     import app.core.config as config
 
@@ -326,3 +340,93 @@ def test_config_split_execution_authority_is_rejected_in_production(monkeypatch)
     reloaded.get_settings.cache_clear()
     with pytest.raises(ValueError, match="split authority"):
         reloaded.get_settings()
+
+
+def test_fastqa_resource_config_surface_uses_shared_model_embedding_and_rerank_namespaces():
+    shared_keys = _env_keys(REPO_ROOT / "resource/config/shared/model-endpoints.shared.env")
+    secret_keys = _env_keys(REPO_ROOT / "resource/config/shared/model-endpoints.secret.env.example")
+    service_keys = _env_keys(REPO_ROOT / "resource/config/services/fastQA/config.shared.env")
+    service_secret_keys = _env_keys(REPO_ROOT / "resource/config/services/fastQA/config.secret.env.example")
+
+    retired_shared = {
+        "LLM_PROVIDER",
+        "LLM_ENABLE_THINKING",
+        "DASHSCOPE_BASE_URL",
+        "DASHSCOPE_MODEL",
+        "OPENAI_BASE_URL",
+        "OPENAI_MODEL",
+        "PATENT_OPENAI_BASE_URL",
+        "PATENT_OPENAI_MODEL",
+        "OPENAI_CONNECT_TIMEOUT_SECONDS",
+        "OPENAI_READ_TIMEOUT_SECONDS",
+        "OPENAI_STREAM_READ_TIMEOUT_SECONDS",
+        "OPENAI_WRITE_TIMEOUT_SECONDS",
+        "OPENAI_POOL_TIMEOUT_SECONDS",
+        "EMBEDDING_TIMEOUT_SECONDS",
+        "PATENT_EMBEDDING_BASE_URL",
+        "PATENT_EMBEDDING_MODEL",
+        "PATENT_EMBEDDING_MODEL_TYPE",
+        "PATENT_EMBEDDING_API_URL",
+        "PATENT_EMBEDDING_API_MODEL",
+        "PATENT_EMBEDDING_API_TIMEOUT_SECONDS",
+        "QA_RETRIEVAL_RERANK_PROVIDER",
+        "QA_RETRIEVAL_RERANK_BASE_URL",
+        "QA_RETRIEVAL_RERANK_MODEL",
+        "QA_RETRIEVAL_RERANK_TIMEOUT",
+        "PATENT_STAGE2_RERANK_PROVIDER",
+        "PATENT_STAGE2_RERANK_BASE_URL",
+        "PATENT_STAGE2_RERANK_MODEL",
+        "PATENT_STAGE2_RERANK_TIMEOUT_SECONDS",
+        "PATENT_STAGE2_RERANK_ENDPOINT_FAMILY",
+        "OCR_BASE_URL",
+        "OCR_MODEL",
+        "OCR_TIMEOUT_SECONDS",
+    }
+    assert retired_shared.isdisjoint(shared_keys)
+    assert {
+        "LLM_BASE_URL",
+        "LLM_MODEL",
+        "LLM_CONNECT_TIMEOUT_SECONDS",
+        "LLM_READ_TIMEOUT_SECONDS",
+        "LLM_STREAM_READ_TIMEOUT_SECONDS",
+        "LLM_WRITE_TIMEOUT_SECONDS",
+        "LLM_POOL_TIMEOUT_SECONDS",
+        "LLM_KEEPALIVE_EXPIRY_SECONDS",
+        "LLM_MAX_CONNECTIONS",
+        "LLM_MAX_KEEPALIVE_CONNECTIONS",
+        "EMBEDDING_BASE_URL",
+        "EMBEDDING_MODEL",
+        "EMBEDDING_MODEL_TYPE",
+        "EMBEDDING_API_URL",
+        "EMBEDDING_API_MODEL",
+        "EMBEDDING_API_TIMEOUT_SECONDS",
+        "RERANK_PROVIDER",
+        "RERANK_BASE_URL",
+        "RERANK_MODEL",
+        "RERANK_TIMEOUT_SECONDS",
+    } <= shared_keys
+
+    assert {"LLM_API_KEY", "EMBEDDING_API_KEY", "RERANK_API_KEY"} <= secret_keys
+    assert {
+        "OPENAI_API_KEY",
+        "DASHSCOPE_API_KEY",
+        "QA_RETRIEVAL_RERANK_API_KEY",
+        "PATENT_STAGE2_RERANK_API_KEY",
+        "OCR_API_KEY",
+    }.isdisjoint(secret_keys)
+
+    assert {
+        "QUERY_EXPANSION_MODEL",
+        "QA_RETRIEVAL_RERANK_API_KEY",
+        "FASTQA_STAGE2_CHAT_WARM_INTERVAL_SECONDS",
+        "FASTQA_STAGE2_RERANK_WARMUP_ENABLED",
+        "FASTQA_STAGE2_RERANK_WARM_INTERVAL_SECONDS",
+        "FASTQA_STAGE2_WARM_ACTIVE_START_HOUR",
+        "FASTQA_STAGE2_WARM_ACTIVE_END_HOUR",
+        "UPLOAD_QA_USE_SIDECAR",
+        "PDF_QA_USE_DEDICATED_LLM",
+        "PDF_QA_MODEL",
+        "PDF_QA_WARMUP_ENABLED",
+    }.isdisjoint(service_keys)
+    assert {"FASTQA_LLM_HTTP_SHARED_POOL_ENABLED", "QA_RETRIEVAL_RERANK_CANDIDATES", "ASK_STREAM_MAX_CONCURRENT"} <= service_keys
+    assert {"DASHSCOPE_API_KEY", "OCR_API_KEY"}.isdisjoint(service_secret_keys)

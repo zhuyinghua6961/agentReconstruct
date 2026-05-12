@@ -37,7 +37,7 @@ def test_persist_assistant_message_routes_through_chat_persistence(monkeypatch):
     request = SimpleNamespace(
         app=SimpleNamespace(
             logger=SimpleNamespace(warning=lambda *args, **kwargs: None, info=lambda *args, **kwargs: None),
-            state=SimpleNamespace(config={"CHAT_PERSIST_ENABLED": True}),
+            state=SimpleNamespace(config={"chat_persistence_enabled": True}),
         )
     )
     ask_request = SimpleNamespace(
@@ -118,7 +118,7 @@ def test_persist_assistant_message_delegates_to_chat_persistence(monkeypatch):
     request = SimpleNamespace(
         app=SimpleNamespace(
             logger=SimpleNamespace(warning=lambda *args, **kwargs: None, info=lambda *args, **kwargs: None),
-            state=SimpleNamespace(config={"CHAT_PERSIST_ENABLED": True}),
+            state=SimpleNamespace(config={"chat_persistence_enabled": True}),
         )
     )
     ask_request = SimpleNamespace(
@@ -201,7 +201,7 @@ def test_persist_user_message_delegates_to_chat_persistence(monkeypatch):
     request = SimpleNamespace(
         app=SimpleNamespace(
             logger=SimpleNamespace(warning=lambda *args, **kwargs: None, info=lambda *args, **kwargs: None),
-            state=SimpleNamespace(config={"CHAT_PERSIST_ENABLED": True}),
+            state=SimpleNamespace(config={"chat_persistence_enabled": True}),
         )
     )
     ask_request = SimpleNamespace(

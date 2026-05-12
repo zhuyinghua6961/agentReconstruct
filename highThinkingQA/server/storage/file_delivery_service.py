@@ -58,40 +58,33 @@ def resolve_uploaded_file_delivery(*, file_row: dict[str, Any], logger: Any) -> 
         if scheme == "minio" and "/" in value:
             _, object_name = value.split("/", 1)
             backend = get_storage_backend(project_root=str(config.SERVICE_STATE_ROOT))
-            use_proxy = _bool_env("MINIO_USE_PROXY", True)
             try:
                 expires = int(str(os.getenv("MINIO_DOWNLOAD_EXPIRES", "3600")).strip() or "3600")
             except Exception:
                 expires = 3600
 
-            if not use_proxy:
-                try:
-                    url = backend.get_file_url(object_name=object_name, expires_seconds=expires)
-                    return FileDeliveryPlan(kind="redirect", redirect_url=url, download_name=file_name)
-                except Exception as exc:  # pragma: no cover - runtime env specific
-                    logger.warning("build presigned url failed: %s", exc)
-            else:
-                suffix = Path(file_name).suffix or ".bin"
-                fd, temp_path = tempfile.mkstemp(prefix="highthinking-download-", suffix=suffix)
-                os.close(fd)
-                ok = False
-                try:
-                    ok = backend.download_file(object_name=object_name, local_path=temp_path)
-                except Exception as exc:  # pragma: no cover - runtime env specific
+            suffix = Path(file_name).suffix or ".bin"
+            fd, temp_path = tempfile.mkstemp(prefix="highthinking-download-", suffix=suffix)
+            os.close(fd)
+            ok = False
+            try:
+                ok = backend.download_file(object_name=object_name, local_path=temp_path)
+            except Exception as exc:  # pragma: no cover - runtime env specific
+                if logger is not None:
                     logger.warning("download minio object failed: %s", exc)
 
-                if ok:
-                    return FileDeliveryPlan(
-                        kind="file",
-                        local_path=temp_path,
-                        cleanup_path=temp_path,
-                        download_name=file_name,
-                    )
+            if ok:
+                return FileDeliveryPlan(
+                    kind="file",
+                    local_path=temp_path,
+                    cleanup_path=temp_path,
+                    download_name=file_name,
+                )
 
-                try:
-                    os.remove(temp_path)
-                except Exception:
-                    pass
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
 
         if scheme == "local":
             candidate = Path(value)

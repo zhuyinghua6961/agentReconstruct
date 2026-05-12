@@ -1,15 +1,15 @@
 """
 PDF 解析模块
-通过阿里云百炼 API 调用 qwen-vl-ocr 将 PDF 解析为结构化文本。
+通过阿里云百炼 API 调用视觉语言模型将 PDF 解析为结构化文本。
 
 流程：
   1. 用 PyMuPDF (fitz) 将 PDF 每页渲染为 PNG 图片
-  2. 将页面分批（每批 OCR_PAGES_PER_BATCH 页），多图合并为一次 API 请求
+  2. 将页面分批（每批 VLM_PAGES_PER_BATCH 页），多图合并为一次 API 请求
   3. 每次请求创建独立的 API 客户端实例
   4. 拼接所有批次的输出
 
 限流策略：
-  - 全局信号量控制同时在飞的请求数（config.OCR_MAX_CONCURRENT_REQUESTS）
+  - 全局信号量控制同时在飞的请求数（config.VLM_MAX_CONCURRENT_REQUESTS）
   - 429/Connection error 时指数退避重试
 """
 
@@ -28,22 +28,22 @@ import config
 
 logger = logging.getLogger(__name__)
 
-# ── 全局 OCR 限流信号量 ──
-_ocr_semaphore: Optional[threading.Semaphore] = None
+# ── 全局 VLM 限流信号量 ──
+_vlm_semaphore: Optional[threading.Semaphore] = None
 _semaphore_lock = threading.Lock()
 
 
-def _get_ocr_semaphore() -> threading.Semaphore:
-    """惰性初始化全局 OCR 信号量"""
-    global _ocr_semaphore
-    if _ocr_semaphore is None:
+def _get_vlm_semaphore() -> threading.Semaphore:
+    """惰性初始化全局 VLM 信号量"""
+    global _vlm_semaphore
+    if _vlm_semaphore is None:
         with _semaphore_lock:
-            if _ocr_semaphore is None:
-                _ocr_semaphore = threading.Semaphore(config.OCR_MAX_CONCURRENT_REQUESTS)
+            if _vlm_semaphore is None:
+                _vlm_semaphore = threading.Semaphore(config.VLM_MAX_CONCURRENT_REQUESTS)
                 logger.info(
-                    f"OCR 全局信号量初始化: 最大并发请求 = {config.OCR_MAX_CONCURRENT_REQUESTS}"
+                    f"VLM 全局信号量初始化: 最大并发请求 = {config.VLM_MAX_CONCURRENT_REQUESTS}"
                 )
-    return _ocr_semaphore
+    return _vlm_semaphore
 
 
 def pdf_to_page_images(pdf_path: str, dpi: int = 200) -> list[bytes]:
@@ -83,7 +83,7 @@ def _call_ocr_batch(
     每次调用创建独立的 API 客户端实例。
 
     Args:
-        image_batch: PNG 图片 bytes 列表（最多 OCR_PAGES_PER_BATCH 张）
+        image_batch: PNG 图片 bytes 列表（最多 VLM_PAGES_PER_BATCH 张）
         batch_start_page: 批次起始页码（从 1 开始，用于日志）
         batch_end_page: 批次结束页码（含，用于日志）
         pdf_name: PDF 文件名（用于日志）
@@ -93,8 +93,8 @@ def _call_ocr_batch(
     """
     # 每次请求创建独立 client
     client = OpenAI(
-        api_key=config.OCR_API_KEY,
-        base_url=config.OCR_BASE_URL,
+        api_key=config.VLM_API_KEY,
+        base_url=config.VLM_BASE_URL,
     )
 
     # 构建多图 content
@@ -117,7 +117,7 @@ def _call_ocr_batch(
     })
 
     response = client.chat.completions.create(
-        model=config.OCR_MODEL,
+        model=config.VLM_MODEL,
         messages=[{"role": "user", "content": content}],
     )
 
@@ -153,9 +153,9 @@ def _parse_batch_with_ratelimit(
     Returns:
         该批次的文本内容
     """
-    sem = _get_ocr_semaphore()
-    max_retries = config.OCR_MAX_RETRIES
-    retry_base = config.OCR_RETRY_BASE
+    sem = _get_vlm_semaphore()
+    max_retries = config.VLM_MAX_RETRIES
+    retry_base = config.VLM_RETRY_BASE
 
     for attempt in range(max_retries + 1):
         sem.acquire()
@@ -205,7 +205,7 @@ def _parse_batch_with_ratelimit(
 def parse_pdf_via_vlm_api(pdf_path: str) -> str:
     """
     通过百炼 qwen-vl-ocr API 解析 PDF 为文本。
-    每 OCR_PAGES_PER_BATCH 页合并为一次请求，减少 API 调用次数。
+    每 VLM_PAGES_PER_BATCH 页合并为一次请求，减少 API 调用次数。
     每次请求创建独立的 API 客户端实例。
 
     Args:
@@ -215,7 +215,7 @@ def parse_pdf_via_vlm_api(pdf_path: str) -> str:
         解析后的文本（所有批次拼接）
     """
     pdf_name = Path(pdf_path).stem
-    batch_size = config.OCR_PAGES_PER_BATCH
+    batch_size = config.VLM_PAGES_PER_BATCH
 
     # Step 1: PDF -> 每页 PNG 图片
     page_images = pdf_to_page_images(pdf_path)
@@ -256,7 +256,7 @@ def parse_pdf(pdf_path: str, method: str = "vlm_api") -> str:
     if not os.path.exists(pdf_path):
         raise FileNotFoundError(f"PDF 文件不存在: {pdf_path}")
 
-    logger.info(f"解析 PDF: {pdf_path} (模型: {config.OCR_MODEL})")
+    logger.info(f"解析 PDF: {pdf_path} (模型: {config.VLM_MODEL})")
 
     return parse_pdf_via_vlm_api(pdf_path)
 

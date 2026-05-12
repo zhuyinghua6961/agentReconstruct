@@ -463,9 +463,9 @@ def bootstrap_generation_runtime(runtime: Any) -> None:
             config=None,
         )
         if not str(resolved.api_key or "").strip():
-            raise ValueError("OPENAI_API_KEY/DASHSCOPE_API_KEY is required")
+            raise ValueError("LLM_API_KEY is required")
         if not str(resolved.base_url or "").strip():
-            raise ValueError("OPENAI_BASE_URL/DASHSCOPE_BASE_URL is required")
+            raise ValueError("LLM_BASE_URL is required")
 
         shared_http_client = None
         stage2_chat_hot_pool = None
@@ -569,27 +569,17 @@ def bootstrap_generation_runtime(runtime: Any) -> None:
 
         if bool(getattr(settings, "stage2_rerank_hot_pool_enabled", False)):
             try:
-                rerank_provider = str(
-                    os.getenv("QA_RETRIEVAL_RERANK_PROVIDER", "dashscope") or "dashscope"
-                ).strip()
+                rerank_provider = str(os.getenv("RERANK_PROVIDER", "local") or "local").strip()
                 rerank_provider_norm = rerank_provider.lower()
-                raw_rerank_api_key = str(os.getenv("QA_RETRIEVAL_RERANK_API_KEY", "") or "").strip()
+                raw_rerank_api_key = str(os.getenv("RERANK_API_KEY", "") or "").strip()
                 if rerank_provider_norm == "local":
                     rerank_api_key = raw_rerank_api_key
                     rerank_default_base_url = "http://localhost:8084"
                 else:
-                    rerank_api_key = (
-                        raw_rerank_api_key
-                        or str(os.getenv("DASHSCOPE_API_KEY", "") or "").strip()
-                        or str(resolved.api_key or "").strip()
-                    )
+                    rerank_api_key = raw_rerank_api_key
                     rerank_default_base_url = "https://dashscope.aliyuncs.com"
-                rerank_base_url = str(
-                    os.getenv("QA_RETRIEVAL_RERANK_BASE_URL", rerank_default_base_url) or rerank_default_base_url
-                ).strip()
-                rerank_model = str(
-                    os.getenv("QA_RETRIEVAL_RERANK_MODEL", "qwen3-vl-rerank") or "qwen3-vl-rerank"
-                ).strip()
+                rerank_base_url = str(os.getenv("RERANK_BASE_URL", rerank_default_base_url) or rerank_default_base_url).strip()
+                rerank_model = str(os.getenv("RERANK_MODEL", "qwen3-vl-rerank") or "qwen3-vl-rerank").strip()
                 stage2_rerank_hot_pool = RerankSessionPool(
                     lane_count=int(getattr(settings, "stage2_rerank_hot_lane_count", 0) or 0),
                     logger=getattr(runtime, "logger", None),

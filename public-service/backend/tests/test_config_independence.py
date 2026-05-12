@@ -42,6 +42,19 @@ def test_no_implicit_repo_root_env_loading(config_module) -> None:
     settings = config_module.get_settings()
     assert settings.mysql_host == "127.0.0.1"
     assert settings.port == 8102
+    assert settings.redis_enabled is True
+
+
+def test_public_service_redis_enabled_ignores_disabled_env(
+    config_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REDIS_ENABLED", "0")
+    config_module.get_settings.cache_clear()
+
+    settings = config_module.get_settings()
+
+    assert settings.redis_enabled is True
 
 
 def test_explicit_env_file_loading(config_module, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

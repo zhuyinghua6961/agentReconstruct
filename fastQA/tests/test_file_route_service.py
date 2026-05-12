@@ -86,3 +86,23 @@ def test_file_routes_fallback_path_still_works_when_shared_pool_disabled(monkeyp
     assert app_state.aux_llm is sentinel
     assert len(built) == 1
     assert built[0]["http_client"] is None
+
+
+def test_resolve_app_owned_llm_error_mentions_unified_llm_keys(monkeypatch):
+    app_state = SimpleNamespace(
+        shared_llm_adapter=None,
+        aux_llm=None,
+        shared_llm_http_pool=None,
+    )
+    monkeypatch.setattr(
+        file_route_service_module,
+        "resolve_generation_runtime_inputs",
+        lambda **kwargs: SimpleNamespace(api_key="", base_url="", model=""),
+    )
+
+    try:
+        file_route_service_module.resolve_app_owned_llm(app_state=app_state, logger=None)
+    except RuntimeError as exc:
+        assert "LLM_API_KEY" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")

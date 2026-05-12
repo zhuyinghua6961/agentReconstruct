@@ -43,7 +43,7 @@ def decompose_question(
     response = chat_completion(
         prompt=prompt,
         client=client,
-        model=config.DECOMPOSE_MODEL,
+        model=config.LLM_MODEL,
         temperature=0.3,  # 低温度保证输出格式稳定
         max_tokens=2048,
         enable_thinking=enable_thinking,

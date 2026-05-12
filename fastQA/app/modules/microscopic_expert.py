@@ -152,21 +152,19 @@ class MicroscopicSemanticExpert:
         logger: Any | None = None,
         should_cancel: Any | None = None,
     ) -> dict[str, Any]:
-        provider = str(os.getenv("QA_RETRIEVAL_RERANK_PROVIDER", "dashscope") or "dashscope").strip()
+        provider = str(os.getenv("RERANK_PROVIDER", "local") or "local").strip()
         provider_norm = provider.lower()
-        raw_api_key = str(os.getenv("QA_RETRIEVAL_RERANK_API_KEY", "") or "").strip()
+        raw_api_key = str(os.getenv("RERANK_API_KEY", "") or "").strip()
         if provider_norm == "local":
             api_key = raw_api_key
             default_base_url = "http://localhost:8084"
         else:
-            api_key = raw_api_key or str(os.getenv("DASHSCOPE_API_KEY", "") or "").strip()
+            api_key = raw_api_key
             default_base_url = "https://dashscope.aliyuncs.com"
-        base_url = str(
-            os.getenv("QA_RETRIEVAL_RERANK_BASE_URL", default_base_url) or default_base_url
-        ).strip()
-        model = str(os.getenv("QA_RETRIEVAL_RERANK_MODEL", "qwen3-vl-rerank") or "qwen3-vl-rerank").strip()
+        base_url = str(os.getenv("RERANK_BASE_URL", default_base_url) or default_base_url).strip()
+        model = str(os.getenv("RERANK_MODEL", "qwen3-vl-rerank") or "qwen3-vl-rerank").strip()
         try:
-            timeout_seconds = float(str(os.getenv("QA_RETRIEVAL_RERANK_TIMEOUT", "20") or "20").strip())
+            timeout_seconds = float(str(os.getenv("RERANK_TIMEOUT_SECONDS", "20") or "20").strip())
         except Exception:
             timeout_seconds = 20.0
 

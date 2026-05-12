@@ -87,9 +87,10 @@ def test_gateway_settings_expose_admission_defaults(monkeypatch):
 
     settings = GatewaySettings.from_env()
 
-    assert settings.redis.enabled is False
+    assert settings.redis.enabled is True
     assert settings.redis.key_prefix == "gateway"
-    assert settings.admission.enabled is False
+    assert settings.admission.enabled is True
+    assert settings.admission.dispatcher_enabled is True
     assert settings.admission.runtime_role == "web"
     assert settings.admission.max_concurrent == 20
     assert settings.admission.fast_or_patent_max_concurrent == 20
@@ -100,6 +101,18 @@ def test_gateway_settings_expose_admission_defaults(monkeypatch):
     assert settings.admission.queued_ttl_seconds == 900
     assert settings.admission.post_admit_attach_ttl_seconds == 600
     assert settings.refresh_survivable_qa_tasks_enabled is False
+
+
+def test_gateway_settings_keep_mandatory_redis_and_admission_enabled(monkeypatch):
+    monkeypatch.setenv("REDIS_ENABLED", "0")
+    monkeypatch.setenv("GATEWAY_ADMISSION_ENABLED", "0")
+    monkeypatch.setenv("GATEWAY_ADMISSION_DISPATCHER_ENABLED", "0")
+
+    settings = GatewaySettings.from_env()
+
+    assert settings.redis.enabled is True
+    assert settings.admission.enabled is True
+    assert settings.admission.dispatcher_enabled is True
 
 
 def test_gateway_settings_accept_runtime_role_and_redis_env(monkeypatch):

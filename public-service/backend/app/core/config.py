@@ -229,7 +229,7 @@ def get_settings() -> Settings:
         mysql_user=str(os.getenv("MYSQL_USER", "root") or "root").strip(),
         mysql_password=str(os.getenv("MYSQL_PASSWORD", "") or "").strip(),
         mysql_database=str(os.getenv("MYSQL_DATABASE", "agent_reconstruct") or "agent_reconstruct").strip(),
-        redis_enabled=_get_bool("REDIS_ENABLED", False),
+        redis_enabled=True,
         redis_url=(str(os.getenv("REDIS_URL", "") or "").strip() or None),
         redis_host=str(os.getenv("REDIS_HOST", "127.0.0.1") or "127.0.0.1").strip(),
         redis_port=_get_int("REDIS_PORT", 6379, minimum=1, maximum=65535),

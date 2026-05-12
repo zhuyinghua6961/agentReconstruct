@@ -2069,6 +2069,54 @@ def test_get_task_events_stream_replays_then_live_tails_until_terminal():
     assert payloads[2]["status"] == "canceled"
 
 
+def test_get_task_events_stream_appends_terminal_state_when_queue_terminal_has_no_terminal_frame():
+    _set_health_transport()
+    queue_store = app.state.execution_queue_status_store
+    relay_store = app.state.execution_event_relay_store
+    queue_store.put_request(
+        {
+            "request_id": "req_events_missing_terminal_frame",
+            "status": "failed",
+            "conversation_id": 88,
+            "user_id": 42,
+            "assistant_message_id": "msg_missing_terminal",
+            "requested_mode": "fast",
+            "actual_mode": "fast",
+            "route": "kb_qa",
+            "queue_tier": "high",
+            "created_at": "2026-04-06T10:00:00+00:00",
+            "updated_at": "2026-04-06T10:00:10+00:00",
+            "started_at": "2026-04-06T10:00:05+00:00",
+            "failed_at": "2026-04-06T10:00:10+00:00",
+            "failure_reason": "stream_ended_without_done",
+        },
+        ttl_seconds=900,
+    )
+    relay_store.append_frame("req_events_missing_terminal_frame", {"type": "state", "status": "queued"}, ttl_seconds=900)
+    relay_store.append_frame("req_events_missing_terminal_frame", {"type": "state", "status": "running"}, ttl_seconds=900)
+    relay_store.append_frame("req_events_missing_terminal_frame", {"type": "content", "delta": "partial"}, ttl_seconds=900)
+    client = TestClient(app)
+
+    with client.stream(
+        "GET",
+        "/api/v1/tasks/req_events_missing_terminal_frame/events",
+        params={"after_seq": 3},
+        headers={"accept": "text/event-stream"},
+    ) as response:
+        body = b"".join(response.iter_bytes())
+
+    assert response.status_code == 200
+    payloads = _sse_payloads(body)
+    assert [item["seq"] for item in payloads] == [4]
+    assert payloads[0]["type"] == "state"
+    assert payloads[0]["status"] == "failed"
+    replay = client.get(
+        "/api/v1/tasks/req_events_missing_terminal_frame/events",
+        params={"after_seq": 3},
+    ).json()["events"]
+    assert replay == payloads
+
+
 def test_get_task_events_filters_duplicate_upstream_seq_and_ignores_post_terminal_replay_frames():
     _set_health_transport()
     queue_store = app.state.execution_queue_status_store

@@ -9,6 +9,20 @@ import pytest
 import env_loader
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _env_keys(path: Path) -> set[str]:
+    keys: set[str] = set()
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key = line.split("=", 1)[0].removeprefix("export ").strip()
+        keys.add(key)
+    return keys
+
+
 def _reload_config_module():
     import config
 
@@ -220,8 +234,15 @@ def test_resolve_resource_root_defaults_to_repo_resource(monkeypatch):
 def test_config_uses_env_values_and_resolves_relative_paths(monkeypatch):
     state_root = Path("/tmp/highthinking-state")
     asset_root = Path("/tmp/highthinking-assets")
-    monkeypatch.setenv("DASHSCOPE_API_KEY", "masked")
+    monkeypatch.setenv("LLM_API_KEY", "masked")
     monkeypatch.setenv("LLM_MODEL", "unit-test-model")
+    monkeypatch.setenv("LLM_ENABLE_THINKING", "0")
+    monkeypatch.setenv("DECOMPOSE_MODEL", "legacy-decompose")
+    monkeypatch.setenv("DIRECT_ANSWER_MODEL", "legacy-direct")
+    monkeypatch.setenv("SUB_ANSWER_MODEL", "legacy-sub")
+    monkeypatch.setenv("CHECKER_MODEL", "legacy-checker")
+    monkeypatch.setenv("DIRECT_ANSWER_ENABLE_THINKING", "1")
+    monkeypatch.setenv("DECOMPOSE_ENABLE_THINKING", "1")
     monkeypatch.setenv("HIGHTHINKINGQA_SERVICE_STATE_ROOT", str(state_root))
     monkeypatch.setenv("HIGHTHINKINGQA_SERVICE_ASSET_ROOT", str(asset_root))
     monkeypatch.setenv("PAPERS_DIR", "tmp-papers")
@@ -232,8 +253,11 @@ def test_config_uses_env_values_and_resolves_relative_paths(monkeypatch):
 
     reloaded = importlib.reload(config)
 
-    assert reloaded.DASHSCOPE_API_KEY == "masked"
+    assert reloaded.LLM_API_KEY == "masked"
     assert reloaded.LLM_MODEL == "unit-test-model"
+    assert reloaded.MAIN_LLM_THINKING_ENABLED is True
+    assert reloaded.DIRECT_STAGE_THINKING_ENABLED is False
+    assert reloaded.DECOMPOSE_STAGE_THINKING_ENABLED is False
     assert reloaded.PAPERS_DIR == str((state_root / "tmp-papers").resolve())
     assert reloaded.PROMPTS_DIR == str((asset_root / "custom-prompts").resolve())
     assert reloaded.CHROMA_PERSIST_DIR == str((state_root / "custom-vdb").resolve())
@@ -396,3 +420,73 @@ def test_config_defaults_conversation_rollout_to_public_service(tmp_path, monkey
     assert reloaded.CONVERSATION_EXECUTION_CONTEXT_READ_TARGET == 'public_service'
     assert reloaded.CONVERSATION_ASSISTANT_WRITE_TARGET == 'public_service'
     assert reloaded.CONVERSATION_OVERLAY_ENABLED is False
+
+
+def test_highthinkingqa_resource_config_surface_uses_service_embedding_namespace():
+    shared_keys = _env_keys(REPO_ROOT / "resource/config/services/highThinkingQA/config.shared.env")
+    env_example_keys = _env_keys(REPO_ROOT / "resource/config/services/highThinkingQA/config.env.example")
+    secret_keys = _env_keys(REPO_ROOT / "resource/config/services/highThinkingQA/config.secret.env.example")
+
+    assert {
+        "LLM_ENABLE_THINKING",
+        "DECOMPOSE_MODEL",
+        "DIRECT_ANSWER_MODEL",
+        "SUB_ANSWER_MODEL",
+        "DIRECT_ANSWER_ENABLE_THINKING",
+        "DECOMPOSE_ENABLE_THINKING",
+        "EMBEDDING_BASE_URL",
+        "EMBEDDING_MODEL",
+        "EMBEDDING_DIMENSIONS",
+        "OCR_BASE_URL",
+        "OCR_MODEL",
+        "OCR_CONCURRENCY",
+        "OCR_MAX_CONCURRENT_REQUESTS",
+        "OCR_PAGES_PER_BATCH",
+        "OCR_MAX_RETRIES",
+        "OCR_RETRY_BASE",
+        "CHECKER_MODEL",
+        "EMBED_BATCH_SIZE",
+        "EMBED_API_RPM",
+        "EMBED_API_TPM",
+        "EMBED_CONCURRENCY",
+        "EMBED_MAX_CONCURRENT_REQUESTS",
+        "EMBED_MAX_INPUT_TOKENS",
+        "EMBED_MAX_RETRIES",
+        "EMBED_QUEUE_SIZE",
+        "CHAT_PERSIST_ENABLED",
+        "CHAT_PERSIST_ASYNC",
+    }.isdisjoint(shared_keys)
+
+    assert {
+        "LLM_MODEL",
+        "HIGHTHINKINGQA_EMBEDDING_BASE_URL",
+        "HIGHTHINKINGQA_EMBEDDING_MODEL",
+        "HIGHTHINKINGQA_EMBEDDING_DIMENSIONS",
+        "HIGHTHINKINGQA_EMBEDDING_BATCH_SIZE",
+        "HIGHTHINKINGQA_EMBEDDING_API_RPM",
+        "HIGHTHINKINGQA_EMBEDDING_API_TPM",
+        "HIGHTHINKINGQA_EMBEDDING_CONCURRENCY",
+        "HIGHTHINKINGQA_EMBEDDING_MAX_CONCURRENT_REQUESTS",
+        "HIGHTHINKINGQA_EMBEDDING_MAX_INPUT_TOKENS",
+        "HIGHTHINKINGQA_EMBEDDING_MAX_RETRIES",
+        "HIGHTHINKINGQA_EMBEDDING_QUEUE_SIZE",
+        "ASK_STREAM_MAX_CONCURRENT",
+        "REDIS_KEY_PREFIX",
+    } <= shared_keys
+
+    assert {
+        "DASHSCOPE_API_KEY",
+        "LLM_ENABLE_THINKING",
+        "DECOMPOSE_MODEL",
+        "DIRECT_ANSWER_MODEL",
+        "SUB_ANSWER_MODEL",
+        "DIRECT_ANSWER_ENABLE_THINKING",
+        "DECOMPOSE_ENABLE_THINKING",
+    }.isdisjoint(env_example_keys)
+    assert {
+        "HIGHTHINKINGQA_EMBEDDING_BASE_URL",
+        "HIGHTHINKINGQA_EMBEDDING_MODEL",
+        "HIGHTHINKINGQA_EMBEDDING_DIMENSIONS",
+    } <= env_example_keys
+    assert {"LLM_API_KEY", "HIGHTHINKINGQA_EMBEDDING_API_KEY"} <= secret_keys
+    assert {"DASHSCOPE_API_KEY", "EMBEDDING_API_KEY", "OCR_API_KEY"}.isdisjoint(secret_keys)

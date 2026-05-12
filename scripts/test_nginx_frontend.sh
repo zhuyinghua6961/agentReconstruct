@@ -41,10 +41,10 @@ echo "checking proxied health via $BASE_URL/health"
 curl -fsS "$BASE_URL/health" >"$HEALTH_FILE"
 jq -e '.success == true' "$HEALTH_FILE" >/dev/null
 
-REDIS_ENABLED="$(jq -r '.components.redis.enabled // false' "$HEALTH_FILE")"
+REDIS_HEALTH_ENABLED="$(jq -r '.components.redis.enabled // false' "$HEALTH_FILE")"
 REDIS_LIVE_AVAILABLE="$(jq -r '.components.redis.live_available // false' "$HEALTH_FILE")"
 
-echo "redis_enabled=$REDIS_ENABLED"
+echo "redis_enabled=$REDIS_HEALTH_ENABLED"
 echo "redis_live_available=$REDIS_LIVE_AVAILABLE"
 
 if [[ -z "$AUTH_BEARER_TOKEN" || -z "$ASK_STREAM_JSON_FILE" || -z "$TASK_REQUEST_PAYLOAD_FILE" ]]; then
@@ -52,7 +52,7 @@ if [[ -z "$AUTH_BEARER_TOKEN" || -z "$ASK_STREAM_JSON_FILE" || -z "$TASK_REQUEST
   exit 0
 fi
 
-if [[ "$REDIS_ENABLED" != "true" || "$REDIS_LIVE_AVAILABLE" != "true" ]]; then
+if [[ "$REDIS_HEALTH_ENABLED" != "true" || "$REDIS_LIVE_AVAILABLE" != "true" ]]; then
   echo "skipping task recovery checks because REDIS is not live through gateway health"
   exit 0
 fi

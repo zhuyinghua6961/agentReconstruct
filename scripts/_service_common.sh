@@ -244,7 +244,7 @@ wait_for_service_health() {
 
 gateway_admission_worker_enabled() {
   load_gateway_env_files
-  env_bool "${GATEWAY_ADMISSION_WORKER_ENABLED:-0}"
+  return 0
 }
 
 gateway_admission_worker_pid_file() {

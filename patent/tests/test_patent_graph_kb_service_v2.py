@@ -41,6 +41,26 @@ def test_route_v2_returns_skip_graph_result(monkeypatch):
     assert result.diagnostics["tri_state_mode"] == "skip_graph"
 
 
+def test_route_v2_analytical_relation_question_skips_without_graph_execution(monkeypatch):
+    def _fail_execute(**kwargs):
+        raise AssertionError("skip_graph analytical relation should not execute a graph query")
+
+    monkeypatch.setattr(patent_graph_service, "execute_patent_prepared_query", _fail_execute)
+
+    result = route_patent_graph_kb_v2(
+        question="磷酸铁锂磨砂粒径与产品性能间的关系",
+        conversation_context={},
+        neo4j_client=object(),
+        max_rows=10,
+    )
+
+    assert result.mode == "skip_graph"
+    assert result.direct_result is None
+    assert result.rag_payload is None
+    assert result.diagnostics["tri_state_mode"] == "skip_graph"
+    assert result.diagnostics["matched_rule"] == "analytical_relation_question"
+
+
 def test_route_v2_returns_direct_answer_result(monkeypatch):
     plan = PatentGraphQueryPlanV2(
         strategy="template",

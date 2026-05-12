@@ -74,9 +74,9 @@ def create_app() -> FastAPI:
         "ASK_EXECUTOR_MAX_WORKERS": settings.ask_executor_max_workers,
         "ASK_TIMEOUT_SECONDS": settings.ask_timeout_seconds,
         "SSE_HEARTBEAT_SECONDS": settings.sse_heartbeat_seconds,
-        "CHAT_PERSIST_ENABLED": settings.chat_persist_enabled,
-        "CHAT_PERSIST_ASYNC": settings.chat_persist_async,
-        "CHAT_PERSIST_ASYNC_WORKERS": settings.chat_persist_async_workers,
+        "chat_persistence_enabled": settings.chat_persist_enabled,
+        "chat_persistence_async": settings.chat_persist_async,
+        "chat_persistence_async_workers": settings.chat_persist_async_workers,
         "ENABLE_CORS": settings.enable_cors,
         "CORS_ORIGINS": settings.cors_origins,
     }

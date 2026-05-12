@@ -208,15 +208,39 @@ def test_hybrid_synthesis_client_from_env_reads_hybrid_budget(monkeypatch):
         def close(self):
             raise AssertionError("injected client should not be closed by this test")
 
-    monkeypatch.setenv("PATENT_OPENAI_API_KEY", "key")
-    monkeypatch.setenv("PATENT_OPENAI_BASE_URL", "https://example.com")
-    monkeypatch.setenv("PATENT_OPENAI_MODEL", "model")
+    monkeypatch.setenv("LLM_API_KEY", "key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://example.com")
+    monkeypatch.setenv("LLM_MODEL", "model")
     monkeypatch.setenv("PATENT_HYBRID_MAX_TOKENS", "4096")
 
     client = PatentHybridSynthesisClient.from_env(http_client=_FakeHttpClient())
 
     assert client is not None
     assert client.runtime_signature()["max_tokens"] == 4096
+
+
+def test_hybrid_synthesis_client_from_env_prefers_unified_llm_namespace(monkeypatch):
+    class _FakeHttpClient:
+        def close(self):
+            raise AssertionError("injected client should not be closed by this test")
+
+    monkeypatch.setenv("LLM_API_KEY", "llm-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("LLM_MODEL", "llm-model")
+    monkeypatch.setenv("LLM_READ_TIMEOUT_SECONDS", "47")
+    monkeypatch.setenv("PATENT_OPENAI_API_KEY", "patent-key")
+    monkeypatch.setenv("PATENT_OPENAI_BASE_URL", "https://patent.example/v1")
+    monkeypatch.setenv("PATENT_OPENAI_MODEL", "patent-model")
+    monkeypatch.setenv("PATENT_OPENAI_TIMEOUT_SECONDS", "99")
+
+    client = PatentHybridSynthesisClient.from_env(http_client=_FakeHttpClient())
+
+    assert client is not None
+    signature = client.runtime_signature()
+    assert signature["model"] == "llm-model"
+    assert signature["timeout_seconds"] == 47.0
+    assert client._api_key == "llm-key"
+    assert client._base_url == "https://llm.example/v1"
 
 
 def test_config_shared_env_example_includes_tabular_and_hybrid_answer_knobs():

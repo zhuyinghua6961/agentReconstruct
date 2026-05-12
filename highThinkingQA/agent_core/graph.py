@@ -414,13 +414,13 @@ def run_agent(
     )
     total_start = time.time()
     working_question = state.effective_question or state.question
-    resolved_enable_thinking = config.LLM_ENABLE_THINKING if enable_thinking is None else bool(enable_thinking)
+    resolved_enable_thinking = config.MAIN_LLM_THINKING_ENABLED if enable_thinking is None else bool(enable_thinking)
     resolved_stream_synthesis_enable_thinking = False if stream_callback else resolved_enable_thinking
     resolved_direct_answer_enable_thinking = (
-        config.DIRECT_ANSWER_ENABLE_THINKING if enable_thinking is None else bool(enable_thinking)
+        config.DIRECT_STAGE_THINKING_ENABLED if enable_thinking is None else bool(enable_thinking)
     )
     resolved_decompose_enable_thinking = (
-        config.DECOMPOSE_ENABLE_THINKING if enable_thinking is None else bool(enable_thinking)
+        config.DECOMPOSE_STAGE_THINKING_ENABLED if enable_thinking is None else bool(enable_thinking)
     )
     resolved_num_sub_questions = int(num_sub_questions) if num_sub_questions is not None else int(config.NUM_SUB_QUESTIONS)
     resolved_retrieval_top_k = int(retrieval_top_k) if retrieval_top_k is not None else int(config.RETRIEVAL_TOP_K)
@@ -481,7 +481,7 @@ def run_agent(
             logger.info("%sstep1 direct_answer start", _trace_prefix(trace_id))
             answer = get_or_compute_direct_answer(
                 question=working_question,
-                model=config.DIRECT_ANSWER_MODEL,
+                model=config.LLM_MODEL,
                 enable_thinking=resolved_direct_answer_enable_thinking,
                 compute_fn=lambda: direct_answer(
                     working_question,
@@ -503,7 +503,7 @@ def run_agent(
             logger.info("%sstep1 decompose start", _trace_prefix(trace_id))
             questions = get_or_compute_decompose(
                 question=working_question,
-                model=config.DECOMPOSE_MODEL,
+                model=config.LLM_MODEL,
                 enable_thinking=resolved_decompose_enable_thinking,
                 num_sub_questions=resolved_num_sub_questions,
                 compute_fn=lambda: decompose_question(

@@ -37,7 +37,7 @@ def direct_answer(
         chat_completion_stream(
             prompt=prompt,
             client=client,
-            model=config.DIRECT_ANSWER_MODEL,
+            model=config.LLM_MODEL,
             temperature=0.7,
             max_tokens=4096,
             enable_thinking=enable_thinking,

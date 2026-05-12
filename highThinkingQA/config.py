@@ -55,6 +55,26 @@ def _get_int(name: str, default: int, *, minimum: int | None = None, maximum: in
     return value
 
 
+def _get_int_from_names(*names: str, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
+    selected = None
+    for name in names:
+        raw = str(os.getenv(name, "") or "").strip()
+        if raw:
+            selected = name
+            break
+    if selected is None:
+        return _get_int("", default, minimum=minimum, maximum=maximum)
+    return _get_int(selected, default, minimum=minimum, maximum=maximum)
+
+
+def _first_env(*names: str, default: str = "") -> str:
+    for name in names:
+        raw = str(os.getenv(name, "") or "").strip()
+        if raw:
+            return raw
+    return default
+
+
 def _get_optional_conversation_target(name: str) -> str | None:
     raw = str(os.getenv(name, "") or "").strip().lower()
     if not raw:
@@ -149,46 +169,41 @@ def _resolve_asset_path(name: str, default: str) -> str:
 
 @dataclass(frozen=True)
 class RuntimeSettings:
-    dashscope_api_key: str
     llm_base_url: str
     llm_model: str
     llm_api_key: str
-    llm_enable_thinking: bool
-    decompose_model: str
-    direct_answer_model: str
-    sub_answer_model: str
-    direct_answer_enable_thinking: bool
-    decompose_enable_thinking: bool
+    main_llm_thinking_enabled: bool
+    direct_stage_thinking_enabled: bool
+    decompose_stage_thinking_enabled: bool
     embedding_base_url: str
     embedding_model: str
     embedding_api_key: str
     embedding_dimensions: int
-    ocr_base_url: str
-    ocr_model: str
-    ocr_api_key: str
+    vlm_base_url: str
+    vlm_model: str
+    vlm_api_key: str
     max_chunk_tokens: int
     semantic_chunk_min_tokens: int
     semantic_chunk_max_tokens: int
     tiktoken_encoding: str
     chroma_persist_dir: str
     chroma_collection_name: str
-    ocr_concurrency: int
-    ocr_max_concurrent_requests: int
-    ocr_pages_per_batch: int
-    ocr_max_retries: int
-    ocr_retry_base: int
-    embed_batch_size: int
-    embed_api_rpm: int
-    embed_api_tpm: int
-    embed_concurrency: int
-    embed_max_concurrent_requests: int
-    embed_max_input_tokens: int
-    embed_max_retries: int
-    embed_queue_size: int
+    vlm_concurrency: int
+    vlm_max_concurrent_requests: int
+    vlm_pages_per_batch: int
+    vlm_max_retries: int
+    vlm_retry_base: int
+    embedding_batch_size: int
+    embedding_api_rpm: int
+    embedding_api_tpm: int
+    embedding_concurrency: int
+    embedding_max_concurrent_requests: int
+    embedding_max_input_tokens: int
+    embedding_max_retries: int
+    embedding_queue_size: int
     retrieval_top_k: int
     retrieval_pipeline_batch_size: int
     num_sub_questions: int
-    checker_model: str
     max_check_loops: int
     cache_dir: str
     parsed_markdown_cache_dir: str
@@ -240,72 +255,61 @@ class GunicornSettings:
 
 
 def get_runtime_settings() -> RuntimeSettings:
-    dashscope_api_key = str(os.getenv("DASHSCOPE_API_KEY", "") or "").strip()
-    openai_api_key = str(os.getenv("OPENAI_API_KEY", "") or "").strip()
-    llm_api_key = str(os.getenv("LLM_API_KEY") or openai_api_key or dashscope_api_key or "").strip()
-    embedding_api_key = str(os.getenv("EMBEDDING_API_KEY") or llm_api_key or "").strip()
-    ocr_api_key = str(os.getenv("OCR_API_KEY") or llm_api_key or "").strip()
+    llm_api_key = str(os.getenv("LLM_API_KEY") or "").strip()
+    llm_model = str(os.getenv("LLM_MODEL", "qwen3-max") or "qwen3-max").strip()
+    embedding_api_key = _first_env("HIGHTHINKINGQA_EMBEDDING_API_KEY")
 
     return RuntimeSettings(
-        dashscope_api_key=dashscope_api_key,
-        llm_base_url=str(
-            os.getenv("LLM_BASE_URL")
-            or os.getenv("OPENAI_BASE_URL")
-            or os.getenv("DASHSCOPE_BASE_URL")
-            or "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        ).strip(),
-        llm_model=str(os.getenv("LLM_MODEL", "qwen3-max") or "qwen3-max").strip(),
+        llm_base_url=str(os.getenv("LLM_BASE_URL") or "https://dashscope.aliyuncs.com/compatible-mode/v1").strip(),
+        llm_model=llm_model,
         llm_api_key=llm_api_key,
-        llm_enable_thinking=_get_bool("LLM_ENABLE_THINKING", True),
-        decompose_model=str(os.getenv("DECOMPOSE_MODEL", os.getenv("LLM_MODEL", "qwen3-max")) or os.getenv("LLM_MODEL", "qwen3-max")).strip(),
-        direct_answer_model=str(os.getenv("DIRECT_ANSWER_MODEL", os.getenv("LLM_MODEL", "qwen3-max")) or os.getenv("LLM_MODEL", "qwen3-max")).strip(),
-        sub_answer_model=str(os.getenv("SUB_ANSWER_MODEL", os.getenv("LLM_MODEL", "qwen3-max")) or os.getenv("LLM_MODEL", "qwen3-max")).strip(),
-        direct_answer_enable_thinking=_get_bool("DIRECT_ANSWER_ENABLE_THINKING", False),
-        decompose_enable_thinking=_get_bool("DECOMPOSE_ENABLE_THINKING", False),
-        embedding_base_url=str(
-            os.getenv(
-                "EMBEDDING_BASE_URL",
-                os.getenv("OPENAI_BASE_URL")
-                or os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-            )
-            or "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        ).strip(),
-        embedding_model=str(os.getenv("EMBEDDING_MODEL", "text-embedding-v4") or "text-embedding-v4").strip(),
+        main_llm_thinking_enabled=True,
+        direct_stage_thinking_enabled=False,
+        decompose_stage_thinking_enabled=False,
+        embedding_base_url=_first_env(
+            "HIGHTHINKINGQA_EMBEDDING_BASE_URL",
+            default="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        ),
+        embedding_model=_first_env("HIGHTHINKINGQA_EMBEDDING_MODEL", default="text-embedding-v4"),
         embedding_api_key=embedding_api_key,
-        embedding_dimensions=_get_int("EMBEDDING_DIMENSIONS", 2048, minimum=1),
-        ocr_base_url=str(
-            os.getenv(
-                "OCR_BASE_URL",
-                os.getenv("OPENAI_BASE_URL")
-                or os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-            )
-            or "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        ).strip(),
-        ocr_model=str(os.getenv("OCR_MODEL", "qwen-vl-ocr-2025-11-20") or "qwen-vl-ocr-2025-11-20").strip(),
-        ocr_api_key=ocr_api_key,
+        embedding_dimensions=_get_int_from_names(
+            "HIGHTHINKINGQA_EMBEDDING_DIMENSIONS",
+            default=2048,
+            minimum=1,
+        ),
+        vlm_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        vlm_model="qwen-vl-ocr-2025-11-20",
+        vlm_api_key="",
         max_chunk_tokens=_get_int("MAX_CHUNK_TOKENS", 4000, minimum=1),
         semantic_chunk_min_tokens=_get_int("SEMANTIC_CHUNK_MIN_TOKENS", 2000, minimum=1),
         semantic_chunk_max_tokens=_get_int("SEMANTIC_CHUNK_MAX_TOKENS", 4000, minimum=1),
         tiktoken_encoding=str(os.getenv("TIKTOKEN_ENCODING", "cl100k_base") or "cl100k_base").strip(),
         chroma_persist_dir=_resolve_state_path("CHROMA_PERSIST_DIR", "vectordb"),
         chroma_collection_name=str(os.getenv("CHROMA_COLLECTION_NAME", "lfp_papers") or "lfp_papers").strip(),
-        ocr_concurrency=_get_int("OCR_CONCURRENCY", 40, minimum=1),
-        ocr_max_concurrent_requests=_get_int("OCR_MAX_CONCURRENT_REQUESTS", 40, minimum=1),
-        ocr_pages_per_batch=_get_int("OCR_PAGES_PER_BATCH", 3, minimum=1),
-        ocr_max_retries=_get_int("OCR_MAX_RETRIES", 5, minimum=0),
-        ocr_retry_base=_get_int("OCR_RETRY_BASE", 3, minimum=1),
-        embed_batch_size=_get_int("EMBED_BATCH_SIZE", 10, minimum=1),
-        embed_api_rpm=_get_int("EMBED_API_RPM", 1800, minimum=1),
-        embed_api_tpm=_get_int("EMBED_API_TPM", 1_200_000, minimum=1),
-        embed_concurrency=_get_int("EMBED_CONCURRENCY", 2, minimum=1),
-        embed_max_concurrent_requests=_get_int("EMBED_MAX_CONCURRENT_REQUESTS", 4, minimum=1),
-        embed_max_input_tokens=_get_int("EMBED_MAX_INPUT_TOKENS", 8000, minimum=1),
-        embed_max_retries=_get_int("EMBED_MAX_RETRIES", 5, minimum=0),
-        embed_queue_size=_get_int("EMBED_QUEUE_SIZE", 200, minimum=1),
+        vlm_concurrency=40,
+        vlm_max_concurrent_requests=40,
+        vlm_pages_per_batch=3,
+        vlm_max_retries=5,
+        vlm_retry_base=3,
+        embedding_batch_size=_get_int_from_names("HIGHTHINKINGQA_EMBEDDING_BATCH_SIZE", default=10, minimum=1),
+        embedding_api_rpm=_get_int_from_names("HIGHTHINKINGQA_EMBEDDING_API_RPM", default=1800, minimum=1),
+        embedding_api_tpm=_get_int_from_names("HIGHTHINKINGQA_EMBEDDING_API_TPM", default=1_200_000, minimum=1),
+        embedding_concurrency=_get_int_from_names("HIGHTHINKINGQA_EMBEDDING_CONCURRENCY", default=2, minimum=1),
+        embedding_max_concurrent_requests=_get_int_from_names(
+            "HIGHTHINKINGQA_EMBEDDING_MAX_CONCURRENT_REQUESTS",
+            default=4,
+            minimum=1,
+        ),
+        embedding_max_input_tokens=_get_int_from_names(
+            "HIGHTHINKINGQA_EMBEDDING_MAX_INPUT_TOKENS",
+            default=8000,
+            minimum=1,
+        ),
+        embedding_max_retries=_get_int_from_names("HIGHTHINKINGQA_EMBEDDING_MAX_RETRIES", default=5, minimum=0),
+        embedding_queue_size=_get_int_from_names("HIGHTHINKINGQA_EMBEDDING_QUEUE_SIZE", default=200, minimum=1),
         retrieval_top_k=_get_int("RETRIEVAL_TOP_K", 3, minimum=1),
         retrieval_pipeline_batch_size=_get_int("RETRIEVAL_PIPELINE_BATCH_SIZE", 2, minimum=1),
         num_sub_questions=_get_int("NUM_SUB_QUESTIONS", 5, minimum=1),
-        checker_model=str(os.getenv("CHECKER_MODEL", "qwen3.5-plus") or "qwen3.5-plus").strip(),
         max_check_loops=_get_int("MAX_CHECK_LOOPS", 2, minimum=0),
         cache_dir=_resolve_state_path("CACHE_DIR", "cache"),
         parsed_markdown_cache_dir=_resolve_state_path("PARSED_MARKDOWN_CACHE_DIR", "cache/parsed_markdown"),
@@ -332,8 +336,8 @@ def get_http_service_settings() -> HttpServiceSettings:
         ask_executor_max_workers=_get_int("ASK_EXECUTOR_MAX_WORKERS", 5, minimum=1),
         ask_timeout_seconds=_get_int("ASK_TIMEOUT_SECONDS", 1800, minimum=10),
         sse_heartbeat_seconds=_get_int("SSE_HEARTBEAT_SECONDS", 15, minimum=1),
-        chat_persist_enabled=_get_bool("CHAT_PERSIST_ENABLED", True),
-        chat_persist_async=_get_bool("CHAT_PERSIST_ASYNC", True),
+        chat_persist_enabled=True,
+        chat_persist_async=True,
         chat_persist_async_workers=_get_int("CHAT_PERSIST_ASYNC_WORKERS", 4, minimum=1),
         enable_cors=_get_bool("ENABLE_CORS", True),
         cors_origins=str(os.getenv("CORS_ORIGINS", "*") or "*").strip(),
@@ -375,46 +379,41 @@ HTTP_SETTINGS = get_http_service_settings()
 CONVERSATION_ROLLOUT_SETTINGS = get_conversation_rollout_settings()
 GUNICORN_SETTINGS = get_gunicorn_settings()
 
-DASHSCOPE_API_KEY = SETTINGS.dashscope_api_key
 LLM_BASE_URL = SETTINGS.llm_base_url
 LLM_MODEL = SETTINGS.llm_model
 LLM_API_KEY = SETTINGS.llm_api_key
-LLM_ENABLE_THINKING = SETTINGS.llm_enable_thinking
-DECOMPOSE_MODEL = SETTINGS.decompose_model
-DIRECT_ANSWER_MODEL = SETTINGS.direct_answer_model
-SUB_ANSWER_MODEL = SETTINGS.sub_answer_model
-DIRECT_ANSWER_ENABLE_THINKING = SETTINGS.direct_answer_enable_thinking
-DECOMPOSE_ENABLE_THINKING = SETTINGS.decompose_enable_thinking
+MAIN_LLM_THINKING_ENABLED = SETTINGS.main_llm_thinking_enabled
+DIRECT_STAGE_THINKING_ENABLED = SETTINGS.direct_stage_thinking_enabled
+DECOMPOSE_STAGE_THINKING_ENABLED = SETTINGS.decompose_stage_thinking_enabled
 EMBEDDING_BASE_URL = SETTINGS.embedding_base_url
 EMBEDDING_MODEL = SETTINGS.embedding_model
 EMBEDDING_API_KEY = SETTINGS.embedding_api_key
 EMBEDDING_DIMENSIONS = SETTINGS.embedding_dimensions
-OCR_BASE_URL = SETTINGS.ocr_base_url
-OCR_MODEL = SETTINGS.ocr_model
-OCR_API_KEY = SETTINGS.ocr_api_key
+VLM_BASE_URL = SETTINGS.vlm_base_url
+VLM_MODEL = SETTINGS.vlm_model
+VLM_API_KEY = SETTINGS.vlm_api_key
 MAX_CHUNK_TOKENS = SETTINGS.max_chunk_tokens
 SEMANTIC_CHUNK_MIN_TOKENS = SETTINGS.semantic_chunk_min_tokens
 SEMANTIC_CHUNK_MAX_TOKENS = SETTINGS.semantic_chunk_max_tokens
 TIKTOKEN_ENCODING = SETTINGS.tiktoken_encoding
 CHROMA_PERSIST_DIR = SETTINGS.chroma_persist_dir
 CHROMA_COLLECTION_NAME = SETTINGS.chroma_collection_name
-OCR_CONCURRENCY = SETTINGS.ocr_concurrency
-OCR_MAX_CONCURRENT_REQUESTS = SETTINGS.ocr_max_concurrent_requests
-OCR_PAGES_PER_BATCH = SETTINGS.ocr_pages_per_batch
-OCR_MAX_RETRIES = SETTINGS.ocr_max_retries
-OCR_RETRY_BASE = SETTINGS.ocr_retry_base
-EMBED_BATCH_SIZE = SETTINGS.embed_batch_size
-EMBED_API_RPM = SETTINGS.embed_api_rpm
-EMBED_API_TPM = SETTINGS.embed_api_tpm
-EMBED_CONCURRENCY = SETTINGS.embed_concurrency
-EMBED_MAX_CONCURRENT_REQUESTS = SETTINGS.embed_max_concurrent_requests
-EMBED_MAX_INPUT_TOKENS = SETTINGS.embed_max_input_tokens
-EMBED_MAX_RETRIES = SETTINGS.embed_max_retries
-EMBED_QUEUE_SIZE = SETTINGS.embed_queue_size
+VLM_CONCURRENCY = SETTINGS.vlm_concurrency
+VLM_MAX_CONCURRENT_REQUESTS = SETTINGS.vlm_max_concurrent_requests
+VLM_PAGES_PER_BATCH = SETTINGS.vlm_pages_per_batch
+VLM_MAX_RETRIES = SETTINGS.vlm_max_retries
+VLM_RETRY_BASE = SETTINGS.vlm_retry_base
+HIGHTHINKINGQA_EMBEDDING_BATCH_SIZE = SETTINGS.embedding_batch_size
+HIGHTHINKINGQA_EMBEDDING_API_RPM = SETTINGS.embedding_api_rpm
+HIGHTHINKINGQA_EMBEDDING_API_TPM = SETTINGS.embedding_api_tpm
+HIGHTHINKINGQA_EMBEDDING_CONCURRENCY = SETTINGS.embedding_concurrency
+HIGHTHINKINGQA_EMBEDDING_MAX_CONCURRENT_REQUESTS = SETTINGS.embedding_max_concurrent_requests
+HIGHTHINKINGQA_EMBEDDING_MAX_INPUT_TOKENS = SETTINGS.embedding_max_input_tokens
+HIGHTHINKINGQA_EMBEDDING_MAX_RETRIES = SETTINGS.embedding_max_retries
+HIGHTHINKINGQA_EMBEDDING_QUEUE_SIZE = SETTINGS.embedding_queue_size
 RETRIEVAL_TOP_K = SETTINGS.retrieval_top_k
 RETRIEVAL_PIPELINE_BATCH_SIZE = SETTINGS.retrieval_pipeline_batch_size
 NUM_SUB_QUESTIONS = SETTINGS.num_sub_questions
-CHECKER_MODEL = SETTINGS.checker_model
 MAX_CHECK_LOOPS = SETTINGS.max_check_loops
 CACHE_DIR = SETTINGS.cache_dir
 PARSED_MARKDOWN_CACHE_DIR = SETTINGS.parsed_markdown_cache_dir
@@ -430,8 +429,6 @@ ASK_STREAM_MAX_CONCURRENT = HTTP_SETTINGS.ask_stream_max_concurrent
 ASK_EXECUTOR_MAX_WORKERS = HTTP_SETTINGS.ask_executor_max_workers
 ASK_TIMEOUT_SECONDS = HTTP_SETTINGS.ask_timeout_seconds
 SSE_HEARTBEAT_SECONDS = HTTP_SETTINGS.sse_heartbeat_seconds
-CHAT_PERSIST_ENABLED = HTTP_SETTINGS.chat_persist_enabled
-CHAT_PERSIST_ASYNC = HTTP_SETTINGS.chat_persist_async
 CHAT_PERSIST_ASYNC_WORKERS = HTTP_SETTINGS.chat_persist_async_workers
 ENABLE_CORS = HTTP_SETTINGS.enable_cors
 CORS_ORIGINS = HTTP_SETTINGS.cors_origins

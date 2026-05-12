@@ -654,6 +654,39 @@ def test_stage2_targeted_retrieval_passes_rerank_arguments(monkeypatch):
     assert result["claim_to_results"]["claim one"]["rerank"] == {"provider": "test"}
 
 
+def test_stage2_targeted_retrieval_keeps_rerank_enabled_when_env_disables(monkeypatch):
+    monkeypatch.setenv("QA_RETRIEVAL_RERANK_ENABLED", "false")
+    monkeypatch.setenv("QA_RETRIEVAL_RERANK_CANDIDATES", "9")
+    monkeypatch.setenv("QA_STAGE2_FORCE_KEYWORD_INJECTION", "false")
+    monkeypatch.setenv("QA_STAGE2_ENTITY_LOCK_ENABLED", "false")
+    expert = _Expert(
+        responses={
+            "claim one": {
+                "documents": ["doc-a"],
+                "metadatas": [{"doi": "10.3/c"}],
+                "distances": [0.1],
+                "rerank": {"provider": "test"},
+            }
+        }
+    )
+
+    result = run_stage2_targeted_retrieval(
+        retrieval_claims=[{"claim": "claim one", "keywords": []}],
+        n_results_per_claim=1,
+        user_question="battery cycle life",
+        literature_expert=expert,
+        logger=logging.getLogger("test.stage2"),
+        client=None,
+        model=None,
+        preprocess_retrieval_query_fn=lambda query: query,
+        validate_retrieval_relevance_fn=lambda results, query, claim: results,
+    )
+
+    assert result["success"] is True
+    assert expert.calls[0]["use_rerank"] is True
+    assert expert.calls[0]["rerank_candidates"] == 9
+
+
 def test_stage2_targeted_retrieval_records_relevance_validation(monkeypatch):
     monkeypatch.delenv("QA_STAGE2_QUERY_EXPANSION_ENABLED", raising=False)
     monkeypatch.setenv("QA_STAGE2_FORCE_KEYWORD_INJECTION", "false")

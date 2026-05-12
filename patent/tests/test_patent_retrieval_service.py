@@ -522,7 +522,8 @@ def test_targeted_retrieval_records_graph_no_hit_fallback():
     assert payload["metadata"]["graph_candidate_patent_ids"] == ["CN123456789A"]
 
 
-def test_targeted_retrieval_claims_path_applies_graph_candidate_filter():
+def test_targeted_retrieval_claims_path_applies_graph_candidate_filter(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "false")
     chunk_calls: list[list[str] | None] = []
     service = PatentRetrievalService(
         identity_registry={"CN123456789A": "CN123456789A", "US20240001234A1": "US20240001234A1"},
@@ -711,7 +712,8 @@ def test_targeted_retrieval_preserves_multiple_localized_snippets_for_same_paten
     assert {item["section_type"] for item in payload["reference_objects"]} == {"claim", "description"}
 
 
-def test_targeted_retrieval_generates_query_per_claim_and_returns_unified_documents_metadata_distances():
+def test_targeted_retrieval_generates_query_per_claim_and_returns_unified_documents_metadata_distances(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "false")
     abstract_queries: list[str] = []
     chunk_calls: list[tuple[str, list[str] | None]] = []
     generated_calls: list[tuple[str, str]] = []
@@ -779,7 +781,8 @@ def test_targeted_retrieval_generates_query_per_claim_and_returns_unified_docume
     assert payload["distances"] == [0.03, 0.08]
 
 
-def test_targeted_retrieval_merges_multi_claim_results_and_dedups_by_document_prefix():
+def test_targeted_retrieval_merges_multi_claim_results_and_dedups_by_document_prefix(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "false")
     query_to_chunk = {
         "query-a": [
             {
@@ -2129,9 +2132,9 @@ def test_build_default_runtime_wires_stage2_rerank_fn_from_env(monkeypatch, tmp_
         def close(self):
             return None
 
-    monkeypatch.setenv("PATENT_STAGE2_RERANK_PROVIDER", "dashscope")
-    monkeypatch.setenv("PATENT_STAGE2_RERANK_API_KEY", "patent-key")
-    monkeypatch.setenv("PATENT_STAGE2_RERANK_MODEL", "gte-rerank-v2")
+    monkeypatch.setenv("RERANK_PROVIDER", "dashscope")
+    monkeypatch.setenv("RERANK_API_KEY", "rerank-key")
+    monkeypatch.setenv("RERANK_MODEL", "gte-rerank-v2")
     archive_root = tmp_path / "archive"
     archive_root.mkdir()
     monkeypatch.setattr(

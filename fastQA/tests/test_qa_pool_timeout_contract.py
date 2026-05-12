@@ -199,6 +199,7 @@ def _install_generation_runtime(monkeypatch, runtime) -> None:
 
 def _install_pdf_bindings(monkeypatch, *, llm) -> None:
     monkeypatch.setenv("UPLOAD_QA_USE_SIDECAR", "0")
+    monkeypatch.setenv("UPLOAD_QA_SIDECAR_MODE", "off")
 
     def _answer_from_pdf(question, pdf_content, **kwargs):
         return answer_from_pdf_impl(
@@ -220,12 +221,26 @@ def _install_pdf_bindings(monkeypatch, *, llm) -> None:
         lambda **kwargs: ("PDF content " * 30, None),
     )
     monkeypatch.setattr(
-        "app.services.file_routes.get_pdf_bindings",
-        lambda app_state, logger: SimpleNamespace(
+        app.state,
+        "pdf_web_bindings",
+        SimpleNamespace(
             answer_from_pdf=_answer_from_pdf,
             extract_pdf_text=lambda *_args, **_kwargs: "PDF content " * 30,
         ),
+        raising=False,
     )
+
+
+def test_pdf_qa_sidecar_switch_ignores_disabled_env(monkeypatch):
+    from app.modules.qa_pdf.service import PdfQaService
+
+    monkeypatch.setenv("UPLOAD_QA_USE_SIDECAR", "0")
+
+    assert PdfQaService().should_use_sidecar(
+        turn_mode="file_only",
+        allow_kb_verification=False,
+        selected_pdf_files=[{"file_id": 1, "local_path": "/tmp/demo.pdf"}],
+    ) is True
 
 
 def test_sync_kb_route_surfaces_upstream_pool_timeout_as_http_503(monkeypatch):

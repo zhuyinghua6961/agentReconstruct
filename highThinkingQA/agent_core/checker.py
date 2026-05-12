@@ -310,7 +310,7 @@ def _run_checker_slice(
     raw = chat_completion(
         prompt=prompt,
         client=client,
-        model=config.CHECKER_MODEL,
+        model=config.LLM_MODEL,
         enable_thinking=False,
         max_tokens=4096,
         temperature=0.3,

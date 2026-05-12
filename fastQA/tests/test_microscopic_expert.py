@@ -60,10 +60,11 @@ def test_microscopic_expert_leases_rerank_session_when_pool_available(monkeypatc
         return {"documents": ["doc"], "metadatas": [], "rerank_scores": [0.9], "fallback": False, "provider": "test"}
 
     monkeypatch.setattr("app.modules.microscopic_expert.rerank_documents_impl", _fake_rerank_documents)
-    monkeypatch.setenv("QA_RETRIEVAL_RERANK_PROVIDER", "dashscope")
-    monkeypatch.setenv("QA_RETRIEVAL_RERANK_MODEL", "qwen3-vl-rerank")
-    monkeypatch.setenv("QA_RETRIEVAL_RERANK_BASE_URL", "https://dashscope.aliyuncs.com")
-    monkeypatch.setenv("QA_RETRIEVAL_RERANK_TIMEOUT", "20")
+    monkeypatch.setenv("RERANK_PROVIDER", "dashscope")
+    monkeypatch.setenv("RERANK_API_KEY", "rerank-key")
+    monkeypatch.setenv("RERANK_MODEL", "qwen3-vl-rerank")
+    monkeypatch.setenv("RERANK_BASE_URL", "https://dashscope.aliyuncs.com")
+    monkeypatch.setenv("RERANK_TIMEOUT_SECONDS", "20")
 
     expert = MicroscopicSemanticExpert.__new__(MicroscopicSemanticExpert)
     expert.rerank_session_pool = _LanePool()
@@ -73,6 +74,7 @@ def test_microscopic_expert_leases_rerank_session_when_pool_available(monkeypatc
     assert result["provider"] == "test"
     assert expert.rerank_session_pool.lease_called is True
     assert calls["session"] == "leased-session"
+    assert calls["api_key"] == "rerank-key"
 
 
 def test_microscopic_expert_local_rerank_does_not_inherit_dashscope_key_or_url(monkeypatch):
@@ -83,9 +85,9 @@ def test_microscopic_expert_local_rerank_does_not_inherit_dashscope_key_or_url(m
         return {"documents": ["doc"], "metadatas": [], "rerank_scores": [0.9], "fallback": False, "provider": "local"}
 
     monkeypatch.setattr("app.modules.microscopic_expert.rerank_documents_impl", _fake_rerank_documents)
-    monkeypatch.setenv("QA_RETRIEVAL_RERANK_PROVIDER", "local")
-    monkeypatch.delenv("QA_RETRIEVAL_RERANK_API_KEY", raising=False)
-    monkeypatch.delenv("QA_RETRIEVAL_RERANK_BASE_URL", raising=False)
+    monkeypatch.setenv("RERANK_PROVIDER", "local")
+    monkeypatch.delenv("RERANK_API_KEY", raising=False)
+    monkeypatch.delenv("RERANK_BASE_URL", raising=False)
     monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-key")
 
     expert = MicroscopicSemanticExpert.__new__(MicroscopicSemanticExpert)
@@ -97,6 +99,70 @@ def test_microscopic_expert_local_rerank_does_not_inherit_dashscope_key_or_url(m
     assert calls["provider"] == "local"
     assert calls["api_key"] == ""
     assert calls["base_url"] == "http://localhost:8084"
+
+
+def test_microscopic_expert_prefers_unified_rerank_namespace(monkeypatch):
+    calls = {}
+
+    def _fake_rerank_documents(**kwargs):
+        calls.update(kwargs)
+        return {"documents": ["doc"], "metadatas": [], "rerank_scores": [0.9], "fallback": False, "provider": "dashscope"}
+
+    monkeypatch.setattr("app.modules.microscopic_expert.rerank_documents_impl", _fake_rerank_documents)
+    monkeypatch.setenv("RERANK_PROVIDER", "dashscope")
+    monkeypatch.setenv("RERANK_API_KEY", "rerank-key")
+    monkeypatch.setenv("RERANK_BASE_URL", "https://rerank.example")
+    monkeypatch.setenv("RERANK_MODEL", "rerank-model")
+    monkeypatch.setenv("RERANK_TIMEOUT_SECONDS", "11")
+    monkeypatch.setenv("QA_RETRIEVAL_RERANK_PROVIDER", "local")
+    monkeypatch.setenv("QA_RETRIEVAL_RERANK_API_KEY", "legacy-key")
+    monkeypatch.setenv("QA_RETRIEVAL_RERANK_BASE_URL", "https://legacy.example")
+    monkeypatch.setenv("QA_RETRIEVAL_RERANK_MODEL", "legacy-model")
+    monkeypatch.setenv("QA_RETRIEVAL_RERANK_TIMEOUT", "22")
+
+    expert = MicroscopicSemanticExpert.__new__(MicroscopicSemanticExpert)
+    expert.rerank_session_pool = None
+
+    result = expert._rerank_documents(query="lfp", documents=["doc1"], metadatas=[], top_n=1)
+
+    assert result["provider"] == "dashscope"
+    assert calls["provider"] == "dashscope"
+    assert calls["api_key"] == "rerank-key"
+    assert calls["base_url"] == "https://rerank.example"
+    assert calls["model"] == "rerank-model"
+    assert calls["timeout_seconds"] == 11.0
+
+
+def test_microscopic_expert_ignores_retired_rerank_aliases(monkeypatch):
+    calls = {}
+
+    def _fake_rerank_documents(**kwargs):
+        calls.update(kwargs)
+        return {"documents": ["doc"], "metadatas": [], "rerank_scores": [0.9], "fallback": False, "provider": "local"}
+
+    monkeypatch.setattr("app.modules.microscopic_expert.rerank_documents_impl", _fake_rerank_documents)
+    monkeypatch.delenv("RERANK_PROVIDER", raising=False)
+    monkeypatch.delenv("RERANK_API_KEY", raising=False)
+    monkeypatch.delenv("RERANK_BASE_URL", raising=False)
+    monkeypatch.delenv("RERANK_MODEL", raising=False)
+    monkeypatch.delenv("RERANK_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setenv("QA_RETRIEVAL_RERANK_PROVIDER", "dashscope")
+    monkeypatch.setenv("QA_RETRIEVAL_RERANK_API_KEY", "legacy-key")
+    monkeypatch.setenv("QA_RETRIEVAL_RERANK_BASE_URL", "https://legacy.example")
+    monkeypatch.setenv("QA_RETRIEVAL_RERANK_MODEL", "legacy-model")
+    monkeypatch.setenv("QA_RETRIEVAL_RERANK_TIMEOUT", "22")
+
+    expert = MicroscopicSemanticExpert.__new__(MicroscopicSemanticExpert)
+    expert.rerank_session_pool = None
+
+    result = expert._rerank_documents(query="lfp", documents=["doc1"], metadatas=[], top_n=1)
+
+    assert result["provider"] == "local"
+    assert calls["provider"] == "local"
+    assert calls["api_key"] == ""
+    assert calls["base_url"] == "http://localhost:8084"
+    assert calls["model"] == "qwen3-vl-rerank"
+    assert calls["timeout_seconds"] == 20.0
 
 
 def test_microscopic_expert_wraps_rerank_http_call_with_gate(monkeypatch):

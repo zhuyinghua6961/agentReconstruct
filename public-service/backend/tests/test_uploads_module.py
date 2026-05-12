@@ -414,6 +414,7 @@ def test_clear_pdf_resets_runtime_path():
 def test_upload_processing_config_prefers_new_worker_env_names(monkeypatch):
     from app.modules.conversation.upload_processing_worker import UploadProcessingConfig
 
+    monkeypatch.setenv("UPLOAD_FILE_PROCESSING_ENABLED", "0")
     monkeypatch.setenv("UPLOAD_PROCESSING_WORKER_MAX_WORKERS", "5")
     monkeypatch.setenv("UPLOAD_FILE_PROCESSING_MAX_WORKERS", "2")
     monkeypatch.setenv("UPLOAD_PROCESSING_MAX_PDF_PAGES", "33")
@@ -421,6 +422,7 @@ def test_upload_processing_config_prefers_new_worker_env_names(monkeypatch):
 
     config = UploadProcessingConfig.from_env()
 
+    assert config.enabled is True
     assert config.max_workers == 5
     assert config.pdf_max_pages == 33
 

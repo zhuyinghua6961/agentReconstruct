@@ -101,7 +101,7 @@ def _persist_upload_metadata_if_needed(
     size_bytes: int | None,
     storage_ref: str | None,
 ) -> dict[str, Any]:
-    if not bool(request.app.state.config.get("CHAT_PERSIST_ENABLED", False)):
+    if not bool(request.app.state.config.get("chat_persistence_enabled", False)):
         return {}
 
     user_id_num = _to_int(user_id)

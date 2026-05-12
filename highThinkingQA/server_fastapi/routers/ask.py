@@ -160,11 +160,11 @@ def _bind_auth_context(ask_request, context: AuthContext):
 
 
 def _chat_persist_enabled(request: Request) -> bool:
-    return bool(request.app.state.config.get("CHAT_PERSIST_ENABLED", False))
+    return bool(request.app.state.config.get("chat_persistence_enabled", False))
 
 
 def _chat_persist_async_enabled(request: Request) -> bool:
-    return bool(request.app.state.config.get("CHAT_PERSIST_ASYNC", True))
+    return bool(request.app.state.config.get("chat_persistence_async", True))
 
 
 def _header_truthy(value) -> bool:

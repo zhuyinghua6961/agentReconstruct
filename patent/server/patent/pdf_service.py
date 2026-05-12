@@ -867,39 +867,18 @@ class PatentPdfAnswerClient:
 
     @classmethod
     def from_env(cls, *, http_client: Any | None = None) -> "PatentPdfAnswerClient | None":
-        api_key = _first_env(
-            "PATENT_OPENAI_API_KEY",
-            "LLM_API_KEY",
-            "OPENAI_API_KEY",
-            "DASHSCOPE_API_KEY",
-        )
-        base_url = _first_env(
-            "PATENT_OPENAI_BASE_URL",
-            "LLM_BASE_URL",
-            "OPENAI_BASE_URL",
-            "DASHSCOPE_BASE_URL",
-        )
-        model = _first_env(
-            "PATENT_OPENAI_MODEL",
-            "LLM_MODEL",
-            "OPENAI_MODEL",
-            "DASHSCOPE_MODEL",
-        )
+        api_key = _first_env("LLM_API_KEY")
+        base_url = _first_env("LLM_BASE_URL")
+        model = _first_env("LLM_MODEL")
         if not api_key or not base_url or not model:
             return None
         return cls(
             api_key=api_key,
             base_url=base_url,
             model=model,
-            timeout_seconds=_env_float("PATENT_OPENAI_TIMEOUT_SECONDS", 30.0),
-            top_p=_env_float("PATENT_OPENAI_TOP_P", 0.95),
-            max_tokens=max(
-                1024,
-                _env_int(
-                    "PATENT_OPENAI_MAX_TOKENS",
-                    _env_int("PDF_QA_MAX_TOKENS", 2500),
-                ),
-            ),
+            timeout_seconds=_env_float("LLM_READ_TIMEOUT_SECONDS", 30.0),
+            top_p=0.95,
+            max_tokens=max(1024, _env_int("PDF_QA_MAX_TOKENS", 2500)),
             http_client=http_client,
         )
 

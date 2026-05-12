@@ -34,7 +34,7 @@ def _question_hash(question: str) -> str:
 
 
 def _runtime_model_name(runtime: Any) -> str:
-    raw = str(getattr(runtime, "model", "") or os.getenv("DASHSCOPE_MODEL", "unknown")).strip()
+    raw = str(getattr(runtime, "model", "") or os.getenv("LLM_MODEL", "unknown")).strip()
     return raw or "unknown"
 
 

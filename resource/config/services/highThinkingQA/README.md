@@ -16,15 +16,14 @@ Load order for the service process:
 highThinkingQA owns:
 
 - Gunicorn worker/thread/timeouts, CORS, SSE, and ask concurrency
-- thinking-mode model choices such as `LLM_MODEL`, `DECOMPOSE_MODEL`,
-  `DIRECT_ANSWER_MODEL`, `SUB_ANSWER_MODEL`, `CHECKER_MODEL`, and thinking flags
-- DashScope embedding/OCR model choices and dimensions
-- chunking, retrieval, ingestion, cache, and conversation persistence behavior
+- thinking-mode model choice through `LLM_MODEL`
+- highThinkingQA-specific embedding endpoint, model, dimensions, and ingestion limits
+- chunking, retrieval, ingestion, cache, and conversation persistence capacity
 - local paper, prompt, Chroma, upload, and conversation paths
 - `REDIS_KEY_PREFIX=highthinkingqa`
 
 Shared config owns service ports, common Redis/MySQL/MinIO infrastructure defaults, model
-endpoint aliases, and graph endpoints. Use `config.env` or process env for local overrides;
+endpoints, and graph endpoints. Use `config.env` or process env for local overrides;
 do not commit filled secret files.
 
 Runtime/state/assets should resolve via the `resource/` contract when the service runs from this monorepo.

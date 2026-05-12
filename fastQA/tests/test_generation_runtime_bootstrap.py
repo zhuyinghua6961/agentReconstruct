@@ -9,17 +9,15 @@ from app.modules.generation_pipeline.runtime_bootstrap import (
     ensure_literature_expert,
     resolve_generation_runtime_inputs,
 )
+from app.modules.generation_pipeline.query_expander import QueryExpander
 
 
 def test_resolve_generation_runtime_inputs_uses_service_roots(monkeypatch, tmp_path):
     state_root = (tmp_path / "state").resolve()
     asset_root = (tmp_path / "assets").resolve()
-    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.com/v1")
-    monkeypatch.setenv("OPENAI_MODEL", "gpt-test")
-    monkeypatch.delenv("LLM_API_KEY", raising=False)
-    monkeypatch.delenv("LLM_BASE_URL", raising=False)
-    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.setenv("LLM_API_KEY", "llm-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://example.com/v1")
+    monkeypatch.setenv("LLM_MODEL", "gpt-test")
     monkeypatch.setenv("EMBEDDING_MODEL_TYPE", "local")
     monkeypatch.setenv("EMBEDDING_MODEL_PATH", "models/bge")
     monkeypatch.setenv("VECTOR_DB_PATH", "vectordb")
@@ -33,14 +31,14 @@ def test_resolve_generation_runtime_inputs_uses_service_roots(monkeypatch, tmp_p
         asset_root=asset_root,
     )
 
-    assert resolved.api_key == "openai-key"
+    assert resolved.api_key == "llm-key"
     assert resolved.base_url == "https://example.com/v1"
     assert resolved.model == "gpt-test"
     assert resolved.embedding_model_path == str((asset_root / "models/bge").resolve())
     assert resolved.chroma_db_path == str((state_root / "vectordb").resolve())
 
 
-def test_resolve_generation_runtime_inputs_accepts_dashscope_aliases(monkeypatch, tmp_path):
+def test_resolve_generation_runtime_inputs_ignores_retired_llm_aliases(monkeypatch, tmp_path):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
@@ -60,9 +58,47 @@ def test_resolve_generation_runtime_inputs_accepts_dashscope_aliases(monkeypatch
         asset_root=tmp_path / "assets",
     )
 
-    assert resolved.api_key == "dash-key"
+    assert resolved.api_key == ""
     assert resolved.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
     assert resolved.model == "qwen-plus"
+
+
+def test_resolve_generation_runtime_inputs_prefers_unified_llm_namespace(monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_API_KEY", "llm-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("LLM_MODEL", "llm-model")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openai.example/v1")
+    monkeypatch.setenv("OPENAI_MODEL", "openai-model")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dash-key")
+    monkeypatch.setenv("DASHSCOPE_BASE_URL", "https://dash.example/v1")
+    monkeypatch.setenv("DASHSCOPE_MODEL", "dash-model")
+
+    resolved = resolve_generation_runtime_inputs(
+        api_key=None,
+        base_url=None,
+        model=None,
+        config=None,
+        state_root=tmp_path / "state",
+        asset_root=tmp_path / "assets",
+    )
+
+    assert resolved.api_key == "llm-key"
+    assert resolved.base_url == "https://llm.example/v1"
+    assert resolved.model == "llm-model"
+
+
+def test_query_expander_prefers_unified_llm_model(monkeypatch):
+    monkeypatch.setenv("LLM_API_KEY", "llm-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("LLM_MODEL", "llm-model")
+    monkeypatch.setenv("QUERY_EXPANSION_MODEL", "query-model")
+
+    expander = QueryExpander()
+
+    assert expander.api_key == "llm-key"
+    assert expander.base_url == "https://llm.example/v1"
+    assert expander.model == "llm-model"
 
 
 def test_build_openai_client_uses_local_factory(monkeypatch):
@@ -108,6 +144,7 @@ def test_build_openai_client_uses_local_factory(monkeypatch):
         "FASTQA_LLM_HTTP_MAX_KEEPALIVE_CONNECTIONS",
         "LLM_CONNECT_TIMEOUT_SECONDS",
         "LLM_READ_TIMEOUT_SECONDS",
+        "LLM_STREAM_READ_TIMEOUT_SECONDS",
         "LLM_WRITE_TIMEOUT_SECONDS",
         "LLM_POOL_TIMEOUT_SECONDS",
         "LLM_KEEPALIVE_EXPIRY_SECONDS",
@@ -128,15 +165,54 @@ def test_build_openai_client_uses_local_factory(monkeypatch):
     assert client is sentinel
     assert calls["api_key"] == "key"
     assert calls["base_url"] == "https://example.com/v1"
-    assert calls["connect_timeout_seconds"] == 12.0
+    assert calls["connect_timeout_seconds"] == 15.0
     assert calls["read_timeout_seconds"] == 180.0
     assert calls["stream_read_timeout_seconds"] == 5.0
-    assert calls["write_timeout_seconds"] == 181.0
-    assert calls["pool_timeout_seconds"] == 9.0
+    assert calls["write_timeout_seconds"] == 180.0
+    assert calls["pool_timeout_seconds"] == 30.0
     assert calls["keepalive_expiry_seconds"] == 90.0
     assert calls["max_connections"] == 160
     assert calls["max_keepalive_connections"] == 64
     assert calls["http_client"] is None
+
+
+def test_build_openai_client_prefers_unified_llm_timeout_namespace(monkeypatch):
+    sentinel = object()
+    calls: dict[str, object] = {}
+
+    def _fake_builder(**kwargs):
+        calls.update(kwargs)
+        return sentinel
+
+    monkeypatch.setenv("LLM_CONNECT_TIMEOUT_SECONDS", "11")
+    monkeypatch.setenv("LLM_READ_TIMEOUT_SECONDS", "222")
+    monkeypatch.setenv("LLM_STREAM_READ_TIMEOUT_SECONDS", "333")
+    monkeypatch.setenv("LLM_WRITE_TIMEOUT_SECONDS", "44")
+    monkeypatch.setenv("LLM_POOL_TIMEOUT_SECONDS", "5")
+    monkeypatch.setenv("LLM_KEEPALIVE_EXPIRY_SECONDS", "66")
+    monkeypatch.setenv("LLM_MAX_CONNECTIONS", "77")
+    monkeypatch.setenv("LLM_MAX_KEEPALIVE_CONNECTIONS", "8")
+    monkeypatch.setenv("FASTQA_LLM_HTTP_CONNECT_TIMEOUT_SECONDS", "15")
+    monkeypatch.setenv("FASTQA_LLM_HTTP_READ_TIMEOUT_SECONDS", "180")
+    monkeypatch.setenv("FASTQA_LLM_HTTP_STREAM_READ_TIMEOUT_SECONDS", "601")
+    monkeypatch.setenv("FASTQA_LLM_HTTP_WRITE_TIMEOUT_SECONDS", "181")
+    monkeypatch.setenv("FASTQA_LLM_HTTP_POOL_TIMEOUT_SECONDS", "30")
+    monkeypatch.setenv("FASTQA_LLM_HTTP_KEEPALIVE_EXPIRY_SECONDS", "90")
+    monkeypatch.setenv("FASTQA_LLM_HTTP_MAX_CONNECTIONS", "160")
+    monkeypatch.setenv("FASTQA_LLM_HTTP_MAX_KEEPALIVE_CONNECTIONS", "64")
+    monkeypatch.setattr("app.modules.generation_pipeline.runtime_bootstrap.build_chat_completions_client", _fake_builder)
+
+    client = build_openai_client(api_key="key", base_url="https://example.com/v1")
+
+    assert client is sentinel
+    assert calls["connect_timeout_seconds"] == 11.0
+    assert calls["read_timeout_seconds"] == 222.0
+    assert calls["stream_read_timeout_seconds"] == 333.0
+    assert calls["write_timeout_seconds"] == 44.0
+    assert calls["pool_timeout_seconds"] == 5.0
+    assert calls["keepalive_expiry_seconds"] == 66.0
+    assert calls["max_connections"] == 77
+    assert calls["max_keepalive_connections"] == 8
 
 
 def test_ensure_literature_expert_uses_resolved_paths():

@@ -4,7 +4,7 @@ import logging
 import os
 
 from app.integrations.llm import SharedHttpPoolConfig, build_chat_completions_client, raise_if_upstream_pool_timeout
-from app.integrations.llm.openai_compat import DEFAULT_OPENAI_COMPATIBLE_BASE_URL
+from app.integrations.llm.openai_compat import DEFAULT_LLM_COMPATIBLE_BASE_URL
 
 logger = logging.getLogger(__name__)
 
@@ -30,15 +30,13 @@ class QueryExpander:
         http_client=None,
         transport_config: SharedHttpPoolConfig | None = None,
     ) -> None:
-        self.api_key = api_key or os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+        self.api_key = api_key or os.getenv("LLM_API_KEY")
         self.base_url = (
             base_url
             or os.getenv("LLM_BASE_URL")
-            or os.getenv("OPENAI_BASE_URL")
-            or os.getenv("DASHSCOPE_BASE_URL")
-            or DEFAULT_OPENAI_COMPATIBLE_BASE_URL
+            or DEFAULT_LLM_COMPATIBLE_BASE_URL
         )
-        self.model = model or os.getenv("QUERY_EXPANSION_MODEL") or os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL") or os.getenv("DASHSCOPE_MODEL") or "qwen-plus"
+        self.model = model or os.getenv("LLM_MODEL") or "qwen-plus"
         self._http_client = http_client
         self._transport_config = transport_config or SharedHttpPoolConfig.from_env()
         self._client = None

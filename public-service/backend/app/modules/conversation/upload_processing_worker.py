@@ -57,9 +57,8 @@ class UploadProcessingConfig:
 
     @classmethod
     def from_env(cls) -> "UploadProcessingConfig":
-        enabled = str(os.getenv("UPLOAD_FILE_PROCESSING_ENABLED", "1")).strip() != "0"
         return cls(
-            enabled=enabled,
+            enabled=True,
             max_workers=_env_int_alias(
                 ("UPLOAD_PROCESSING_WORKER_MAX_WORKERS", "UPLOAD_FILE_PROCESSING_MAX_WORKERS"),
                 2,

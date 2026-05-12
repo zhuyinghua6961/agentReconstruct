@@ -61,6 +61,10 @@ def _is_material_attribute_question(slots: PatentGraphQuestionSlots) -> bool:
     return bool(slots.material_terms and slots.asks_attribute_value)
 
 
+def _is_analytical_relation_question(slots: PatentGraphQuestionSlots) -> bool:
+    return bool(slots.asks_analytical_relation)
+
+
 def classify_patent_graph_question_v2(
     *,
     question: str,
@@ -124,6 +128,17 @@ def classify_patent_graph_question_v2(
             route_family="hybrid",
             standalone=standalone,
             diagnostics=_diagnostics(slots, matched_rule="multi_patent_compare", candidates=candidates),
+        )
+    elif (
+        _is_analytical_relation_question(slots)
+        and not slots.patent_ids
+        and not _is_explicit_patent_listing_or_count(slots)
+    ):
+        decision = PatentGraphSemanticDecision(
+            mode="skip_graph",
+            route_family="semantic",
+            standalone=standalone,
+            diagnostics=_diagnostics(slots, matched_rule="analytical_relation_question", candidates=candidates),
         )
     elif slots.applicant_names and (slots.asks_trend_landscape or slots.process_terms or slots.material_terms) and not (slots.asks_count or slots.asks_list):
         decision = PatentGraphSemanticDecision(

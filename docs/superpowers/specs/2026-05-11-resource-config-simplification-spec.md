@@ -8,7 +8,13 @@ This spec defines the target contract for simplifying `resource/config/**` after
 
 The goal is to keep only deployment-sensitive settings in configuration files and move fixed runtime decisions into code defaults. The final configuration surface should preserve connection information, secrets, storage/database/cache endpoints, graph database endpoints, model endpoints, request capacity limits, and business scale parameters. Feature switches that are confirmed mandatory should no longer be configurable; they should be hardcoded enabled. Warmup/preheat behavior should be hardcoded disabled for local deployment.
 
-This document is the spec for the future cleanup. It does not itself change code or config files.
+This document was written as the spec for the cleanup. The 2026-05-11 implementation has applied the target contract in code and committed config templates; tests may still mention retired keys when asserting they are ignored, and historical scan tables may still mention retired keys as migration evidence.
+
+Implementation status:
+
+- `resource/config/**` no longer carries retired model aliases, fixed enable switches, or warmup/preheat controls.
+- Runtime code no longer falls back to `OPENAI_*`, `DASHSCOPE_*`, `PATENT_OPENAI_*`, `QA_RETRIEVAL_RERANK_*` endpoint aliases, `PATENT_STAGE2_RERANK_*` endpoint aliases, `PATENT_EMBEDDING_*`, highThinkingQA legacy `EMBED_*`, OCR keys, or stage-specific model keys.
+- Current operator guidance is the target key lists in this spec plus the implementation note in the code map; older generated scan sections are historical evidence, not an active config contract.
 
 Primary reference:
 

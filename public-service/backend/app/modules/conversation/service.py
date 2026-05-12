@@ -3411,7 +3411,6 @@ class ConversationService:
         status_code = self.status_code_for(result, ok_status=200)
         if not result.get("success"):
             return result, status_code, None
-        use_proxy = str(os.getenv("MINIO_USE_PROXY", "1") or "1").strip().lower() in {"1", "true", "yes", "on"}
         try:
             expires_seconds = max(1, int(str(os.getenv("MINIO_DOWNLOAD_EXPIRES", "3600") or "3600").strip()))
         except Exception:
@@ -3419,7 +3418,7 @@ class ConversationService:
         download = storage_service.resolve_download(
             file_row=result.get("data") or {},
             project_root=str(self._workspace_root),
-            use_proxy=use_proxy,
+            use_proxy=True,
             expires_seconds=expires_seconds,
         )
         if download is None:

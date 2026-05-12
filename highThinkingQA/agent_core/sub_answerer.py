@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 def _build_sub_answer_kwargs(prompt: str) -> dict:
     """构建子问题预回答的 API 调用参数（关闭思考模式以加快速度）"""
     return {
-        "model": config.SUB_ANSWER_MODEL,
+        "model": config.LLM_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "extra_body": {"enable_thinking": False},
         "temperature": 0.5,

@@ -41,7 +41,7 @@ def test_gateway_admission_worker_enabled_loads_gateway_env_files(tmp_path):
     assert completed.stdout.strip() == "enabled"
 
 
-def test_gateway_admission_worker_enabled_preserves_explicit_env_over_env_file(tmp_path):
+def test_gateway_admission_worker_enabled_ignores_disabled_process_env(tmp_path):
     env_file = tmp_path / "gateway.env"
     env_file.write_text("GATEWAY_ADMISSION_WORKER_ENABLED=1\n", encoding="utf-8")
 
@@ -57,7 +57,7 @@ def test_gateway_admission_worker_enabled_preserves_explicit_env_over_env_file(t
     )
 
     assert completed.returncode == 0
-    assert completed.stdout.strip() == "disabled"
+    assert completed.stdout.strip() == "enabled"
 
 
 def test_wait_for_pid_state_requires_stable_running_process(tmp_path):

@@ -13,8 +13,8 @@ are commit-safe templates with blank placeholder values.
 - `infrastructure.shared.env`: service hosts/ports, gateway backend URLs, and common
   MySQL/Redis/MinIO non-secret defaults.
 - `infrastructure.secret.env.example`: local template for shared infrastructure secrets.
-- `model-endpoints.shared.env`: unified `LLM_*`, `EMBEDDING_*`, `RERANK_*`, and `OCR_*`
-  endpoint/model/timeout defaults, plus legacy aliases during migration.
+- `model-endpoints.shared.env`: unified `LLM_*`, `EMBEDDING_*`, and `RERANK_*`
+  endpoint/model/timeout defaults.
 - `model-endpoints.secret.env.example`: local template for model API keys.
 - `graph.shared.env`: namespaced Neo4j URLs, usernames, and database names for fastQA,
   patent, and public-service, plus legacy aliases during migration.

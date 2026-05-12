@@ -50,17 +50,9 @@ def _build_private_http_client(*, httpx_module: Any, transport_config: SharedHtt
 
 def init_llm(logger, *, http_client: Any | None = None) -> Any:
     """Initialize PDF QA fallback LLM, preferring DashScope native/OpenAI-compatible transport."""
-    dashscope_api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
-    dashscope_base_url = (
-        os.getenv("LLM_BASE_URL")
-        or os.getenv("OPENAI_BASE_URL")
-        or os.getenv("DASHSCOPE_BASE_URL")
-        or "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    )
-    model = os.getenv(
-        "PDF_QA_MODEL",
-        os.getenv("LLM_MODEL", os.getenv("OPENAI_MODEL", os.getenv("DASHSCOPE_MODEL", "deepseek-v3.1"))),
-    )
+    dashscope_api_key = os.getenv("LLM_API_KEY")
+    dashscope_base_url = os.getenv("LLM_BASE_URL") or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    model = os.getenv("LLM_MODEL") or "deepseek-v3.1"
     temperature = _env_float("PDF_QA_TEMPERATURE", 0.5)
     top_p = _env_float("PDF_QA_TOP_P", 0.95)
     max_tokens = max(1, _env_int("PDF_QA_MAX_TOKENS", 2500))
@@ -147,4 +139,4 @@ def init_llm(logger, *, http_client: Any | None = None) -> Any:
             logger.info("LLM初始化成功，回退OpenAI兼容适配器: %s", model)
             return llm
 
-    raise ValueError("请设置LLM_API_KEY、OPENAI_API_KEY或DASHSCOPE_API_KEY环境变量")
+    raise ValueError("请设置LLM_API_KEY环境变量")

@@ -81,9 +81,6 @@ class PdfQaService:
         selected_pdf_files: list[dict[str, Any]],
         pdf_path: str | None = None,
     ) -> bool:
-        if not _env_bool(env_get, "UPLOAD_QA_USE_SIDECAR", False):
-            return False
-
         mode = _env_str(env_get, "UPLOAD_QA_SIDECAR_MODE", "file_only").lower()
         if mode in {"off", "0", "false"}:
             return False

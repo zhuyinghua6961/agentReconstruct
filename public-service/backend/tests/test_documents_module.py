@@ -55,6 +55,31 @@ def test_smart_translator_prefers_unified_llm_aliases(monkeypatch):
     assert calls == {"api_key": "llm-key", "base_url": "https://llm.example/v1"}
 
 
+def test_smart_translator_ignores_retired_llm_aliases(monkeypatch):
+    calls: dict[str, object] = {}
+
+    class _FakeOpenAI:
+        def __init__(self, **kwargs):
+            calls.update(kwargs)
+
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openai.example/v1")
+    monkeypatch.setenv("OPENAI_MODEL", "openai-model")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dash-key")
+    monkeypatch.setenv("DASHSCOPE_BASE_URL", "https://dash.example/v1")
+    monkeypatch.setenv("DASHSCOPE_MODEL", "dash-model")
+
+    translator = SmartTranslator(_FakeOpenAI)
+
+    assert translator.api_key == ""
+    assert translator.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    assert translator.model == "deepseek-v3.1"
+    assert calls == {}
+
+
 def test_documents_service_prefers_unified_llm_aliases(monkeypatch, tmp_path):
     monkeypatch.setenv("PUBLIC_SERVICE_DATA_ROOT", str(tmp_path))
     monkeypatch.setenv("LLM_API_KEY", "llm-key")
@@ -72,6 +97,25 @@ def test_documents_service_prefers_unified_llm_aliases(monkeypatch, tmp_path):
     assert service._openai_api_key == "llm-key"
     assert service._openai_base_url == "https://llm.example/v1"
     assert service._openai_model == "llm-model"
+
+
+def test_documents_service_ignores_retired_llm_aliases(monkeypatch, tmp_path):
+    monkeypatch.setenv("PUBLIC_SERVICE_DATA_ROOT", str(tmp_path))
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openai.example/v1")
+    monkeypatch.setenv("OPENAI_MODEL", "openai-model")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dash-key")
+    monkeypatch.setenv("DASHSCOPE_BASE_URL", "https://dash.example/v1")
+    monkeypatch.setenv("DASHSCOPE_MODEL", "dash-model")
+
+    service = DocumentsService()
+
+    assert service._openai_api_key == ""
+    assert service._openai_base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    assert service._openai_model == "deepseek-v3.1"
 
 
 def test_view_pdf_route_serves_file(monkeypatch, tmp_path):

@@ -41,6 +41,14 @@ def _float_env(name: str, default: float, *, minimum: float, maximum: float) -> 
     return max(float(minimum), min(float(maximum), value))
 
 
+def _first_env(*names: str, default: str = "") -> str:
+    for name in names:
+        raw = str(os.getenv(name, "") or "").strip()
+        if raw:
+            return raw
+    return default
+
+
 def rerank_patent_stage2_documents(
     *,
     query: str,
@@ -183,17 +191,15 @@ def rerank_patent_stage2_documents(
 
 
 def build_patent_stage2_rerank_fn(*, logger: Any = None, requests_module: Any = None, session: Any = None):
-    provider = str(os.getenv("PATENT_STAGE2_RERANK_PROVIDER", "none") or "none").strip().lower()
+    provider = _first_env("RERANK_PROVIDER", default="none").lower()
     if provider in {"", "none", "off", "disabled"}:
         return None
-    raw_api_key = str(os.getenv("PATENT_STAGE2_RERANK_API_KEY", "") or "").strip()
+    raw_api_key = _first_env("RERANK_API_KEY")
     api_key = raw_api_key
     default_base_url = "http://localhost:8084" if provider == "local" else "https://dashscope.aliyuncs.com"
-    if provider == "dashscope":
-        api_key = raw_api_key or str(os.getenv("DASHSCOPE_API_KEY", "") or "").strip()
-    base_url = str(os.getenv("PATENT_STAGE2_RERANK_BASE_URL", default_base_url) or default_base_url).strip()
-    model = str(os.getenv("PATENT_STAGE2_RERANK_MODEL", "qwen3-vl-rerank") or "qwen3-vl-rerank").strip()
-    timeout_seconds = _float_env("PATENT_STAGE2_RERANK_TIMEOUT_SECONDS", 20.0, minimum=0.5, maximum=300.0)
+    base_url = _first_env("RERANK_BASE_URL", default=default_base_url)
+    model = _first_env("RERANK_MODEL", default="qwen3-vl-rerank")
+    timeout_seconds = _float_env("RERANK_TIMEOUT_SECONDS", 20.0, minimum=0.5, maximum=300.0)
 
     def _rerank_fn(**kwargs):
         return rerank_patent_stage2_documents(

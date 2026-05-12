@@ -118,9 +118,9 @@ class GatewaySettings:
         thinking_base_url = str(os.getenv("THINKING_BACKEND_BASE_URL", "http://127.0.0.1:8009") or "http://127.0.0.1:8009").rstrip("/")
         patent_base_url = str(os.getenv("PATENT_BACKEND_BASE_URL", "http://127.0.0.1:8010") or "http://127.0.0.1:8010").rstrip("/")
         strict_backend_config = _env_bool("GATEWAY_STRICT_BACKEND_CONFIG", False)
-        redis_enabled = _env_bool("REDIS_ENABLED", False)
+        redis_enabled = True
         gateway_runtime_role = str(os.getenv("GATEWAY_RUNTIME_ROLE", "web") or "web").strip().lower() or "web"
-        admission_enabled = _env_bool("GATEWAY_ADMISSION_ENABLED", False)
+        admission_enabled = True
         backend_warnings = _backend_config_warnings(
             fast=fast_base_url,
             thinking=thinking_base_url,
@@ -156,7 +156,7 @@ class GatewaySettings:
             admission=AdmissionSettings(
                 enabled=admission_enabled,
                 runtime_role=gateway_runtime_role,
-                dispatcher_enabled=_env_bool("GATEWAY_ADMISSION_DISPATCHER_ENABLED", admission_enabled),
+                dispatcher_enabled=True,
                 control_api_token=str(os.getenv("GATEWAY_ADMISSION_CONTROL_TOKEN", "") or "").strip(),
                 poll_interval_seconds=max(1, _env_int("GATEWAY_ADMISSION_POLL_INTERVAL_SECONDS", 5)),
                 max_concurrent=max(1, _env_int("INTERACTIVE_EXECUTION_MAX_CONCURRENT", 20)),

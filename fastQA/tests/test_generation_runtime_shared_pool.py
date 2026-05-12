@@ -122,12 +122,12 @@ def test_generation_driven_rag_query_expander_private_client_uses_shared_transpo
     assert calls["http_client"] is None
     assert calls["connect_timeout_seconds"] == 15.0
     assert calls["read_timeout_seconds"] == 180.0
-    assert calls["stream_read_timeout_seconds"] == 601.0
-    assert calls["write_timeout_seconds"] == 181.0
+    assert calls["stream_read_timeout_seconds"] == 600.0
+    assert calls["write_timeout_seconds"] == 180.0
     assert calls["pool_timeout_seconds"] == 30.0
     assert calls["max_connections"] == 160
     assert calls["max_keepalive_connections"] == 64
-    assert calls["keepalive_expiry_seconds"] == 90.0
+    assert calls["keepalive_expiry_seconds"] == 120.0
 
 
 def test_generation_runtime_degrades_to_private_path_when_shared_pool_bootstrap_fails(monkeypatch):

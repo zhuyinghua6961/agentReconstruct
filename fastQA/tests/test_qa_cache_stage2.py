@@ -87,6 +87,50 @@ def test_stage2_cache_roundtrip_normalizes_claims(monkeypatch):
     assert snapshot_cache_metrics()["stage2"]["cache_write"] == 1
 
 
+def test_stage2_cache_fingerprint_uses_fixed_rerank_and_unified_model(monkeypatch):
+    service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    runtime = SimpleNamespace(model="qwen-max")
+    claims = [{"claim": "lfp voltage", "keywords": ["LFP"]}]
+    monkeypatch.setenv("QA_RETRIEVAL_RERANK_ENABLED", "0")
+    monkeypatch.setenv("QA_RETRIEVAL_RERANK_PROVIDER", "legacy-provider")
+    monkeypatch.setenv("QA_RETRIEVAL_RERANK_MODEL", "legacy-model")
+    monkeypatch.setenv("RERANK_PROVIDER", "target-provider")
+    monkeypatch.setenv("RERANK_MODEL", "target-model")
+
+    first = build_stage2_cache_key(
+        redis_service=service,
+        runtime=runtime,
+        question="What is LFP voltage?",
+        retrieval_claims=claims,
+        n_results_per_claim=8,
+    )
+
+    monkeypatch.setenv("QA_RETRIEVAL_RERANK_ENABLED", "1")
+    monkeypatch.setenv("QA_RETRIEVAL_RERANK_PROVIDER", "legacy-provider-2")
+    monkeypatch.setenv("QA_RETRIEVAL_RERANK_MODEL", "legacy-model-2")
+
+    second = build_stage2_cache_key(
+        redis_service=service,
+        runtime=runtime,
+        question="What is LFP voltage?",
+        retrieval_claims=claims,
+        n_results_per_claim=8,
+    )
+
+    assert second == first
+
+    monkeypatch.setenv("RERANK_MODEL", "target-model-2")
+    third = build_stage2_cache_key(
+        redis_service=service,
+        runtime=runtime,
+        question="What is LFP voltage?",
+        retrieval_claims=claims,
+        n_results_per_claim=8,
+    )
+
+    assert third != first
+
+
 def test_stage2_cache_rejects_invalid_payloads():
     service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
     runtime = SimpleNamespace(model="qwen-max")

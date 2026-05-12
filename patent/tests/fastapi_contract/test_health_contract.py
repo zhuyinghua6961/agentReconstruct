@@ -54,11 +54,8 @@ def test_create_app_exposes_patent_runtime_defaults(monkeypatch):
     assert app.state.component_status["redis"]["ready"] is False
     assert app.state.component_status["authority"]["ready"] is False
     assert app.state.component_status["runtime"]["ready"] is True
-    assert app.state.component_status["shared_llm_pool"]["ready"] is False
-    assert app.state.component_status["shared_llm_pool"]["enabled"] is False
-    assert app.state.component_status["shared_llm_pool"]["status"] == "disabled"
-    assert app.state.component_status["planning_upstream_gate"]["enabled"] is False
-    assert app.state.component_status["planning_upstream_gate"]["status"] == "disabled"
+    assert app.state.component_status["shared_llm_pool"]["enabled"] is True
+    assert app.state.component_status["planning_upstream_gate"]["enabled"] is True
     assert app.state.shared_llm_pool is app.state.patent_shared_upstream_provider
     assert app.state.component_status["patent_graph_kb"]["ready"] is False
     assert app.state.component_status["patent_graph_kb"]["enabled"] is False
@@ -70,7 +67,7 @@ def test_create_app_exposes_patent_runtime_defaults(monkeypatch):
 def test_config_shared_env_example_documents_shared_upstream_pool_defaults():
     content = (ROOT_DIR / "config.shared.env.example").read_text(encoding="utf-8")
 
-    assert "PATENT_LLM_HTTP_SHARED_POOL_ENABLED=false" in content
+    assert "PATENT_LLM_HTTP_SHARED_POOL_ENABLED" not in content
     assert "PATENT_LLM_HTTP_KEEPALIVE_EXPIRY_SECONDS=120" in content
     assert "PATENT_LLM_HTTP_MAX_KEEPALIVE_CONNECTIONS=20" in content
     assert "PATENT_LLM_HTTP_MAX_CONNECTIONS=100" in content
@@ -250,7 +247,7 @@ def test_start_gunicorn_script_bootstraps_patent_durable_runtime_env():
     assert "PATENT_DURABLE_MODE_ENABLED" in script
     assert "PATENT_DURABLE_AUTHORITY_ENABLED" in script
     assert "PATENT_AUTHORITY_BASE_URL" in script
-    assert "PATENT_REDIS_ENABLED" in script
+    assert "PATENT_REDIS_ENABLED" not in script
     assert "PATENT_REDIS_URL" in script
     assert "PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN" in script
 
@@ -305,7 +302,7 @@ def test_health_contract_exposes_runtime_concurrency_and_trace(monkeypatch):
     assert payload["patent_graph_kb_ready"] is False
     assert payload["patent_graph_kb_v2_enabled"] is False
     assert payload["patent_graph_kb_rag_injection_enabled"] is False
-    assert payload["components"]["shared_llm_pool"]["status"] == "disabled"
+    assert payload["components"]["shared_llm_pool"]["status"] == "ok"
     assert payload["components"]["patent_graph_kb"]["status"] == "skipped"
     assert response.headers["X-Trace-ID"] == "req_contract"
 
@@ -555,9 +552,9 @@ def test_health_exposes_planning_hot_pool_snapshot(monkeypatch):
 def test_create_app_passes_planning_warm_model_to_hot_pool(monkeypatch):
     monkeypatch.setenv("PATENT_DURABLE_MODE_ENABLED", "false")
     monkeypatch.setenv("PATENT_PLANNING_HOT_POOL_ENABLED", "true")
-    monkeypatch.setenv("PATENT_STAGE1_OPENAI_API_KEY", "test-key")
-    monkeypatch.setenv("PATENT_STAGE1_OPENAI_BASE_URL", "http://example.invalid/v1")
-    monkeypatch.setenv("PATENT_STAGE1_OPENAI_MODEL", "planner-model")
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_BASE_URL", "http://example.invalid/v1")
+    monkeypatch.setenv("LLM_MODEL", "planner-model")
 
     captured: dict[str, object] = {}
 

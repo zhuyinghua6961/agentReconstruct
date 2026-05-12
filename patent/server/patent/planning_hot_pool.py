@@ -58,7 +58,7 @@ class PatentPlanningHotPoolConfig:
     @classmethod
     def from_env(cls) -> "PatentPlanningHotPoolConfig":
         return cls(
-            enabled=_env_flag("PATENT_PLANNING_HOT_POOL_ENABLED", False),
+            enabled=True,
             lane_count=max(1, _env_int("PATENT_PLANNING_HOT_POOL_LANE_COUNT", 2)),
             connect_timeout_seconds=_env_float("PATENT_LLM_HTTP_CONNECT_TIMEOUT_SECONDS", 15.0),
             read_timeout_seconds=_env_float("PATENT_LLM_HTTP_READ_TIMEOUT_SECONDS", 180.0),
@@ -66,16 +66,16 @@ class PatentPlanningHotPoolConfig:
             write_timeout_seconds=_env_float("PATENT_LLM_HTTP_WRITE_TIMEOUT_SECONDS", 180.0),
             pool_timeout_seconds=_env_float("PATENT_LLM_HTTP_POOL_TIMEOUT_SECONDS", 30.0),
             keepalive_expiry_seconds=_env_float("PATENT_LLM_HTTP_KEEPALIVE_EXPIRY_SECONDS", 120.0),
-            warmup_enabled=_env_flag("PATENT_PLANNING_HOT_POOL_WARMUP_ENABLED", False),
-            warm_interval_seconds=max(1.0, _env_float("PATENT_PLANNING_HOT_POOL_WARM_INTERVAL_SECONDS", 7200.0)),
-            warm_timeout_seconds=max(1.0, _env_float("PATENT_PLANNING_HOT_POOL_WARM_TIMEOUT_SECONDS", 30.0)),
-            warm_jitter_seconds=max(0.0, _env_float("PATENT_PLANNING_HOT_POOL_WARM_JITTER_SECONDS", 0.0)),
+            warmup_enabled=False,
+            warm_interval_seconds=7200.0,
+            warm_timeout_seconds=30.0,
+            warm_jitter_seconds=0.0,
             lane_degraded_after_seconds=max(
                 1.0,
                 _env_float("PATENT_PLANNING_HOT_POOL_LANE_DEGRADED_AFTER_SECONDS", 7200.0),
             ),
-            warm_active_start_hour=max(0, min(23, _env_int("PATENT_PLANNING_HOT_POOL_WARM_ACTIVE_START_HOUR", 8))),
-            warm_active_end_hour=max(1, min(24, _env_int("PATENT_PLANNING_HOT_POOL_WARM_ACTIVE_END_HOUR", 18))),
+            warm_active_start_hour=0,
+            warm_active_end_hour=24,
         )
 
     @classmethod
@@ -83,7 +83,7 @@ class PatentPlanningHotPoolConfig:
         llm_http = getattr(settings, "llm_http", settings)
         planning = getattr(settings, "planning_hot_pool", settings)
         return cls(
-            enabled=bool(getattr(planning, "enabled", False)),
+            enabled=True,
             lane_count=max(1, int(getattr(planning, "lane_count", 2) or 2)),
             connect_timeout_seconds=float(getattr(llm_http, "connect_timeout_seconds", 15.0)),
             read_timeout_seconds=float(getattr(llm_http, "read_timeout_seconds", 180.0)),
@@ -91,16 +91,16 @@ class PatentPlanningHotPoolConfig:
             write_timeout_seconds=float(getattr(llm_http, "write_timeout_seconds", 180.0)),
             pool_timeout_seconds=float(getattr(llm_http, "pool_timeout_seconds", 30.0)),
             keepalive_expiry_seconds=float(getattr(llm_http, "keepalive_expiry_seconds", 120.0)),
-            warmup_enabled=bool(getattr(planning, "warmup_enabled", False)),
-            warm_interval_seconds=max(1.0, float(getattr(planning, "warm_interval_seconds", 7200.0) or 7200.0)),
-            warm_timeout_seconds=max(1.0, float(getattr(planning, "warm_timeout_seconds", 30.0) or 30.0)),
-            warm_jitter_seconds=max(0.0, float(getattr(planning, "warm_jitter_seconds", 0.0) or 0.0)),
+            warmup_enabled=False,
+            warm_interval_seconds=7200.0,
+            warm_timeout_seconds=30.0,
+            warm_jitter_seconds=0.0,
             lane_degraded_after_seconds=max(
                 1.0,
                 float(getattr(planning, "lane_degraded_after_seconds", 7200.0) or 7200.0),
             ),
-            warm_active_start_hour=max(0, min(23, int(getattr(planning, "warm_active_start_hour", 8) or 8))),
-            warm_active_end_hour=max(1, min(24, int(getattr(planning, "warm_active_end_hour", 18) or 18))),
+            warm_active_start_hour=0,
+            warm_active_end_hour=24,
         )
 
 

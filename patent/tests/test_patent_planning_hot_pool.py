@@ -378,6 +378,28 @@ def test_patent_planning_hot_pool_default_warm_lane_uses_warm_timeout_on_wire():
     pool.close()
 
 
+def test_patent_planning_hot_pool_config_ignores_disabled_and_warmup_env(monkeypatch):
+    monkeypatch.setenv("PATENT_PLANNING_HOT_POOL_ENABLED", "false")
+    monkeypatch.setenv("PATENT_PLANNING_HOT_POOL_WARMUP_ENABLED", "true")
+    monkeypatch.setenv("PATENT_PLANNING_HOT_POOL_WARM_INTERVAL_SECONDS", "9")
+    monkeypatch.setenv("PATENT_PLANNING_HOT_POOL_WARM_TIMEOUT_SECONDS", "8")
+    monkeypatch.setenv("PATENT_PLANNING_HOT_POOL_WARM_JITTER_SECONDS", "7")
+    monkeypatch.setenv("PATENT_PLANNING_HOT_POOL_WARM_ACTIVE_START_HOUR", "6")
+    monkeypatch.setenv("PATENT_PLANNING_HOT_POOL_WARM_ACTIVE_END_HOUR", "7")
+    monkeypatch.setenv("PATENT_PLANNING_HOT_POOL_LANE_COUNT", "4")
+
+    config = PatentPlanningHotPoolConfig.from_env()
+
+    assert config.enabled is True
+    assert config.lane_count == 4
+    assert config.warmup_enabled is False
+    assert config.warm_interval_seconds == 7200.0
+    assert config.warm_timeout_seconds == 30.0
+    assert config.warm_jitter_seconds == 0.0
+    assert config.warm_active_start_hour == 0
+    assert config.warm_active_end_hour == 24
+
+
 def test_patent_planning_hot_pool_close_waits_for_in_flight_warm_before_closing_resources():
     built_http_clients: list[object] = []
     built_lane_clients: list[_FakeLaneClient] = []

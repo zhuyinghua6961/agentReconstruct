@@ -116,14 +116,9 @@ class DocumentsService:
     def __init__(self) -> None:
         self._papers_dir = self._resolve_papers_dir()
         self._max_pdf_pages = max(1, int(str(os.getenv("MAX_PDF_PAGES", "50") or "50")))
-        self._openai_api_key = _first_env("LLM_API_KEY", "OPENAI_API_KEY", "DASHSCOPE_API_KEY")
-        self._openai_base_url = _first_env(
-            "LLM_BASE_URL",
-            "OPENAI_BASE_URL",
-            "DASHSCOPE_BASE_URL",
-            default=DEFAULT_LLM_BASE_URL,
-        )
-        self._openai_model = _first_env("LLM_MODEL", "OPENAI_MODEL", "DASHSCOPE_MODEL", default="deepseek-v3.1")
+        self._openai_api_key = _first_env("LLM_API_KEY")
+        self._openai_base_url = _first_env("LLM_BASE_URL", default=DEFAULT_LLM_BASE_URL)
+        self._openai_model = _first_env("LLM_MODEL", default="deepseek-v3.1")
 
     def _resolve_papers_dir(self) -> Path:
         path = get_settings().papers_dir

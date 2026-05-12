@@ -10,6 +10,17 @@ if str(ROOT_DIR) not in sys.path:
 import config as patent_config  # noqa: E402
 
 
+def _env_keys(path: Path) -> set[str]:
+    keys: set[str] = set()
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key = line.split("=", 1)[0].removeprefix("export ").strip()
+        keys.add(key)
+    return keys
+
+
 
 
 def test_get_settings_exposes_patent_graph_kb_defaults(monkeypatch):
@@ -58,6 +69,32 @@ def test_config_shared_env_example_documents_patent_graph_kb_defaults():
         encoding="utf-8"
     )
     assert "PATENT_NEO4J_PASSWORD=" in secret_template
+
+
+def test_resource_graph_config_keeps_current_service_prefixed_graph_keys():
+    repo_root = ROOT_DIR.parent
+    shared_keys = _env_keys(repo_root / "resource/config/shared/graph.shared.env")
+    secret_keys = _env_keys(repo_root / "resource/config/shared/graph.secret.env.example")
+
+    assert {
+        "FASTQA_NEO4J_URL",
+        "FASTQA_NEO4J_USERNAME",
+        "FASTQA_NEO4J_DATABASE",
+        "PATENT_NEO4J_URL",
+        "PATENT_NEO4J_USERNAME",
+        "PATENT_NEO4J_DATABASE",
+        "PUBLIC_SERVICE_NEO4J_URL",
+        "PUBLIC_SERVICE_NEO4J_USERNAME",
+        "PUBLIC_SERVICE_NEO4J_DATABASE",
+        "NEO4J_URL",
+        "NEO4J_USERNAME",
+    } <= shared_keys
+    assert {
+        "FASTQA_NEO4J_PASSWORD",
+        "PATENT_NEO4J_PASSWORD",
+        "PUBLIC_SERVICE_NEO4J_PASSWORD",
+        "NEO4J_PASSWORD",
+    } <= secret_keys
 
 
 def test_get_settings_exposes_patent_graph_kb_v2_overrides(monkeypatch):

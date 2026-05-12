@@ -31,22 +31,18 @@ class DocumentsService:
 
     @staticmethod
     def _llm_api_key() -> str:
-        return (
-            str(os.getenv("OPENAI_API_KEY", "")).strip()
-            or str(os.getenv("DASHSCOPE_API_KEY", "")).strip()
-            or str(getattr(config, "LLM_API_KEY", "")).strip()
-        )
+        return str(os.getenv("LLM_API_KEY", "")).strip() or str(getattr(config, "LLM_API_KEY", "")).strip()
 
     @staticmethod
     def _llm_base_url() -> str | None:
-        value = str(os.getenv("OPENAI_BASE_URL", "")).strip() or str(getattr(config, "LLM_BASE_URL", "")).strip()
+        value = str(os.getenv("LLM_BASE_URL", "")).strip() or str(getattr(config, "LLM_BASE_URL", "")).strip()
         return value or None
 
     @staticmethod
     def _llm_model() -> str:
         return (
-            str(os.getenv("DOCUMENTS_LLM_MODEL", "")).strip()
-            or str(os.getenv("OPENAI_MODEL", "")).strip()
+            str(os.getenv("LLM_MODEL", "")).strip()
+            or str(os.getenv("DOCUMENTS_LLM_MODEL", "")).strip()
             or str(getattr(config, "LLM_MODEL", "")).strip()
             or "qwen3-max"
         )

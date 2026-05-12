@@ -3213,6 +3213,57 @@ def test_conversation_download_route_contracts(monkeypatch):
     assert error_response.status_code == 404
 
 
+def test_resolve_uploaded_file_download_always_uses_minio_proxy(monkeypatch):
+    repo = _MemoryConversationRepo()
+    outbox = _OutboxRecorder()
+
+    with TemporaryDirectory() as tempdir:
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(
+            repo=repo,
+            json_store=json_store,
+            outbox_repo=outbox,
+            workspace_root=tempdir,
+            redis_service=RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode"),
+        )
+        created = service.create_conversation(user_id=7, title="MinIO download")
+        conversation_id = int(created["data"]["conversation_id"])
+        remote_object = Path(tempdir) / "folder" / "remote.pdf"
+        remote_object.parent.mkdir(parents=True, exist_ok=True)
+        remote_object.write_bytes(b"pdf")
+        monkeypatch.setattr(
+            "app.modules.storage.service.get_storage_backend",
+            lambda project_root=None: storage_backend,
+        )
+        added = service.add_uploaded_file(
+            user_id=7,
+            conversation_id=conversation_id,
+            file_type="pdf",
+            file_name="remote.pdf",
+            local_path="",
+            storage_ref="minio://bucket/folder/remote.pdf",
+            content_type="application/pdf",
+            size_bytes=3,
+        )
+        file_id = int(added["data"]["file_id"])
+        monkeypatch.setenv("MINIO_USE_PROXY", "0")
+
+        payload, status_code, download = service.resolve_uploaded_file_download(
+            user_id=7,
+            conversation_id=conversation_id,
+            file_id=file_id,
+        )
+
+    assert payload["success"] is True
+    assert status_code == 200
+    assert download["mode"] == "proxy_file"
+    assert Path(download["target"]).exists()
+
+
 def test_conversation_download_route_soft_warns_when_quota_finalize_fails(monkeypatch, tmp_path):
     file_path = tmp_path / "sample.pdf"
     file_path.write_bytes(b"%PDF-1.4\n")

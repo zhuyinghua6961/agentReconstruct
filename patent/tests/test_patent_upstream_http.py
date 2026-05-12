@@ -5,13 +5,13 @@ import config as patent_config
 from server.patent.upstream_http import PatentSharedUpstreamHttpProvider
 
 
-def test_shared_upstream_provider_returns_none_when_disabled(monkeypatch):
+def test_shared_upstream_provider_ignores_disabled_env(monkeypatch):
     monkeypatch.setenv("PATENT_LLM_HTTP_SHARED_POOL_ENABLED", "false")
 
     provider = PatentSharedUpstreamHttpProvider.from_env()
 
-    assert provider.enabled is False
-    assert provider.client() is None
+    assert provider.enabled is True
+    assert provider.client() is not None
     provider.close()
 
 

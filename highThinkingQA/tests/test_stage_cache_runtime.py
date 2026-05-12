@@ -32,7 +32,7 @@ def test_get_redis_settings_uses_service_namespace_by_default(monkeypatch):
 
     settings = get_redis_settings()
 
-    assert settings.enabled is False
+    assert settings.enabled is True
     assert settings.key_prefix == "highthinkingqa"
     assert settings.resolved_url == "redis://:123456@127.0.0.1:6379/0"
 

@@ -290,9 +290,9 @@ def test_pdf_answer_client_from_env_accepts_injected_http_client(monkeypatch):
         def close(self):
             self.closed = True
 
-    monkeypatch.setenv("PATENT_OPENAI_API_KEY", "key")
-    monkeypatch.setenv("PATENT_OPENAI_BASE_URL", "https://example.com")
-    monkeypatch.setenv("PATENT_OPENAI_MODEL", "model")
+    monkeypatch.setenv("LLM_API_KEY", "key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://example.com")
+    monkeypatch.setenv("LLM_MODEL", "model")
     http_client = _FakeHttpClient()
 
     client = PatentPdfAnswerClient.from_env(http_client=http_client)
@@ -301,6 +301,29 @@ def test_pdf_answer_client_from_env_accepts_injected_http_client(monkeypatch):
     assert client._client is http_client
     client.close()
     assert http_client.closed is False
+
+
+def test_pdf_answer_client_from_env_prefers_unified_llm_namespace(monkeypatch):
+    class _FakeHttpClient:
+        def close(self):
+            raise AssertionError("injected client should not be closed by this test")
+
+    monkeypatch.setenv("LLM_API_KEY", "llm-key")
+    monkeypatch.setenv("LLM_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("LLM_MODEL", "llm-model")
+    monkeypatch.setenv("LLM_READ_TIMEOUT_SECONDS", "45")
+    monkeypatch.setenv("PATENT_OPENAI_API_KEY", "patent-key")
+    monkeypatch.setenv("PATENT_OPENAI_BASE_URL", "https://patent.example/v1")
+    monkeypatch.setenv("PATENT_OPENAI_MODEL", "patent-model")
+    monkeypatch.setenv("PATENT_OPENAI_TIMEOUT_SECONDS", "99")
+
+    client = PatentPdfAnswerClient.from_env(http_client=_FakeHttpClient())
+
+    assert client is not None
+    assert client._api_key == "llm-key"
+    assert client._base_url == "https://llm.example/v1"
+    assert client._model == "llm-model"
+    assert client._timeout_seconds == 45.0
 
 
 def test_compare_detection_accepts_implicit_compare_requests():
