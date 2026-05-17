@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from app.core.config import SERVICE_ASSET_ROOT, SERVICE_STATE_ROOT
+from app.core.config import SERVICE_ASSET_ROOT, SERVICE_STATE_ROOT, WORKSPACE_DIR
 from app.integrations.llm import SharedHttpPoolConfig, build_chat_completions_client
 from app.integrations.llm.openai_compat import DEFAULT_LLM_COMPATIBLE_BASE_URL
 
@@ -35,7 +35,10 @@ def _resolve_under_root(raw: str | None, *, root: Path, default: str) -> str:
     value = str(raw or default).strip() or default
     candidate = Path(value).expanduser()
     if not candidate.is_absolute():
-        candidate = (root / candidate).resolve()
+        if candidate.parts and candidate.parts[0] == "resource":
+            candidate = (WORKSPACE_DIR / candidate).resolve()
+        else:
+            candidate = (root / candidate).resolve()
     else:
         candidate = candidate.resolve()
     return str(candidate)

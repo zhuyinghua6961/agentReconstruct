@@ -94,6 +94,14 @@ def _flags_hash() -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
+def _focus_terms_fingerprint(query_focus_terms: list[str] | None) -> str:
+    cleaned = sorted({str(t).strip() for t in (query_focus_terms or []) if str(t or "").strip()})
+    if not cleaned:
+        return "none"
+    payload = json.dumps(cleaned, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
 def build_stage2_cache_key(
     *,
     redis_service: RedisService,
@@ -103,6 +111,7 @@ def build_stage2_cache_key(
     n_results_per_claim: int,
     route_hint: str = "kb_qa",
     graph_cache_fingerprint: str = "none",
+    query_focus_terms: list[str] | None = None,
 ) -> str:
     return redis_service.key_factory.cache(
         "stage2",
@@ -116,6 +125,7 @@ def build_stage2_cache_key(
         _flags_hash(),
         _question_hash(question),
         _claims_hash(retrieval_claims),
+        _focus_terms_fingerprint(query_focus_terms),
         str(graph_cache_fingerprint or "none").strip() or "none",
     )
 
@@ -129,6 +139,7 @@ def build_stage2_lock_key(
     n_results_per_claim: int,
     route_hint: str = "kb_qa",
     graph_cache_fingerprint: str = "none",
+    query_focus_terms: list[str] | None = None,
 ) -> str:
     return redis_service.key_factory.lock(
         "stage2",
@@ -142,6 +153,7 @@ def build_stage2_lock_key(
         _flags_hash(),
         _question_hash(question),
         _claims_hash(retrieval_claims),
+        _focus_terms_fingerprint(query_focus_terms),
         str(graph_cache_fingerprint or "none").strip() or "none",
     )
 
@@ -155,6 +167,7 @@ def get_cached_stage2_result(
     n_results_per_claim: int,
     route_hint: str = "kb_qa",
     graph_cache_fingerprint: str = "none",
+    query_focus_terms: list[str] | None = None,
 ) -> dict[str, Any] | None:
     if redis_service is None or not redis_service.available:
         return None
@@ -167,6 +180,7 @@ def get_cached_stage2_result(
             n_results_per_claim=n_results_per_claim,
             route_hint=route_hint,
             graph_cache_fingerprint=graph_cache_fingerprint,
+            query_focus_terms=query_focus_terms,
         ),
         default=None,
     )
@@ -195,6 +209,7 @@ def cache_stage2_result(
     stage2_result: dict[str, Any],
     route_hint: str = "kb_qa",
     graph_cache_fingerprint: str = "none",
+    query_focus_terms: list[str] | None = None,
 ) -> bool:
     if redis_service is None or not redis_service.available:
         return False
@@ -219,6 +234,7 @@ def cache_stage2_result(
             n_results_per_claim=n_results_per_claim,
             route_hint=route_hint,
             graph_cache_fingerprint=graph_cache_fingerprint,
+            query_focus_terms=query_focus_terms,
         ),
         payload,
         ttl_seconds=_stage2_cache_ttl_seconds(),

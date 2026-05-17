@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from server.patent.graph_kb.classifier_v2 import classify_patent_graph_question_v2
 
 
@@ -214,15 +216,10 @@ def test_classifier_v2_routes_material_attribute_questions_to_graph_for_rag():
         assert decision.diagnostics["candidate_path_ids"][0] == "list_patents_by_material"
 
 
-def test_classifier_v2_keeps_explicit_material_patent_lookup_direct_with_attribute_terms():
+def test_classifier_v2_keeps_explicit_material_patent_listing_direct_with_attribute_terms():
     cases = [
         "涉及磷酸铁锂的专利有哪些？",
-        "涉及磷酸铁锂的专利有多少？",
         "涉及磷酸铁锂电压相关的专利有哪些？",
-        "磷酸铁锂电压相关专利数量是多少？",
-        "磷酸铁锂电压相关申请数量是多少？",
-        "磷酸铁锂电压相关授权数量是多少？",
-        "磷酸铁锂电压相关公开数量是多少？",
     ]
 
     for question in cases:
@@ -230,6 +227,93 @@ def test_classifier_v2_keeps_explicit_material_patent_lookup_direct_with_attribu
         assert decision.mode == "direct_answer"
         assert decision.route_family == "precise"
         assert decision.diagnostics["candidate_path_ids"][0] == "list_patents_by_material"
+
+
+def test_classifier_v2_routes_unsupported_material_count_to_graph_for_rag():
+    cases = [
+        ("涉及磷酸铁锂的专利有多少？", "list_patents_by_material"),
+        ("涉及烧结的专利有多少？", "list_patents_by_process_term"),
+        ("涉及碳源的专利有多少？", "list_patents_by_material_role"),
+        ("磷酸铁锂相关专利数量是多少？", "list_patents_by_material"),
+        ("磷酸铁锂电压相关专利数量是多少？", "list_patents_by_material"),
+        ("磷酸铁锂电压相关申请数量是多少？", "list_patents_by_material"),
+        ("磷酸铁锂电压相关授权数量是多少？", "list_patents_by_material"),
+        ("磷酸铁锂电压相关公开数量是多少？", "list_patents_by_material"),
+    ]
+
+    for question, candidate_path in cases:
+        decision = classify_patent_graph_question_v2(question=question, conversation_context={})
+        assert decision.mode == "graph_for_rag"
+        assert decision.route_family == "hybrid"
+        assert decision.diagnostics["matched_rule"] == "unsupported_material_process_count"
+        assert decision.diagnostics["candidate_path_ids"][0] == candidate_path
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "磷酸铁锂固相合成法通常需要哪种保护气氛？",
+        "磷酸铁锂的保护气氛是什么？",
+        "磷酸铁锂固相法的保护气氛是什么？",
+        "磷酸铁锂烧结通常用氮气还是空气？",
+        "磷酸铁锂碳包覆通常需要什么气氛？",
+        "磷酸铁锂保护气氛的作用是什么？",
+        "磷酸铁锂是否需要在空气中烧结？",
+        "磷酸铁锂烧结时可以用空气吗？",
+        "磷酸铁锂烧结温度是多少？",
+        "磷酸铁锂固相法烧结温度通常是多少？",
+        "磷酸铁锂固相合成需要哪些原料？",
+        "磷酸铁锂固相合成的原料配比是多少？",
+        "烧结需要哪种气氛？",
+        "碳包覆通常需要什么气氛？",
+        "喷雾干燥通常需要什么气氛？",
+        "碳包覆的作用是什么？",
+        "喷雾干燥的作用是什么？",
+    ],
+)
+def test_material_process_synthesis_questions_route_graph_for_rag(question):
+    decision = classify_patent_graph_question_v2(question=question, conversation_context={})
+
+    assert decision.mode == "graph_for_rag"
+    assert decision.route_family == "hybrid"
+    assert decision.diagnostics["matched_rule"] == "material_process_synthesis_question"
+
+
+def test_combined_facet_material_listing_routes_graph_for_rag():
+    decision = classify_patent_graph_question_v2(
+        question="涉及磷酸铁锂保护气氛的专利有哪些？",
+        conversation_context={},
+    )
+
+    assert decision.mode == "graph_for_rag"
+    assert decision.route_family == "hybrid"
+    assert decision.diagnostics["matched_rule"] == "combined_facet_listing_requires_rag"
+    assert decision.diagnostics["candidate_path_ids"][0] == "list_patents_by_material"
+
+
+@pytest.mark.parametrize(
+    ("question", "matched_rule"),
+    [
+        ("CN100355122C 采用什么保护气氛？", "single_patent_atmosphere"),
+        ("CN100355122C 的工艺步骤是什么？", "single_patent_process"),
+        ("CN100355122C 的材料有哪些？", "single_patent_materials"),
+        ("CN100355122C 的技术问题和技术方案是什么？", "single_patent_problem_solution"),
+        ("宁德时代新能源科技股份有限公司有哪些专利？", "applicant_listing"),
+        ("宁德时代新能源科技股份有限公司有多少专利？", "applicant_count"),
+        ("H01M10 下有哪些专利？", "ipc_code_prefix_listing"),
+        ("H01M10 下有多少专利？", "ipc_code_prefix_count"),
+        ("磷酸铁锂相关专利有哪些？", "list_patents_by_material"),
+        ("涉及烧结的专利有哪些？", "list_patents_by_process_term"),
+        ("涉及碳源的专利有哪些？", "list_patents_by_material_role"),
+        ("涉及main材料角色的专利有哪些？", "list_patents_by_material_role"),
+    ],
+)
+def test_supported_precise_graph_questions_remain_direct(question, matched_rule):
+    decision = classify_patent_graph_question_v2(question=question, conversation_context={})
+
+    assert decision.mode == "direct_answer"
+    assert decision.route_family == "precise"
+    assert decision.diagnostics["matched_rule"] == matched_rule
 
 
 def test_classifier_v2_keeps_single_patent_attribute_question_direct():
@@ -264,7 +348,6 @@ def test_classifier_v2_skips_analytical_relation_questions_before_graph_candidat
 def test_classifier_v2_preserves_explicit_material_patent_lookup_with_relation_terms():
     cases = [
         "涉及磷酸铁锂粒径调控的专利有哪些",
-        "磷酸铁锂产品性能相关专利有多少",
         "宁德时代有哪些磷酸铁锂粒径相关专利",
         "H01M10 下有哪些磷酸铁锂粒径相关专利",
     ]
@@ -273,6 +356,17 @@ def test_classifier_v2_preserves_explicit_material_patent_lookup_with_relation_t
         decision = classify_patent_graph_question_v2(question=question, conversation_context={})
         assert decision.mode == "direct_answer"
         assert decision.route_family == "precise"
+
+
+def test_classifier_v2_routes_relation_term_material_count_to_graph_for_rag():
+    decision = classify_patent_graph_question_v2(
+        question="磷酸铁锂产品性能相关专利有多少",
+        conversation_context={},
+    )
+
+    assert decision.mode == "graph_for_rag"
+    assert decision.route_family == "hybrid"
+    assert decision.diagnostics["matched_rule"] == "unsupported_material_process_count"
 
 
 def test_classifier_v2_preserves_single_patent_relation_question():

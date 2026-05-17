@@ -254,6 +254,7 @@ class GenerationDrivenRAG:
         active_stream_count=None,
         graph_evidence: GraphRagPayload | None = None,
         comparison_plan: dict[str, Any] | None = None,
+        query_focus_terms: list[str] | None = None,
     ) -> Dict[str, Any]:
         return run_stage2_targeted_retrieval_impl(
             retrieval_claims=list(retrieval_claims or []),
@@ -280,6 +281,7 @@ class GenerationDrivenRAG:
             active_stream_count=active_stream_count,
             graph_evidence=graph_evidence,
             comparison_plan=comparison_plan,
+            query_focus_terms=query_focus_terms,
         )
 
     def stage25_md_expansion(self, *, retrieval_results: dict[str, Any], user_question: str, dois: list[str]) -> dict[str, Any]:

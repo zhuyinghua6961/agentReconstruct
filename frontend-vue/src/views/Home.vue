@@ -33,7 +33,7 @@ const PINNED_CHATS_COLLAPSED_KEY = 'lfp.sidebar.pinned-collapsed.v1'
 const RECENT_CHATS_COLLAPSED_KEY = 'lfp.sidebar.recent-collapsed.v1'
 const FILE_LIST_COLLAPSED_KEY = 'lfp.file-list.collapsed.v1'
 const ASK_MODE_STORAGE_KEY = 'gateway.ask.mode.v1'
-const ASK_MODE_LABELS = { fast: '快速模式', thinking: '思考模式', patent: '专利模式', graph_kb: '知识图谱', neo4j: '知识图谱' }
+const ASK_MODE_LABELS = { fast: '快速模式', thinking: '深度模式', patent: '专利模式', graph_kb: '知识图谱', neo4j: '知识图谱' }
 
 const store = useChatStore()
 const pdfReader = ref(null)
@@ -94,7 +94,7 @@ const canToggleStreaming = computed(() => {
 })
 const askModeOptions = [
   { value: 'fast', label: '快速' },
-  { value: 'thinking', label: '思考' },
+  { value: 'thinking', label: '深度' },
   { value: 'patent', label: '专利' }
 ]
 const pinnedChatsCollapsed = ref(false)
@@ -789,6 +789,7 @@ function getStepTitle(step) {
 
 function getStepDetail(step) {
   if (!step) return ''
+  if (isGraphPipelineStep(step)) return getGraphStepDetail(step)
   const detail = String(step.detail || '').trim()
   if (detail) return detail
   const title = getStepTitle(step)
@@ -805,9 +806,38 @@ function getStepTimingDurationLabel(msg, step) {
   })
 }
 
+function isGraphPipelineStep(step) {
+  return String(step?.step || '').trim().startsWith('graph_')
+}
+
 function getStepCount(step) {
   const count = Number(step?.data?.count)
   return Number.isFinite(count) && count > 0 ? count : null
+}
+
+function getVisibleStepCount(step) {
+  if (isGraphPipelineStep(step)) return null
+  return getStepCount(step)
+}
+
+function getGraphStepDetail(step) {
+  if (!step) return ''
+  const status = normalizeStepStatus(step?.status)
+  const stepKey = String(step?.step || '').trim()
+  if (status === 'error') {
+    return '图谱检索失败，已自动降级为常规生成链路'
+  }
+  if (stepKey === 'graph_answer') {
+    return '已整理图谱结果并生成回答'
+  }
+  const mode = String(step?.data?.mode || '').trim()
+  if (mode === 'direct_answer') {
+    return '已命中结构化答案'
+  }
+  if (mode === 'skip_graph') {
+    return '未找到可直接用于增强生成的图谱线索'
+  }
+  return '已获取结构化线索，继续文献检索与生成'
 }
 
 function getStepOverview(msg) {
@@ -2546,8 +2576,8 @@ watch(
                           {{ getStepIcon(getCollapsedStepSummary(entry.message)) }}
                         </span>
                         <span class="step-message">{{ getStepTitle(getCollapsedStepSummary(entry.message)) }}</span>
-                        <span v-if="getStepCount(getCollapsedStepSummary(entry.message))" class="step-badge">
-                          {{ getStepCount(getCollapsedStepSummary(entry.message)) }}
+                        <span v-if="getVisibleStepCount(getCollapsedStepSummary(entry.message))" class="step-badge">
+                          {{ getVisibleStepCount(getCollapsedStepSummary(entry.message)) }}
                         </span>
                       </div>
                     </div>
@@ -2558,7 +2588,7 @@ watch(
                       <div class="step-body">
                         <div class="step-row">
                           <span class="step-title">{{ getStepTitle(step) }}</span>
-                          <span v-if="getStepCount(step)" class="step-badge">{{ getStepCount(step) }}</span>
+                          <span v-if="getVisibleStepCount(step)" class="step-badge">{{ getVisibleStepCount(step) }}</span>
                           <span v-if="!getStepDetail(step) && getStepTimingDurationLabel(entry.message, step)" class="stage-step-duration">
                             {{ getStepTimingDurationLabel(entry.message, step) }}
                           </span>

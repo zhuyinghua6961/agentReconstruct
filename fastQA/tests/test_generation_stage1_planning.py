@@ -77,9 +77,26 @@ def test_stage1_planning_parses_json_and_normalizes_claims():
 
     assert result["success"] is True
     assert result["deep_answer"] == "answer"
+    assert result.get("query_focus_terms") == []
     assert result["retrieval_claims"][0]["claim"] == "c1"
     assert result["retrieval_claims"][1]["claim"] == "plain"
     assert client.calls[0]["response_format"] == {"type": "json_object"}
+
+
+def test_stage1_planning_normalizes_query_focus_terms():
+    client = _FakeClient(
+        '{"deep_answer":"ok","query_focus_terms":["高压实型","高压实型","辊压"],"retrieval_claims":[]}'
+    )
+    result = run_stage1_pre_answer_and_planning(
+        user_question="如何制备高压实型LFP",
+        stage1_prompt="prompt",
+        vector_db_context="",
+        client=client,
+        model="gpt-test",
+        logger=_Logger(),
+    )
+    assert result["success"] is True
+    assert result["query_focus_terms"] == ["高压实型", "辊压"]
 
 
 def test_stage1_planning_preserves_structured_answer_plan():
@@ -109,6 +126,7 @@ def test_stage1_planning_preserves_structured_answer_plan():
     assert result["answer_plan"]["answer_type"] == "multi_object_comparison"
     assert [item["label"] for item in result["answer_plan"]["objects"]] == ["磷酸铁", "草酸亚铁"]
     assert result["answer_plan"]["dimensions"][0]["evidence_needed"] == "原料成本和规模化生产数据"
+    assert result.get("query_focus_terms") == []
 
 
 def test_stage1_planning_returns_cancelled_without_dispatching_llm_when_cancelled_first():

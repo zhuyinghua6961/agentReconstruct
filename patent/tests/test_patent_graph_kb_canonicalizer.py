@@ -92,6 +92,90 @@ def test_canonicalizer_extracts_constraints_for_parametric_listing():
     assert bundle.constraints_for_rag[0].value == "张三"
 
 
+def test_canonicalizer_preserves_all_combined_facet_constraints_for_rag():
+    plan = PatentGraphQueryPlanV2(
+        strategy="parametric",
+        intent="list_patents_by_material",
+        question="涉及磷酸铁锂烧结保护气氛的专利有哪些？",
+        parametric_slots={
+            "candidate_queries": build_patent_parametric_query_candidates(
+                "涉及磷酸铁锂烧结保护气氛的专利有哪些？"
+            ),
+        },
+    )
+
+    bundle = canonicalize_patent_graph_rows(plan=plan, rows=())
+    constraints = {
+        (item.field, item.operator, item.value)
+        for item in bundle.constraints_for_rag
+    }
+
+    assert ("material.name", "contains", "磷酸铁锂") in constraints
+    assert ("process.step", "contains", "烧结") in constraints
+    assert ("process.atmosphere", "contains", "气氛") in constraints
+
+
+def test_canonicalizer_preserves_role_and_material_constraints_without_role_overlap_duplication():
+    plan = PatentGraphQueryPlanV2(
+        strategy="parametric",
+        intent="list_patents_by_material_role",
+        question="涉及碳源磷酸铁锂的专利有哪些？",
+        parametric_slots={
+            "candidate_queries": build_patent_parametric_query_candidates(
+                "涉及碳源磷酸铁锂的专利有哪些？"
+            ),
+        },
+    )
+
+    bundle = canonicalize_patent_graph_rows(plan=plan, rows=())
+    constraints = [
+        (item.field, item.operator, item.value)
+        for item in bundle.constraints_for_rag
+    ]
+
+    assert ("material.role", "contains", "碳源") in constraints
+    assert ("material.name", "contains", "磷酸铁锂") in constraints
+    assert constraints.count(("material.name", "contains", "碳源")) == 0
+
+
+def test_canonicalizer_filters_composite_material_constraints_for_role_or_process_facets():
+    cases = [
+        (
+            "涉及碳源保护气氛的专利有哪些？",
+            ("material.role", "contains", "碳源"),
+            ("material.name", "contains", "碳源"),
+        ),
+        (
+            "涉及main保护气氛的专利有哪些？",
+            ("material.role", "contains", "main"),
+            ("material.name", "contains", "main保护气氛"),
+        ),
+        (
+            "涉及烧结保护气氛的专利有哪些？",
+            ("process.step", "contains", "烧结"),
+            ("material.name", "contains", "烧结保护气氛"),
+        ),
+    ]
+
+    for question, expected_constraint, rejected_constraint in cases:
+        plan = PatentGraphQueryPlanV2(
+            strategy="parametric",
+            intent="list_patents_by_material",
+            question=question,
+            parametric_slots={"candidate_queries": build_patent_parametric_query_candidates(question)},
+        )
+
+        bundle = canonicalize_patent_graph_rows(plan=plan, rows=())
+        constraints = {
+            (item.field, item.operator, item.value)
+            for item in bundle.constraints_for_rag
+        }
+
+        assert expected_constraint in constraints
+        assert ("process.atmosphere", "contains", "气氛") in constraints
+        assert rejected_constraint not in constraints
+
+
 def test_stub_true_process_rows_can_be_direct_answerable():
     plan = PatentGraphQueryPlanV2(
         strategy="parametric",

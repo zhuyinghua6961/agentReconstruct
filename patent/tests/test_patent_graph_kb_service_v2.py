@@ -17,6 +17,24 @@ from server.patent.graph_kb.direct_renderer import render_patent_direct_answer
 from server.patent.graph_kb.client import build_patent_parametric_query_candidates
 
 
+class _FakeNeo4jClient:
+    available = True
+
+    def __init__(self, rows_by_path: dict[str, tuple[dict, ...]] | None = None):
+        self.rows_by_path = dict(rows_by_path or {})
+        self.calls: list[tuple[str, dict, int]] = []
+
+    def query(self, cypher, params, *, timeout_ms):
+        cypher_text = str(cypher or "")
+        self.calls.append((cypher_text, dict(params or {}), int(timeout_ms or 0)))
+        for path_id, rows in self.rows_by_path.items():
+            if path_id in cypher_text:
+                return list(rows)
+            if path_id == "list_patent_atmospheres" and "atmosphere_options" in cypher_text:
+                return list(rows)
+        return []
+
+
 def test_route_v2_returns_skip_graph_result(monkeypatch):
     monkeypatch.setattr(
         patent_graph_service,
@@ -236,6 +254,136 @@ def test_route_v2_returns_graph_for_rag_payload(monkeypatch):
     assert result.direct_result is None
     assert result.rag_payload == payload
     assert result.diagnostics["strategy"] == "parametric"
+
+
+def test_route_v2_original_atmosphere_question_routes_graph_for_rag():
+    result = route_patent_graph_kb_v2(
+        question="磷酸铁锂固相合成法通常需要哪种保护气氛？",
+        conversation_context={},
+        neo4j_client=_FakeNeo4jClient(),
+        max_rows=20,
+        timeout_ms=3000,
+        trace_id="test-original-atmosphere",
+    )
+
+    assert result.mode == "graph_for_rag"
+    assert result.direct_result is None
+    assert result.rag_payload is not None
+    assert result.diagnostics["matched_rule"] == "material_process_synthesis_question"
+    assert result.diagnostics["tri_state_mode"] == "graph_for_rag"
+    assert result.rag_payload.stage2_constraints
+    assert any(
+        item.field == "material.name"
+        and item.operator == "contains"
+        and item.value == "磷酸铁锂"
+        for item in result.rag_payload.stage2_constraints
+    )
+    assert any(
+        item.field == "process.atmosphere"
+        and item.operator == "contains"
+        and item.value == "气氛"
+        for item in result.rag_payload.stage2_constraints
+    )
+
+
+def test_route_v2_process_atmosphere_question_preserves_process_constraint():
+    result = route_patent_graph_kb_v2(
+        question="烧结需要哪种气氛？",
+        conversation_context={},
+        neo4j_client=_FakeNeo4jClient(),
+        max_rows=20,
+        timeout_ms=3000,
+        trace_id="test-process-atmosphere",
+    )
+
+    assert result.mode == "graph_for_rag"
+    assert result.direct_result is None
+    assert result.rag_payload is not None
+    assert result.diagnostics["matched_rule"] == "material_process_synthesis_question"
+    assert any(
+        item.field == "process.step"
+        and item.operator == "contains"
+        and item.value == "烧结"
+        for item in result.rag_payload.stage2_constraints
+    )
+    assert any(
+        item.field == "process.atmosphere"
+        and item.operator == "contains"
+        and item.value == "气氛"
+        for item in result.rag_payload.stage2_constraints
+    )
+
+
+def test_route_v2_combined_material_process_listing_preserves_all_constraints():
+    result = route_patent_graph_kb_v2(
+        question="涉及磷酸铁锂烧结的专利有哪些？",
+        conversation_context={},
+        neo4j_client=_FakeNeo4jClient(),
+        max_rows=20,
+        timeout_ms=3000,
+        trace_id="test-material-process-listing",
+    )
+
+    constraints = {
+        (item.field, item.operator, item.value)
+        for item in tuple(result.rag_payload.stage2_constraints if result.rag_payload else ())
+    }
+
+    assert result.mode == "graph_for_rag"
+    assert result.diagnostics["matched_rule"] == "combined_facet_listing_requires_rag"
+    assert ("material.name", "contains", "磷酸铁锂") in constraints
+    assert ("process.step", "contains", "烧结") in constraints
+
+
+def test_route_v2_combined_role_material_listing_preserves_all_constraints():
+    result = route_patent_graph_kb_v2(
+        question="涉及碳源磷酸铁锂的专利有哪些？",
+        conversation_context={},
+        neo4j_client=_FakeNeo4jClient(),
+        max_rows=20,
+        timeout_ms=3000,
+        trace_id="test-role-material-listing",
+    )
+
+    constraints = [
+        (item.field, item.operator, item.value)
+        for item in tuple(result.rag_payload.stage2_constraints if result.rag_payload else ())
+    ]
+
+    assert result.mode == "graph_for_rag"
+    assert result.diagnostics["matched_rule"] == "combined_facet_listing_requires_rag"
+    assert ("material.role", "contains", "碳源") in constraints
+    assert ("material.name", "contains", "磷酸铁锂") in constraints
+    assert constraints.count(("material.name", "contains", "碳源")) == 0
+
+
+def test_route_v2_single_patent_atmosphere_stays_direct():
+    result = route_patent_graph_kb_v2(
+        question="CN100355122C 采用什么保护气氛？",
+        conversation_context={},
+        neo4j_client=_FakeNeo4jClient(
+            {
+                "list_patent_atmospheres": (
+                    {
+                        "patent_id": "CN100355122C",
+                        "title": "一种提高磷酸铁锂大电流放电性能的方法",
+                        "atmosphere_options": ["氮气", "惰性气氛"],
+                        "atmosphere_preferred": "氮气",
+                        "stub": None,
+                    },
+                )
+            }
+        ),
+        max_rows=20,
+        timeout_ms=3000,
+        trace_id="test-single-patent-atmosphere",
+    )
+
+    assert result.mode == "direct_answer"
+    assert result.direct_result is not None
+    assert result.direct_result.template_id == "list_patent_atmospheres"
+    assert result.direct_result.metadata["graph_kb_path_id"] == "list_patent_atmospheres"
+    assert "CN100355122C" in result.direct_result.answer
 
 
 def test_route_v2_downgrades_failed_direct_render_to_graph_for_rag(monkeypatch):

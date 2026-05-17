@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from app.integrations.llm import raise_if_upstream_pool_timeout
+from app.modules.generation_pipeline.text_processing import _clean_retrieval_token
 
 
 def _is_response_format_capability_error(exc: Exception) -> bool:
@@ -95,6 +97,28 @@ def _candidate_json_payloads(result_text: str) -> list[str]:
         if normalized and normalized not in candidates:
             candidates.append(normalized)
     return candidates
+
+
+def _normalize_query_focus_terms(raw: Any) -> List[str]:
+    """Stage1 JSON `query_focus_terms`: short phrases for Stage2 must-include (deduped, length-capped)."""
+    max_n = 8
+    try:
+        max_n = max(1, min(int(str(os.getenv("QA_STAGE1_QUERY_FOCUS_MAX_TERMS", "6")).strip()), 12))
+    except ValueError:
+        max_n = 6
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        ck = _clean_retrieval_token(str(item or "").strip(), max_len=48)
+        if not ck or ck in seen:
+            continue
+        seen.add(ck)
+        out.append(ck)
+        if len(out) >= max_n:
+            break
+    return out
 
 
 def _parse_stage1_json_payload(result_text: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -259,16 +283,19 @@ def run_stage1_pre_answer_and_planning(
                 )
 
         retrieval_claims = [item for item in retrieval_claims if str(item.get("claim") or "").strip()]
+        query_focus_terms = _normalize_query_focus_terms(stage1_result.get("query_focus_terms"))
         logger.info(
-            "阶段一结果归一化完成: deep_answer_chars=%s retrieval_claims=%s",
+            "阶段一结果归一化完成: deep_answer_chars=%s retrieval_claims=%s query_focus_terms=%s",
             len(deep_answer),
             len(retrieval_claims),
+            query_focus_terms,
         )
         return {
             "success": True,
             "deep_answer": deep_answer,
             "answer_plan": answer_plan,
             "retrieval_claims": retrieval_claims,
+            "query_focus_terms": query_focus_terms,
             "raw_response": cleaned_text,
         }
     except Exception as exc:

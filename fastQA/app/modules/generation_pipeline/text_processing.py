@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import os
 import re
-from typing import Any
+from typing import Any, Iterable
 
 
 def normalize_chemical_notation(query: str) -> str:
@@ -30,9 +31,33 @@ def normalize_chemical_notation(query: str) -> str:
     return result
 
 
-def preprocess_retrieval_query(query: str, logger: Any | None = None) -> str:
+def _is_kb_slot_noise_token(kw: str) -> bool:
+    """Strip graph/KB slot artifacts from retrieval keyword streams."""
+    low = str(kw or "").lower()
+    if "_null" in low or "null_null" in low:
+        return True
+    normalized = low.replace(" ", "_").replace("-", "_")
+    if "not_specified" in normalized:
+        return True
+    return False
+
+
+def _clean_retrieval_token(kw: str, *, max_len: int = 20) -> str | None:
+    kw = str(kw or "").strip()
+    if not kw or len(kw) > max_len:
+        return None
+    if _is_kb_slot_noise_token(kw):
+        return None
+    kw = re.sub(r"[^\w\u4e00-\u9fff°C°:/\\-]", "", kw, flags=re.UNICODE)
+    if not kw or kw in {"的", "和", "与", "或", "等", "中", "在", "于", "对", "由"}:
+        return None
+    return kw
+
+
+def collect_retrieval_query_keywords(query: str) -> list[str]:
+    """Normalize, expand synonyms, split into ordered unique keyword tokens (no length cap)."""
     if not query:
-        return ""
+        return []
 
     query = normalize_chemical_notation(query)
     synonyms = {
@@ -69,12 +94,9 @@ def preprocess_retrieval_query(query: str, logger: Any | None = None) -> str:
 
     cleaned_keywords: list[str] = []
     for kw in query.split():
-        kw = kw.strip()
-        if not kw or len(kw) >= 20:
-            continue
-        kw = re.sub(r"[^\w\u4e00-\u9fff°C°:/\\-]", "", kw, flags=re.UNICODE)
-        if kw and kw not in {"的", "和", "与", "或", "等", "中", "在", "于", "对", "由"}:
-            cleaned_keywords.append(kw)
+        ck = _clean_retrieval_token(kw, max_len=20)
+        if ck:
+            cleaned_keywords.append(ck)
 
     unique_keywords: list[str] = []
     seen: set[str] = set()
@@ -83,10 +105,89 @@ def preprocess_retrieval_query(query: str, logger: Any | None = None) -> str:
             continue
         seen.add(kw)
         unique_keywords.append(kw)
+    return unique_keywords
 
+
+def finalize_retrieval_keywords_for_embedding(
+    combined_query: str,
+    must_include: Iterable[str],
+    *,
+    max_keywords: int | None = None,
+    max_injection_slots: int | None = None,
+    logger: Any | None = None,
+) -> str:
+    """Build the keyword string passed to dense retrieval (must_include first, then core tokens).
+
+    ``max_keywords`` defaults from ``QA_STAGE2_EMBEDDING_QUERY_MAX_KEYWORDS`` (default 15).
+    ``max_injection_slots``: if >0, only the first N entries from ``must_include`` are forced
+    at the front; if 0 or None, all non-empty must_include entries are prioritized.
+    """
+    if max_keywords is None:
+        try:
+            max_keywords = int(str(os.getenv("QA_STAGE2_EMBEDDING_QUERY_MAX_KEYWORDS", "15")).strip())
+        except ValueError:
+            max_keywords = 15
+    max_keywords = max(4, min(int(max_keywords), 48))
+
+    if max_injection_slots is None:
+        raw_cap = str(os.getenv("QA_STAGE2_EMBEDDING_QUERY_MAX_INJECTION_SLOTS", "0")).strip()
+        try:
+            max_injection_slots = int(raw_cap)
+        except ValueError:
+            max_injection_slots = 0
+
+    must_list = [str(x).strip() for x in must_include if str(x or "").strip()]
+    if max_injection_slots and max_injection_slots > 0:
+        must_list = must_list[: max(0, int(max_injection_slots))]
+
+    out: list[str] = []
+    seen: set[str] = set()
+
+    for m in must_list:
+        ck = _clean_retrieval_token(m, max_len=48)
+        if not ck or ck in seen:
+            continue
+        seen.add(ck)
+        out.append(ck)
+        if len(out) >= max_keywords:
+            result = " ".join(out)
+            if logger is not None:
+                logger.info(
+                    "stage2 embedding finalize must_only query_in=%s must=%s out=%s",
+                    (combined_query or "")[:120],
+                    must_list,
+                    result[:120],
+                )
+            return result
+
+    for ck in collect_retrieval_query_keywords(combined_query):
+        if ck in seen:
+            continue
+        seen.add(ck)
+        out.append(ck)
+        if len(out) >= max_keywords:
+            break
+
+    result = " ".join(out)
+    if logger is not None:
+        logger.info(
+            "stage2 embedding finalize query_in=%s must=%s out=%s",
+            (combined_query or "")[:120],
+            must_list,
+            result[:120],
+        )
+    return result
+
+
+def preprocess_retrieval_query(query: str, logger: Any | None = None) -> str:
+    if not query:
+        return ""
+
+    unique_keywords = collect_retrieval_query_keywords(query)
     result = " ".join(unique_keywords[:15])
     if logger is not None:
-        logger.info("stage2 preprocess query raw=%s result=%s", query[:80], result[:80])
+        raw_for_log = normalize_chemical_notation(query)
+        logger.info("stage2 preprocess query raw=%s result=%s", raw_for_log[:80], result[:80])
     return result
 
 

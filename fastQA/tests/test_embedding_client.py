@@ -15,8 +15,8 @@ class _Requests:
     def __init__(self):
         self.calls = []
 
-    def post(self, url, json=None, timeout=None):
-        self.calls.append({"url": url, "json": json, "timeout": timeout})
+    def post(self, url, json=None, timeout=None, headers=None):
+        self.calls.append({"url": url, "json": json, "timeout": timeout, "headers": headers or {}})
         return _Response()
 
 
@@ -42,3 +42,23 @@ def test_remote_embedding_client_uses_embedding_api_model_over_legacy_model_name
     client.encode(["hello"])
 
     assert requests_module.calls[0]["json"]["model"] == "target-model"
+
+
+def test_remote_embedding_client_adds_authorization_header_when_embedding_api_key_is_set(monkeypatch):
+    requests_module = _Requests()
+    monkeypatch.setenv("EMBEDDING_API_KEY", "embedding-key")
+
+    client = RemoteEmbeddingClient("https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings", requests_module)
+    client.encode(["hello"])
+
+    assert requests_module.calls[0]["headers"]["Authorization"] == "Bearer embedding-key"
+
+
+def test_remote_embedding_client_omits_authorization_header_without_embedding_api_key(monkeypatch):
+    requests_module = _Requests()
+    monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
+
+    client = RemoteEmbeddingClient("http://127.0.0.1:8001/v1/embeddings", requests_module)
+    client.encode(["hello"])
+
+    assert "Authorization" not in requests_module.calls[0]["headers"]

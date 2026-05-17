@@ -355,6 +355,74 @@ def test_patent_embedding_client_ignores_retired_embedding_aliases(monkeypatch):
     assert client._api_model == "bge-local"
 
 
+def test_patent_embedding_client_adds_authorization_header_when_embedding_api_key_is_set(monkeypatch):
+    from server.patent.runtime import PatentEmbeddingClient
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": [{"embedding": [0.1, 0.2]}]}
+
+    class _FakeHttpClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+            self.calls = []
+
+        def post(self, url, *, json=None, headers=None):
+            self.calls.append({"url": url, "json": json, "headers": headers or {}})
+            return _FakeResponse()
+
+        def close(self):
+            return None
+
+    monkeypatch.setenv("EMBEDDING_MODEL_TYPE", "remote")
+    monkeypatch.setenv("EMBEDDING_API_KEY", "embedding-key")
+    monkeypatch.setenv("EMBEDDING_API_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings")
+    monkeypatch.setenv("EMBEDDING_API_MODEL", "embedding-target")
+    monkeypatch.setattr("server.patent.runtime.httpx.Client", _FakeHttpClient)
+
+    client = PatentEmbeddingClient()
+    output = client.encode(["hello"])
+
+    assert output == [[0.1, 0.2]]
+    assert client._http.calls[0]["headers"]["Authorization"] == "Bearer embedding-key"
+
+
+def test_patent_embedding_client_omits_authorization_header_without_embedding_api_key(monkeypatch):
+    from server.patent.runtime import PatentEmbeddingClient
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": [{"embedding": [0.1, 0.2]}]}
+
+    class _FakeHttpClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+            self.calls = []
+
+        def post(self, url, *, json=None, headers=None):
+            self.calls.append({"url": url, "json": json, "headers": headers or {}})
+            return _FakeResponse()
+
+        def close(self):
+            return None
+
+    monkeypatch.setenv("EMBEDDING_MODEL_TYPE", "remote")
+    monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
+    monkeypatch.setattr("server.patent.runtime.httpx.Client", _FakeHttpClient)
+
+    client = PatentEmbeddingClient()
+    output = client.encode(["hello"])
+
+    assert output == [[0.1, 0.2]]
+    assert "Authorization" not in client._http.calls[0]["headers"]
+
+
 def test_build_default_patent_runtime_passes_injected_http_client_to_llm_wrappers(monkeypatch, tmp_path: Path):
     from server.patent.resource_registry import PatentResourceRegistry
     from server.patent.runtime import build_default_patent_runtime

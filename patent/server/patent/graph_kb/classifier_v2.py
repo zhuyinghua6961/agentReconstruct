@@ -9,6 +9,31 @@ from server.patent.graph_kb.slots import PatentGraphQuestionSlots, extract_paten
 
 
 _PATENT_DOMAIN_OBJECT_HINTS = ("专利", "申请", "授权", "公开", "件", "项")
+_SYNTHESIS_CONDITION_HINTS = (
+    "通常",
+    "一般",
+    "常用",
+    "常见",
+    "优选",
+    "推荐",
+    "需要",
+    "应",
+    "是否",
+    "能否",
+    "可以",
+    "用什么",
+    "哪种",
+    "什么气氛",
+    "什么条件",
+)
+_SYNTHESIS_VALUE_HINTS = ("温度", "配比", "比例", "范围", "是多少")
+_SYNTHESIS_EFFECT_HINTS = ("作用", "目的", "原因", "为什么")
+_SYNTHESIS_FACET_HINTS = ("保护气氛", "烧结气氛", "原料", "锂源", "碳源")
+_SINGLE_FACET_LISTING_PATHS = {
+    "list_patents_by_material",
+    "list_patents_by_material_role",
+    "list_patents_by_process_term",
+}
 
 
 def _matched_rule_for_single_patent(slots: PatentGraphQuestionSlots) -> str:
@@ -63,6 +88,85 @@ def _is_material_attribute_question(slots: PatentGraphQuestionSlots) -> bool:
 
 def _is_analytical_relation_question(slots: PatentGraphQuestionSlots) -> bool:
     return bool(slots.asks_analytical_relation)
+
+
+def _has_material_process_candidate(slots: PatentGraphQuestionSlots) -> bool:
+    return bool(slots.material_terms or slots.material_role_terms or slots.process_terms or slots.atmosphere_terms)
+
+
+def _has_precise_entity_anchor(slots: PatentGraphQuestionSlots) -> bool:
+    return bool(
+        slots.patent_ids
+        or slots.applicant_names
+        or slots.inventor_names
+        or slots.agency_names
+        or slots.ipc_full_codes
+        or slots.ipc_code_prefixes
+        or slots.ipc_prefixes
+    )
+
+
+def _is_unsupported_material_process_count(slots: PatentGraphQuestionSlots) -> bool:
+    return bool(slots.asks_count and _has_material_process_candidate(slots) and not _has_precise_entity_anchor(slots))
+
+
+def _is_material_process_synthesis_question(slots: PatentGraphQuestionSlots) -> bool:
+    text = slots.normalized_question
+    if not _has_material_process_candidate(slots):
+        return False
+    if slots.patent_ids:
+        return False
+    if _is_explicit_patent_listing_or_count(slots):
+        return False
+    if slots.asks_rank:
+        return False
+    return bool(
+        slots.asks_atmosphere
+        or slots.asks_attribute_value
+        or slots.asks_why_how
+        or any(hint in text for hint in _SYNTHESIS_CONDITION_HINTS)
+        or any(hint in text for hint in _SYNTHESIS_VALUE_HINTS)
+        or any(hint in text for hint in _SYNTHESIS_EFFECT_HINTS)
+        or any(hint in text for hint in _SYNTHESIS_FACET_HINTS)
+        or ("还是" in text and bool(slots.atmosphere_terms or slots.process_terms))
+    )
+
+
+def _normalized_term_set(values: tuple[str, ...]) -> set[str]:
+    return {str(item or "").strip().lower() for item in values if str(item or "").strip()}
+
+
+def _is_combined_facet_listing_that_current_template_drops(
+    slots: PatentGraphQuestionSlots,
+    candidates: tuple[dict[str, Any], ...],
+) -> bool:
+    if not _is_explicit_patent_listing_or_count(slots):
+        return False
+    if slots.patent_ids or not candidates:
+        return False
+
+    primary_path = str(candidates[0].get("path_id") or "")
+    if primary_path not in _SINGLE_FACET_LISTING_PATHS:
+        return False
+
+    dropped_constraints = 0
+    if bool(slots.atmosphere_terms or slots.asks_atmosphere):
+        dropped_constraints += 1
+    if slots.process_terms and primary_path != "list_patents_by_process_term":
+        dropped_constraints += 1
+    if slots.material_role_terms and primary_path != "list_patents_by_material_role":
+        dropped_constraints += 1
+
+    material_role_terms = _normalized_term_set(slots.material_role_terms)
+    non_role_material_terms = tuple(
+        item
+        for item in slots.material_terms
+        if str(item or "").strip().lower() not in material_role_terms
+    )
+    if non_role_material_terms and primary_path != "list_patents_by_material":
+        dropped_constraints += 1
+
+    return dropped_constraints > 0
 
 
 def classify_patent_graph_question_v2(
@@ -160,6 +264,27 @@ def classify_patent_graph_question_v2(
             route_family="hybrid",
             standalone=standalone,
             diagnostics=_diagnostics(slots, matched_rule="hybrid_graph_anchor", candidates=candidates),
+        )
+    elif _is_unsupported_material_process_count(slots):
+        decision = PatentGraphSemanticDecision(
+            mode="graph_for_rag",
+            route_family="hybrid",
+            standalone=standalone,
+            diagnostics=_diagnostics(slots, matched_rule="unsupported_material_process_count", candidates=candidates),
+        )
+    elif _is_material_process_synthesis_question(slots):
+        decision = PatentGraphSemanticDecision(
+            mode="graph_for_rag",
+            route_family="hybrid",
+            standalone=standalone,
+            diagnostics=_diagnostics(slots, matched_rule="material_process_synthesis_question", candidates=candidates),
+        )
+    elif _is_combined_facet_listing_that_current_template_drops(slots, candidates):
+        decision = PatentGraphSemanticDecision(
+            mode="graph_for_rag",
+            route_family="hybrid",
+            standalone=standalone,
+            diagnostics=_diagnostics(slots, matched_rule="combined_facet_listing_requires_rag", candidates=candidates),
         )
     elif len(slots.patent_ids) == 1:
         decision = PatentGraphSemanticDecision(

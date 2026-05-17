@@ -38,6 +38,22 @@ def test_resolve_generation_runtime_inputs_uses_service_roots(monkeypatch, tmp_p
     assert resolved.chroma_db_path == str((state_root / "vectordb").resolve())
 
 
+def test_resolve_generation_runtime_inputs_resolves_resource_relative_vector_path(monkeypatch, tmp_path):
+    workspace_resource = Path.cwd() / "resource" / "fastqa" / "vector_database"
+    monkeypatch.setenv("VECTOR_DB_PATH", "resource/fastqa/vector_database")
+
+    resolved = resolve_generation_runtime_inputs(
+        api_key=None,
+        base_url=None,
+        model=None,
+        config=None,
+        state_root=tmp_path / "state",
+        asset_root=tmp_path / "assets",
+    )
+
+    assert resolved.chroma_db_path == str(workspace_resource.resolve())
+
+
 def test_resolve_generation_runtime_inputs_ignores_retired_llm_aliases(monkeypatch, tmp_path):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)

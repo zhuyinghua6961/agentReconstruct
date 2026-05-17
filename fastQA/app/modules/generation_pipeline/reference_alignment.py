@@ -314,7 +314,11 @@ def format_pdf_chunks_evidence(
             if len(text) > chunk_max_chars:
                 text = text[:chunk_max_chars] + "..."
 
-            lines.append(f"**片段{i}（第{page}页）**:")
+            src = str(chunk.get("source") or "").strip()
+            if src == "stage2_retrieval":
+                lines.append(f"**片段{i}（Stage2向量检索·第{page}页）**:")
+            else:
+                lines.append(f"**片段{i}（第{page}页）**:")
             lines.append(text)
             lines.append("")
 

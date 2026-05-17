@@ -248,6 +248,20 @@ def test_config_derives_service_roots_from_resource_root(tmp_path, monkeypatch):
     assert settings.logs_dir == (resource_root / "runtime/dev/fastQA/logs").resolve()
 
 
+def test_settings_resolves_resource_relative_vector_paths_from_workspace(monkeypatch):
+    monkeypatch.setenv("VECTOR_DB_PATH", "resource/fastqa/vector_database")
+    monkeypatch.setenv("VECTOR_DB_MD_PATH", "resource/fastqa/vector_database_md")
+
+    import app.core.config as config
+
+    reloaded = importlib.reload(config)
+    reloaded.get_settings.cache_clear()
+    settings = reloaded.get_settings()
+
+    assert settings.vector_db_path == (reloaded.WORKSPACE_DIR / "resource/fastqa/vector_database").resolve()
+    assert settings.vector_db_md_path == (reloaded.WORKSPACE_DIR / "resource/fastqa/vector_database_md").resolve()
+
+
 def test_resolve_resource_root_autodetects_workspace_resource(tmp_path, monkeypatch):
     workspace_dir = tmp_path / "workspace"
     resource_root = workspace_dir / "resource"

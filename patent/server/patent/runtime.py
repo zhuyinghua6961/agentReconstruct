@@ -307,6 +307,7 @@ class PatentEmbeddingClient:
             default="http://127.0.0.1:8001/v1/embeddings",
         )
         self._api_model = _first_env("EMBEDDING_API_MODEL", default="bge-local")
+        self._api_key = _first_env("EMBEDDING_API_KEY")
         self._local_model_path = _resolve_local_embedding_model_path(self._repo_root)
         self._local_model = None
 
@@ -321,7 +322,7 @@ class PatentEmbeddingClient:
         response = self._http.post(
             self._api_url,
             json={"input": texts, "model": self._api_model},
-            headers={"Content-Type": "application/json"},
+            headers=self._embedding_headers(),
         )
         response.raise_for_status()
         payload = response.json()
@@ -331,6 +332,12 @@ class PatentEmbeddingClient:
             return embeddings
         single = list(payload.get("embedding") or [])
         return [single] if single else []
+
+    def _embedding_headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        return headers
 
     def _prime_local_model(self) -> None:
         if self._local_model is not None:

@@ -83,7 +83,9 @@ service_health_url() {
   case "$1" in
     gateway) echo "http://127.0.0.1:$(service_port gateway)/docs" ;;
     public-service) echo "http://127.0.0.1:$(service_port public-service)/api/health" ;;
-    fastQA) echo "http://127.0.0.1:$(service_port fastQA)/api/health" ;;
+    # Use /healthz for start_all liveness: /api/health returns 503 until generation_runtime_ready
+    # (e.g. when generation runtime is disabled), which would make wait_for_service_health time out.
+    fastQA) echo "http://127.0.0.1:$(service_port fastQA)/healthz" ;;
     highThinkingQA) echo "http://127.0.0.1:$(service_port highThinkingQA)/api/health" ;;
     patent) echo "http://127.0.0.1:$(service_port patent)/api/health" ;;
     *) return 1 ;;

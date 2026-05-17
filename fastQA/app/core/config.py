@@ -135,7 +135,10 @@ def _resolve_under_root(raw: str | None, *, root: Path, default: str) -> Path:
     value = str(raw or default).strip() or default
     candidate = Path(value).expanduser()
     if not candidate.is_absolute():
-        candidate = (root / candidate).resolve()
+        if candidate.parts and candidate.parts[0] == "resource":
+            candidate = (WORKSPACE_DIR / candidate).resolve()
+        else:
+            candidate = (root / candidate).resolve()
     else:
         candidate = candidate.resolve()
     return candidate

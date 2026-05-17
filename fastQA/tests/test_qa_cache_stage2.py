@@ -175,3 +175,44 @@ def test_stage2_cache_key_changes_when_graph_doi_candidates_change():
     )
 
     assert first_key != second_key
+
+
+def test_stage2_cache_key_changes_when_query_focus_terms_change():
+    service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
+    runtime = SimpleNamespace(model="qwen-max")
+    claims = [{"claim": "lfp voltage"}]
+
+    a = build_stage2_cache_key(
+        redis_service=service,
+        runtime=runtime,
+        question="What is LFP voltage?",
+        retrieval_claims=claims,
+        n_results_per_claim=8,
+        query_focus_terms=["高压实"],
+    )
+    b = build_stage2_cache_key(
+        redis_service=service,
+        runtime=runtime,
+        question="What is LFP voltage?",
+        retrieval_claims=claims,
+        n_results_per_claim=8,
+        query_focus_terms=["辊压"],
+    )
+    assert a != b
+
+    c = build_stage2_cache_key(
+        redis_service=service,
+        runtime=runtime,
+        question="What is LFP voltage?",
+        retrieval_claims=claims,
+        n_results_per_claim=8,
+        query_focus_terms=None,
+    )
+    d = build_stage2_cache_key(
+        redis_service=service,
+        runtime=runtime,
+        question="What is LFP voltage?",
+        retrieval_claims=claims,
+        n_results_per_claim=8,
+    )
+    assert c == d

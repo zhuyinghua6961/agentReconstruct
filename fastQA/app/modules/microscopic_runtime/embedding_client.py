@@ -14,12 +14,16 @@ class RemoteEmbeddingClient:
         model_name = str(os.getenv("EMBEDDING_API_MODEL", "") or os.getenv("EMBEDDING_MODEL_NAME", "")).strip()
         if model_name:
             payload["model"] = model_name
+        headers: dict[str, str] = {}
+        api_key = str(os.getenv("EMBEDDING_API_KEY", "") or "").strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
 
         try:
             timeout_seconds = float(str(os.getenv("EMBEDDING_API_TIMEOUT_SECONDS", "120") or "120").strip())
         except Exception:
             timeout_seconds = 120.0
-        response = self.requests.post(self.api_url, json=payload, timeout=timeout_seconds)
+        response = self.requests.post(self.api_url, json=payload, timeout=timeout_seconds, headers=headers or None)
         response.raise_for_status()
         result = response.json()
         embeddings: list[list[float]]

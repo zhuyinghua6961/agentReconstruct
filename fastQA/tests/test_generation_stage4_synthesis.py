@@ -360,8 +360,13 @@ def test_build_top5_reference_context_uses_default_min_citations(monkeypatch):
         retrieval_results={
             "claim_to_results": {
                 "c1": {
-                    "distances": [0.1],
-                    "metadatas": [{"doi": "10.1/a"}],
+                    "distances": [0.1, 0.1, 0.1, 0.1],
+                    "metadatas": [
+                        {"doi": "10.1/a"},
+                        {"doi": "10.1/b"},
+                        {"doi": "10.1/c"},
+                        {"doi": "10.1/d"},
+                    ],
                 }
             }
         },
@@ -369,7 +374,35 @@ def test_build_top5_reference_context_uses_default_min_citations(monkeypatch):
         topk=12,
     )
 
+    assert len(_scores) >= 4
     assert "必须至少引用 4 篇不同文献" in reference_text
+
+
+def test_build_top_reference_context_intersects_with_pdf_chunks():
+    """Top-ref list must only include DOIs present in pdf_chunks (citation-verify allowlist)."""
+    retrieval = {
+        "claim_to_results": {
+            "c1": {
+                "distances": [0.05, 0.1],
+                "metadatas": [{"doi": "10.12/x-high-rank"}, {"doi": "10.12/y-low-rank-in-pdf"}],
+            }
+        }
+    }
+    pdf_chunks = {
+        "10.12/y-low-rank-in-pdf": [{"text": "only this PDF exists", "page": 1}],
+    }
+    scores, reference_text = build_top5_reference_context(
+        retrieval_results=retrieval,
+        logger=_logger(),
+        pdf_chunks=pdf_chunks,
+        topk=5,
+        min_citations=4,
+        user_question="",
+    )
+    assert len(scores) == 1
+    assert scores[0][0] == "10.12/y-low-rank-in-pdf"
+    assert "10.12/x-high-rank" not in reference_text
+    assert "10.12/y-low-rank-in-pdf" in reference_text
 
 
 def test_stage4_fact_mode_removes_dois_outside_fact_list(monkeypatch):

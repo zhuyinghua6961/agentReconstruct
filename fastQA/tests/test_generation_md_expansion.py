@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from app.modules.generation_pipeline.md_expansion import run_stage25_md_expansion
 
@@ -48,6 +49,44 @@ def test_run_stage25_md_expansion_returns_md_chunks(monkeypatch):
     assert list(result["md_chunks_by_doi"]) == ["10.1/a"]
     assert result["stats"]["hit_doi_count"] == 1
     assert result["stats"]["total_md_chunks"] == 1
+
+
+def test_run_stage25_md_expansion_resolves_resource_relative_md_path(monkeypatch):
+    monkeypatch.setenv("QA_STAGE25_MD_GLOBAL_SUPPLEMENT_ENABLED", "0")
+    monkeypatch.setenv("VECTOR_DB_MD_PATH", "resource/fastqa/vector_database_md")
+    expected_path = str((Path.cwd() / "resource" / "fastqa" / "vector_database_md").resolve())
+    captured: dict[str, str] = {}
+
+    class _FakeCollection:
+        def query(self, **_kwargs):
+            return {"documents": [[]], "metadatas": [[]], "distances": [[]]}
+
+    class _FakeClient:
+        def __init__(self, path: str):
+            captured["path"] = path
+
+        def get_collection(self, name: str):
+            captured["collection"] = name
+            return _FakeCollection()
+
+    class _FakeChromadb:
+        PersistentClient = _FakeClient
+
+    import app.modules.generation_pipeline.md_expansion as md_expansion
+
+    monkeypatch.setattr(md_expansion, "chromadb", _FakeChromadb)
+
+    result = run_stage25_md_expansion(
+        retrieval_results={"documents": []},
+        user_question="lfp voltage",
+        dois=["10.1/a"],
+        literature_expert=_Expert(),
+        logger=logging.getLogger("test.md"),
+    )
+
+    assert captured["path"] == expected_path
+    assert captured["collection"] == "md_papers"
+    assert result["stats"]["fallback_reason"] == "no_md_match"
 
 
 class _RecordingEmbeddingModel:

@@ -279,6 +279,7 @@ def _extract_known_organizations(text: str) -> tuple[str, ...]:
 def _extract_loose_material_terms(text: str) -> tuple[str, ...]:
     terms: list[str] = []
     role_terms = {item.lower() for item in _MATERIAL_ROLE_TERMS}
+    process_terms = {item.lower() for item in _PROCESS_TERMS}
     for pattern in (_LOOSE_MATERIAL_PATENT_RE, _LOOSE_MATERIAL_EFFECT_RE):
         for match in pattern.finditer(text):
             term = _text(match.group("term"))
@@ -289,6 +290,7 @@ def _extract_loose_material_terms(text: str) -> tuple[str, ...]:
                 or "步骤" in term
                 or "路线" in term
                 or term.lower() in role_terms
+                or term.lower() in process_terms
             ):
                 continue
             terms.append(term)

@@ -18,6 +18,7 @@ class Stage2Retriever:
         active_stream_count: int | None = None,
         graph_evidence=None,
         comparison_plan: dict[str, Any] | None = None,
+        query_focus_terms: list[str] | None = None,
     ) -> dict[str, Any]:
         stage2_fn = runtime.stage2_targeted_retrieval
         try:
@@ -39,6 +40,8 @@ class Stage2Retriever:
                 kwargs["graph_evidence"] = graph_evidence
             if "comparison_plan" in parameters or supports_kwargs:
                 kwargs["comparison_plan"] = comparison_plan
+            if "query_focus_terms" in parameters or supports_kwargs:
+                kwargs["query_focus_terms"] = query_focus_terms
         return stage2_fn(**kwargs)
 
 

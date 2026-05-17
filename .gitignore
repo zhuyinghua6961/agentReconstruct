@@ -28,7 +28,8 @@ config.secret.env
 .env
 **/config.secret.env
 **/.env
-
+archive/patentOldCode
+scripts/gateway
 .vendor/
 
 archive/frontend-vue-legacy/

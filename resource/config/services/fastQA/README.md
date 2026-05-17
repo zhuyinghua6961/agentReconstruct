@@ -3,8 +3,9 @@
 Service-level env templates for the `fastQA` backend live here.
 
 Shared infrastructure and model endpoint defaults come from `resource/config/shared/` and
-are loaded before these service-local files. Keep service-local overrides here only when
-fastQA intentionally differs from the shared default.
+are loaded before these service-local files. Commit-safe Stage2 retrieval tuning defaults live in
+[`config.shared.env`](config.shared.env) in this directory. Keep other service-local overrides in
+`config.env` only when fastQA intentionally differs from the shared default.
 
 Expected runtime contract:
 

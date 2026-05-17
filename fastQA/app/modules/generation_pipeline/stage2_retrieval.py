@@ -12,7 +12,11 @@ from app.integrations.llm import Stage2UpstreamGateCancelled, raise_if_upstream_
 from app.modules.graph_kb.models import GraphRagPayload
 from app.modules.generation_pipeline.feature_flags import env_bool, env_int
 from app.modules.generation_pipeline.retrieval_validation import validate_retrieval_relevance
-from app.modules.generation_pipeline.text_processing import extract_question_keywords, preprocess_retrieval_query
+from app.modules.generation_pipeline.text_processing import (
+    extract_question_keywords,
+    finalize_retrieval_keywords_for_embedding,
+    preprocess_retrieval_query,
+)
 from app.modules.qa_kb.comparison_intent import build_retrieval_claims_from_comparison_plan
 
 
@@ -342,8 +346,8 @@ def apply_stage2_query_constraints(
 
     constrained = query
     if merged_prefix:
-        constrained = " ".join(merged_prefix) + " " + query
-    constrained = preprocess_retrieval_query_fn(constrained)
+        # Core retrieval tokens first; finalize_embedding will still prioritize must_include.
+        constrained = f"{query} {' '.join(merged_prefix)}".strip()
     return constrained, details
 
 
@@ -353,15 +357,19 @@ def merge_graph_hints_into_retrieval(
     preprocess_retrieval_query_fn: Callable[[str], str],
     graph_evidence: GraphRagPayload | None,
 ) -> str:
+    """Append optional graph **entity** hints after the core query (no DOI merge; no preprocess).
+
+    DOI strings must not enter the dense retrieval query. ``preprocess_retrieval_query_fn`` is
+    kept for API compatibility but unused here; embedding truncation is handled by
+    ``finalize_retrieval_keywords_for_embedding`` at search time.
+    """
+    _ = preprocess_retrieval_query_fn
     if graph_evidence is None:
+        return query
+    if not env_bool("QA_STAGE2_GRAPH_QUERY_HINT_MERGE_ENABLED", False):
         return query
 
     prefixes: list[str] = []
-    for doi in list(graph_evidence.stage2_doi_candidates or [])[:5]:
-        text = str(doi or "").strip()
-        if text and text not in prefixes and text not in query:
-            prefixes.append(text)
-
     for values in dict(graph_evidence.stage2_entity_hints or {}).values():
         for item in list(values or [])[:5]:
             text = str(item or "").strip()
@@ -370,7 +378,7 @@ def merge_graph_hints_into_retrieval(
 
     if not prefixes:
         return query
-    return preprocess_retrieval_query_fn(" ".join(prefixes + [query]))
+    return f"{query} {' '.join(prefixes)}".strip()
 
 
 def _ensure_comparison_object_lock(
@@ -384,7 +392,7 @@ def _ensure_comparison_object_lock(
         return query, []
     if any(_contains_keyword(query, token) for token in tokens):
         return query, []
-    locked = preprocess_retrieval_query_fn(" ".join([tokens[0], query]))
+    locked = f"{query} {tokens[0]}".strip()
     return locked, [tokens[0]]
 
 
@@ -466,9 +474,9 @@ def _build_comparison_groups(
             documents.extend(list(output.get("documents") or []))
             metadatas.extend(list(output.get("metadatas") or []))
             distances.extend(list(output.get("distances") or []))
-            query = str(output.get("query") or "").strip()
-            if query:
-                queries.append(query)
+            q_use = str(output.get("embedding_query") or output.get("query") or "").strip()
+            if q_use:
+                queries.append(q_use)
         evidence_status = "sufficient" if len(documents) >= min_docs else "insufficient"
         groups.append(
             {
@@ -628,10 +636,19 @@ def run_single_claim_retrieval(
         final_query = " ".join(query_parts) if query_parts else "磷酸铁锂 Fe2P"
 
         logger.info("🔍 [并行检索 %s] 查询: %s...", claim_index, final_query[:100])
+        max_kw = env_int("QA_STAGE2_EMBEDDING_QUERY_MAX_KEYWORDS", 15, minimum=4, maximum=48)
+        max_inj = env_int("QA_STAGE2_EMBEDDING_QUERY_MAX_INJECTION_SLOTS", 0, minimum=0, maximum=64)
+        embedding_query = finalize_retrieval_keywords_for_embedding(
+            final_query,
+            [],
+            max_keywords=max_kw,
+            max_injection_slots=max_inj if max_inj > 0 else None,
+            logger=logger,
+        )
         if literature_expert:
             results = _search_with_optional_rerank(
                 literature_expert=literature_expert,
-                combined_query=final_query,
+                combined_query=embedding_query,
                 n_results=n_results,
                 toggles=toggles,
             )
@@ -646,6 +663,7 @@ def run_single_claim_retrieval(
             "metadatas": results.get("metadatas", []),
             "distances": results.get("distances", []),
             "query": final_query,
+            "embedding_query": embedding_query,
             "claim_index": claim_index,
         }
     except Exception as exc:
@@ -656,6 +674,7 @@ def run_single_claim_retrieval(
             "metadatas": [],
             "distances": [],
             "query": str(claim)[:50] if claim else "",
+            "embedding_query": "",
             "claim_index": claim_index,
             "error": str(exc),
         }
@@ -686,6 +705,7 @@ def run_stage2_targeted_retrieval(
     rerank_candidates: Optional[int] = None,
     graph_evidence: GraphRagPayload | None = None,
     comparison_plan: dict[str, Any] | None = None,
+    query_focus_terms: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     def _cancelled() -> bool:
         if should_cancel is None:
@@ -794,6 +814,12 @@ def run_stage2_targeted_retrieval(
     if normalized_user_question and normalized_user_question != str(user_question or "").strip():
         logger.info("🧹 Stage2 已移除对话背景包装，仅使用当前问题进行检索约束")
 
+    focus_for_injection: List[str] = []
+    if env_bool("QA_STAGE2_QUERY_FOCUS_INJECTION_ENABLED", True):
+        focus_for_injection = [str(t).strip() for t in list(query_focus_terms or []) if str(t or "").strip()]
+    if focus_for_injection:
+        logger.info("Stage2 query_focus_terms (must-include)=%s", focus_for_injection)
+
     def _process_claim(index: int, claim: Any) -> Dict[str, Any]:
         claim_started_at = time.monotonic()
         if _cancelled():
@@ -804,7 +830,11 @@ def run_stage2_targeted_retrieval(
                 "metadatas": [],
                 "distances": [],
                 "query": "",
-                "query_guardrail": {"injected_keywords": [], "injected_entities": []},
+                "query_guardrail": {
+                    "injected_keywords": [],
+                    "injected_entities": [],
+                    "query_focus_terms": list(focus_for_injection),
+                },
                 "rerank": {},
                 "relevance_validation": {"before": 0, "after": 0},
                 "timing": {
@@ -846,8 +876,13 @@ def run_stage2_targeted_retrieval(
             negative_context_terms = []
 
         claim_key = claim_text or f"claim_{index}"
-        query_guardrail_details = {"injected_keywords": [], "injected_entities": []}
+        query_guardrail_details = {
+            "injected_keywords": [],
+            "injected_entities": [],
+            "query_focus_terms": list(focus_for_injection),
+        }
         combined_query = ""
+        embedding_query = ""
         ai_query_ms = 0.0
         query_expansion_ms = 0.0
         search_total_ms = 0.0
@@ -883,6 +918,7 @@ def run_stage2_targeted_retrieval(
                 "metadatas": [],
                 "distances": [],
                 "query": combined_query,
+                "embedding_query": embedding_query,
                 "query_guardrail": query_guardrail_details,
                 "rerank": {},
                 "relevance_validation": {"before": 0, "after": 0},
@@ -937,6 +973,7 @@ def run_stage2_targeted_retrieval(
             toggles=toggles,
             extract_question_keywords_fn=extract_keywords_fn,
         )
+        query_guardrail_details["query_focus_terms"] = list(focus_for_injection)
         combined_query = merge_graph_hints_into_retrieval(
             query=combined_query,
             preprocess_retrieval_query_fn=preprocess_fn,
@@ -950,20 +987,50 @@ def run_stage2_targeted_retrieval(
             )
             if locked_tokens:
                 query_guardrail_details["comparison_object_lock"] = locked_tokens
-        if query_guardrail_details["injected_keywords"] or query_guardrail_details["injected_entities"]:
+        if (
+            query_guardrail_details["injected_keywords"]
+            or query_guardrail_details["injected_entities"]
+            or query_guardrail_details.get("query_focus_terms")
+        ):
             logger.info(
-                "[%s/%s] 查询约束生效: injected_keywords=%s injected_entities=%s",
+                "[%s/%s] 查询约束生效: injected_keywords=%s injected_entities=%s query_focus_terms=%s",
                 index,
                 len(claims),
                 query_guardrail_details["injected_keywords"],
                 query_guardrail_details["injected_entities"],
+                query_guardrail_details.get("query_focus_terms") or [],
             )
+
+        must_include: List[str] = []
+        must_include.extend(str(t) for t in focus_for_injection if str(t or "").strip())
+        must_include.extend(
+            str(x) for x in (query_guardrail_details.get("injected_keywords") or []) if str(x or "").strip()
+        )
+        must_include.extend(
+            str(x) for x in (query_guardrail_details.get("injected_entities") or []) if str(x or "").strip()
+        )
+        lock_extra = query_guardrail_details.get("comparison_object_lock")
+        if isinstance(lock_extra, list):
+            must_include.extend(str(x) for x in lock_extra if str(x or "").strip())
+
+        max_kw = env_int("QA_STAGE2_EMBEDDING_QUERY_MAX_KEYWORDS", 15, minimum=4, maximum=48)
+        max_inj = env_int("QA_STAGE2_EMBEDDING_QUERY_MAX_INJECTION_SLOTS", 0, minimum=0, maximum=64)
+        embedding_query = finalize_retrieval_keywords_for_embedding(
+            combined_query,
+            must_include,
+            max_keywords=max_kw,
+            max_injection_slots=max_inj if max_inj > 0 else None,
+            logger=logger,
+        )
+        if env_bool("QA_STAGE2_EMBEDDING_QUERY_LLM_REFINE_ENABLED", False):
+            # Hook for optional LLM-based compression; disabled by default for determinism.
+            pass
 
         try:
             search_started_at = time.monotonic()
             raw_results = _search_with_optional_rerank(
                 literature_expert=literature_expert,
-                combined_query=combined_query,
+                combined_query=embedding_query,
                 n_results=max(n_results_per_claim * 3, 8),
                 toggles=toggles,
                 logger=logger,
@@ -976,7 +1043,9 @@ def run_stage2_targeted_retrieval(
             before_count = len(list(raw_results.get("documents") or []))
             rerank_meta = dict(raw_results.get("rerank") or {})
             relevance_started_at = time.monotonic()
-            validated_results = validate_fn(raw_results, combined_query, claim_text) if raw_results and "documents" in raw_results else raw_results
+            validated_results = (
+                validate_fn(raw_results, embedding_query, claim_text) if raw_results and "documents" in raw_results else raw_results
+            )
             relevance_validation_ms = (time.monotonic() - relevance_started_at) * 1000.0
             documents = list(validated_results.get("documents") or [])
             metadatas = list(validated_results.get("metadatas") or [])
@@ -1010,7 +1079,7 @@ def run_stage2_targeted_retrieval(
                 search_total_ms,
                 relevance_validation_ms,
                 claim_total_ms,
-                len(combined_query),
+                len(embedding_query),
                 before_count,
                 after_count,
             )
@@ -1021,6 +1090,7 @@ def run_stage2_targeted_retrieval(
                 "metadatas": metadatas,
                 "distances": distances,
                 "query": combined_query,
+                "embedding_query": embedding_query,
                 "query_guardrail": query_guardrail_details,
                 "rerank": rerank_meta,
                 "relevance_validation": {"before": before_count, "after": after_count},
@@ -1049,6 +1119,7 @@ def run_stage2_targeted_retrieval(
                 "metadatas": [],
                 "distances": [],
                 "query": combined_query,
+                "embedding_query": embedding_query,
                 "query_guardrail": query_guardrail_details,
                 "rerank": {},
                 "relevance_validation": {"before": 0, "after": 0},
@@ -1084,6 +1155,7 @@ def run_stage2_targeted_retrieval(
                 "metadatas": [],
                 "distances": [],
                 "query": combined_query,
+                "embedding_query": embedding_query,
                 "query_guardrail": query_guardrail_details,
                 "rerank": {},
                 "relevance_validation": {"before": 0, "after": 0},
@@ -1165,6 +1237,7 @@ def run_stage2_targeted_retrieval(
             "metadatas": list(output["metadatas"]),
             "distances": list(output["distances"]),
             "query": str(output["query"]),
+            "embedding_query": str(output.get("embedding_query") or ""),
             "query_guardrail": dict(output.get("query_guardrail") or {}),
             "rerank": dict(output.get("rerank") or {}),
             "relevance_validation": dict(output.get("relevance_validation") or {}),

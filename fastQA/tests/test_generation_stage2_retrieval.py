@@ -100,12 +100,16 @@ def test_stage2_targeted_retrieval_applies_keyword_and_entity_guardrails(monkeyp
     )
 
     assert result["success"] is True
-    query = result["claim_to_results"]["claim one"]["query"]
+    claim = result["claim_to_results"]["claim one"]
+    query = claim["query"]
+    embedding_q = claim["embedding_query"]
     assert "LFP" in query
     assert "Ti" in query
     assert "cycle life" in query
-    assert result["claim_to_results"]["claim one"]["query_guardrail"]["injected_entities"] == ["Ti"]
-    assert expert.calls[0]["query"] == query
+    assert claim["query_guardrail"]["injected_entities"] == ["Ti"]
+    assert expert.calls[0]["query"] == embedding_q
+    assert "Ti" in embedding_q
+    assert "LFP" in embedding_q
     assert client.calls[0]["model"] == "gpt-test"
 
 
@@ -257,10 +261,11 @@ def test_stage2_comparison_uses_profile_retrieval_query(monkeypatch):
     )
 
     assert result["success"] is True
-    assert expert.calls[0]["query"] == "FePO4 as iron source precursor for LiFePO4 synthesis route evidence"
-    assert result["comparison_groups"][0]["queries"] == [
-        "FePO4 as iron source precursor for LiFePO4 synthesis route evidence"
-    ]
+    emb = next(iter(result["claim_to_results"].values()))["embedding_query"]
+    assert expert.calls[0]["query"] == emb
+    assert "iron source precursor" in emb.lower()
+    assert "fepo4" in emb.lower() or "FePO4" in emb
+    assert result["comparison_groups"][0]["queries"] == [emb]
 
 
 def test_stage2_comparison_query_expansion_keeps_object_lock(monkeypatch):
@@ -744,6 +749,7 @@ def test_stage2_targeted_retrieval_returns_cancelled_payload():
 
 
 def test_stage2_targeted_retrieval_merges_graph_hints_into_query(monkeypatch):
+    monkeypatch.setenv("QA_STAGE2_GRAPH_QUERY_HINT_MERGE_ENABLED", "1")
     monkeypatch.setenv("QA_STAGE2_FORCE_KEYWORD_INJECTION", "false")
     monkeypatch.setenv("QA_STAGE2_ENTITY_LOCK_ENABLED", "false")
     expert = _Expert(
@@ -771,7 +777,7 @@ def test_stage2_targeted_retrieval_merges_graph_hints_into_query(monkeypatch):
 
     assert result["success"] is True
     assert "GRAPH_HINT" in result["claim_to_results"]["claim one"]["query"]
-    assert "10.9/graph" in result["claim_to_results"]["claim one"]["query"]
+    assert "10.9/graph" not in result["claim_to_results"]["claim one"]["query"]
 
 
 def test_stage2_targeted_retrieval_propagates_pool_timeout_from_ai_query_generation(monkeypatch):

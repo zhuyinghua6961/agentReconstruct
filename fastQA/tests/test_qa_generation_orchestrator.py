@@ -109,6 +109,11 @@ def _logger():
     return logging.getLogger("test")
 
 
+def _merge_stage2_identity(**kwargs):
+    """Orchestrator tests stub Stage2 docs without expecting retrieval-snippet injection."""
+    return dict(kwargs.get("pdf_chunks") or {})
+
+
 def test_orchestrator_run_returns_fallback_when_stage2_fails():
     runtime = _Runtime(
         stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]},
@@ -144,7 +149,7 @@ def test_orchestrator_run_returns_final_result_when_stage4_succeeds():
         stage3_payload={"10.1": [{"text": "evidence"}]},
         stage4_payload=[{"success": True, "final_answer": "final", "query_mode": "生成驱动检索（PDF溯源）", "references": [{"doi": "10.1"}]}],
     )
-    orchestrator = GenerationPipelineOrchestrator()
+    orchestrator = GenerationPipelineOrchestrator(merge_stage2_retrieval_evidence_fn=_merge_stage2_identity)
 
     result = orchestrator.run(
         question="hello",
@@ -194,7 +199,11 @@ def test_orchestrator_passes_reranked_evidence_chunks_to_stage4(monkeypatch):
                 conversation_context=kwargs["conversation_context"],
             )
 
-    orchestrator = GenerationPipelineOrchestrator(stage4=_Stage4(), evidence_rerank_fn=_rerank)
+    orchestrator = GenerationPipelineOrchestrator(
+        stage4=_Stage4(),
+        evidence_rerank_fn=_rerank,
+        merge_stage2_retrieval_evidence_fn=_merge_stage2_identity,
+    )
 
     result = orchestrator.run(
         question="hello",

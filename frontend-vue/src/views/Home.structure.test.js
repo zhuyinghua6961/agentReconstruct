@@ -32,7 +32,7 @@ function assertNoGlobalMessageContentSelector(selector) {
 }
 
 test('Home formats graph_kb query mode as a knowledge-graph badge during streaming', () => {
-  assert.match(source, /const ASK_MODE_LABELS = \{ fast: '快速模式', thinking: '思考模式', patent: '专利模式', graph_kb: '知识图谱', neo4j: '知识图谱' \}/)
+  assert.match(source, /const ASK_MODE_LABELS = \{ fast: '快速模式', thinking: '深度模式', patent: '专利模式', graph_kb: '知识图谱', neo4j: '知识图谱' \}/)
 })
 
 test('Home marks graph kb assistant messages with a graph-only class for labeled and raw graph modes', () => {
@@ -78,6 +78,18 @@ test('Home renders QA stage timing summary and details in the processing panel',
   assert.match(source, /stage-timing-summary/)
   assert.match(source, /stage-step-duration/)
   assert.doesNotMatch(source, /stage-timing-list/)
+})
+
+test('Home hides graph step result counts from the processing panel', () => {
+  assert.match(source, /function isGraphPipelineStep\(step\)/)
+  assert.match(source, /function getVisibleStepCount\(step\)/)
+  assert.match(source, /if \(isGraphPipelineStep\(step\)\) return null/)
+  assert.match(source, /function getGraphStepDetail\(step\)/)
+  assert.match(source, /if \(isGraphPipelineStep\(step\)\) return getGraphStepDetail\(step\)/)
+  assert.match(source, /已获取结构化线索，继续文献检索与生成/)
+  assert.match(source, /v-if="getVisibleStepCount\(getCollapsedStepSummary\(entry\.message\)\)"[\s\S]*{{ getVisibleStepCount\(getCollapsedStepSummary\(entry\.message\)\) }}/)
+  assert.match(source, /v-if="getVisibleStepCount\(step\)" class="step-badge">{{ getVisibleStepCount\(step\) }}/)
+  assert.doesNotMatch(source, /getStepCount\(step\)" class="step-badge"/)
 })
 
 test('Home imports and uses question anchor helper for stable user-message ids', () => {

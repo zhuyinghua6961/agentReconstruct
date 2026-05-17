@@ -4,6 +4,7 @@ from typing import Any
 
 from server.patent.graph_kb.models import PatentGraphConstraint, PatentGraphEvidenceBundle, PatentGraphQueryPlanV2
 from server.patent.graph_kb.query_templates import get_patent_query_template
+from server.patent.graph_kb.slots import extract_patent_graph_slots
 
 
 _SAFE_DIRECT_PARAMETRIC_PATHS = {
@@ -78,6 +79,59 @@ def _select_candidate(plan: PatentGraphQueryPlanV2, matched_path: str = "") -> d
             if _text(candidate.get("path_id")) == normalized_matched_path:
                 return candidate
     return candidates[0] if candidates else {}
+
+
+def _normalized_set(values: Any) -> set[str]:
+    return {_text(item).lower() for item in list(values or []) if _text(item)}
+
+
+def _slots_for_plan(plan: PatentGraphQueryPlanV2) -> dict[str, Any]:
+    slots = dict(plan.parametric_slots.get("slots") or {})
+    if slots or not _text(plan.question):
+        return slots
+    return extract_patent_graph_slots(plan.question).diagnostics()
+
+
+def _material_constraint_terms(slots: dict[str, Any]) -> tuple[str, ...]:
+    role_terms = _normalized_set(slots.get("material_role_terms"))
+    process_terms = tuple(_text(item).lower() for item in tuple(slots.get("process_terms") or ()) if _text(item))
+    atmosphere_terms = tuple(_text(item).lower() for item in tuple(slots.get("atmosphere_terms") or ()) if _text(item))
+    material_terms: list[str] = []
+    for value in tuple(slots.get("material_terms") or ()):
+        text = _text(value)
+        lowered = text.lower()
+        if not text or lowered in role_terms:
+            continue
+        if any(term and term in lowered for term in process_terms):
+            continue
+        if any(term and term in lowered for term in atmosphere_terms):
+            continue
+        if any(term and term in lowered for term in role_terms):
+            continue
+        material_terms.append(text)
+    return tuple(material_terms)
+
+
+def _is_allowed_material_constraint(value: Any, slots: dict[str, Any]) -> bool:
+    if not slots:
+        return bool(_text(value))
+    return _text(value) in set(_material_constraint_terms(slots))
+
+
+def _append_constraint(
+    constraints: list[PatentGraphConstraint],
+    *,
+    field: str,
+    operator: str,
+    value: Any,
+) -> None:
+    text = _text(value)
+    if not text:
+        return
+    key = (field, operator, text)
+    if any((item.field, item.operator, _text(item.value)) == key for item in constraints):
+        return
+    constraints.append(PatentGraphConstraint(field=field, operator=operator, value=text))
 
 
 def _infer_selected_path_id(plan: PatentGraphQueryPlanV2, matched_path: str = "") -> str:
@@ -168,53 +222,75 @@ def _constraints_for_plan(plan: PatentGraphQueryPlanV2, *, matched_path: str = "
     if plan.legacy_template_plan is not None:
         params = dict(plan.legacy_template_plan.params or {})
         template_id = str(plan.legacy_template_id or plan.legacy_template_plan.template_id or "")
-        if template_id == "lookup_patent_by_id" and _text(params.get("patent_id")):
-            constraints.append(PatentGraphConstraint(field="patent.id", operator="eq", value=_text(params.get("patent_id"))))
-        if template_id == "list_patents_by_ipc" and _text(params.get("ipc_code")):
-            constraints.append(PatentGraphConstraint(field="ipc.code", operator="eq", value=_text(params.get("ipc_code"))))
-        if template_id == "list_patents_by_applicant" and _text(params.get("organization_name")):
-            constraints.append(
-                PatentGraphConstraint(field="organization.applicant", operator="eq", value=_text(params.get("organization_name")))
-            )
+        if template_id == "lookup_patent_by_id":
+            _append_constraint(constraints, field="patent.id", operator="eq", value=params.get("patent_id"))
+        if template_id == "list_patents_by_ipc":
+            _append_constraint(constraints, field="ipc.code", operator="eq", value=params.get("ipc_code"))
+        if template_id == "list_patents_by_applicant":
+            _append_constraint(constraints, field="organization.applicant", operator="eq", value=params.get("organization_name"))
         return tuple(constraints)
 
-    candidate = _select_candidate(plan, matched_path=matched_path)
-    if not candidate:
-        return ()
-    path_id = str(candidate.get("path_id") or "")
-    params = dict(candidate.get("params") or {})
-    if path_id in {"list_patents_by_inventor", "count_patents_by_inventor"} and _text(params.get("inventor_name")):
-        constraints.append(PatentGraphConstraint(field="person.inventor", operator="eq", value=_text(params.get("inventor_name"))))
-    elif path_id in {"list_patents_by_agency", "count_patents_by_agency"} and _text(params.get("agency_name")):
-        constraints.append(PatentGraphConstraint(field="organization.agency", operator="eq", value=_text(params.get("agency_name"))))
-    elif path_id in {"list_patents_by_ipc_prefix", "count_patents_by_ipc_prefix"} and _text(params.get("ipc_prefix")):
-        constraints.append(PatentGraphConstraint(field="ipc.subclass", operator="eq", value=_text(params.get("ipc_prefix"))))
-    elif path_id in {"list_patents_by_ipc_code_prefix", "count_patents_by_ipc_code_prefix"} and _text(params.get("ipc_code_prefix")):
-        constraints.append(PatentGraphConstraint(field="ipc.code", operator="starts_with", value=_text(params.get("ipc_code_prefix"))))
-    elif path_id in {"list_patents_by_ipc_full_code", "count_patents_by_ipc_full_code"} and _text(params.get("ipc_full_code")):
-        constraints.append(PatentGraphConstraint(field="ipc.code", operator="eq", value=_text(params.get("ipc_full_code"))))
-    elif path_id in {"list_patents_by_applicant", "count_patents_by_applicant"} and _text(params.get("applicant_name") or params.get("organization_name")):
-        constraints.append(
-            PatentGraphConstraint(field="organization.applicant", operator="eq", value=_text(params.get("applicant_name") or params.get("organization_name")))
-        )
-    elif path_id in {
-        "lookup_patent_by_id",
-        "list_patent_process_steps",
-        "list_patent_material_roles",
-        "list_patent_experiment_tables",
-        "list_patent_problem_solution",
-        "list_patent_inventive_scope",
-        "list_patent_citations",
-        "list_patent_atmospheres",
-        "list_patent_embodiment_insights",
-    } and _text(params.get("patent_id")):
-        constraints.append(PatentGraphConstraint(field="patent.id", operator="eq", value=_text(params.get("patent_id"))))
-    elif path_id == "list_patents_by_material" and _text(params.get("material_term")):
-        constraints.append(PatentGraphConstraint(field="material.name", operator="contains", value=_text(params.get("material_term"))))
-    elif path_id == "list_patents_by_material_role" and _text(params.get("material_role_term")):
-        constraints.append(PatentGraphConstraint(field="material.role", operator="contains", value=_text(params.get("material_role_term"))))
-    elif path_id == "list_patents_by_process_term" and _text(params.get("process_term")):
-        constraints.append(PatentGraphConstraint(field="process.step", operator="contains", value=_text(params.get("process_term"))))
+    selected_candidate = _select_candidate(plan, matched_path=matched_path)
+    selected_path_id = str(selected_candidate.get("path_id") or "")
+    candidate_sources = [selected_candidate] if selected_candidate else []
+    slots = _slots_for_plan(plan)
+    if str(plan.diagnostics.get("matched_rule") or "") in {
+        "combined_facet_listing_requires_rag",
+        "material_process_synthesis_question",
+    }:
+        for candidate in _candidate_queries(plan):
+            if candidate not in candidate_sources:
+                candidate_sources.append(candidate)
+
+    for candidate in candidate_sources:
+        path_id = str(candidate.get("path_id") or "")
+        params = dict(candidate.get("params") or {})
+        if path_id in {"list_patents_by_inventor", "count_patents_by_inventor"}:
+            _append_constraint(constraints, field="person.inventor", operator="eq", value=params.get("inventor_name"))
+        elif path_id in {"list_patents_by_agency", "count_patents_by_agency"}:
+            _append_constraint(constraints, field="organization.agency", operator="eq", value=params.get("agency_name"))
+        elif path_id in {"list_patents_by_ipc_prefix", "count_patents_by_ipc_prefix"}:
+            _append_constraint(constraints, field="ipc.subclass", operator="eq", value=params.get("ipc_prefix"))
+        elif path_id in {"list_patents_by_ipc_code_prefix", "count_patents_by_ipc_code_prefix"}:
+            _append_constraint(constraints, field="ipc.code", operator="starts_with", value=params.get("ipc_code_prefix"))
+        elif path_id in {"list_patents_by_ipc_full_code", "count_patents_by_ipc_full_code"}:
+            _append_constraint(constraints, field="ipc.code", operator="eq", value=params.get("ipc_full_code"))
+        elif path_id in {"list_patents_by_applicant", "count_patents_by_applicant"}:
+            _append_constraint(
+                constraints,
+                field="organization.applicant",
+                operator="eq",
+                value=params.get("applicant_name") or params.get("organization_name"),
+            )
+        elif path_id in {
+            "lookup_patent_by_id",
+            "list_patent_process_steps",
+            "list_patent_material_roles",
+            "list_patent_experiment_tables",
+            "list_patent_problem_solution",
+            "list_patent_inventive_scope",
+            "list_patent_citations",
+            "list_patent_atmospheres",
+            "list_patent_embodiment_insights",
+        }:
+            _append_constraint(constraints, field="patent.id", operator="eq", value=params.get("patent_id"))
+        elif path_id == "list_patents_by_material":
+            if _is_allowed_material_constraint(params.get("material_term"), slots):
+                _append_constraint(constraints, field="material.name", operator="contains", value=params.get("material_term"))
+        elif path_id == "list_patents_by_material_role":
+            _append_constraint(constraints, field="material.role", operator="contains", value=params.get("material_role_term"))
+        elif path_id == "list_patents_by_process_term":
+            _append_constraint(constraints, field="process.step", operator="contains", value=params.get("process_term"))
+
+    if slots and selected_path_id in {"list_patents_by_material", "list_patents_by_material_role", "list_patents_by_process_term"}:
+        for value in tuple(slots.get("material_role_terms") or ()):
+            _append_constraint(constraints, field="material.role", operator="contains", value=value)
+        for value in _material_constraint_terms(slots):
+            _append_constraint(constraints, field="material.name", operator="contains", value=value)
+        for value in tuple(slots.get("process_terms") or ()):
+            _append_constraint(constraints, field="process.step", operator="contains", value=value)
+        for value in tuple(slots.get("atmosphere_terms") or ()):
+            _append_constraint(constraints, field="process.atmosphere", operator="contains", value=value)
     return tuple(constraints)
 
 

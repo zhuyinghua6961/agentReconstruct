@@ -217,7 +217,7 @@ function normalizeMessage(item) {
   const rawMode = String(item?.queryMode || item?.query_mode || metadata.query_mode || metadata.queryMode || '').trim();
   const queryModeMap = {
     fast: '快速模式',
-    thinking: '思考模式',
+    thinking: '深度模式',
     patent: '专利模式',
     neo4j: '知识图谱',
     graph_kb: '知识图谱',

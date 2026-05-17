@@ -24,6 +24,7 @@ class GenerationRuntime(Protocol):
         active_stream_count: int | None = None,
         graph_evidence: GraphRagPayload | None = None,
         comparison_plan: dict[str, Any] | None = None,
+        query_focus_terms: list[str] | None = None,
     ) -> dict[str, Any]:
         ...
 

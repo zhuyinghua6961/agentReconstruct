@@ -7,6 +7,7 @@ from typing import Any, Callable, Iterator
 from app.integrations.redis import RedisService
 from app.modules.generation_pipeline.evidence_rerank import rerank_evidence_chunks
 from app.modules.generation_pipeline.feature_flags import env_bool, env_int
+from app.modules.generation_pipeline.stage2_evidence_merge import maybe_merge_stage2_retrieval_evidence
 from app.modules.graph_kb.models import GraphRagPayload
 from app.modules.qa_cache.metrics import increment_cache_metric
 from app.modules.qa_cache.singleflight import run_singleflight
@@ -239,6 +240,7 @@ class GenerationPipelineOrchestrator:
         stage4: Stage4Synthesizer | None = None,
         evaluate_stage3_pdf_skip_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         merge_pdf_chunks_with_md_fn: Callable[..., dict[str, list[dict[str, Any]]]] | None = None,
+        merge_stage2_retrieval_evidence_fn: Callable[..., dict[str, list[dict[str, Any]]]] | None = None,
         evidence_rerank_fn: Callable[..., dict[str, Any]] | None = None,
     ) -> None:
         self.stage1 = stage1 or Stage1Planner()
@@ -248,6 +250,7 @@ class GenerationPipelineOrchestrator:
         self.stage4 = stage4 or Stage4Synthesizer()
         self.evaluate_stage3_pdf_skip_fn = evaluate_stage3_pdf_skip_fn or (lambda **_kwargs: {"should_skip": False, "reason": ""})
         self.merge_pdf_chunks_with_md_fn = merge_pdf_chunks_with_md_fn
+        self.merge_stage2_retrieval_evidence_fn = merge_stage2_retrieval_evidence_fn or maybe_merge_stage2_retrieval_evidence
         self.evidence_rerank_fn = evidence_rerank_fn or rerank_evidence_chunks
 
     def _timed(self, timings: dict[str, float], key: str, fn: Callable[[], Any]) -> Any:
@@ -411,6 +414,7 @@ class GenerationPipelineOrchestrator:
         active_stream_count: int | None,
         graph_evidence: GraphRagPayload | None,
         comparison_plan: dict[str, Any] | None = None,
+        query_focus_terms: list[str] | None = None,
     ) -> dict[str, Any]:
         cached = get_cached_stage2_result(
             redis_service=redis_service,
@@ -419,6 +423,7 @@ class GenerationPipelineOrchestrator:
             retrieval_claims=retrieval_claims,
             n_results_per_claim=n_results_per_claim,
             graph_cache_fingerprint=self._graph_cache_fingerprint(graph_evidence),
+            query_focus_terms=query_focus_terms,
         )
         if cached is not None:
             increment_cache_metric("stage2", "cache_hit")
@@ -438,6 +443,8 @@ class GenerationPipelineOrchestrator:
                 kwargs["graph_evidence"] = graph_evidence
             if self._supports_kwarg(self.stage2.run, "comparison_plan"):
                 kwargs["comparison_plan"] = comparison_plan
+            if self._supports_kwarg(self.stage2.run, "query_focus_terms"):
+                kwargs["query_focus_terms"] = query_focus_terms
             result = self.stage2.run(**kwargs)
             if not _payload_cancelled(result) and not _should_cancelled(should_cancel):
                 cache_stage2_result(
@@ -448,6 +455,7 @@ class GenerationPipelineOrchestrator:
                     n_results_per_claim=n_results_per_claim,
                     stage2_result=result,
                     graph_cache_fingerprint=self._graph_cache_fingerprint(graph_evidence),
+                    query_focus_terms=query_focus_terms,
                 )
             return result
 
@@ -463,6 +471,7 @@ class GenerationPipelineOrchestrator:
                 retrieval_claims=retrieval_claims,
                 n_results_per_claim=n_results_per_claim,
                 graph_cache_fingerprint=self._graph_cache_fingerprint(graph_evidence),
+                query_focus_terms=query_focus_terms,
             ),
             namespace="stage2",
             read_cached_fn=lambda: get_cached_stage2_result(
@@ -472,6 +481,7 @@ class GenerationPipelineOrchestrator:
                 retrieval_claims=retrieval_claims,
                 n_results_per_claim=n_results_per_claim,
                 graph_cache_fingerprint=self._graph_cache_fingerprint(graph_evidence),
+                query_focus_terms=query_focus_terms,
             ),
             compute_fn=_compute,
         )
@@ -532,6 +542,24 @@ class GenerationPipelineOrchestrator:
                 dois=dois,
             ),
             compute_fn=_compute,
+        )
+
+    def _merge_stage2_into_evidence(
+        self,
+        *,
+        pdf_chunks: dict[str, list[dict[str, Any]]],
+        retrieval_results: dict[str, Any],
+        dois: list[str],
+        logger: Any,
+    ) -> dict[str, list[dict[str, Any]]]:
+        merge_fn = self.merge_stage2_retrieval_evidence_fn
+        if merge_fn is None:
+            return dict(pdf_chunks or {})
+        return merge_fn(
+            retrieval_results=retrieval_results,
+            dois_ordered=list(dois or []),
+            pdf_chunks=dict(pdf_chunks or {}),
+            logger=logger,
         )
 
     def _run_stage35_evidence_rerank(
@@ -708,6 +736,10 @@ class GenerationPipelineOrchestrator:
         )
         if comparison_plan.get("enabled"):
             retrieval_claims = build_retrieval_claims_from_comparison_plan(comparison_plan) + build_retrieval_claims_from_answer_plan(answer_plan)
+        _qf = stage1_result.get("query_focus_terms")
+        stage1_query_focus_terms = (
+            [str(x).strip() for x in _qf if str(x or "").strip()] if isinstance(_qf, list) else []
+        )
         if not retrieval_claims:
             return self._fallback_result(
                 final_answer=deep_answer,
@@ -735,6 +767,7 @@ class GenerationPipelineOrchestrator:
                 active_stream_count=active_stream_count,
                 graph_evidence=graph_evidence,
                 comparison_plan=comparison_plan,
+                query_focus_terms=stage1_query_focus_terms,
             ),
         )
         if not stage2_result.get("success"):
@@ -836,6 +869,13 @@ class GenerationPipelineOrchestrator:
                     pdf_chunks=pdf_chunks,
                     md_chunks=md_expansion_result.get("md_chunks_by_doi", {}),
                 )
+
+        pdf_chunks = self._merge_stage2_into_evidence(
+            pdf_chunks=pdf_chunks,
+            retrieval_results=stage2_result,
+            dois=dois,
+            logger=logger,
+        )
 
         evidence_rerank_result = self._timed(
             timings,
@@ -1032,6 +1072,10 @@ class GenerationPipelineOrchestrator:
         )
         if comparison_plan.get("enabled"):
             retrieval_claims = build_retrieval_claims_from_comparison_plan(comparison_plan) + build_retrieval_claims_from_answer_plan(answer_plan)
+        _qf = stage1_result.get("query_focus_terms")
+        stage1_query_focus_terms = (
+            [str(x).strip() for x in _qf if str(x or "").strip()] if isinstance(_qf, list) else []
+        )
         logger.info(
             "fastqa stream stage1 normalized deep_answer_chars=%s retrieval_claims=%s question=%s",
             len(deep_answer),
@@ -1073,6 +1117,7 @@ class GenerationPipelineOrchestrator:
                 active_stream_count=active_stream_count,
                 graph_evidence=graph_evidence,
                 comparison_plan=comparison_plan,
+                query_focus_terms=stage1_query_focus_terms,
             ),
         )
         logger.info(
@@ -1224,6 +1269,13 @@ class GenerationPipelineOrchestrator:
                     pdf_chunks=pdf_chunks,
                     md_chunks=md_expansion_result.get("md_chunks_by_doi", {}),
                 )
+
+        pdf_chunks = self._merge_stage2_into_evidence(
+            pdf_chunks=pdf_chunks,
+            retrieval_results=stage2_result,
+            dois=dois,
+            logger=logger,
+        )
 
         logger.info(
             "fastqa stream stage3 completed skipped=%s skip_reason=%s pdf_source_count=%s pdf_chunk_count=%s",
