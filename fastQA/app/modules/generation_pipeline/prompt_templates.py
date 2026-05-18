@@ -63,7 +63,7 @@ STAGE1_PROMPT = r"""你是一位长期从事磷酸铁锂（LFP）正极材料研
 
 **重要术语区分（必须严格遵守）**：
 - **压实密度（Compaction Density）**：电极片在辊压或压制后的密度，通常指电极片的压实密度，单位g/cm³
-- **振实密度（Tapping Density）**：粉末材料在振实仪中振实后的密度，是粉末材料的固有属性，单位g/cm³
+- **振实密度（Tapping Density；英文文献常写作 *tap density* / *tapping density*，均指粉末振实后的密度，与电极压实无关）**：粉末材料在振实仪中振实后的密度，是粉末材料的固有属性，单位g/cm³
 - **关键要求**：
   1. 如果用户问题问的是"压实密度"，答案中**只能使用"压实密度"**，不要提及"振实密度"
   2. 如果用户问题问的是"振实密度"，答案中**只能使用"振实密度"**，不要提及"压实密度"
@@ -159,11 +159,30 @@ STAGE1_PROMPT = r"""你是一位长期从事磷酸铁锂（LFP）正极材料研
 4. 与 `retrieval_claims[].keywords` 可部分重叠，但 `query_focus_terms` 侧重点是**窄化检索方向**，宜更短、更贴用户「刺点」。
 5. **振实密度 vs 压实密度（检索焦点约束）**：二者物理含义不同（粉末振实 vs 电极片压实）。用户若仅泛称「高压实型」「高密度」而未点名电极压实：**不要把「压实密度」当作必选焦点词**；除非用户明确提到辊压极片、电极压实密度或 compaction，否则焦点优先使用「高压实」「粉末致密」「球形颗粒」「粒径」「碳包覆」等不与电极压实混淆的短语。**禁止**在 `query_focus_terms` 里把「振实密度」与「压实密度」并列当作一对同义词。
 
+**【问题焦点识别与证据轴】**（对象字段 `question_focus`，**必须给出**）：
+在写出 `deep_answer` 并完成检索主张草案后，对用户问题做一次**结构化焦点路由**（不改变 `deep_answer` 的正文主轴，只做机器可读摘要）：
+1. **`focus_type`**：**必须**取自下列英文字段之一（/snake_case，严格一致）：
+   `generic`、`synthesis_preparation`、`powder_dense_morphology`、`electrode_compaction_process`、`carbon_coating_conductivity`、`doping_structure`、`electrochemical_performance`、`characterization`、`mechanism_analysis`、`comparative_tradeoff`、`density_metric_ambiguity`、`safety_reliability`、`cost_scaleup`、`recycling_sustainability`、`other`
+2. **`focus_summary`**：用 **1–2 句中文**概括「用户最关心要回答什么、主线在哪一层」（工艺制备 / 粉末形貌致密 / 极片压实 / 机理 / 对比 / 安全等）。
+3. **`evidence_axes`**：**2–8 条**极短短语（中文或中英文专业词），表示检索命中片段应尽量对齐的「证据主轴」；可比 `query_focus_terms` **稍具描述性**，但与用户意图一致。**不要绑死臆测数值**。
+4. **`secondary_axes`**：**0–4 条**可选，表示次要佐证方向（在用户明确需要时再填；否则可为 `[]`）。
+5. **`confidence`**：`high` / `medium` / `low`，表示你对焦点分类与用户意图对齐的主观把握。
+6. **振实 vs 压实（焦点声明）**：若用户未明确写的是**粉末振实/堆积**还是**极片辊压后的压实密度**，须在 `focus_summary` 里**点明当前答案/证据主轴**落在哪一侧；含糊的「高压实型」默认可按**粉末高压实（偏振实/球形致密）**组织检索，**不要**在 `evidence_axes` 里把「压实密度」与「振实密度」当成可互换同义词并列；只有用户原文已点名某一类时，才把该类写入 `evidence_axes` 主轴。
+
+**与其它字段的关系**：`question_focus.evidence_axes` 可与 `query_focus_terms`、`retrieval_claims[].keywords` 部分重叠；**各司其职**——`query_focus_terms`偏「收窄刺点」，`evidence_axes`偏「段落级应对齐的证据维度」。`retrieval_claims` 的**排序**应让用户主线对应的主张靠前（通常与 `question_focus.focus_type` / `focus_summary` 对齐的那几条）。
+
 请以JSON格式输出（严格使用下面的结构化格式，**不要**添加任何额外说明文字）：
 ```json
 {
   "deep_answer": "你的深度预回答内容（Markdown格式）",
   "query_focus_terms": ["高压实型", "粉末致密"],
+  "question_focus": {
+    "focus_type": "powder_dense_morphology",
+    "focus_summary": "用户关心高压实粉体侧的形貌与堆积，不要把电极压实与粉末振实混为一谈。",
+    "evidence_axes": ["球形二次颗粒","喷雾干燥","粉末堆积","致密化"],
+    "secondary_axes": ["碳包覆"],
+    "confidence": "high"
+  },
   "retrieval_claims": [
     {
       "claim": "主张陈述句：具体可检索但不绑死臆测数值（数字仅当用户原文已给出时可写入）",
@@ -260,7 +279,7 @@ STAGE2_PROMPT = r"""你是一名最终的答案润色与校验专家。
 
 **重要术语区分（必须严格遵守）**：
 - **压实密度（Compaction Density）**：电极片在辊压或压制后的密度，通常指电极片的压实密度，单位g/cm³
-- **振实密度（Tapping Density）**：粉末材料在振实仪中振实后的密度，是粉末材料的固有属性，单位g/cm³
+- **振实密度（Tapping Density；英文文献常写作 *tap density* / *tapping density*，均指粉末振实后的密度，与电极压实无关）**：粉末材料在振实仪中振实后的密度，是粉末材料的固有属性，单位g/cm³
 - **关键要求**：
   1. 如果用户问题问的是"压实密度"，答案中**只能使用"压实密度"**，不要提及"振实密度"
   2. 如果用户问题问的是"振实密度"，答案中**只能使用"振实密度"**，不要提及"压实密度"

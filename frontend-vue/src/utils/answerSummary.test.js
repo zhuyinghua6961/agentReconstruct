@@ -131,6 +131,39 @@ test('inline markdown heading marker after plain text is normalized into a real 
   }
 })
 
+test('heading lines with inline prose body keep prose out of the heading style', () => {
+  const markdown = [
+    '## 压实密度的典型范围 根据专利证据，磷酸铁锂材料的压实密度可在较大范围内调控。常规工艺制备的磷酸铁锂压实密度通常在2.2-2.6 g/cm3之间 (CN118458747A)。',
+  ].join('\n')
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.match(html, /<h2>压实密度的典型范围<\/h2>/)
+    assert.match(html, /<p>根据专利证据，磷酸铁锂材料的压实密度可在较大范围内调控。/)
+    assert.doesNotMatch(html, /<h2>压实密度的典型范围 根据专利证据/)
+    assert.match(html, /data-patent-id="CN118458747A"/)
+  }
+})
+
+test('glued section and subsection heading markers are split into separate headings', () => {
+  const markdown = [
+    '## 提升压实密度的关键策略 ### 颗粒级配与形貌控制',
+    '颗粒级配是提高压实密度的有效手段。',
+  ].join('\n')
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.match(html, /<h2>提升压实密度的关键策略<\/h2>/)
+    assert.match(html, /<h3>颗粒级配与形貌控制<\/h3>/)
+    assert.match(html, /<p>颗粒级配是提高压实密度的有效手段。<\/p>/)
+    assert.doesNotMatch(html, /### 颗粒级配与形貌控制/)
+  }
+})
+
 test('mixed separator and heading markers are normalized instead of leaking raw markdown tokens', () => {
   const markdown = '引言 --- #### # 1. 本征电压平台与机制'
 

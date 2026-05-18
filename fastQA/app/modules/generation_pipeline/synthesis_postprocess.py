@@ -294,19 +294,35 @@ def log_topk_coverage(
     label: str = "top-k",
 ) -> None:
     """Log citation coverage between answer DOI set and ranked DOI candidates."""
-    target_dois = [doi for doi, _ in top_refs_with_scores]
-    missing_dois = set(target_dois) - cited_dois_set
+    cited_keys = {canonicalize_doi(str(d or "").strip()) for d in cited_dois_set}
+    cited_keys.discard("")
 
-    if missing_dois:
-        logger.warning(f"⚠️ LLM未引用以下 {len(missing_dois)} 篇参考文献（{label}）:")
-        for doi in missing_dois:
+    target_rows: list[tuple[str, str]] = []
+    for doi, _score in top_refs_with_scores:
+        raw = str(doi or "").strip()
+        if not raw:
+            continue
+        ck = canonicalize_doi(raw)
+        if ck:
+            target_rows.append((raw, ck))
+
+    missing_raw: list[str] = []
+    hits = 0
+    for raw, ck in target_rows:
+        if ck in cited_keys:
+            hits += 1
+        else:
+            missing_raw.append(raw)
+
+    if missing_raw:
+        logger.warning(f"⚠️ LLM未引用以下 {len(missing_raw)} 篇参考文献（{label}）:")
+        for doi in missing_raw:
             logger.warning(f"   - {doi}")
 
-        cited_target = len(cited_dois_set.intersection(set(target_dois)))
-        logger.info(f"📊 LLM在答案中引用了 {cited_target}/{len(target_dois)} 篇{label}文献")
+        logger.info(f"📊 LLM在答案中引用了 {hits}/{len(target_rows)} 篇{label}文献")
         return
 
-    logger.info(f"✅ LLM成功引用了全部 {len(target_dois)} 篇{label}文献")
+    logger.info(f"✅ LLM成功引用了全部 {len(target_rows)} 篇{label}文献")
 
 
 def log_top5_coverage(

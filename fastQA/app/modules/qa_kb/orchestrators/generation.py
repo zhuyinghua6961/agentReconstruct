@@ -7,7 +7,9 @@ from typing import Any, Callable, Iterator
 from app.integrations.redis import RedisService
 from app.modules.generation_pipeline.evidence_rerank import rerank_evidence_chunks
 from app.modules.generation_pipeline.feature_flags import env_bool, env_int
+from app.modules.generation_pipeline.stage1_planning import effective_query_focus_terms_for_stage2
 from app.modules.generation_pipeline.stage2_evidence_merge import maybe_merge_stage2_retrieval_evidence
+from app.modules.generation_pipeline.stage2_focus_policy import rerank_dois_for_focus_evidence
 from app.modules.graph_kb.models import GraphRagPayload
 from app.modules.qa_cache.metrics import increment_cache_metric
 from app.modules.qa_cache.singleflight import run_singleflight
@@ -150,11 +152,28 @@ def build_retrieval_claims_from_answer_plan(answer_plan: dict[str, Any] | None) 
     return claims
 
 
-def select_source_dois_for_evidence(*, retrieval_results: dict[str, Any], dois: list[str]) -> list[str]:
+def select_source_dois_for_evidence(
+    *,
+    retrieval_results: dict[str, Any],
+    dois: list[str],
+    user_question: str | None = None,
+    query_focus_terms: list[str] | None = None,
+) -> list[str]:
     """Keep the evidence expansion set small enough for Stage4 to stay grounded."""
-    ordered_dois = _dedupe_preserve_order(dois)
-    if not ordered_dois:
+    deduped_ordered = _dedupe_preserve_order(dois)
+    if not deduped_ordered:
         return []
+
+    workflow_dois, focus_audit = rerank_dois_for_focus_evidence(
+        ordered_dois=deduped_ordered,
+        retrieval_results=retrieval_results,
+        user_question=str(user_question or ""),
+        query_focus_terms=list(query_focus_terms or []),
+    )
+    if isinstance(retrieval_results, dict) and isinstance(focus_audit, dict):
+        retrieval_results.setdefault("focus_policy_audit", focus_audit)
+
+    ordered_dois = workflow_dois or deduped_ordered
 
     max_total = env_int("QA_SOURCE_DOI_MAX_TOTAL", 15, minimum=1, maximum=100)
     max_non_comparison = env_int("QA_SOURCE_DOI_MAX_TOTAL_NON_COMPARISON", 20, minimum=1, maximum=100)
@@ -736,10 +755,7 @@ class GenerationPipelineOrchestrator:
         )
         if comparison_plan.get("enabled"):
             retrieval_claims = build_retrieval_claims_from_comparison_plan(comparison_plan) + build_retrieval_claims_from_answer_plan(answer_plan)
-        _qf = stage1_result.get("query_focus_terms")
-        stage1_query_focus_terms = (
-            [str(x).strip() for x in _qf if str(x or "").strip()] if isinstance(_qf, list) else []
-        )
+        stage1_query_focus_terms = effective_query_focus_terms_for_stage2(stage1_result)
         if not retrieval_claims:
             return self._fallback_result(
                 final_answer=deep_answer,
@@ -797,7 +813,12 @@ class GenerationPipelineOrchestrator:
             doi_source = "graph_seeded" if dois else "none"
             logger.info("fastqa stream graph-seeded doi fallback engaged doi_count=%s doi_sample=%s", len(dois), dois[:10])
         if dois:
-            selected_dois = select_source_dois_for_evidence(retrieval_results=stage2_result, dois=dois)
+            selected_dois = select_source_dois_for_evidence(
+                retrieval_results=stage2_result,
+                dois=dois,
+                user_question=question,
+                query_focus_terms=stage1_query_focus_terms,
+            )
             if selected_dois != _dedupe_preserve_order(dois):
                 logger.info(
                     "fastqa stream source doi gate reduced doi_count=%s->%s doi_sample=%s",
@@ -1072,10 +1093,7 @@ class GenerationPipelineOrchestrator:
         )
         if comparison_plan.get("enabled"):
             retrieval_claims = build_retrieval_claims_from_comparison_plan(comparison_plan) + build_retrieval_claims_from_answer_plan(answer_plan)
-        _qf = stage1_result.get("query_focus_terms")
-        stage1_query_focus_terms = (
-            [str(x).strip() for x in _qf if str(x or "").strip()] if isinstance(_qf, list) else []
-        )
+        stage1_query_focus_terms = effective_query_focus_terms_for_stage2(stage1_result)
         logger.info(
             "fastqa stream stage1 normalized deep_answer_chars=%s retrieval_claims=%s question=%s",
             len(deep_answer),
@@ -1159,7 +1177,12 @@ class GenerationPipelineOrchestrator:
             doi_source = "graph_seeded" if dois else "none"
             logger.info("fastqa stream graph-seeded doi fallback engaged doi_count=%s doi_sample=%s", len(dois), dois[:10])
         if dois:
-            selected_dois = select_source_dois_for_evidence(retrieval_results=stage2_result, dois=dois)
+            selected_dois = select_source_dois_for_evidence(
+                retrieval_results=stage2_result,
+                dois=dois,
+                user_question=question,
+                query_focus_terms=stage1_query_focus_terms,
+            )
             if selected_dois != _dedupe_preserve_order(dois):
                 logger.info(
                     "fastqa stream source doi gate reduced doi_count=%s->%s doi_sample=%s",

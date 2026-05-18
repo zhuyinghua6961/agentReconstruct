@@ -5,23 +5,14 @@ import re
 from typing import Any, Callable
 
 from server.patent.models import PatentRetrievalClaim
+from server.patent.prompt_loader import load_patent_prompt_template
 from server.patent.retrieval_guardrails import apply_patent_stage2_query_guardrails
 from server.patent.retrieval_service import PatentRetrievalService
 from server.patent.stage2_controls import resolve_stage2_runtime_toggles
 
 
-DEFAULT_PATENT_STAGE2_QUERY_PROMPT = """
-你是专利问答系统的阶段二检索查询生成器。你的任务是基于用户问题和当前待验证 claim，输出最适合向量检索的专利检索 query。
-
-请严格输出一个 JSON 对象，字段包括：
-- query: 主检索 query，必须适合专利摘要和正文 chunk 检索
-- query_expansions: 可选数组，给出最多 2 条补充检索 query
-
-要求：
-1. query 必须保留 claim 中的技术对象、性能指标、材料体系和关键比较维度。
-2. 如果 claim 或关键词里出现专利号、公开号、IPC/CPC、材料体系、倍率、温度窗口、SOC 等信息，要显式保留。
-3. 不要输出解释文字。
-""".strip()
+DEFAULT_PATENT_STAGE2_QUERY_PROMPT = load_patent_prompt_template("stage2_query_generation.txt")
+DEFAULT_PATENT_STAGE2_QUERY_SYSTEM_PROMPT = load_patent_prompt_template("stage2_query_system.txt")
 
 _OUTER_JSON_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*(.*)\s*```\s*$", re.IGNORECASE | re.DOTALL)
 
@@ -34,35 +25,14 @@ class _NullLogger:
         return None
 
 
-def _is_response_format_capability_error(exc: Exception) -> bool:
-    message = " ".join(str(exc or "").split()).lower()
-    if not message:
-        return False
-    if "response_format" not in message and "json_object" not in message:
-        return False
-    capability_hints = ("not supported", "unsupported", "unknown parameter", "invalid parameter", "not implemented")
-    return any(hint in message for hint in capability_hints)
-
-
 def _create_stage2_completion(*, client: Any, model: str, messages: list[dict[str, Any]], logger: Any) -> Any:
-    try:
-        return client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.2,
-            max_tokens=600,
-            response_format={"type": "json_object"},
-        )
-    except Exception as exc:
-        if not _is_response_format_capability_error(exc):
-            raise
-        logger.warning("patent stage2 response_format unsupported; retrying without it: %s", exc)
-        return client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.2,
-            max_tokens=600,
-        )
+    del logger
+    return client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=0.3,
+        max_tokens=150,
+    )
 
 
 def _unwrap_outer_json_fence(text: str) -> str | None:
@@ -137,6 +107,27 @@ def _normalize_query_list(values: Any) -> list[str]:
     return normalized
 
 
+class _PromptFormatDict(dict[str, str]):
+    def __missing__(self, key: str) -> str:
+        return ""
+
+
+def _render_stage2_query_prompt(
+    *,
+    template: str,
+    core_question: str,
+    claim_text: str,
+    keywords_text: str,
+) -> str:
+    return str(template or "").format_map(
+        _PromptFormatDict(
+            core_question=str(core_question or ""),
+            claim_text=str(claim_text or ""),
+            keywords_text=str(keywords_text or ""),
+        )
+    )
+
+
 def _fallback_claim_query(*, retrieval_claim: PatentRetrievalClaim, user_question: str) -> list[str]:
     parts = [
         " ".join(str(retrieval_claim.claim or "").split()).strip(),
@@ -157,6 +148,7 @@ def build_stage2_queries_for_claim(
     model: str,
     logger: Any,
     stage2_prompt: str = DEFAULT_PATENT_STAGE2_QUERY_PROMPT,
+    stage2_system_prompt: str = DEFAULT_PATENT_STAGE2_QUERY_SYSTEM_PROMPT,
 ) -> list[str]:
     claim_text = " ".join(str(retrieval_claim.claim or "").split()).strip()
     if client is None or not str(model or "").strip():
@@ -168,35 +160,23 @@ def build_stage2_queries_for_claim(
         )
         return fallback_queries
 
-    keyword_text = "；".join(
+    keyword_text = ", ".join(
         " ".join(str(item or "").split()).strip()
         for item in list(retrieval_claim.keywords or [])
         if " ".join(str(item or "").split()).strip()
     )
-    preferred_sections = "；".join(
-        " ".join(str(item or "").split()).strip()
-        for item in list(retrieval_claim.preferred_sections or [])
-        if " ".join(str(item or "").split()).strip()
-    )
-    filters = dict(retrieval_claim.filters or {})
-    user_content = "\n".join(
-        [
-            f"用户问题：{user_question}",
-            f"当前 claim：{claim_text}",
-            f"关键词：{keyword_text}",
-            f"偏好 sections：{preferred_sections}",
-            f"过滤条件：{json.dumps(filters, ensure_ascii=False, sort_keys=True)}",
-        ]
+    user_content = _render_stage2_query_prompt(
+        template=stage2_prompt,
+        core_question=str(user_question or "").strip() or f"关于{claim_text[:50]}的问题",
+        claim_text=claim_text,
+        keywords_text=keyword_text or "无",
     ).strip()
     try:
         response = _create_stage2_completion(
             client=client,
             model=str(model).strip(),
             messages=[
-                {
-                    "role": "system",
-                    "content": stage2_prompt + "\n\n返回值只能是一个 JSON 对象，不能包含 JSON 以外的解释性文字。",
-                },
+                {"role": "system", "content": str(stage2_system_prompt or "").strip()},
                 {"role": "user", "content": user_content},
             ],
             logger=logger,
@@ -204,9 +184,18 @@ def build_stage2_queries_for_claim(
         result_text = str(response.choices[0].message.content or "").strip()
         payload = _parse_json_payload(result_text)
         if payload is None:
+            plain_queries = _normalize_query_list(result_text)
+            if plain_queries:
+                logger.info(
+                    "patent stage2 query generation succeeded claim=%s query_count=%s queries=%s",
+                    claim_text[:120],
+                    len(plain_queries),
+                    plain_queries,
+                )
+                return plain_queries
             fallback_queries = _fallback_claim_query(retrieval_claim=retrieval_claim, user_question=user_question)
             logger.warning(
-                "patent stage2 query generation json parse failed claim=%s response_chars=%s fallback_queries=%s",
+                "patent stage2 query generation returned empty non-json response claim=%s response_chars=%s fallback_queries=%s",
                 claim_text[:120],
                 len(result_text),
                 fallback_queries,

@@ -337,9 +337,9 @@ def get_settings() -> Settings:
         redis_socket_connect_timeout_sec=_get_int("REDIS_SOCKET_CONNECT_TIMEOUT_SEC", 2, minimum=1, maximum=60),
         redis_socket_timeout_sec=_get_int("REDIS_SOCKET_TIMEOUT_SEC", 2, minimum=1, maximum=60),
         generation_runtime_enabled=_get_bool("FASTQA_GENERATION_RUNTIME_ENABLED", False),
-        graph_kb_enabled=True,
-        graph_kb_v2_enabled=True,
-        graph_kb_rag_injection_enabled=True,
+        graph_kb_enabled=_get_bool("FASTQA_GRAPH_KB_ENABLED", True),
+        graph_kb_v2_enabled=_get_bool("FASTQA_GRAPH_KB_V2_ENABLED", True),
+        graph_kb_rag_injection_enabled=_get_bool("FASTQA_GRAPH_KB_RAG_INJECTION_ENABLED", True),
         neo4j_url=str(os.getenv("FASTQA_NEO4J_URL") or os.getenv("NEO4J_URL", "") or "").strip(),
         neo4j_username=str(
             os.getenv("FASTQA_NEO4J_USERNAME") or os.getenv("NEO4J_USERNAME", "neo4j") or "neo4j"

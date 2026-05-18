@@ -325,6 +325,9 @@ def test_config_chat_persist_enabled_defaults_to_true(monkeypatch):
 
 
 def test_graph_four_route_flags_have_conservative_defaults(monkeypatch):
+    monkeypatch.setenv("FASTQA_GRAPH_KB_ENABLED", "true")
+    monkeypatch.setenv("FASTQA_GRAPH_KB_V2_ENABLED", "true")
+    monkeypatch.setenv("FASTQA_GRAPH_KB_RAG_INJECTION_ENABLED", "true")
     monkeypatch.delenv("FASTQA_GRAPH_DIRECT_ANSWER_MIN_CONFIDENCE", raising=False)
     monkeypatch.delenv("FASTQA_GRAPH_MAX_DOI_CANDIDATES", raising=False)
     monkeypatch.delenv("FASTQA_GRAPH_ALLOW_SUSPICIOUS_DOI_FOR_RAG", raising=False)

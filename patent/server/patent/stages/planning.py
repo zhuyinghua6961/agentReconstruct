@@ -6,26 +6,10 @@ import time
 from typing import Any
 
 from server.patent.models import PatentRetrievalClaim, PatentRetrievalPlan
+from server.patent.prompt_loader import load_patent_prompt_template
 
 
-DEFAULT_PATENT_STAGE1_PROMPT = """
-你是专利问答系统的阶段一规划器。你的任务不是直接给最终结论，而是先输出深度预回答，再给出面向专利检索的结构化检索指令列表。
-
-请严格输出一个 JSON 对象，字段包括：
-- deep_answer: 对用户问题的专利分析预回答，允许给出初步判断，但不要编造未核实的专利事实。
-- retrieval_claims: 一个数组。每个元素都是一个对象，包含：
-  - claim
-  - keywords
-  - preferred_sections
-  - filters
-
-要求：
-1. 检索指令必须是专利导向，每条 claim 都应该能直接指导后续检索。
-2. claim 应表达一个待验证的技术判断、事实点或比较维度，而不是空泛主题。
-3. keywords 应尽量补充技术关键词、材料体系、性能指标、对象名称、公开号。
-4. 如果性能信息可能在表格里，preferred_sections 必须包含 tables。
-5. 如果无法给出有效检索指令，retrieval_claims 返回空数组，不要编造。
-""".strip()
+DEFAULT_PATENT_STAGE1_PROMPT = load_patent_prompt_template("stage1_planning.txt")
 
 _OUTER_JSON_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*(.*)\s*```\s*$", re.IGNORECASE | re.DOTALL)
 _PATENT_ID_RE = re.compile(r"\b(?=[A-Z0-9/.,-]*\d)[A-Z]{2}[A-Z0-9][A-Z0-9/.,-]{4,}[A-Z0-9]\b")
@@ -467,9 +451,10 @@ def run_stage1_pre_answer_and_planning(
         }
 
     user_content = f"{context_block}\n\n用户问题：{question}" if context_block else f"用户问题：{question}"
+    system_content = str(stage1_prompt or "").strip()
     logger.info(
         "patent stage1 planning prompt prepared prompt_chars=%s user_content_chars=%s elapsed_ms=%.3f",
-        len(stage1_prompt + "\n\n返回值只能是一个 JSON 对象，不能包含 JSON 以外的解释性文字。"),
+        len(system_content),
         len(user_content),
         (time.perf_counter() - stage_started) * 1000,
     )
@@ -480,10 +465,7 @@ def run_stage1_pre_answer_and_planning(
             client=client,
             model=str(model).strip(),
             messages=[
-                {
-                    "role": "system",
-                    "content": stage1_prompt + "\n\n返回值只能是一个 JSON 对象，不能包含 JSON 以外的解释性文字。",
-                },
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": user_content},
             ],
             logger=logger,

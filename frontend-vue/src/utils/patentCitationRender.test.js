@@ -156,28 +156,33 @@ test('trailing patent citation is preserved when it differs from the inline pate
   }
 })
 
-test('bare patent ids inside inline code and code fences are not linkified', async () => {
+test('bare patent ids inside inline code are linkified while code fences stay protected', async () => {
   const { formatAnswer, formatStreamingAnswer } = await loadRenderUtils()
   const inlineCodeInput = '`CN109192948B`'
   const fencedCodeInput = '```\nCN109192948B\n```'
 
-  const outputs = [
+  const inlineOutputs = [
     formatAnswer(inlineCodeInput),
     formatStreamingAnswer(inlineCodeInput),
+  ]
+  const fencedOutputs = [
     formatAnswer(fencedCodeInput),
     formatStreamingAnswer(fencedCodeInput),
   ]
 
-  for (const html of outputs) {
+  for (const html of inlineOutputs) {
+    assert.match(html, /data-patent-id="CN109192948B"/)
+    assert.doesNotMatch(html, /<code>CN109192948B<\/code>/)
+  }
+
+  for (const html of fencedOutputs) {
     assert.doesNotMatch(html, /data-patent-id="CN109192948B"/)
   }
 
-  assert.match(formatAnswer(inlineCodeInput), /<code>CN109192948B<\/code>/)
-  assert.match(formatStreamingAnswer(inlineCodeInput), /<code>CN109192948B<\/code>/)
   assert.match(formatAnswer(fencedCodeInput), /<pre><code>CN109192948B[\s\S]*<\/code><\/pre>/)
 })
 
-test('trailing patent citation is preserved when the earlier patent id only appears inside inline code', async () => {
+test('duplicate trailing patent citation is removed when the earlier patent id appears as a backticked patent id', async () => {
   const { formatAnswer, formatStreamingAnswer } = await loadRenderUtils()
   const input = '示例：`CN109192948B` (CN109192948B)。'
 
@@ -185,9 +190,25 @@ test('trailing patent citation is preserved when the earlier patent id only appe
   const streamingHtml = formatStreamingAnswer(input)
 
   for (const html of [finalHtml, streamingHtml]) {
-    assert.match(html, /<code>CN109192948B<\/code>/)
+    assert.doesNotMatch(html, /<code>CN109192948B<\/code>/)
     assert.match(html, /data-patent-id="CN109192948B"/)
-    assert.match(html, /\(<a href="#" class="doi-link patent-link" data-patent-id="CN109192948B">CN109192948B<\/a>\)。/)
+    assert.equal((html.match(/data-patent-id="CN109192948B"/g) || []).length, 1)
+    assert.doesNotMatch(html, /\(<a href="#" class="doi-link patent-link" data-patent-id="CN109192948B">CN109192948B<\/a>\)。/)
+  }
+})
+
+test('backticked patent ids in narrative prose are rendered as patent links', async () => {
+  const { formatAnswer, formatStreamingAnswer } = await loadRenderUtils()
+  const input = '例如，专利`CN116368096A`明确指出，LFP/C材料在大约3.4V出现电压平台；如 `CN100470894C` 和 `CN100389515C` 也给出相关电压数据。'
+
+  const finalHtml = formatAnswer(input)
+  const streamingHtml = formatStreamingAnswer(input)
+
+  for (const html of [finalHtml, streamingHtml]) {
+    assert.equal((html.match(/<code>CN/g) || []).length, 0)
+    assert.match(html, /data-patent-id="CN116368096A"/)
+    assert.match(html, /data-patent-id="CN100470894C"/)
+    assert.match(html, /data-patent-id="CN100389515C"/)
   }
 })
 

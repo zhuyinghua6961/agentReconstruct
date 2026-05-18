@@ -50,6 +50,26 @@ def test_patent_rerank_dashscope_uses_fastqa_compatible_payload():
     assert requests.calls[0]["timeout"] == 12.5
 
 
+def test_patent_rerank_local_requests_return_documents():
+    requests = _Requests({"results": [{"index": 0, "relevance_score": 0.95}]})
+
+    result = rerank_patent_stage2_documents(
+        query="thermal",
+        documents=["doc-a"],
+        metadatas=[{"patent_id": "CN123"}],
+        top_n=1,
+        provider="local",
+        model="qwen3-vl-rerank",
+        base_url="http://localhost:8084",
+        timeout_seconds=12.5,
+        requests_module=requests,
+    )
+
+    assert result["documents"] == ["doc-a"]
+    assert requests.calls[0]["endpoint"] == "http://localhost:8084/v1/rerank"
+    assert requests.calls[0]["json"]["return_documents"] is True
+
+
 def test_patent_rerank_fn_reads_unified_env_and_does_not_require_runtime_injection(monkeypatch):
     requests = _Requests({"output": {"results": [{"index": 0, "relevance_score": 0.8}]}})
     monkeypatch.setenv("RERANK_PROVIDER", "dashscope")

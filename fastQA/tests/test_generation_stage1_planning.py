@@ -3,7 +3,10 @@ from __future__ import annotations
 import httpx
 from types import SimpleNamespace
 
-from app.modules.generation_pipeline.stage1_planning import run_stage1_pre_answer_and_planning
+from app.modules.generation_pipeline.stage1_planning import (
+    effective_query_focus_terms_for_stage2,
+    run_stage1_pre_answer_and_planning,
+)
 
 
 class _FakeClient:
@@ -397,3 +400,47 @@ def test_stage1_planning_logs_prompt_and_llm_boundaries():
     assert any("阶段一提示词拼装完成" in message and "prompt_chars=" in message for message in messages)
     assert any("阶段一 LLM 请求发起" in message and "model=gpt-test" in message for message in messages)
     assert any("阶段一 LLM 响应已接收" in message and "response_chars=" in message for message in messages)
+
+
+def test_effective_query_focus_terms_merges_axes_with_order_and_dedup():
+    merged = effective_query_focus_terms_for_stage2(
+        {
+            "query_focus_terms": ["高压实型", "辊压"],
+            "question_focus": {
+                "evidence_axes": ["辊压", "球形颗粒"],
+                "secondary_axes": ["碳包覆", "球形颗粒"],
+            },
+        }
+    )
+    assert merged == ["高压实型", "辊压", "球形颗粒", "碳包覆"]
+
+
+def test_stage1_planning_normalizes_question_focus_and_effective_terms():
+    client = _FakeClient(
+        '''{
+          "deep_answer": "answer",
+          "query_focus_terms": ["高压实型"],
+          "question_focus": {
+            "focus_type": "UNKNOWN_TYPE_X",
+            "focus_summary": "summary",
+            "evidence_axes": ["喷雾干燥"],
+            "secondary_axes": [],
+            "confidence": "nope"
+          },
+          "retrieval_claims": []
+        }'''
+    )
+    result = run_stage1_pre_answer_and_planning(
+        user_question="制备高压实LFP粉末",
+        stage1_prompt="prompt",
+        vector_db_context="",
+        client=client,
+        model="gpt-test",
+        logger=_Logger(),
+    )
+    qf_obj = result.get("question_focus")
+    assert isinstance(qf_obj, dict)
+    assert qf_obj["focus_type"] == "generic"
+    assert qf_obj["confidence"] == "medium"
+    assert qf_obj["evidence_axes"] == ["喷雾干燥"]
+    assert result["effective_query_focus_terms"] == ["高压实型", "喷雾干燥"]

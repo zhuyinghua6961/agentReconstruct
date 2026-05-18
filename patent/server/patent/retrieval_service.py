@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import logging
+import os
 import re
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -105,6 +106,10 @@ def _document_prefix_key(text: str) -> str:
     return normalized[:80]
 
 
+def _document_first_200_key(text: str) -> str:
+    return str(text or "")[:200]
+
+
 def _reference_bundle(
     evidence: PatentEvidence,
     *,
@@ -195,12 +200,13 @@ class PatentRetrievalService:
         catalog_index_version: str = "catalog-v1",
         top_k_metadata: int = 20,
         top_k_fulltext: int = 30,
-        top_k_abstract_vector: int = 8,
-        top_k_chunk_vector: int = 8,
+        top_k_abstract_vector: int = 25,
+        top_k_chunk_vector: int = 10,
         cache_ttl_seconds: int = 60,
         negative_ttl_seconds: int = 15,
         abstract_vector_search: Callable[[str, int], list[dict[str, Any]]] | None = None,
         chunk_vector_search: Callable[[str, list[str] | None, int], list[dict[str, Any]]] | None = None,
+        query_expander: Callable[[str], str] | None = None,
         table_loader: Callable[[str], list[dict[str, Any]] | list[PatentTableSupplement]] | None = None,
         answer_builder: Callable[..., str] | None = None,
         archive_loader: Any | None = None,
@@ -224,6 +230,8 @@ class PatentRetrievalService:
         self._negative_ttl_seconds = max(1, int(negative_ttl_seconds))
         self._abstract_vector_search = abstract_vector_search
         self._chunk_vector_search = chunk_vector_search
+        self._query_expander = query_expander
+        self._query_expander_instance: Any | None = None
         self._vector_runtime_enabled = True
         self._catalog_lock = threading.Lock()
         self._vector_runtime_lock = threading.Lock()
@@ -429,6 +437,197 @@ class PatentRetrievalService:
             "behavior": behavior,
         }
 
+    def _targeted_retrieve_from_claims_dual_search(
+        self,
+        *,
+        retrieval_claims: list[PatentRetrievalClaim],
+        user_question: str,
+        query_generation_fn: Callable[..., list[str]] | None = None,
+        frozen_claim_queries: list[list[str]] | None = None,
+        parallel_workers: int = 1,
+        should_cancel: Callable[[], bool] | None = None,
+        context: dict[str, Any] | None = None,
+        rerank_fn: Callable[..., dict[str, Any]] | None = None,
+        stage2_query_diagnostics: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        started_at = time.perf_counter()
+        timings: dict[str, int] = {}
+        graph_controls = self._graph_retrieval_controls(context)
+        graph_candidate_patent_ids = list(graph_controls.get("candidate_patent_ids") or [])
+        graph_candidate_keys = {_normalize_identifier(item) for item in graph_candidate_patent_ids}
+        resolved_frozen_claim_queries = list(frozen_claim_queries or [])
+        claim_jobs = list(enumerate(retrieval_claims))
+
+        def _failed_claim_output(index: int, claim: PatentRetrievalClaim, exc: Exception) -> dict[str, Any]:
+            _LOGGER.warning(
+                "claim retrieval failed claim_index=%s claim=%s error=%s",
+                int(index) + 1,
+                str(claim.claim or "")[:120],
+                exc,
+            )
+            return {
+                "index": index,
+                "generated_queries": [],
+                "candidate_patent_ids": [],
+                "matches": [],
+                "ok": False,
+            }
+
+        def _process_claim(index: int, claim: PatentRetrievalClaim) -> dict[str, Any]:
+            if index < len(resolved_frozen_claim_queries):
+                claim_queries = _normalize_query_list(resolved_frozen_claim_queries[index])
+            else:
+                claim_queries = self._generate_claim_queries(
+                    user_question=user_question,
+                    retrieval_claim=claim,
+                    query_generation_fn=query_generation_fn,
+                )
+            generated_queries: list[str] = []
+            candidate_patent_ids: list[str] = []
+            matches: list[_MatchedReference] = []
+            for raw_query in claim_queries:
+                query = self._prepare_stage2_dual_search_query(raw_query)
+                if not query:
+                    continue
+                generated_queries.append(query)
+                query_matches, query_candidate_ids = self._dual_vector_search_for_query(
+                    query=query,
+                    retrieval_claim=claim,
+                    graph_candidate_patent_ids=graph_candidate_patent_ids,
+                    graph_candidate_keys=graph_candidate_keys,
+                    rerank_fn=rerank_fn,
+                )
+                for patent_id in query_candidate_ids:
+                    if patent_id not in candidate_patent_ids:
+                        candidate_patent_ids.append(patent_id)
+                matches.extend(query_matches)
+            return {
+                "index": index,
+                "generated_queries": generated_queries,
+                "candidate_patent_ids": candidate_patent_ids,
+                "matches": matches,
+                "ok": True,
+            }
+
+        if callable(should_cancel) and should_cancel():
+            return self._cancelled_stage2_payload()
+
+        claim_outputs: list[dict[str, Any]] = []
+        if len(claim_jobs) <= 1 or int(parallel_workers or 1) <= 1:
+            for index, claim in claim_jobs:
+                if callable(should_cancel) and should_cancel():
+                    return self._cancelled_stage2_payload()
+                try:
+                    claim_outputs.append(_process_claim(index, claim))
+                except Exception as exc:
+                    claim_outputs.append(_failed_claim_output(index, claim, exc))
+        else:
+            max_workers = min(max(1, int(parallel_workers)), len(claim_jobs))
+            cancelled = False
+            executor = ThreadPoolExecutor(max_workers=max_workers)
+            try:
+                future_map = {executor.submit(_process_claim, index, claim): (index, claim) for index, claim in claim_jobs}
+                pending = set(future_map)
+                while pending:
+                    if callable(should_cancel) and should_cancel():
+                        cancelled = True
+                        for future in pending:
+                            future.cancel()
+                        return self._cancelled_stage2_payload()
+                    done, pending = wait(pending, timeout=0.2, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        try:
+                            claim_outputs.append(future.result())
+                        except Exception as exc:
+                            index, claim = future_map[future]
+                            claim_outputs.append(_failed_claim_output(index, claim, exc))
+            finally:
+                executor.shutdown(wait=not cancelled, cancel_futures=cancelled)
+
+        generated_queries: list[str] = []
+        candidate_patent_ids: list[str] = []
+        all_matches: list[_MatchedReference] = []
+        for output in sorted(claim_outputs, key=lambda item: int(item.get("index", 0))):
+            if not output.get("ok"):
+                continue
+            for query in list(output.get("generated_queries") or []):
+                if query not in generated_queries:
+                    generated_queries.append(query)
+            for patent_id in list(output.get("candidate_patent_ids") or []):
+                if patent_id not in candidate_patent_ids:
+                    candidate_patent_ids.append(patent_id)
+            all_matches.extend(list(output.get("matches") or []))
+
+        selected_matches = self._dedupe_matches_by_first_200_chars(all_matches)
+        graph_fallback = False
+        if not selected_matches and graph_candidate_patent_ids:
+            selected_matches = [
+                match
+                for patent_id in graph_candidate_patent_ids
+                for match in [self._default_match_for_patent(patent_id)]
+                if match is not None
+            ]
+            graph_fallback = bool(selected_matches)
+        if not selected_matches:
+            fallback_plan = self._retrieval_plan_from_claims(retrieval_claims, user_question=user_question)
+            if graph_candidate_patent_ids:
+                payload = self._stage2_payload_from_outcome(
+                    self._build_not_found(
+                        "vector_hybrid",
+                        negative_cache_hit=False,
+                        timings=timings,
+                        started_at=started_at,
+                    )
+                )
+                metadata = dict(payload.get("metadata") or {})
+                metadata["graph_stage2_behavior"] = "fallback_no_vector_hits"
+                metadata["graph_candidate_patent_ids"] = list(graph_candidate_patent_ids)
+                metadata["graph_constraints_applied"] = list(graph_controls.get("constraints") or [])
+                metadata["candidate_patent_ids"] = list(graph_candidate_patent_ids)
+                metadata["retrieval_plan_queries"] = list(generated_queries)
+                payload["metadata"] = metadata
+                return payload
+            return self._targeted_retrieve_from_plan(
+                retrieval_plan=fallback_plan,
+                user_question=user_question,
+                context=context,
+            )
+
+        outcome = self._build_success(
+            "vector_hybrid",
+            selected_matches,
+            question=user_question,
+            context=context,
+            cache_hit=False,
+            timings=timings,
+            started_at=started_at,
+            include_answer_text=False,
+        )
+        payload = self._stage2_payload_from_outcome(outcome, matches=selected_matches)
+        metadata = dict(payload.get("metadata") or {})
+        metadata["candidate_patent_ids"] = list(graph_candidate_patent_ids or candidate_patent_ids)
+        metadata["retrieval_plan_queries"] = list(generated_queries)
+        if stage2_query_diagnostics:
+            metadata["stage2_query_diagnostics"] = list(stage2_query_diagnostics)
+        if graph_candidate_patent_ids or graph_controls.get("behavior") == "hint_only":
+            metadata["graph_stage2_behavior"] = "fallback_no_vector_hits" if graph_fallback else (
+                "filter_applied" if graph_candidate_patent_ids else "hint_only"
+            )
+            if graph_candidate_patent_ids:
+                metadata["graph_candidate_patent_ids"] = list(graph_candidate_patent_ids)
+                metadata["graph_constraints_applied"] = list(graph_controls.get("constraints") or [])
+            if graph_fallback:
+                metadata["localization_fallback"] = "archive_default_anchor"
+        payload["metadata"] = metadata
+        _LOGGER.info(
+            "patent stage2 dual-search retrieval summary raw_candidates=%s selected_sources=%s graph_behavior=%s source_ids=%s",
+            len(candidate_patent_ids),
+            [dict(match.metadata or {}).get("stage2_source") for match in selected_matches[:8]],
+            str(metadata.get("graph_stage2_behavior") or "none"),
+            list(payload.get("source_ids") or []),
+        )
+        return payload
+
     def _targeted_retrieve_from_plan(
         self,
         *,
@@ -606,6 +805,19 @@ class PatentRetrievalService:
                 context=context,
             )
             return self._annotate_no_vector_convergence_payload(payload, toggles=toggles) if toggles.convergence_enabled else payload
+
+        if not toggles.convergence_enabled:
+            return self._targeted_retrieve_from_claims_dual_search(
+                retrieval_claims=retrieval_claims,
+                user_question=user_question,
+                query_generation_fn=query_generation_fn,
+                frozen_claim_queries=frozen_claim_queries,
+                parallel_workers=parallel_workers,
+                should_cancel=should_cancel,
+                context=context,
+                rerank_fn=rerank_fn,
+                stage2_query_diagnostics=stage2_query_diagnostics,
+            )
 
         started_at = time.perf_counter()
         timings: dict[str, int] = {}
@@ -1155,6 +1367,293 @@ class PatentRetrievalService:
                 return list(dict.fromkeys(queries))
         fallback_query = self._fallback_claim_query(user_question=user_question, retrieval_claim=retrieval_claim)
         return [fallback_query] if fallback_query else []
+
+    def _prepare_stage2_dual_search_query(self, query: str) -> str:
+        preprocessed = self._preprocess_retrieval_query(query)
+        return self._expand_retrieval_query(preprocessed)
+
+    def _dual_vector_search_for_query(
+        self,
+        *,
+        query: str,
+        retrieval_claim: PatentRetrievalClaim,
+        graph_candidate_patent_ids: list[str],
+        graph_candidate_keys: set[str],
+        rerank_fn: Callable[..., dict[str, Any]] | None = None,
+    ) -> tuple[list[_MatchedReference], list[str]]:
+        abstract_top_k = self._abstract_dual_search_top_k()
+        chunk_top_k = self._chunk_dual_search_top_k()
+        abstract_candidate_top_k = self._dual_search_vector_candidate_top_k(abstract_top_k, rerank_fn)
+        chunk_candidate_top_k = self._dual_search_vector_candidate_top_k(chunk_top_k, rerank_fn)
+        max_where_ids = self._chunk_dual_search_where_max_ids()
+        abstract_hits = self._run_abstract_vector_search(query, abstract_candidate_top_k)
+        if graph_candidate_keys:
+            abstract_hits = [
+                hit
+                for hit in abstract_hits
+                if _normalize_identifier(
+                    self._normalize_patent_id(
+                        hit.get("patent_id") or hit.get("canonical_patent_id") or hit.get("json_stem")
+                    )
+                )
+                in graph_candidate_keys
+            ]
+        abstract_hits = self._rerank_stage2_hits(
+            query=query,
+            hits=abstract_hits,
+            top_n=abstract_top_k,
+            rerank_fn=rerank_fn,
+        )
+        query_candidate_ids: list[str] = []
+        matches: list[_MatchedReference] = []
+
+        for hit in abstract_hits:
+            normalized = self._normalize_patent_id(
+                hit.get("patent_id") or hit.get("canonical_patent_id") or hit.get("json_stem")
+            )
+            if normalized and normalized not in query_candidate_ids:
+                query_candidate_ids.append(normalized)
+            abstract_match = self._match_from_abstract_hit(
+                hit,
+                generated_query=query,
+                retrieval_claim=retrieval_claim,
+            )
+            if abstract_match is not None:
+                matches.append(abstract_match)
+
+        if graph_candidate_patent_ids:
+            chunk_candidate_ids = list(graph_candidate_patent_ids[:max_where_ids])
+        else:
+            chunk_candidate_ids = list(query_candidate_ids[:max_where_ids]) if query_candidate_ids else None
+
+        chunk_hits = self._run_chunk_vector_search(query, chunk_candidate_ids, chunk_candidate_top_k)
+        if graph_candidate_keys:
+            chunk_hits = [
+                hit
+                for hit in chunk_hits
+                if _normalize_identifier(
+                    self._normalize_patent_id(
+                        hit.get("patent_id") or hit.get("canonical_patent_id") or hit.get("json_stem")
+                    )
+                )
+                in graph_candidate_keys
+            ]
+        chunk_hits = self._rerank_stage2_hits(
+            query=query,
+            hits=chunk_hits,
+            top_n=chunk_top_k,
+            rerank_fn=rerank_fn,
+        )
+        for hit in chunk_hits:
+            normalized = self._normalize_patent_id(
+                hit.get("patent_id") or hit.get("canonical_patent_id") or hit.get("json_stem")
+            )
+            if normalized and normalized not in query_candidate_ids:
+                query_candidate_ids.append(normalized)
+            chunk_match = self._match_from_chunk_hit(
+                self._augment_stage2_hit_metadata(
+                    hit,
+                    stage2_source="chunk",
+                    generated_query=query,
+                    retrieval_claim=retrieval_claim,
+                )
+            )
+            if chunk_match is not None:
+                matches.append(chunk_match)
+
+        return matches, list(dict.fromkeys([*query_candidate_ids, *graph_candidate_patent_ids]))
+
+    def _rerank_stage2_hits(
+        self,
+        *,
+        query: str,
+        hits: list[dict[str, Any]],
+        top_n: int,
+        rerank_fn: Callable[..., dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        if not hits or not callable(rerank_fn):
+            return list(hits)
+        candidates = list(hits[:50])
+        documents = [str(hit.get("document") or "") for hit in candidates]
+        metadatas = [dict(hit or {}) for hit in candidates]
+        try:
+            result = dict(
+                rerank_fn(
+                    query=query,
+                    documents=documents,
+                    metadatas=metadatas,
+                    top_n=min(max(1, int(top_n)), len(candidates)),
+                )
+                or {}
+            )
+        except Exception:
+            _LOGGER.warning("patent stage2 internal rerank failed; using vector order", exc_info=True)
+            return list(hits)
+        if bool(result.get("fallback")):
+            return list(hits)
+        selected: list[dict[str, Any]] = []
+        used: set[int] = set()
+        result_documents = list(result.get("documents") or [])
+        result_metadatas = list(result.get("metadatas") or [])
+        for result_index, metadata in enumerate(result_metadatas):
+            result_document = result_documents[result_index] if result_index < len(result_documents) else None
+            metadata_patent_id = self._normalize_patent_id(dict(metadata or {}).get("patent_id"))
+            for index, hit in enumerate(candidates):
+                if index in used:
+                    continue
+                hit_patent_id = self._normalize_patent_id(
+                    hit.get("patent_id") or hit.get("canonical_patent_id") or hit.get("json_stem")
+                )
+                if metadata_patent_id and metadata_patent_id != hit_patent_id:
+                    continue
+                if result_document is not None and str(result_document) != str(hit.get("document") or ""):
+                    continue
+                selected.append(hit)
+                used.add(index)
+                break
+        if not selected:
+            for index in list(result.get("indices") or []):
+                try:
+                    selected.append(candidates[int(index)])
+                except Exception:
+                    continue
+        return selected or list(hits)
+
+    @staticmethod
+    def _dual_search_vector_candidate_top_k(final_top_k: int, rerank_fn: Callable[..., dict[str, Any]] | None) -> int:
+        if callable(rerank_fn):
+            return 50
+        return max(1, int(final_top_k))
+
+    @staticmethod
+    def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+        try:
+            value = int(str(os.getenv(name, default)).strip())
+        except Exception:
+            value = int(default)
+        return max(minimum, min(maximum, value))
+
+    def _abstract_dual_search_top_k(self) -> int:
+        configured = self._env_int("PATENT_ABSTRACT_SEARCH_TOPK", 25, minimum=1, maximum=500)
+        return max(configured, int(self._top_k_abstract_vector), 8)
+
+    def _chunk_dual_search_top_k(self) -> int:
+        configured = self._env_int("PATENT_CHUNK_SEARCH_TOPK", 10, minimum=1, maximum=500)
+        return max(configured, int(self._top_k_chunk_vector), 10)
+
+    def _chunk_dual_search_where_max_ids(self) -> int:
+        return self._env_int("PATENT_CHUNK_WHERE_MAX_IDS", 60, minimum=1, maximum=1000)
+
+    def _expand_retrieval_query(self, query: str) -> str:
+        if not query or not query.strip():
+            return query
+        if callable(self._query_expander):
+            try:
+                expanded = str(self._query_expander(query) or "").strip()
+                return expanded or query
+            except Exception:
+                _LOGGER.warning("patent stage2 query expansion failed; using preprocessed query", exc_info=True)
+                return query
+        try:
+            if self._query_expander_instance is None:
+                from server.patent.query_expander import QueryExpander
+
+                self._query_expander_instance = QueryExpander()
+            expanded = str(self._query_expander_instance.expand(query) or "").strip()
+            return expanded or query
+        except Exception:
+            _LOGGER.warning("patent stage2 query expansion unavailable; using preprocessed query", exc_info=True)
+            return query
+
+    def _preprocess_retrieval_query(self, query: str) -> str:
+        if not query:
+            return ""
+        query = self._normalize_chemical_notation(query)
+        synonyms = {
+            "PEG": "聚乙二醇",
+            "LiFePO4": "磷酸铁锂 LFP",
+            "LFP": "LiFePO4 磷酸铁锂",
+            "磷酸铁锂": "LiFePO4 LFP",
+            "PVDF": "聚偏氟乙烯",
+            "NMP": "N-甲基吡咯烷酮",
+            "CMC": "羧甲基纤维素钠",
+            "SBR": "丁苯橡胶",
+            "SP": "导电炭黑 Super P",
+            "Super P": "导电炭黑 SP",
+            "聚乙二醇": "PEG",
+            "聚偏氟乙烯": "PVDF",
+            "N-甲基吡咯烷酮": "NMP",
+            "羧甲基纤维素钠": "CMC",
+            "丁苯橡胶": "SBR",
+            "导电炭黑": "SP Super P",
+            "压实密度": "compaction density",
+            "振实密度": "tap density",
+            "compaction density": "压实密度",
+            "tap density": "振实密度",
+        }
+        extensions: list[str] = []
+        for abbr, synonym in synonyms.items():
+            pattern = r"\b" + re.escape(abbr) + r"\b"
+            if re.search(pattern, query, flags=re.IGNORECASE):
+                for item in synonym.split():
+                    if item not in extensions:
+                        extensions.append(item)
+        if extensions:
+            query = f"{query} {' '.join(extensions)}"
+        query = re.sub(r"\(|\)|OR|AND|\"", "", query)
+        query = re.sub(r"[;,.。；，、]", " ", query)
+        cleaned_keywords: list[str] = []
+        for keyword in query.split():
+            keyword = keyword.strip()
+            if not keyword or len(keyword) >= 20:
+                continue
+            keyword = re.sub(r"[^\w\u4e00-\u9fff°C°:/\\-]", "", keyword, flags=re.UNICODE)
+            if keyword and keyword not in {"的", "和", "与", "或", "等", "中", "在", "于", "对", "由"}:
+                cleaned_keywords.append(keyword)
+        unique_keywords: list[str] = []
+        seen: set[str] = set()
+        for keyword in cleaned_keywords:
+            if keyword in seen:
+                continue
+            seen.add(keyword)
+            unique_keywords.append(keyword)
+        return " ".join(unique_keywords[:15])
+
+    @staticmethod
+    def _normalize_chemical_notation(query: str) -> str:
+        if not query:
+            return query
+        chemical_mappings = {
+            "fe2p": "Fe2P",
+            "fe2p2o7": "Fe2P2O7",
+            "li4p2o7": "Li4P2O7",
+            "fe2o3": "Fe2O3",
+            "feo": "FeO",
+            "fe3o4": "Fe3O4",
+            "γ-fe2o3": "γ-Fe2O3",
+            "α-fe2o3": "α-Fe2O3",
+            "lifepo4": "LiFePO4",
+            "lfp": "LFP",
+            "li2co3": "Li2CO3",
+            "nh4h2po4": "NH4H2PO4",
+            "fec2o4": "FeC2O4",
+        }
+        result = query.lower()
+        for lower_case, proper_case in chemical_mappings.items():
+            result = re.sub(r"\b" + re.escape(lower_case) + r"\b", proper_case, result, flags=re.IGNORECASE)
+        return result
+
+    @staticmethod
+    def _dedupe_matches_by_first_200_chars(matches: list[_MatchedReference]) -> list[_MatchedReference]:
+        seen: set[str] = set()
+        deduped: list[_MatchedReference] = []
+        for match in matches:
+            key = _document_first_200_key(match.snippet_text)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(match)
+        return deduped
 
     def _augment_stage2_hit_metadata(
         self,

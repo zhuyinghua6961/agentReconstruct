@@ -41,7 +41,7 @@ def test_settings_default_graph_kb_always_on(monkeypatch):
     get_settings.cache_clear()
 
 
-def test_settings_ignores_hidden_graph_kb_rollback_env(monkeypatch):
+def test_settings_respects_graph_kb_kill_switch_env(monkeypatch):
     monkeypatch.setenv("FASTQA_GRAPH_KB_ENABLED", "false")
     monkeypatch.setenv("FASTQA_GRAPH_KB_V2_ENABLED", "false")
     monkeypatch.setenv("FASTQA_GRAPH_KB_RAG_INJECTION_ENABLED", "false")
@@ -49,21 +49,19 @@ def test_settings_ignores_hidden_graph_kb_rollback_env(monkeypatch):
     get_settings.cache_clear()
     settings = get_settings()
 
-    assert settings.graph_kb_enabled is True
-    assert settings.graph_kb_v2_enabled is True
-    assert settings.graph_kb_rag_injection_enabled is True
+    assert settings.graph_kb_enabled is False
+    assert settings.graph_kb_v2_enabled is False
+    assert settings.graph_kb_rag_injection_enabled is False
 
     get_settings.cache_clear()
 
 
-def test_fastqa_service_config_no_longer_exposes_graph_disable_flags():
+def test_shared_fastqa_config_documents_graph_kb_master_switch():
     repo_root = Path(__file__).resolve().parents[2]
     shared_env = repo_root / "resource/config/services/fastQA/config.shared.env"
     content = shared_env.read_text(encoding="utf-8")
 
-    assert "FASTQA_GRAPH_KB_ENABLED" not in content
-    assert "FASTQA_GRAPH_KB_V2_ENABLED" not in content
-    assert "FASTQA_GRAPH_KB_RAG_INJECTION_ENABLED" not in content
+    assert "FASTQA_GRAPH_KB_ENABLED=" in content
 
 
 def test_settings_prefer_fastqa_namespaced_neo4j(monkeypatch):

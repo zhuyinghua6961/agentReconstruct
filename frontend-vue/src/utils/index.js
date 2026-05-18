@@ -624,24 +624,21 @@ function linkifyPatentTextSegment(text) {
   return output
 }
 
-function linkifyPatentListCodeSpans(html) {
+function linkifyInlinePatentCodeSpans(html) {
   return String(html || '')
     .split(/(<pre\b[\s\S]*?<\/pre>)/gi)
     .map((segment) => {
       if (/^<pre\b/i.test(segment)) return segment
       return segment.replace(
-        /(<li\b[^>]*>\s*(?:<p>\s*)?)<code>\s*([A-Za-z]{2}\d{6,14}[A-Za-z]\d?)\s*<\/code>/g,
-        (raw, prefix, patentId) => `${prefix}${renderPatentAnchor(patentId) || raw}`
-      ).replace(
-        /(<p>\s*专利\s*)<code>\s*([A-Za-z]{2}\d{6,14}[A-Za-z]\d?)\s*<\/code>/g,
-        (raw, prefix, patentId) => `${prefix}${renderPatentAnchor(patentId) || raw}`
+        /<code\b[^>]*>\s*([A-Za-z]{2}\d{6,14}[A-Za-z]\d?)\s*<\/code>/g,
+        (raw, patentId) => renderPatentAnchor(patentId) || raw
       )
     })
     .join('')
 }
 
 function applyPatentLinksToHtml(html) {
-  const segments = linkifyPatentListCodeSpans(html).split(/(<[^>]+>)/g)
+  const segments = linkifyInlinePatentCodeSpans(html).split(/(<[^>]+>)/g)
   let inAnchor = false
   let codeDepth = 0
   let preDepth = 0
@@ -940,6 +937,7 @@ function normalizeMarkdownForRender(text) {
     line = normalizeInlineOrderedListLine(line)
     line = normalizeInlineBulletListLine(line)
     line = normalizeLeadingHeadingMarkers(line)
+    line = normalizeMalformedHeadingLine(line)
     line = normalizeStandaloneOrderedSubheadingLine(line, findNextNonEmptyLine(lines, index + 1))
     line = line.replace(/^(\s{0,3}#{1,6})([^\s#])/, '$1 $2')
     line = line.replace(/^(\s{0,3}[-*+])([^\s])/, '$1 $2')
@@ -1044,6 +1042,83 @@ function normalizeLeadingHeadingMarkers(line) {
     /^(\s*)(?:(#{1,6})\s+)+(.*\S.*)$/,
     (_match, indent, hashes, text) => `${indent}${hashes} ${String(text || '').trim()}`
   )
+}
+
+function normalizeMalformedHeadingLine(line) {
+  const source = String(line || '')
+  if (!/^\s{0,3}#{1,6}\s+/.test(source)) return source
+
+  return splitGluedHeadingMarkers(source)
+    .flatMap((headingLine) => splitHeadingInlineBody(headingLine))
+    .join('\n\n')
+}
+
+function splitGluedHeadingMarkers(line) {
+  const parts = []
+  let rest = String(line || '').trimEnd()
+
+  while (rest) {
+    const match = rest.match(/^(\s{0,3}#{1,6}\s+.+?)\s+(#{1,6}\s+\S[\s\S]*)$/)
+    if (!match) {
+      parts.push(rest)
+      break
+    }
+
+    const firstTitle = stripHeadingMarker(match[1])
+    const nextTitle = stripHeadingMarker(match[2])
+    if (!isHeadingTitleCandidate(firstTitle) || !isHeadingTitleCandidate(nextTitle)) {
+      parts.push(rest)
+      break
+    }
+
+    parts.push(match[1].trimEnd())
+    rest = match[2].trimStart()
+  }
+
+  return parts.length > 0 ? parts : [String(line || '')]
+}
+
+function splitHeadingInlineBody(line) {
+  const source = String(line || '')
+  const match = source.match(/^(\s{0,3}#{1,6}\s+)(.+)$/)
+  if (!match) return [source]
+
+  const content = String(match[2] || '').trim()
+  for (const boundary of content.matchAll(/\s+/g)) {
+    const title = content.slice(0, boundary.index).trim()
+    const body = content.slice(Number(boundary.index) + boundary[0].length).trim()
+    if (!isHeadingTitleCandidate(title) || !looksLikeInlineHeadingBody(body)) continue
+    return [`${match[1]}${title}`, body]
+  }
+
+  return [source]
+}
+
+function stripHeadingMarker(line) {
+  return String(line || '').replace(/^\s{0,3}#{1,6}\s+/, '').trim()
+}
+
+function isHeadingTitleCandidate(text) {
+  const title = String(text || '').trim()
+  if (title.length < 2 || title.length > 36) return false
+  if (!/[\u4e00-\u9fff]/.test(title)) return false
+  if (/[。！？!?；;，,]/.test(title)) return false
+  return true
+}
+
+function looksLikeInlineHeadingBody(text) {
+  const body = String(text || '').trim()
+  if (body.length < 18) return false
+  if (!/[\u4e00-\u9fff]/.test(body)) return false
+  if (/^(?:#{1,6}|[-*+]|\d+[.)])\s+/.test(body)) return false
+  if (/^(?:根据|例如|通过|追求|不同|常规|优化|元素|烧结|专利|该|这一|这些|这种|其|可|在|同时|此外|需要|通常|一般|主要|对于|实际应用|应用|材料|工艺|结构|性能|采用|利用|显示|表明|形成|包括|具有)/.test(body)) {
+    return true
+  }
+  if (/^[\u4e00-\u9fffA-Za-z0-9/()（）+\-.]{2,18}(?:是|可|能|能够|有助于|会|通常|一般|主要|直接|间接|需要|影响|决定)/.test(body)) {
+    return true
+  }
+  return /[，。；：]/.test(body.slice(0, 90))
+    && /(?:专利|材料|密度|性能|工艺|电池|范围|策略|参数)/.test(body.slice(0, 90))
 }
 
 function normalizeStandaloneOrderedSubheadingLine(line, nextNonEmptyLine) {
@@ -1314,7 +1389,10 @@ function stripRawUrls(text) {
   while (i < source.length) {
     const codeSpan = source[i] === '`' ? readInlineCodeSpan(source, i) : null
     if (codeSpan) {
-      output += ' '.repeat(codeSpan.end - codeSpan.start)
+      const inlinePatentId = normalizePatentIdForLink(codeSpan.inner)
+      output += inlinePatentId && isPatentPublicationNumber(inlinePatentId)
+        ? inlinePatentId
+        : ' '.repeat(codeSpan.end - codeSpan.start)
       i = codeSpan.end
       continue
     }
@@ -1345,6 +1423,7 @@ function readInlineCodeSpan(text, startIndex) {
   return {
     start: startIndex,
     end: endIndex + tickCount,
+    inner: source.slice(startIndex + tickCount, endIndex),
   }
 }
 

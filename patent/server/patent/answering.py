@@ -11,6 +11,7 @@ from typing import Any, Iterator
 
 import httpx
 
+from server.patent.prompt_loader import load_patent_prompt_template
 from server.patent.retrieval_models import PatentEvidence, PatentRetrievalOutcome, PatentTableSupplement
 from server.patent.upstream_transport import (
     build_patent_request_timeout,
@@ -25,6 +26,108 @@ _BACKTICK_CODE_SPAN_RE = re.compile(r"`(?P<body>[^`\n]{1,200})`")
 _PATENT_CITATION_LIST_ITEM_RE = re.compile(r"^(?:patent_id\s*=\s*)?([A-Za-z0-9._/\-]+)$", re.IGNORECASE)
 _CLAUSE_BOUNDARIES = "\n。！？!?；;，,"
 _STREAM_CITATION_TAIL_HOLD = 160
+DEFAULT_PATENT_STAGE4_ANSWER_USER_TEMPLATE = load_patent_prompt_template("stage4_answer_user.txt")
+DEFAULT_PATENT_STAGE4_ANSWER_SYSTEM_PROMPT = load_patent_prompt_template("stage4_answer_system.txt")
+
+
+class _PromptFormatDict(dict[str, str]):
+    def __missing__(self, key: str) -> str:
+        return ""
+
+
+def _render_prompt_template(template: str, **values: object) -> str:
+    return str(template or "").format_map(
+        _PromptFormatDict({key: str(value or "") for key, value in values.items()})
+    )
+
+
+def _escape_prompt_value(value: object) -> str:
+    return str(value or "").replace("{", "{{").replace("}", "}}")
+
+
+def _build_patent_stage4_doping_warning(user_question: str) -> str:
+    user_question_lower = str(user_question or "").lower()
+    doping_elements: list[tuple[str, str]] = []
+    element_patterns = [
+        (r"钛[掺杂]?", "Ti", "钛"),
+        (r"ti[ doped]?", "Ti", "钛"),
+        (r"镁[掺杂]?", "Mg", "镁"),
+        (r"mg[ doped]?", "Mg", "镁"),
+        (r"锰[掺杂]?", "Mn", "锰"),
+        (r"mn[ doped]?", "Mn", "锰"),
+        (r"锌[掺杂]?", "Zn", "锌"),
+        (r"zn[ doped]?", "Zn", "锌"),
+        (r"钒[掺杂]?", "V", "钒"),
+        (r"v[ +]doping", "V", "钒"),
+        (r"氟[掺杂]?", "F", "氟"),
+        (r"f[ -]doping", "F", "氟"),
+    ]
+    for pattern, eng, chi in element_patterns:
+        del eng
+        if re.search(pattern, user_question_lower):
+            doping_elements.append(("", chi))
+    if not doping_elements:
+        return ""
+    elements_str = "、".join([item[1] for item in doping_elements])
+    return f"""
+## ⚠️ 重要验证：专利证据元素匹配（必须遵守！）
+
+用户问题涉及：**{elements_str}掺杂**
+
+**你必须只引用标注为"✅ 包含核心元素"的专利证据！**
+
+证据文档中每件专利都标注了状态：
+- ✅ 包含核心元素 - 该专利包含用户问题中提到的掺杂元素，可以引用
+- ❌ 不含核心元素（可能不相关！） - 该专利不包含用户问题中提到的掺杂元素，**绝对禁止引用**！
+
+**绝对禁止**：
+- 禁止引用标注为"❌ 不含核心元素"的专利证据
+- 禁止在答案中声称这些专利研究了这些元素的掺杂效果
+- 禁止基于这些专利证据进行推理
+
+**正确做法**：
+- 如果没有"✅ 包含核心元素"的专利证据，必须明确说"当前证据未直接覆盖{elements_str}掺杂"
+- 只能引用标注为"✅ 包含核心元素"的专利证据
+
+例如：用户问"钛掺杂"，证据中只有"氟掺杂"专利（标注为❌），就必须说"当前证据未直接覆盖钛掺杂"！
+"""
+
+
+def _build_patent_stage4_facts_based_warning() -> str:
+    return """
+## 🚨 单阶段模式：证据优先于预回答！
+
+**用户原问题**是锚点。支持性专利证据中的内容**优先于**用户消息里的专家初稿。
+初稿仅作角度与结构参考：**禁止**用初稿中的具体数据、结论充当「已引用专利证据」的论述；无证据支撑的句子不得写成肯定性技术结论。
+
+## 预回答（专家初稿）的统一规则
+
+- **用户原问题**：全文必须直接回应，避免答非所问。
+- **预回答**：只用于**结构、讨论维度、段落衔接**，**不是**事实与数据的来源。
+- **开篇引言（推荐保留）**：可在答案最前写 **1 段**（可多句），风格可与预回答首段类似：**问题意义或背景** → **对用户问题中的核心术语作界定**（如压实密度与振实密度须与用户问题用词一致，勿混用）→ **预告下文将从哪些方面展开**。该段为**引导**，**不需要**标注 `(patent_id=公开号)`；其中**具体数值、比例、工艺参数**仍须来自当轮专利证据，**禁止**照搬预回答中无证据支撑的数字。
+- **正文中的具体数值、比例、工艺参数、性能数据、机理断言**（引言之后的论述部分）：须能在当轮「支持性专利证据」中找到依据；找不到则不要写，或明确写「当前专利证据未直接给出」。
+- 预回答与专利证据不一致时，**以专利证据为准**。
+"""
+
+
+def _build_patent_stage4_cite_depth_instruction(evidence_count: int) -> str:
+    n_ev = max(0, int(evidence_count or 0))
+    if n_ev == 0:
+        return "本轮未提供专利证据正文时，**不要**在答案中编写 `(patent_id=公开号)`。"
+    if n_ev <= 2:
+        return (
+            f"本轮专利证据正文仅 **{n_ev}** 件：最多只引用这 {n_ev} 件；有据可查的论断后可标 `(patent_id=公开号)`，"
+            "**禁止**使用白名单外的公开号。"
+        )
+    if n_ev <= 8:
+        return (
+            f"本轮专利证据正文共 **{n_ev}** 件：建议引用 **{min(3, n_ev)}–{n_ev}** 件，"
+            f"件数**不得超过 {n_ev}**；所有 patent_id/公开号须与用户消息白名单逐字一致。"
+        )
+    return (
+        f"本轮专利证据正文共 **{n_ev}** 件：建议从中择优深入引用 **3–8** 件；"
+        "所有 `(patent_id=公开号)` 必须来自白名单，禁止凭记忆补全。"
+    )
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -569,6 +672,8 @@ class PatentAnswerBuilder:
             }
             payload = self._build_request_payload(
                 prompt=prompt,
+                question=question,
+                evidence_count=int(prompt_metadata.get("evidence_patent_count", 0)),
                 allowed_patent_ids=allowed_patent_ids,
                 stream=False,
                 min_distinct_citations=min_distinct_citations,
@@ -753,6 +858,8 @@ class PatentAnswerBuilder:
         }
         payload = self._build_request_payload(
             prompt=prompt,
+            question=question,
+            evidence_count=int(prompt_metadata.get("evidence_patent_count", 0)),
             allowed_patent_ids=allowed_patent_ids,
             stream=True,
             min_distinct_citations=min_distinct_citations,
@@ -979,20 +1086,14 @@ class PatentAnswerBuilder:
             context=context,
             allowed_patent_ids=allowed_patent_ids,
         )
-        lines = [
-            "你是一名最终的专利答案润色与校验专家。",
-            "",
-            "请基于以下材料生成最终答案：",
-            "",
-            f"1. 原始问题：{question}",
-        ]
+        context_lines: list[str] = []
         summary = dict(context.get("summary_for_llm") or context.get("summary") or {})
         short_summary = str(summary.get("short_summary") or "").strip()
         if short_summary:
-            lines.extend(["", f"2. 会话摘要（仅用于承接上文指代）：{short_summary}"])
+            context_lines.extend(["", f"2. 会话摘要（仅用于承接上文指代）：{short_summary}"])
         stage1_deep_answer = str(context.get("stage1_deep_answer") or "").strip()
         if stage1_deep_answer:
-            lines.extend(
+            context_lines.extend(
                 [
                     "",
                     "3. 阶段1预分析（仅供结构、比较维度和核验线索参考，不能直接当作事实来源）：",
@@ -1002,65 +1103,100 @@ class PatentAnswerBuilder:
         turns_source = context.get("recent_turns_for_llm") or context.get("chat_history") or []
         turns = [str(item.get("content") or "").strip() for item in list(turns_source)[-4:] if isinstance(item, dict)]
         if turns:
-            lines.extend(["", "4. 最近对话（仅用于承接当前问题，不可覆盖专利证据）："])
-            lines.extend(f"- {item}" for item in turns if item)
+            context_lines.extend(["", "4. 最近对话（仅用于承接当前问题，不可覆盖专利证据）："])
+            context_lines.extend(f"- {item}" for item in turns if item)
         if allowed_patent_ids:
-            lines.extend(["", f"5. 允许引用的专利白名单：{', '.join(allowed_patent_ids)}"])
+            top5_reference_list = (
+                f"**【专利公开号白名单 — 强制】** 引用格式 `(patent_id=公开号)`，"
+                f"须与下列反引号内**逐字相同**。\n"
+                f"**禁止**编造下表以外的公开号；无证据支撑处省略标注。\n\n"
+                f"【合法公开号 — 与「支持性专利证据」中第 1…第 {len(allowed_patent_ids)} 件专利对应】\n\n"
+            )
+            for index, patent_id in enumerate(allowed_patent_ids, 1):
+                top5_reference_list += f"{index}. `{patent_id}`\n"
+            top5_reference_list += (
+                "\n⭐ **引用**：含容量、倍率、循环等**数值**时优先依据证据中的"
+                "「结构化性能表（_tables.json）」；句末标注 `(patent_id=…)`。\n"
+            )
         else:
-            lines.extend(["", "5. 允许引用的专利白名单：无"])
-        lines.append("最终答案中的引用格式必须严格使用 `(patent_id=公开号)`，并且只能引用上面的白名单公开号。")
-        lines.append("只有白名单允许引用；图谱候选专利和图谱事实只能作为结构化辅助线索。")
+            top5_reference_list = "【专利证据】本轮无正文片段，请勿编造公开号。\n"
         graph_kb = dict(context.get("graph_kb") or {})
+        graph_context_lines: list[str] = []
         if graph_kb:
-            lines.extend(["", "6. 图谱结构化辅助线索（不可直接当作文献引用，也不能把这些候选专利当作引用白名单）："])
+            graph_context_lines.extend(["6. 图谱结构化辅助线索（不可直接当作专利证据引用，也不能把这些候选专利当作引用白名单）："])
             graph_mode = str(graph_kb.get("mode") or "").strip()
             if graph_mode:
-                lines.append(f"- 图谱模式：{graph_mode}")
+                graph_context_lines.append(f"- 图谱模式：{graph_mode}")
             graph_candidates = _normalize_patent_id_list(graph_kb.get("stage4_graph_candidate_patent_ids"))
             if graph_candidates:
-                lines.append(f"- 图谱候选专利（非引用白名单）：{', '.join(graph_candidates)}")
+                graph_context_lines.append(f"- 图谱候选专利（非引用白名单）：{', '.join(graph_candidates)}")
             fact_block = str(graph_kb.get("stage4_fact_block") or "").strip()
             if fact_block:
-                lines.append("- 图谱事实：")
-                lines.extend(f"  {line}" for line in str(fact_block).splitlines() if str(line).strip())
-        if min_distinct_citations > 0:
-            lines.append(f"最终答案至少引用 {min_distinct_citations} 个不同公开号。")
+                graph_context_lines.append("- 图谱事实：")
+                graph_context_lines.extend(f"  {line}" for line in str(fact_block).splitlines() if str(line).strip())
         evidence_lines, evidence_metadata = _build_stage4_evidence_section(
             retrieval_outcome=retrieval_outcome,
             allowed_patent_ids=allowed_patent_ids,
         )
-        lines.extend(evidence_lines)
-        lines.extend(
-            [
-                "",
-                "写作与引用要求：",
-                "- 答案必须基于“检索证据”生成，而不是直接照搬“阶段1预分析”。",
-                "- 阶段1预分析只能作为结构、比较维度和核验线索；若与证据冲突，以证据为准。",
-                "- 如果表格与正文片段同时存在，容量、倍率、循环等数值优先采用表格证据；配比、工艺窗口等结构化参数也应优先使用表格，正文片段用于补充条件、对象和机理。",
-                "- 每个核心要点都应尽量同时给出：实质技术结论、对应证据、必要的机理解释或工程含义。",
-                "- 具体数值、工艺参数、性能结论必须来自给定证据；证据不足时可以保守表述，但不能伪造引用。",
-                "- 要明确区分背景/法律套话与实质技术证据，优先保留真正支持结论的片段。",
-                "- 每个有证据支撑的关键结论后面都要补一个 `(patent_id=公开号)`，不能输出白名单之外的公开号。",
-                "- 不要机械地在每句话后重复标注同一公开号；同一逻辑块优先在段落末或要点末标注 1 次。",
-                "- 输出使用清晰、规整的 Markdown；避免只罗列碎片证据。",
-            ]
+        min_distinct_citations_clause = (
+            f"最终答案至少引用 {min_distinct_citations} 个不同公开号。"
+            if min_distinct_citations > 0
+            else ""
         )
-        if min_distinct_citations > 0:
-            lines.append(f"整段答案必须覆盖至少 {min_distinct_citations} 个不同公开号。")
-        return "\n".join(lines), evidence_metadata
+        final_coverage_clause = (
+            f"整段答案必须覆盖至少 {min_distinct_citations} 个不同公开号。"
+            if min_distinct_citations > 0
+            else ""
+        )
+        prompt = _render_prompt_template(
+            DEFAULT_PATENT_STAGE4_ANSWER_USER_TEMPLATE,
+            user_question=_escape_prompt_value(question),
+            deep_answer=_escape_prompt_value(stage1_deep_answer),
+            context_block="\n".join(context_lines).strip(),
+            graph_context_block="\n".join(graph_context_lines).strip(),
+            evidence_documents=_escape_prompt_value("\n".join(evidence_lines).strip()),
+            min_distinct_citations_clause=min_distinct_citations_clause,
+            final_coverage_clause=final_coverage_clause,
+            top5_references=_escape_prompt_value(top5_reference_list),
+        ).strip()
+        return prompt, evidence_metadata
 
     def _build_request_payload(
         self,
         *,
         prompt: str,
+        question: str = "",
+        evidence_count: int = 0,
         allowed_patent_ids: list[str],
         stream: bool,
         min_distinct_citations: int,
     ) -> dict[str, Any]:
-        min_citation_clause = (
-            f"最终答案至少引用 {int(min_distinct_citations)} 个不同公开号；"
-            if int(min_distinct_citations) > 0
-            else ""
+        del allowed_patent_ids, min_distinct_citations
+        sys_cite_mid = "- 在答案中标注 patent_id/公开号；若某件专利不相关，直接跳过不引用即可，无需在答案中说明"
+        sys_cite_correct = (
+            "- 使用专利证据中的具体数值（如导电率、活化能、掺杂量、温度等），并说明其物理意义\n"
+            "- 含数值或强结论的论断须可溯源；`(patent_id=公开号)` 优先标在**段落末或要点末**（同一逻辑块、同一件专利一般 **1 次**），必要时同段内至多 **2 处**，避免一句一标"
+        )
+        sys_cite_fine = (
+            "- **可溯源与成组标注**：优先段落末/要点末；**禁止**同一 `(patent_id=公开号)` 在连续多个短句末尾机械重复；引用件数须符合上文约束，"
+            "**禁止**为凑件数编造白名单外公开号"
+        )
+        sys_cite_format = (
+            "## 📚 专利公开号引用格式\n"
+            "- 使用 `(patent_id=公开号)` 格式，公开号须与用户消息中的白名单**完全一致**\n"
+            "- 每处引用需伴随机理解释或定量数据；遵守上文「按件综述式」密度与反机械重复规则"
+        )
+        system_prompt = _render_prompt_template(
+            DEFAULT_PATENT_STAGE4_ANSWER_SYSTEM_PROMPT,
+            split_body_prefix="",
+            user_question=_escape_prompt_value(str(question or "")),
+            doping_warning=_escape_prompt_value(_build_patent_stage4_doping_warning(str(question or ""))),
+            facts_based_warning=_escape_prompt_value(_build_patent_stage4_facts_based_warning()),
+            sys_cite_mid=_escape_prompt_value(sys_cite_mid),
+            sys_cite_correct=_escape_prompt_value(sys_cite_correct),
+            cite_depth_instruction=_escape_prompt_value(_build_patent_stage4_cite_depth_instruction(evidence_count)),
+            sys_cite_fine=_escape_prompt_value(sys_cite_fine),
+            sys_cite_format=_escape_prompt_value(sys_cite_format),
         )
         return {
             "model": self.model,
@@ -1069,17 +1205,7 @@ class PatentAnswerBuilder:
             "messages": [
                 {
                     "role": "system",
-                    "content": (
-                        "你是专利分析助手。只能基于给定证据回答，不要虚构未出现的事实；"
-                        "阶段1预分析只能作为结构和核验线索，不能直接当作事实来源；"
-                        "如果表格存在，必须优先采用表格中的容量、倍率、循环、配比和工艺窗口等数值，再用正文片段补充机理与条件；"
-                        "要区分背景/法律套话与真正的技术证据；"
-                        "每个核心要点尽量同时包含实质技术结论、关键证据和必要的机理或工程含义；"
-                        "不要机械地在每句话后重复标注同一公开号，同一逻辑块优先在段落末或要点末标注 1 次；"
-                        "引用必须使用 `(patent_id=公开号)`，不能使用 DOI；"
-                        f"{min_citation_clause}"
-                        f"最终答案里只允许引用这些公开号：{', '.join(allowed_patent_ids) if allowed_patent_ids else '无'}。"
-                    ),
+                    "content": system_prompt,
                 },
                 {"role": "user", "content": prompt},
             ],

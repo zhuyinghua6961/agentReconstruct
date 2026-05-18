@@ -280,11 +280,11 @@ def test_patent_answer_builder_prompt_reads_normalized_stage4_context():
     )
     builder.close()
 
-    assert "Earlier summary" in prompt
-    assert "Earlier turn" in prompt
     assert "先比较安全性、倍率和量产一致性。" in prompt
     assert "/api/patent/original/CN115132975B?section=claim&claim_number=1&format=html" in prompt
     assert "Claim 1" in prompt
+    assert "你是一名最终的答案润色与校验专家。" in prompt
+    assert "专家初稿（预回答）" in prompt
 
 
 def test_patent_answer_builder_prompt_includes_patent_id_whitelist_and_citation_contract():
@@ -319,7 +319,7 @@ def test_patent_answer_builder_prompt_includes_patent_id_whitelist_and_citation_
     )
     builder.close()
 
-    assert "允许引用的专利白名单" in prompt
+    assert "**【专利公开号白名单 — 强制】**" in prompt
     assert "CN115132975B" in prompt
     assert "CN999999999A" in prompt
     assert "(patent_id=公开号)" in prompt
@@ -364,9 +364,9 @@ def test_patent_answer_builder_prompt_emphasizes_evidence_first_and_table_priori
     )
     builder.close()
 
-    assert "答案必须基于“检索证据”生成，而不是直接照搬“阶段1预分析”" in prompt
-    assert "如果表格与正文片段同时存在，容量、倍率、循环等数值优先采用表格证据" in prompt
-    assert "不要机械地在每句话后重复标注同一公开号" in prompt
+    assert "答案必须基于\"支持性专利证据\"生成，而不是简单套用\"专家初稿\"" in prompt
+    assert "结构化性能表（_tables.json）" in prompt
+    assert "按件综述式写作（必读）" in prompt
 
 
 def test_patent_answer_builder_request_payload_mentions_stage1_reference_only_and_non_mechanical_citation():
@@ -381,11 +381,11 @@ def test_patent_answer_builder_request_payload_mentions_stage1_reference_only_an
 
     system_prompt = payload["messages"][0]["content"]
 
-    assert "阶段1预分析只能作为结构和核验线索，不能直接当作事实来源" in system_prompt
-    assert "不要机械地在每句话后重复标注同一公开号" in system_prompt
-    assert "引用必须使用 `(patent_id=公开号)`" in system_prompt
-    assert "不能使用 DOI" in system_prompt
-    assert "最终答案至少引用 2 个不同公开号" in system_prompt
+    assert "你是一位资深的材料科学学术专家，擅长从工程应用角度分析材料失效机理。" in system_prompt
+    assert "禁止声称\"未找到专利证据\"" in system_prompt
+    assert "单阶段模式：证据优先于预回答" in system_prompt
+    assert "按件综述式写作（必读）" in system_prompt
+    assert "使用 `(patent_id=公开号)` 格式" in system_prompt
 
 
 def test_stage4_synthesis_enforces_patent_id_whitelist_on_answer_builder_output():
@@ -944,7 +944,8 @@ def test_patent_answer_builder_generation_path_keeps_sanitization_with_mixed_tab
     payload_text = str(captured_payload["json"])
     assert "表1 各实施例性能对比" in payload_text
     assert "Claim 1" in payload_text
-    assert "不能使用 DOI" in payload_text
+    assert "你是一位资深的材料科学学术专家" in payload_text
+    assert "按件综述式写作" in payload_text
     assert "(patent_id=CN115132975B)" in answer
     assert "CN000000000A" not in answer
     assert "另一篇外部专利也报告了类似现象" not in answer

@@ -99,6 +99,132 @@ def _candidate_json_payloads(result_text: str) -> list[str]:
     return candidates
 
 
+def _effective_focus_max_n() -> int:
+    """Merged `query_focus_terms` + evidence axes cap for Stage2 / DOI gating."""
+    try:
+        return max(4, min(int(str(os.getenv("QA_STAGE1_EFFECTIVE_FOCUS_MAX_TERMS", "12")).strip()), 24))
+    except ValueError:
+        return 12
+
+
+_ALLOWED_QUESTION_FOCUS_TYPES = frozenset(
+    {
+        "generic",
+        "synthesis_preparation",
+        "powder_dense_morphology",
+        "electrode_compaction_process",
+        "carbon_coating_conductivity",
+        "doping_structure",
+        "electrochemical_performance",
+        "characterization",
+        "mechanism_analysis",
+        "comparative_tradeoff",
+        "density_metric_ambiguity",
+        "safety_reliability",
+        "cost_scaleup",
+        "recycling_sustainability",
+        "other",
+    }
+)
+
+
+def _normalize_axes_list(raw: Any, *, max_n: int) -> List[str]:
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        ck = _clean_retrieval_token(str(item or "").strip(), max_len=48)
+        if not ck or ck in seen:
+            continue
+        seen.add(ck)
+        out.append(ck)
+        if len(out) >= max_n:
+            break
+    return out
+
+
+def _normalize_question_focus(raw: Any) -> dict[str, Any]:
+    """Stage1 JSON `question_focus`: LLM-derived focus routing for retrieval / ranking."""
+    axes_max = 8
+    secondary_max = 4
+    try:
+        axes_max = max(1, min(int(str(os.getenv("QA_STAGE1_EVIDENCE_AXES_MAX_TERMS", "8")).strip()), 16))
+    except ValueError:
+        axes_max = 8
+    try:
+        secondary_max = max(0, min(int(str(os.getenv("QA_STAGE1_SECONDARY_AXES_MAX_TERMS", "4")).strip()), 12))
+    except ValueError:
+        secondary_max = 4
+
+    if not isinstance(raw, dict):
+        return {
+            "focus_type": "generic",
+            "focus_summary": "",
+            "evidence_axes": [],
+            "secondary_axes": [],
+            "confidence": "medium",
+        }
+
+    focus_raw = str(raw.get("focus_type") or "").strip().lower().replace(" ", "_")
+    focus_type = focus_raw if focus_raw in _ALLOWED_QUESTION_FOCUS_TYPES else "generic"
+    summary = str(raw.get("focus_summary") or "").strip()
+    if len(summary) > 280:
+        summary = summary[:280].rsplit(maxsplit=1)[0].strip()
+
+    confidence_raw = str(raw.get("confidence") or "").strip().lower()
+    if confidence_raw not in {"high", "medium", "low"}:
+        confidence_raw = "medium"
+
+    evidence_axes = _normalize_axes_list(raw.get("evidence_axes"), max_n=axes_max)
+    secondary_axes = _normalize_axes_list(raw.get("secondary_axes"), max_n=secondary_max)
+
+    return {
+        "focus_type": focus_type,
+        "focus_summary": summary,
+        "evidence_axes": evidence_axes,
+        "secondary_axes": secondary_axes,
+        "confidence": confidence_raw,
+    }
+
+
+def effective_query_focus_terms_for_stage2(stage1_result: dict[str, Any] | None) -> List[str]:
+    """Merge narrow `query_focus_terms` with `question_focus` axes for Stage2 reordering / DOI selection."""
+    if not isinstance(stage1_result, dict):
+        return []
+
+    merged: list[str] = []
+
+    raw_qf = stage1_result.get("query_focus_terms")
+    if isinstance(raw_qf, list):
+        for item in raw_qf:
+            t = _clean_retrieval_token(str(item or "").strip(), max_len=48)
+            if t:
+                merged.append(t)
+
+    qf_block = stage1_result.get("question_focus")
+    if isinstance(qf_block, dict):
+        for key in ("evidence_axes", "secondary_axes"):
+            inner = qf_block.get(key)
+            if isinstance(inner, list):
+                for item in inner:
+                    t = _clean_retrieval_token(str(item or "").strip(), max_len=48)
+                    if t:
+                        merged.append(t)
+
+    cap = _effective_focus_max_n()
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in merged:
+        if t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+        if len(out) >= cap:
+            break
+    return out
+
+
 def _normalize_query_focus_terms(raw: Any) -> List[str]:
     """Stage1 JSON `query_focus_terms`: short phrases for Stage2 must-include (deduped, length-capped)."""
     max_n = 8
@@ -255,6 +381,7 @@ def run_stage1_pre_answer_and_planning(
             }
 
         deep_answer = str(stage1_result.get("deep_answer") or "").strip()
+        question_focus = _normalize_question_focus(stage1_result.get("question_focus"))
         answer_plan = stage1_result.get("answer_plan")
         if not isinstance(answer_plan, dict):
             answer_plan = {}
@@ -284,11 +411,20 @@ def run_stage1_pre_answer_and_planning(
 
         retrieval_claims = [item for item in retrieval_claims if str(item.get("claim") or "").strip()]
         query_focus_terms = _normalize_query_focus_terms(stage1_result.get("query_focus_terms"))
+        merged_focus = effective_query_focus_terms_for_stage2(
+            {
+                "query_focus_terms": query_focus_terms,
+                "question_focus": question_focus,
+            }
+        )
         logger.info(
-            "阶段一结果归一化完成: deep_answer_chars=%s retrieval_claims=%s query_focus_terms=%s",
+            "阶段一结果归一化完成: deep_answer_chars=%s retrieval_claims=%s query_focus_terms=%s "
+            "question_focus=%s effective_focus_terms=%s",
             len(deep_answer),
             len(retrieval_claims),
             query_focus_terms,
+            {"type": question_focus.get("focus_type"), "axes": len(question_focus.get("evidence_axes") or [])},
+            merged_focus,
         )
         return {
             "success": True,
@@ -296,6 +432,8 @@ def run_stage1_pre_answer_and_planning(
             "answer_plan": answer_plan,
             "retrieval_claims": retrieval_claims,
             "query_focus_terms": query_focus_terms,
+            "question_focus": question_focus,
+            "effective_query_focus_terms": merged_focus,
             "raw_response": cleaned_text,
         }
     except Exception as exc:

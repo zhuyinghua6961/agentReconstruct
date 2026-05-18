@@ -113,6 +113,7 @@ def rerank_patent_stage2_documents(
             "query": query,
             "documents": docs_to_rerank,
             "top_n": requested_top_n,
+            "return_documents": True,
         }
         headers = {"Content-Type": "application/json"}
         if api_key:

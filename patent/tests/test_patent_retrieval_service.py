@@ -21,6 +21,12 @@ from server.patent.stages.retrieval import run_stage2_targeted_retrieval
 from server.services.execution_cache import ExecutionCache
 
 
+@pytest.fixture(autouse=True)
+def _disable_external_query_expander(monkeypatch):
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+
 class _FakeRedis:
     def __init__(self) -> None:
         self.store: dict[str, object] = {}
@@ -767,18 +773,315 @@ def test_targeted_retrieval_generates_query_per_claim_and_returns_unified_docume
     )
 
     assert generated_calls == [("从专利角度如何评估 LMFP 对 LFP 的替代窗口和风险？", "评估 LMFP 对 LFP 的替代窗口")]
-    assert abstract_queries == ["LMFP LFP 替代窗口 高 SOC 充电安全 低 SOC 放电功率"]
-    assert chunk_calls == [("LMFP LFP 替代窗口 高 SOC 充电安全 低 SOC 放电功率", ["CN115132975B"])]
+    assert abstract_queries == ["lmfp LFP 替代窗口 高 soc 充电安全 低 放电功率 LiFePO4 磷酸铁锂"]
+    assert chunk_calls == [("lmfp LFP 替代窗口 高 soc 充电安全 低 放电功率 LiFePO4 磷酸铁锂", ["CN115132975B"])]
     assert payload["source_ids"] == ["CN115132975B"]
     assert payload["documents"] == [
-        "实施例表明 LMFP/LFP/三元复配能够同时改善高 SOC 充电安全性与低 SOC 放电功率。",
         "通过 LMFP/LFP/三元复配改善充电安全与低 SOC 放电功率。",
+        "实施例表明 LMFP/LFP/三元复配能够同时改善高 SOC 充电安全性与低 SOC 放电功率。",
     ]
     assert payload["metadatas"][0]["patent_id"] == "CN115132975B"
-    assert payload["metadatas"][0]["stage2_source"] == "chunk"
-    assert payload["metadatas"][0]["generated_query"] == "LMFP LFP 替代窗口 高 SOC 充电安全 低 SOC 放电功率"
-    assert payload["metadatas"][1]["stage2_source"] == "abstract"
-    assert payload["distances"] == [0.03, 0.08]
+    assert payload["metadatas"][0]["stage2_source"] == "abstract"
+    assert payload["metadatas"][0]["generated_query"] == "lmfp LFP 替代窗口 高 soc 充电安全 低 放电功率 LiFePO4 磷酸铁锂"
+    assert payload["metadatas"][1]["stage2_source"] == "chunk"
+    assert payload["distances"] == [0.08, 0.03]
+
+
+def test_targeted_retrieval_uses_oldcode_patent_dual_search_shape(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "false")
+    abstract_calls: list[tuple[str, int]] = []
+    chunk_calls: list[tuple[str, list[str] | None, int]] = []
+    expander_inputs: list[str] = []
+
+    service = PatentRetrievalService(
+        identity_registry={"CN115132975B": "CN115132975B"},
+        catalog_records=[
+            PatentCatalogRecord(
+                canonical_patent_id="CN115132975B",
+                publication_number="CN115132975B",
+                application_number="CN202110320984.1",
+                title="一种锂离子电池及动力车辆",
+                abstract_text="通过 LiFePO4 与 PEG 碳源改善倍率性能。",
+            )
+        ],
+        retrieval_version="retrieval-v2",
+        catalog_index_version="catalog-v2",
+        query_expander=lambda query: expander_inputs.append(query) or f"{query} overcharge",
+        abstract_vector_search=lambda question, top_k: abstract_calls.append((question, top_k)) or [
+            {
+                "patent_id": "CN115132975B",
+                "distance": 0.08,
+                "document": "通过 LiFePO4 与 PEG 碳源改善倍率性能。",
+            }
+        ],
+        chunk_vector_search=lambda question, candidate_patent_ids, top_k: chunk_calls.append(
+            (question, list(candidate_patent_ids) if candidate_patent_ids is not None else None, top_k)
+        )
+        or [
+            {
+                "patent_id": "CN115132975B",
+                "distance": 0.03,
+                "source_file": "说明书.json",
+                "json_stem": "CN115132975B",
+                "chunk_index": 7,
+                "document": "实施例显示 PEG 聚乙二醇辅助碳包覆提升 LiFePO4 倍率性能。",
+            }
+        ],
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[PatentRetrievalClaim(claim="PEG 碳源改善 LiFePO4 倍率性能", keywords=["PEG", "LiFePO4"])],
+        user_question="PEG 对 LiFePO4 倍率性能有什么影响？",
+        frozen_claim_queries=[["LiFePO4 PEG 倍率性能"]],
+    )
+
+    assert abstract_calls[0][1] == 25
+    assert chunk_calls[0][1:] == (["CN115132975B"], 10)
+    assert abstract_calls[0][0] == chunk_calls[0][0]
+    assert expander_inputs == ["LiFePO4 peg 倍率性能 聚乙二醇 磷酸铁锂 LFP"]
+    assert abstract_calls[0][0].endswith("overcharge")
+    assert payload["documents"] == [
+        "通过 LiFePO4 与 PEG 碳源改善倍率性能。",
+        "实施例显示 PEG 聚乙二醇辅助碳包覆提升 LiFePO4 倍率性能。",
+    ]
+
+
+def test_targeted_retrieval_global_chunk_when_abstract_has_no_patent_ids(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "false")
+    chunk_calls: list[tuple[list[str] | None, int]] = []
+
+    service = PatentRetrievalService(
+        identity_registry={"CN115132975B": "CN115132975B"},
+        catalog_records=[
+            PatentCatalogRecord(
+                canonical_patent_id="CN115132975B",
+                publication_number="CN115132975B",
+                application_number="CN202110320984.1",
+                title="一种锂离子电池及动力车辆",
+                abstract_text="通过 LiFePO4 与 PEG 碳源改善倍率性能。",
+            )
+        ],
+        retrieval_version="retrieval-v2",
+        catalog_index_version="catalog-v2",
+        abstract_vector_search=lambda question, top_k: [],
+        chunk_vector_search=lambda question, candidate_patent_ids, top_k: chunk_calls.append(
+            (list(candidate_patent_ids) if candidate_patent_ids is not None else None, top_k)
+        )
+        or [
+            {
+                "patent_id": "CN115132975B",
+                "distance": 0.03,
+                "source_file": "说明书.json",
+                "json_stem": "CN115132975B",
+                "chunk_index": 7,
+                "document": "全局 chunk 检索命中 PEG 碳源证据。",
+            }
+        ],
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[PatentRetrievalClaim(claim="PEG 碳源改善 LiFePO4 倍率性能", keywords=["PEG", "LiFePO4"])],
+        user_question="PEG 对 LiFePO4 倍率性能有什么影响？",
+        frozen_claim_queries=[["LiFePO4 PEG 倍率性能"]],
+    )
+
+    assert chunk_calls == [(None, 10)]
+    assert payload["documents"] == ["全局 chunk 检索命中 PEG 碳源证据。"]
+
+
+def test_targeted_retrieval_applies_rerank_inside_each_dual_vector_search(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "false")
+    rerank_calls: list[dict[str, object]] = []
+
+    service = PatentRetrievalService(
+        identity_registry={"CN115132975B": "CN115132975B", "US20240001234A1": "US20240001234A1"},
+        catalog_records=[
+            PatentCatalogRecord(
+                canonical_patent_id="CN115132975B",
+                publication_number="CN115132975B",
+                application_number="CN202110320984.1",
+                title="一种锂离子电池及动力车辆",
+                abstract_text="abstract A",
+            ),
+            PatentCatalogRecord(
+                canonical_patent_id="US20240001234A1",
+                publication_number="US20240001234A1",
+                application_number="US18/000,123",
+                title="Electrode manufacturing method",
+                abstract_text="abstract B",
+            ),
+        ],
+        retrieval_version="retrieval-v2",
+        catalog_index_version="catalog-v2",
+        abstract_vector_search=lambda question, top_k: [
+            {"patent_id": "CN115132975B", "distance": 0.40, "document": "abstract A"},
+            {"patent_id": "US20240001234A1", "distance": 0.10, "document": "abstract B"},
+        ],
+        chunk_vector_search=lambda question, candidate_patent_ids, top_k: [
+            {
+                "patent_id": "CN115132975B",
+                "distance": 0.30,
+                "source_file": "说明书.json",
+                "json_stem": "CN115132975B",
+                "chunk_index": 1,
+                "document": "chunk A",
+            },
+            {
+                "patent_id": "US20240001234A1",
+                "distance": 0.05,
+                "source_file": "说明书.json",
+                "json_stem": "US20240001234A1",
+                "chunk_index": 2,
+                "document": "chunk B",
+            },
+        ],
+    )
+
+    def _rerank(**kwargs):
+        rerank_calls.append(kwargs)
+        docs = list(kwargs.get("documents") or [])
+        metas = list(kwargs.get("metadatas") or [])
+        return {
+            "documents": list(reversed(docs)),
+            "metadatas": list(reversed(metas)),
+            "rerank_scores": [0.99, 0.88],
+            "fallback": False,
+            "provider": "local",
+        }
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[PatentRetrievalClaim(claim="rerank dual search", keywords=[])],
+        user_question="rerank dual search",
+        frozen_claim_queries=[["rerank dual search"]],
+        rerank_fn=_rerank,
+    )
+
+    assert len(rerank_calls) == 2
+    assert [call["top_n"] for call in rerank_calls] == [2, 2]
+    assert payload["documents"] == ["abstract B", "abstract A", "chunk B", "chunk A"]
+
+
+def test_targeted_retrieval_fetches_50_candidates_before_internal_rerank(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "false")
+    abstract_top_k_calls: list[int] = []
+    chunk_calls: list[tuple[list[str] | None, int]] = []
+    rerank_calls: list[dict[str, int]] = []
+
+    def _abstract_hits(top_k: int) -> list[dict[str, object]]:
+        return [
+            {
+                "patent_id": "CN115132975B",
+                "distance": 0.5 - (index * 0.001),
+                "document": f"abstract candidate {index}",
+            }
+            for index in range(top_k)
+        ]
+
+    def _chunk_hits(top_k: int) -> list[dict[str, object]]:
+        return [
+            {
+                "patent_id": "CN115132975B",
+                "distance": 0.4 - (index * 0.001),
+                "source_file": "说明书.json",
+                "json_stem": "CN115132975B",
+                "chunk_index": index,
+                "document": f"chunk candidate {index}",
+            }
+            for index in range(top_k)
+        ]
+
+    service = PatentRetrievalService(
+        identity_registry={"CN115132975B": "CN115132975B"},
+        catalog_records=[
+            PatentCatalogRecord(
+                canonical_patent_id="CN115132975B",
+                publication_number="CN115132975B",
+                application_number="CN202110320984.1",
+                title="一种锂离子电池及动力车辆",
+                abstract_text="abstract candidate 0",
+            )
+        ],
+        retrieval_version="retrieval-v2",
+        catalog_index_version="catalog-v2",
+        abstract_vector_search=lambda question, top_k: abstract_top_k_calls.append(top_k) or _abstract_hits(top_k),
+        chunk_vector_search=lambda question, candidate_patent_ids, top_k: chunk_calls.append(
+            (list(candidate_patent_ids) if candidate_patent_ids is not None else None, top_k)
+        )
+        or _chunk_hits(top_k),
+    )
+
+    def _rerank(**kwargs):
+        docs = list(kwargs.get("documents") or [])
+        metas = list(kwargs.get("metadatas") or [])
+        top_n = int(kwargs.get("top_n") or 0)
+        rerank_calls.append({"candidate_count": len(docs), "top_n": top_n})
+        return {
+            "documents": docs[:top_n],
+            "metadatas": metas[:top_n],
+            "rerank_scores": [1.0 - (index * 0.01) for index in range(min(top_n, len(docs)))],
+            "fallback": False,
+            "provider": "local",
+        }
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[PatentRetrievalClaim(claim="候选池重排", keywords=[])],
+        user_question="候选池重排",
+        frozen_claim_queries=[["候选池重排"]],
+        rerank_fn=_rerank,
+    )
+
+    assert abstract_top_k_calls == [50]
+    assert chunk_calls == [(["CN115132975B"], 50)]
+    assert rerank_calls == [
+        {"candidate_count": 50, "top_n": 25},
+        {"candidate_count": 50, "top_n": 10},
+    ]
+    assert len(payload["documents"]) == 35
+
+
+def test_targeted_retrieval_dedupes_by_first_200_chars_without_resorting(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "false")
+    shared_prefix = "同一段专利证据。" + "A" * 210
+
+    service = PatentRetrievalService(
+        identity_registry={"CN115132975B": "CN115132975B"},
+        catalog_records=[
+            PatentCatalogRecord(
+                canonical_patent_id="CN115132975B",
+                publication_number="CN115132975B",
+                application_number="CN202110320984.1",
+                title="一种锂离子电池及动力车辆",
+                abstract_text="同一段专利证据。",
+            )
+        ],
+        retrieval_version="retrieval-v2",
+        catalog_index_version="catalog-v2",
+        abstract_vector_search=lambda question, top_k: [
+            {
+                "patent_id": "CN115132975B",
+                "distance": 0.40,
+                "document": f"{shared_prefix} 摘要版本",
+            }
+        ],
+        chunk_vector_search=lambda question, candidate_patent_ids, top_k: [
+            {
+                "patent_id": "CN115132975B",
+                "distance": 0.01,
+                "source_file": "说明书.json",
+                "json_stem": "CN115132975B",
+                "chunk_index": 7,
+                "document": f"{shared_prefix} chunk 版本",
+            }
+        ],
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[PatentRetrievalClaim(claim="重复证据去重", keywords=[])],
+        user_question="重复证据如何去重？",
+        frozen_claim_queries=[["重复证据"]],
+    )
+
+    assert payload["documents"] == [f"{shared_prefix} 摘要版本"]
 
 
 def test_targeted_retrieval_merges_multi_claim_results_and_dedups_by_document_prefix(monkeypatch):
@@ -862,8 +1165,13 @@ def test_targeted_retrieval_merges_multi_claim_results_and_dedups_by_document_pr
     )
 
     assert payload["source_ids"] == ["CN115132975B", "US20240001234A1"]
-    assert payload["documents"][0] == "重复证据段。后缀B"
-    assert "重复证据段。后缀A" not in payload["documents"]
+    assert payload["documents"][:4] == [
+        "通过 LMFP/LFP/三元复配改善充电安全与低 SOC 放电功率。",
+        "An electrode manufacturing process.",
+        "重复证据段。后缀A",
+        "独立证据A",
+    ]
+    assert "重复证据段。后缀B" in payload["documents"]
     assert payload["documents"].count("通过 LMFP/LFP/三元复配改善充电安全与低 SOC 放电功率。") == 1
     assert any(item["patent_id"] == "US20240001234A1" for item in payload["metadatas"])
 

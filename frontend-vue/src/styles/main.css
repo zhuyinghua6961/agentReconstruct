@@ -421,8 +421,8 @@ textarea::placeholder {
 }
 
 .message-content strong {
-  color: #667eea;
-  font-weight: 600;
+  color: inherit;
+  font-weight: 700;
 }
 
 .message-content p {

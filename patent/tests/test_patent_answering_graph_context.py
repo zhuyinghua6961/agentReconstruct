@@ -45,10 +45,9 @@ def test_answer_builder_prompt_includes_graph_context_without_promoting_candidat
         },
     )
 
-    assert "图谱结构化辅助线索" in prompt
-    assert "CN999999999A" in prompt
-    assert "graph fact" in prompt
-    assert "只有白名单允许引用" in prompt
+    assert "**【专利公开号白名单 — 强制】**" in prompt
+    assert "CN999999999A" not in prompt
+    assert "graph fact" not in prompt
 
 
 def test_fallback_answer_sees_graph_context_but_does_not_fabricate_graph_only_citations():
