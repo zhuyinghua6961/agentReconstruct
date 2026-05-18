@@ -22,7 +22,8 @@ def test_find_pdf_path_prefers_storage_resolution(monkeypatch, tmp_path):
     assert found == str(resolved)
 
 
-def test_find_pdf_path_supports_exact_and_underscore_names(tmp_path):
+def test_find_pdf_path_supports_exact_and_underscore_names(monkeypatch, tmp_path):
+    monkeypatch.setenv("QA_ORIGINAL_MINIO_ONLY", "false")
     exact = tmp_path / "10.1" / "x.pdf"
     exact.parent.mkdir(parents=True)
     exact.write_text("pdf", encoding="utf-8")
@@ -36,7 +37,22 @@ def test_find_pdf_path_supports_exact_and_underscore_names(tmp_path):
     assert found_underscore == str(underscore)
 
 
-def test_stage3_load_pdf_chunks_uses_finder_and_extractor(tmp_path):
+def test_find_pdf_path_strict_mode_does_not_fallback_to_local_pdf(monkeypatch, tmp_path):
+    local_pdf = tmp_path / "10.1_x.pdf"
+    local_pdf.write_text("pdf", encoding="utf-8")
+    monkeypatch.setenv("QA_ORIGINAL_MINIO_ONLY", "true")
+    monkeypatch.setattr(
+        "app.modules.generation_pipeline.pdf_pipeline.storage_service.ensure_local_paper_pdf",
+        lambda **kwargs: None,
+    )
+
+    found = find_pdf_path(doi="10.1/x", papers_dir=tmp_path, logger=logging.getLogger("test.pdf"))
+
+    assert found is None
+
+
+def test_stage3_load_pdf_chunks_uses_finder_and_extractor(monkeypatch, tmp_path):
+    monkeypatch.setenv("QA_ORIGINAL_MINIO_ONLY", "false")
     pdf_path = tmp_path / "10.1_a.pdf"
     pdf_path.write_text("pdf", encoding="utf-8")
 
@@ -58,7 +74,8 @@ def test_stage3_load_pdf_chunks_uses_finder_and_extractor(tmp_path):
     assert calls == [("10.1/a", 2)]
 
 
-def test_stage3_load_pdf_chunks_returns_partial_result_on_cancel(tmp_path):
+def test_stage3_load_pdf_chunks_returns_partial_result_on_cancel(monkeypatch, tmp_path):
+    monkeypatch.setenv("QA_ORIGINAL_MINIO_ONLY", "false")
     pdf_path = tmp_path / "10.1_a.pdf"
     pdf_path.write_text("pdf", encoding="utf-8")
 

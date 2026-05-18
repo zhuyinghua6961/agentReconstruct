@@ -27,6 +27,7 @@ from server.patent.pdf_contract import (
     validate_compare_context,
 )
 from server.patent.file_models import PatentFileContract
+from server.patent.object_reader import ObjectReader
 from server.patent.pdf_extraction import extract_pdf_text as extract_patent_file_qa_pdf_text
 from server.patent.summary_formatting import (
     LITERATURE_SUMMARY_NOTE,
@@ -1108,6 +1109,7 @@ class PatentPdfService:
         extract_pdf_text_fn: Callable[..., str] | None = None,
         answer_question_fn: Callable[..., str] | None = None,
         answer_client: PatentPdfAnswerClient | Any | None = None,
+        object_reader: ObjectReader | Any | None = None,
         max_pdf_pages: int = 50,
         max_pdf_chars: int | None = None,
         compare_max_pdf_chars: int | None = None,
@@ -1115,6 +1117,7 @@ class PatentPdfService:
         self._extract_pdf_text_fn = extract_pdf_text_fn or extract_file_qa_pdf_text
         self._answer_question_fn = answer_question_fn
         self._client = None if answer_question_fn is not None else (answer_client or PatentPdfAnswerClient.from_env())
+        self._object_reader = object_reader
         self._max_pdf_pages = max(1, int(max_pdf_pages))
         resolved_max_pdf_chars = 12000 if max_pdf_chars is None else int(max_pdf_chars)
         self._max_pdf_chars = max(1000, resolved_max_pdf_chars)
@@ -1125,6 +1128,15 @@ class PatentPdfService:
         else:
             resolved_compare_max_pdf_chars = max(1000, _env_int("PATENT_MULTI_PDF_COMPARE_MAX_CHARS", 50000))
         self._compare_max_pdf_chars = max(1, resolved_compare_max_pdf_chars)
+
+    def _get_object_reader(self) -> ObjectReader | Any:
+        if self._object_reader is None:
+            self._object_reader = ObjectReader()
+        return self._object_reader
+
+    @staticmethod
+    def _strict_minio_only() -> bool:
+        return _env_flag("PATENT_ORIGINAL_MINIO_ONLY", True)
 
     def close(self) -> None:
         close = getattr(self._client, "close", None)
@@ -1435,10 +1447,21 @@ class PatentPdfService:
     def _load_pdf_documents(self, *, execution_files: list[Any]) -> list[dict[str, str]]:
         sections: list[dict[str, str]] = []
         for item in execution_files:
-            local_path = str(item.payload.get("local_path") or "").strip()
-            if not local_path:
-                continue
-            resolved = Path(local_path)
+            file_name = str(item.file_name or item.payload.get("file_name") or f"file:{item.file_id}")
+            if self._strict_minio_only():
+                storage_ref = str(item.payload.get("storage_ref") or "").strip()
+                if not storage_ref:
+                    continue
+                suffix = Path(file_name).suffix.lower() or ".pdf"
+                try:
+                    resolved = Path(self._get_object_reader().materialize_temp(storage_ref, suffix=suffix))
+                except Exception:
+                    continue
+            else:
+                local_path = str(item.payload.get("local_path") or "").strip()
+                if not local_path:
+                    continue
+                resolved = Path(local_path)
             if not resolved.exists() or not resolved.is_file():
                 continue
             extracted = str(
@@ -1452,7 +1475,7 @@ class PatentPdfService:
             ).strip()
             if not extracted:
                 continue
-            label = str(item.file_name or resolved.name or f"file:{item.file_id}")
+            label = str(file_name or resolved.name or f"file:{item.file_id}")
             sections.append({"label": label, "text": extracted})
         return sections
 

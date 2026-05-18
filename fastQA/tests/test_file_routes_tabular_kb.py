@@ -26,6 +26,22 @@ def test_iter_tabular_route_events_injects_kb_context(tmp_path, monkeypatch):
         yield {"type": "done", "route": kwargs.get("route_hint") or "hybrid_qa", "references": []}
 
     monkeypatch.setattr(file_routes_module.qa_tabular_service, "iter_answer_events", _fake_iter_answer_events)
+    monkeypatch.setattr(
+        file_routes_module,
+        "materialize_uploaded_files",
+        lambda **_kwargs: [
+            {
+                "file_id": 1,
+                "file_type": "excel",
+                "file_name": "demo.xlsx",
+                "storage_ref": "minio://agentcode/uploads/demo.xlsx",
+                "local_path": str(source_file.resolve()),
+                "parse_status": "",
+                "index_status": "",
+                "processing_stage": "",
+            }
+        ],
+    )
 
     runtime = SimpleNamespace(
         stage1_pre_answer_and_planning=lambda _q: {"retrieval_claims": [{"claim": "c"}]},
@@ -51,7 +67,7 @@ def test_iter_tabular_route_events_injects_kb_context(tmp_path, monkeypatch):
                 "file_id": 1,
                 "file_type": "excel",
                 "file_name": "demo.xlsx",
-                "storage_ref": f"local://{source_file}",
+                "storage_ref": "minio://agentcode/uploads/demo.xlsx",
                 "local_path": "",
                 "parse_status": "uploaded",
                 "index_status": "pending",

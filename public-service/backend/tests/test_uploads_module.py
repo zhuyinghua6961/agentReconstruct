@@ -71,7 +71,7 @@ def test_upload_pdf_success_binds_conversation(monkeypatch):
                 "add_uploaded_file",
                 lambda **kwargs: call_order.append("add_uploaded_file") or {"success": True, "data": {"file_id": 8}},
             )
-            monkeypatch.setattr(storage_service, "mirror_file", lambda **kwargs: "local://mirrored")
+            monkeypatch.setattr(storage_service, "mirror_file", lambda **kwargs: "minio://agentcode/uploads/sample.pdf")
 
             response = client.post(
                 "/api/v1/upload_pdf",
@@ -85,7 +85,7 @@ def test_upload_pdf_success_binds_conversation(monkeypatch):
         payload = response.json()
         assert payload["success"] is True
         assert payload["file_id"] == 8
-        assert payload["storage_ref"] == "local://mirrored"
+        assert payload["storage_ref"] == "minio://agentcode/uploads/sample.pdf"
         assert Path(payload["filepath"]).exists()
         assert client.app.state.runtime.current_pdf_path is None
         assert call_order == ["add_uploaded_file"]
@@ -113,7 +113,7 @@ def test_upload_pdf_sanitizes_client_filename(monkeypatch):
             monkeypatch.setattr(
                 storage_service,
                 "mirror_file",
-                lambda **kwargs: mirrored.update(kwargs) or "local://mirrored",
+                lambda **kwargs: mirrored.update(kwargs) or "minio://agentcode/uploads/sample.pdf",
             )
 
             response = client.post(
@@ -160,7 +160,7 @@ def test_upload_pdf_without_conversation_context_returns_400_and_does_not_count_
             monkeypatch.setattr(
                 storage_service,
                 "mirror_file",
-                lambda **kwargs: mirrored.__setitem__("called", True) or "local://mirrored",
+                lambda **kwargs: mirrored.__setitem__("called", True) or "minio://agentcode/uploads/sample.pdf",
             )
             response = client.post(
                 "/api/v1/upload_pdf",
@@ -216,6 +216,40 @@ def test_upload_pdf_fails_when_storage_mirror_is_unavailable(monkeypatch):
     assert remaining_files == []
 
 
+def test_upload_pdf_rejects_non_minio_storage_ref(monkeypatch):
+    with TemporaryDirectory() as tempdir:
+        with TestClient(app) as client:
+            client.app.dependency_overrides[get_optional_auth_context] = lambda: AuthContext(
+                user_id=7,
+                role="user",
+                username="alice",
+            )
+            client.app.state.runtime.upload_folder = Path(tempdir)
+            client.app.state.runtime.upload_processing_worker = None
+            add_called = {"count": 0}
+            monkeypatch.setattr(
+                conversation_service_module.conversation_service,
+                "add_uploaded_file",
+                lambda **kwargs: add_called.__setitem__("count", add_called["count"] + 1) or {"success": True, "data": {"file_id": 8}},
+            )
+            monkeypatch.setattr(storage_service, "mirror_file", lambda **kwargs: "local://mirrored")
+
+            response = client.post(
+                "/api/v1/upload_pdf",
+                files={"file": ("sample.pdf", b"pdf-data", "application/pdf")},
+                data={"conversation_id": "12"},
+            )
+
+            remaining_files = list(Path(tempdir).iterdir())
+            client.app.dependency_overrides.clear()
+
+    assert response.status_code == 503
+    payload = response.json()
+    assert payload["code"] == "UPLOAD_STORAGE_UNAVAILABLE"
+    assert add_called["count"] == 0
+    assert remaining_files == []
+
+
 def test_upload_pdf_does_not_consume_user_visible_upload_quota(monkeypatch):
     with TemporaryDirectory() as tempdir:
         with TestClient(app) as client:
@@ -242,7 +276,7 @@ def test_upload_pdf_does_not_consume_user_visible_upload_quota(monkeypatch):
                 "add_uploaded_file",
                 lambda **kwargs: {"success": True, "data": {"file_id": 8}},
             )
-            monkeypatch.setattr(storage_service, "mirror_file", lambda **kwargs: "local://mirrored")
+            monkeypatch.setattr(storage_service, "mirror_file", lambda **kwargs: "minio://agentcode/uploads/sample.pdf")
 
             response = client.post(
                 "/api/v1/upload_pdf",
@@ -276,7 +310,7 @@ def test_upload_excel_success_returns_frontend_required_fields(monkeypatch):
                 "add_uploaded_file",
                 lambda **kwargs: {"success": True, "data": {"file_id": 18}},
             )
-            monkeypatch.setattr(storage_service, "mirror_file", lambda **kwargs: "local://excel-mirrored")
+            monkeypatch.setattr(storage_service, "mirror_file", lambda **kwargs: "minio://agentcode/uploads/sample.xlsx")
 
             response = client.post(
                 "/api/v1/upload_excel",
@@ -291,7 +325,7 @@ def test_upload_excel_success_returns_frontend_required_fields(monkeypatch):
     assert payload["success"] is True
     assert payload["file_id"] == 18
     assert payload["filename"] == "sample.xlsx"
-    assert payload["storage_ref"] == "local://excel-mirrored"
+    assert payload["storage_ref"] == "minio://agentcode/uploads/sample.xlsx"
     assert Path(payload["filepath"]).name.endswith("sample.xlsx")
     assert payload["parse_status"] == "uploaded"
     assert payload["index_status"] == "pending"
@@ -315,7 +349,7 @@ def test_upload_pdf_persist_failure_cleans_orphaned_file(monkeypatch):
                 "add_uploaded_file",
                 lambda **kwargs: {"success": False, "code": "DB_UNAVAILABLE"},
             )
-            monkeypatch.setattr(storage_service, "mirror_file", lambda **kwargs: "local://mirrored")
+            monkeypatch.setattr(storage_service, "mirror_file", lambda **kwargs: "minio://agentcode/uploads/sample.pdf")
             monkeypatch.setattr(
                 storage_service,
                 "cleanup_resources",
@@ -333,7 +367,7 @@ def test_upload_pdf_persist_failure_cleans_orphaned_file(monkeypatch):
     assert response.status_code == 503
     payload = response.json()
     assert payload["code"] == "DB_UNAVAILABLE"
-    assert str((cleaned.get("file_row") or {}).get("storage_ref")) == "local://mirrored"
+    assert str((cleaned.get("file_row") or {}).get("storage_ref")) == "minio://agentcode/uploads/sample.pdf"
 
 
 def test_upload_pdf_persist_failure_with_path_like_filename_still_cleans_safely(monkeypatch):
@@ -352,7 +386,7 @@ def test_upload_pdf_persist_failure_with_path_like_filename_still_cleans_safely(
                 "add_uploaded_file",
                 lambda **kwargs: {"success": False, "code": "DB_UNAVAILABLE"},
             )
-            monkeypatch.setattr(storage_service, "mirror_file", lambda **kwargs: "local://mirrored")
+            monkeypatch.setattr(storage_service, "mirror_file", lambda **kwargs: "minio://agentcode/uploads/sample.pdf")
             monkeypatch.setattr(
                 storage_service,
                 "cleanup_resources",
@@ -388,7 +422,7 @@ def test_upload_pdf_does_not_create_upload_quota_lease(monkeypatch):
                 "add_uploaded_file",
                 lambda **kwargs: {"success": True, "data": {"file_id": 8}},
             )
-            monkeypatch.setattr(storage_service, "mirror_file", lambda **kwargs: "local://mirrored")
+            monkeypatch.setattr(storage_service, "mirror_file", lambda **kwargs: "minio://agentcode/uploads/sample.pdf")
 
             response = client.post(
                 "/api/v1/upload_pdf",

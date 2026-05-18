@@ -14,6 +14,8 @@ import httpx
 from server.patent.answering import PatentAnswerBuilder
 from server.patent.archive_loader import PatentArchiveLoader
 from server.patent.models import PatentRetrievalClaim, PatentRetrievalPlan
+from server.patent.object_reader import ObjectReader
+from server.patent.original_minio_loader import PatentOriginalMinioLoader
 from server.patent.resource_registry import PatentResourceRegistry
 from server.patent.retrieval_service import PatentRetrievalService
 from server.patent.rerank_service import build_patent_stage2_rerank_fn
@@ -427,6 +429,8 @@ class PatentRuntime:
     stage2_parallel_workers: int = 4
     stage3_parallel_workers: int = 4
     stage2_rerank_fn: Any | None = None
+    table_loader: Any | None = None
+    pdf_loader: Any | None = None
 
     def stage2_runtime_signature(self) -> dict[str, Any]:
         return build_stage2_runtime_signature(
@@ -544,12 +548,19 @@ class PatentRuntime:
         source_ids: list[str],
         should_cancel: Any | None = None,
     ) -> dict[str, Any]:
+        strict_original_minio_only = _env_flag("PATENT_ORIGINAL_MINIO_ONLY", default=True)
+        table_loader = self.table_loader if callable(self.table_loader) else None
+        if table_loader is None and not strict_original_minio_only and self.archive_loader is not None:
+            table_loader = self.archive_loader.load_tables
+        pdf_loader = self.pdf_loader if callable(self.pdf_loader) else None
+        if pdf_loader is None and not strict_original_minio_only and self.archive_loader is not None:
+            pdf_loader = self.archive_loader.load_pdf_document
         return run_stage3_load_patent_evidence(
             retrieval_results=retrieval_results,
             source_ids=source_ids,
             catalog_loader=self.archive_loader.load_catalog_record if self.archive_loader is not None else None,
-            table_loader=self.archive_loader.load_tables if self.archive_loader is not None else None,
-            pdf_loader=self.archive_loader.load_pdf_document if self.archive_loader is not None else None,
+            table_loader=table_loader,
+            pdf_loader=pdf_loader,
             force_pdf=self.stage3_force_pdf,
             parallel_workers=self.stage3_parallel_workers,
             should_cancel=should_cancel,
@@ -646,6 +657,19 @@ def build_default_patent_runtime(
                 top_k=top_k,
                 patent_ids=candidate_patent_ids,
             )
+    strict_original_minio_only = _env_flag("PATENT_ORIGINAL_MINIO_ONLY", default=True)
+    original_minio_loader = None
+    table_loader = getattr(archive_loader, "load_tables", None)
+    pdf_loader = getattr(archive_loader, "load_pdf_document", None)
+    if strict_original_minio_only:
+        original_minio_loader = PatentOriginalMinioLoader(
+            reader=ObjectReader(),
+            bucket=_first_env("MINIO_BUCKET", default="agentcode") or "agentcode",
+            archive_root=registry.archive_root,
+        )
+        table_loader = original_minio_loader.load_tables
+        pdf_loader = original_minio_loader.load_pdf_document
+        resources.append(original_minio_loader)
     try:
         retrieval_service = PatentRetrievalService(
             execution_cache=execution_cache,
@@ -655,9 +679,9 @@ def build_default_patent_runtime(
             catalog_index_version="catalog-v2",
             abstract_vector_search=abstract_search,
             chunk_vector_search=chunk_search,
-            table_loader=archive_loader.load_tables,
+            table_loader=table_loader,
             answer_builder=answer_builder,
-            archive_loader=archive_loader,
+            archive_loader=None if strict_original_minio_only else archive_loader,
         )
     except Exception:
         for resource in reversed(resources):
@@ -689,6 +713,8 @@ def build_default_patent_runtime(
         planning_upstream_gate=planning_upstream_gate,
         planning_model=planning_model,
         stage2_rerank_fn=build_patent_stage2_rerank_fn(logger=_LOGGER),
+        table_loader=table_loader,
+        pdf_loader=pdf_loader,
         stage3_force_pdf=_first_env("PATENT_STAGE3_FORCE_PDF", default="false").lower() in {"1", "true", "yes", "on"},
         stage2_parallel_workers=_positive_int_env("PATENT_STAGE2_PARALLEL_WORKERS", default=4),
         stage3_parallel_workers=_positive_int_env("PATENT_STAGE3_PARALLEL_WORKERS", default=4),

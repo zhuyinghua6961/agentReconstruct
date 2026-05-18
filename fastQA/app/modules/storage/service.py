@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
 import tempfile
@@ -13,6 +14,17 @@ from app.core.config import get_settings
 
 _PAPER_DOWNLOAD_LOCKS: dict[str, threading.Lock] = {}
 _PAPER_DOWNLOAD_LOCKS_GUARD = threading.Lock()
+_LOGGER = logging.getLogger("fastqa.storage.service")
+
+
+def _record_original_metric(name: str, **labels: Any) -> None:
+    try:
+        from app.modules.qa_cache.metrics import increment_cache_metric
+
+        increment_cache_metric("qa_original", name)
+    except Exception:
+        pass
+    _LOGGER.info("qa_original_metric name=%s labels=%s", name, labels)
 
 
 class StorageService:
@@ -127,6 +139,19 @@ class StorageService:
         return code in {"NoSuchKey", "NoSuchBucket", "NoSuchObject"}
 
     @staticmethod
+    def _env_bool(name: str, default: bool) -> bool:
+        raw = str(os.getenv(name, "") or "").strip().lower()
+        if raw in {"1", "true", "yes", "on"}:
+            return True
+        if raw in {"0", "false", "no", "off"}:
+            return False
+        return bool(default)
+
+    @classmethod
+    def _strict_original_minio_only(cls) -> bool:
+        return cls._env_bool("QA_ORIGINAL_MINIO_ONLY", True)
+
+    @staticmethod
     def _paper_lock_key(local_path: Path) -> str:
         return str(local_path.resolve())
 
@@ -180,13 +205,19 @@ class StorageService:
         logger: Any | None = None,
     ) -> bool:
         _ = project_root
-        existing = self._resolve_local_existing_pdf(doi=doi, papers_dir=papers_dir)
-        if existing is not None:
-            return True
-
         normalized = self.normalize_doi(doi)
         if not normalized:
             return False
+        if not self._strict_original_minio_only():
+            existing = self._resolve_local_existing_pdf(doi=doi, papers_dir=papers_dir)
+            if existing is not None:
+                _record_original_metric(
+                    "qa_original_local_fallback_attempt_total",
+                    service="fastQA",
+                    source_family="paper_pdf",
+                    result="legacy_local_exists",
+                )
+                return True
         minio_ctx = self._build_minio_client()
         if minio_ctx is None:
             return False
@@ -218,9 +249,16 @@ class StorageService:
         if not normalized:
             return None
 
-        existing = self._resolve_local_existing_pdf(doi=normalized, papers_dir=papers_path)
-        if existing is not None and existing.exists():
-            return existing
+        if not self._strict_original_minio_only():
+            existing = self._resolve_local_existing_pdf(doi=normalized, papers_dir=papers_path)
+            if existing is not None and existing.exists():
+                _record_original_metric(
+                    "qa_original_local_fallback_attempt_total",
+                    service="fastQA",
+                    source_family="paper_pdf",
+                    result="legacy_local_path",
+                )
+                return existing
 
         minio_ctx = self._build_minio_client()
         if minio_ctx is None:
@@ -232,7 +270,13 @@ class StorageService:
         lock = self._get_paper_download_lock(local_path)
 
         with lock:
-            if local_path.exists() and local_path.is_file():
+            if not self._strict_original_minio_only() and local_path.exists() and local_path.is_file():
+                _record_original_metric(
+                    "qa_original_local_fallback_attempt_total",
+                    service="fastQA",
+                    source_family="paper_pdf",
+                    result="legacy_local_path",
+                )
                 return local_path
             tmp_fd, tmp_path_text = tempfile.mkstemp(
                 prefix=f"{local_path.stem}.",

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import re
+import os
 from typing import Any
 
 from app.models.files import ConversationFileRow
@@ -138,6 +140,7 @@ _GENERIC_META_QUESTION_HINTS = (
     "应该",
 )
 _FILE_ROUTE_HINTS = {"pdf_qa", "tabular_qa", "hybrid_qa"}
+_LOGGER = logging.getLogger("gateway.file_context_resolver")
 
 _DIRECT_ORDINAL_PATTERN = re.compile(r"第\s*([0-9零〇一二两三四五六七八九十]+)\s*个(?:文献|文件|表格|pdf|excel|csv)?")
 _FRONT_ORDINAL_PATTERN = re.compile(r"前\s*([0-9零〇一二两三四五六七八九十]+)\s*个(?:文献|文件|表格|pdf|excel|csv)?")
@@ -159,6 +162,55 @@ _TABLE_OPERATION_PATTERNS = (
 _DOI_PATTERN = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+\b", re.IGNORECASE)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _record_metric(metrics: Any | None, name: str, **labels: Any) -> None:
+    if metrics is None:
+        _LOGGER.info("qa_original_metric name=%s labels=%s", name, labels)
+        return
+    for method_name in ("increment", "inc", "record"):
+        method = getattr(metrics, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            method(name, **labels)
+            return
+        except TypeError:
+            try:
+                method(name, labels)
+                return
+            except TypeError:
+                continue
+    counter = getattr(metrics, "counter", None)
+    if callable(counter):
+        try:
+            metric = counter(name, **labels)
+            inc = getattr(metric, "inc", None)
+            if callable(inc):
+                inc()
+                return
+        except TypeError:
+            pass
+    if callable(metrics):
+        try:
+            metrics(name, **labels)
+        except TypeError:
+            metrics(name, labels)
+
+
+def _source_family_for_row(row: ConversationFileRow) -> str:
+    if row.is_pdf:
+        return "upload_pdf"
+    if row.is_table:
+        return "upload_table"
+    return "upload_object"
+
+
 class FileContextResolver:
     def __init__(
         self,
@@ -166,10 +218,12 @@ class FileContextResolver:
         route_classifier: RouteClassifier | None = None,
         classifier_enabled: bool = False,
         classifier_policy: ClassifierThresholdPolicy | None = None,
+        metrics: Any | None = None,
     ) -> None:
         self._route_classifier = route_classifier or NoopRouteClassifier()
         self._classifier_enabled = bool(classifier_enabled)
         self._classifier_policy = classifier_policy or ClassifierThresholdPolicy()
+        self._metrics = metrics
 
     def resolve(
         self,
@@ -516,6 +570,20 @@ class FileContextResolver:
         allow_kb_verification: bool,
         file_map: dict[int, ConversationFileRow],
     ) -> FileContextDecision:
+        status = self._selection_status(resolved_ids=selected_file_ids, file_map=file_map)
+        if status is not None:
+            return self._status_turn(
+                route=route,
+                selected_file_ids=selected_file_ids,
+                strategy=strategy,
+                allow_kb_verification=allow_kb_verification,
+                file_map=file_map,
+                status_code=status["code"],
+                status_error=status["error"],
+                status_message=status["message"],
+                status_retriable=bool(status["retriable"]),
+                status_detail=dict(status["detail"]),
+            )
         turn_mode = "mixed" if allow_kb_verification else "file_only"
         used_files = [self._build_file_payload(file_id, strategy, file_map) for file_id in selected_file_ids]
         return FileContextDecision(
@@ -780,7 +848,28 @@ class FileContextResolver:
                     "retriable": True,
                     "detail": self._file_status_detail(row),
                 }
+            if self._strict_minio_only() and not row.has_minio_storage_ref:
+                storage_reason = "storage_ref_missing" if not str(row.storage_ref or "").strip() else "storage_ref_not_minio"
+                status_code = "FILE_STORAGE_REF_MISSING" if storage_reason == "storage_ref_missing" else "FILE_STORAGE_REF_NOT_MINIO"
+                _record_metric(
+                    self._metrics,
+                    "qa_original_storage_ref_missing_total",
+                    service="gateway",
+                    source_family=_source_family_for_row(row),
+                    result="blocked",
+                    reason=storage_reason,
+                )
+                return {
+                    "code": status_code,
+                    "error": storage_reason,
+                    "message": f"文件 {row.file_name or row.file_id} 缺少可执行的 MinIO 存储引用，请重新上传或刷新文件元数据",
+                    "retriable": False,
+                    "detail": self._file_storage_detail(row=row, selected_ids=resolved_ids, file_map=file_map, reason=storage_reason),
+                }
         return None
+
+    def _strict_minio_only(self) -> bool:
+        return _env_bool("QA_ORIGINAL_MINIO_ONLY", True)
 
     def _is_file_failed(self, row: ConversationFileRow) -> bool:
         parse_status = str(row.parse_status or "").strip().lower()
@@ -796,6 +885,25 @@ class FileContextResolver:
             "parse_status": row.parse_status,
             "index_status": row.index_status,
             "processing_stage": row.processing_stage,
+        }
+
+    def _file_storage_detail(
+        self,
+        *,
+        row: ConversationFileRow,
+        selected_ids: list[int],
+        file_map: dict[int, ConversationFileRow],
+        reason: str,
+    ) -> dict[str, Any]:
+        selected_rows = [file_map[file_id] for file_id in selected_ids if file_id in file_map]
+        return {
+            **self._file_status_detail(row),
+            "storage_ref": row.storage_ref,
+            "local_path": row.local_path,
+            "reason_codes": [reason],
+            "missing_storage_ref_count": sum(1 for item in selected_rows if not str(item.storage_ref or "").strip()),
+            "minio_storage_ref_count": sum(1 for item in selected_rows if item.has_minio_storage_ref),
+            "local_only_file_count": sum(1 for item in selected_rows if str(item.local_path or "").strip() and not item.has_minio_storage_ref),
         }
 
     def _reference_resolution_rows(self, active_rows: list[ConversationFileRow]) -> list[ConversationFileRow]:

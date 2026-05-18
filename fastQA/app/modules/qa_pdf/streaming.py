@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import re
 from collections.abc import Iterable, Iterator
 from typing import Any
@@ -26,19 +25,6 @@ def _extract_doi_from_pdf_filename(pdf_path: str) -> str:
     if not match:
         return ""
     return match.group(1).replace("_", "/", 1).rstrip(").,;")
-
-
-def _resolve_first_token_timeout() -> float:
-    raw = str(os.getenv("UPLOAD_QA_FIRST_TOKEN_TIMEOUT_SEC", "25") or "25").strip()
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        value = 25.0
-    if value < 1.0:
-        return 1.0
-    if value > 180.0:
-        return 180.0
-    return value
 
 
 def _iter_answer_pieces(answer: Any) -> Iterator[str]:
@@ -150,7 +136,7 @@ def iter_uploaded_pdf_answer_events(**kwargs: Any) -> Iterator[Any]:
             pdf_content,
             kb_verification=kb_verification,
             stream=True,
-            first_token_timeout_sec=_resolve_first_token_timeout(),
+            first_token_timeout_sec=None,
             is_cancelled=is_cancelled,
         )
     except Exception as exc:

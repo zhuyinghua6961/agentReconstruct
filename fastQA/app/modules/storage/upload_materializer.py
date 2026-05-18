@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import tempfile
 import threading
 from pathlib import Path
 from typing import Any, Iterable
 
+from app.modules.storage.object_reader import ObjectReader, ObjectReaderProtocolError, ObjectReaderUnavailableError
+
 _DOWNLOAD_LOCKS: dict[str, threading.Lock] = {}
 _DOWNLOAD_LOCKS_GUARD = threading.Lock()
 _TABLE_FILE_TYPES = {"excel", "csv", "table", "xls", "xlsx"}
+_LOGGER = logging.getLogger("fastqa.storage.upload_materializer")
 
 
 def parse_storage_ref(storage_ref: str | None) -> dict[str, str | None] | None:
@@ -38,6 +42,21 @@ def _resolve_readable_local_path(local_path: str | None) -> Path | None:
     except Exception:
         return None
     return None
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
+def _strict_minio_only() -> bool:
+    if "FASTQA_UPLOAD_MINIO_ONLY" in os.environ:
+        return _env_bool("FASTQA_UPLOAD_MINIO_ONLY", True)
+    return _env_bool("QA_ORIGINAL_MINIO_ONLY", True)
 
 
 def _default_cache_dir() -> Path:
@@ -96,15 +115,105 @@ def _warn(logger: Any, message: str, *args: Any) -> None:
         logger.warning(message, *args)
 
 
+def _record_metric(metrics: Any | None, name: str, **labels: Any) -> None:
+    if metrics is None:
+        try:
+            from app.modules.qa_cache.metrics import increment_cache_metric
+
+            increment_cache_metric("qa_original", name)
+        except Exception:
+            pass
+        _LOGGER.info("qa_original_metric name=%s labels=%s", name, labels)
+        return
+    for method_name in ("increment", "inc", "record"):
+        method = getattr(metrics, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            method(name, **labels)
+            return
+        except TypeError:
+            try:
+                method(name, labels)
+                return
+            except TypeError:
+                continue
+    counter = getattr(metrics, "counter", None)
+    if callable(counter):
+        try:
+            metric = counter(name, **labels)
+            inc = getattr(metric, "inc", None)
+            if callable(inc):
+                inc()
+                return
+        except TypeError:
+            pass
+    if callable(metrics):
+        try:
+            metrics(name, **labels)
+        except TypeError:
+            metrics(name, labels)
+
+
+def _source_family_for_item(*, file_item: dict[str, Any], parsed_ref: dict[str, str | None] | None = None) -> str:
+    file_name = str(file_item.get("file_name") or "").lower()
+    object_name = str((parsed_ref or {}).get("object_name") or "").lower()
+    target = object_name or file_name
+    if target.endswith(".pdf"):
+        return "upload_pdf"
+    if target.endswith((".csv", ".xls", ".xlsx")):
+        return "upload_table"
+    return "upload_object"
+
+
 def materialize_uploaded_file(
     file_item: dict[str, Any],
     *,
     logger: Any | None = None,
     cache_dir: str | Path | None = None,
+    strict_minio_only: bool | None = None,
+    metrics: Any | None = None,
 ) -> dict[str, Any]:
     prepared = dict(file_item or {})
+    strict = _strict_minio_only() if strict_minio_only is None else bool(strict_minio_only)
+    if strict:
+        prepared["local_path"] = ""
+        parsed_ref = parse_storage_ref(prepared.get("storage_ref"))
+        if not parsed_ref:
+            prepared["storage_error"] = "storage_ref_missing"
+            return prepared
+        if parsed_ref["scheme"] != "minio":
+            prepared["storage_error"] = "storage_ref_not_minio"
+            return prepared
+        suffix = Path(str(prepared.get("file_name") or parsed_ref.get("object_name") or "upload.bin")).suffix or ".bin"
+        try:
+            reader = ObjectReader(runtime_root=cache_dir, metrics=metrics)
+            materialized = reader.materialize_temp(str(prepared.get("storage_ref") or ""), suffix=suffix)
+            stat = reader.stat(str(prepared.get("storage_ref") or ""))
+        except ObjectReaderProtocolError as exc:
+            prepared["storage_error"] = str(exc) or "storage_ref_invalid"
+            return prepared
+        except ObjectReaderUnavailableError as exc:
+            _warn(logger, "uploaded file MinIO materialization failed for %s: %s", prepared.get("storage_ref"), exc)
+            prepared["storage_error"] = "object_unavailable"
+            return prepared
+        prepared["local_path"] = str(materialized)
+        prepared["storage_error"] = ""
+        prepared["storage_bucket"] = stat.bucket
+        prepared["storage_object_name"] = stat.object_name
+        prepared["storage_etag"] = stat.etag
+        prepared["storage_size"] = stat.size
+        return prepared
+
     existing_local_path = _resolve_readable_local_path(prepared.get("local_path"))
     if existing_local_path is not None:
+        _record_metric(
+            metrics,
+            "qa_original_local_fallback_attempt_total",
+            service="fastQA",
+            source_family=_source_family_for_item(file_item=prepared),
+            result="legacy_local_path",
+        )
         prepared["local_path"] = str(existing_local_path)
         return prepared
 
@@ -116,6 +225,13 @@ def materialize_uploaded_file(
     if parsed_ref["scheme"] == "local":
         resolved_local_path = _resolve_readable_local_path(parsed_ref.get("local_path"))
         if resolved_local_path is not None:
+            _record_metric(
+                metrics,
+                "qa_original_local_fallback_attempt_total",
+                service="fastQA",
+                source_family=_source_family_for_item(file_item=prepared, parsed_ref=parsed_ref),
+                result="legacy_local_ref",
+            )
             prepared["local_path"] = str(resolved_local_path)
         return prepared
 
@@ -168,12 +284,13 @@ def materialize_uploaded_files(
     file_items: Iterable[dict[str, Any]],
     logger: Any | None = None,
     cache_dir: str | Path | None = None,
+    metrics: Any | None = None,
 ) -> list[dict[str, Any]]:
     prepared_items: list[dict[str, Any]] = []
     for item in list(file_items or []):
         if not isinstance(item, dict):
             continue
-        prepared = materialize_uploaded_file(item, logger=logger, cache_dir=cache_dir)
+        prepared = materialize_uploaded_file(item, logger=logger, cache_dir=cache_dir, metrics=metrics)
         if str(prepared.get("local_path") or "").strip():
             prepared = _clear_processing_statuses(prepared)
         prepared_items.append(prepared)

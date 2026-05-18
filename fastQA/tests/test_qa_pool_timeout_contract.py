@@ -364,6 +364,7 @@ def test_kb_stream_route_surfaces_query_expander_pool_timeout_from_generation_pi
 
 
 def test_sync_pdf_route_surfaces_pool_timeout_from_pdf_engine(monkeypatch):
+    monkeypatch.setenv("FASTQA_UPLOAD_MINIO_ONLY", "false")
     _install_pdf_bindings(monkeypatch, llm=_PdfStreamPoolTimeoutThenFallbackLLM())
 
     response = ask(
@@ -393,6 +394,7 @@ def test_sync_pdf_route_surfaces_pool_timeout_from_pdf_engine(monkeypatch):
 
 
 def test_pdf_stream_route_surfaces_pool_timeout_from_pdf_engine_after_stream_started(monkeypatch):
+    monkeypatch.setenv("FASTQA_UPLOAD_MINIO_ONLY", "false")
     _install_pdf_bindings(monkeypatch, llm=_PdfStreamPoolTimeoutThenFallbackLLM())
 
     response = ask_stream(

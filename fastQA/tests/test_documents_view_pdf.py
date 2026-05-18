@@ -9,9 +9,10 @@ class _FakeRequest:
         self.method = "GET"
 
 
-def test_view_pdf_returns_inline_file_response(tmp_path):
+def test_view_pdf_returns_inline_file_response(monkeypatch, tmp_path):
     pdf_path = tmp_path / "10.1_demo.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n%test\n")
+    monkeypatch.setattr("app.modules.documents.service.storage_service.ensure_local_paper_pdf", lambda **_kwargs: pdf_path)
     request = _FakeRequest(tmp_path)
     response = view_pdf("10.1/demo", request)
     request.method = "HEAD"

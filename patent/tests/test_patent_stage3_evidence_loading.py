@@ -366,7 +366,82 @@ def test_runtime_stage3_passes_parallel_workers_and_should_cancel(monkeypatch):
     assert captured["should_cancel"] is should_cancel
 
 
+def test_patent_runtime_stage3_uses_configured_table_loader_instead_of_archive_tables():
+    class _ArchiveLoader:
+        def load_catalog_record(self, patent_id: str) -> PatentCatalogRecord:
+            return PatentCatalogRecord(
+                canonical_patent_id=patent_id,
+                publication_number=patent_id,
+                application_number=None,
+                title=patent_id,
+                abstract_text=f"{patent_id} abstract",
+            )
+
+        def load_tables(self, patent_id: str):
+            raise AssertionError(f"archive table loader should not be used for {patent_id}")
+
+        def load_pdf_document(self, patent_id: str):
+            return None
+
+    runtime = PatentRuntime(
+        retrieval_service=object(),  # type: ignore[arg-type]
+        resources=[],
+        archive_loader=_ArchiveLoader(),  # type: ignore[arg-type]
+        table_loader=lambda patent_id: [
+            PatentTableSupplement(
+                table_title="MinIO Table",
+                columns=["x"],
+                rows=[{"x": patent_id}],
+            )
+        ],
+    )
+
+    bundle = runtime.stage3_load_patent_evidence(
+        retrieval_results={"documents": [], "metadatas": [], "reference_objects": []},
+        source_ids=["CN115132975B"],
+    )
+
+    assert bundle["evidences"][0]["table_supplements"][0]["table_title"] == "MinIO Table"
+
+
+def test_patent_runtime_stage3_strict_default_does_not_use_archive_tables_or_pdf(monkeypatch):
+    monkeypatch.delenv("PATENT_ORIGINAL_MINIO_ONLY", raising=False)
+
+    class _ArchiveLoader:
+        def load_catalog_record(self, patent_id: str) -> PatentCatalogRecord:
+            return PatentCatalogRecord(
+                canonical_patent_id=patent_id,
+                publication_number=patent_id,
+                application_number=None,
+                title=patent_id,
+                abstract_text=f"{patent_id} abstract",
+            )
+
+        def load_tables(self, patent_id: str):
+            raise AssertionError(f"archive table loader should not be used for {patent_id}")
+
+        def load_pdf_document(self, patent_id: str):
+            raise AssertionError(f"archive PDF loader should not be used for {patent_id}")
+
+    runtime = PatentRuntime(
+        retrieval_service=object(),  # type: ignore[arg-type]
+        resources=[],
+        archive_loader=_ArchiveLoader(),  # type: ignore[arg-type]
+        stage3_force_pdf=True,
+    )
+
+    bundle = runtime.stage3_load_patent_evidence(
+        retrieval_results={"documents": [], "metadatas": [], "reference_objects": []},
+        source_ids=["CN115132975B"],
+    )
+
+    evidence = bundle["evidences"][0]
+    assert evidence["table_supplements"] == []
+    assert "pdf_document" not in evidence["metadata"]
+
+
 def test_patent_runtime_stage3_load_patent_evidence_uses_archive_tables_and_pdf_chunks(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("PATENT_ORIGINAL_MINIO_ONLY", "false")
     patent_dir = tmp_path / "CN115132975B"
     patent_dir.mkdir(parents=True)
     (patent_dir / "CN115132975B_tables.json").write_text(

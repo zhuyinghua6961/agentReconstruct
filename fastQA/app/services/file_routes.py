@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from types import SimpleNamespace
@@ -20,6 +21,9 @@ from app.services.file_qa_helpers import (
 )
 
 
+_LOGGER = logging.getLogger("fastqa.file_routes")
+
+
 class FileRouteRuntimeError(RuntimeError):
     pass
 
@@ -36,6 +40,30 @@ def _env_int(*names: str, default: int) -> int:
         return parsed if parsed > 0 else default
     return default
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
+def _strict_upload_minio_only() -> bool:
+    if "FASTQA_UPLOAD_MINIO_ONLY" in os.environ:
+        return _env_bool("FASTQA_UPLOAD_MINIO_ONLY", True)
+    return _env_bool("QA_ORIGINAL_MINIO_ONLY", True)
+
+
+def _record_original_metric(name: str, **labels: Any) -> None:
+    try:
+        from app.modules.qa_cache.metrics import increment_cache_metric
+
+        increment_cache_metric("qa_original", name)
+    except Exception:
+        pass
+    _LOGGER.info("qa_original_metric name=%s labels=%s", name, labels)
 
 
 def _scope_tokens(value: object) -> set[str]:
@@ -238,12 +266,44 @@ def iter_pdf_route_events(
         for item in execution_files
         if isinstance(item, dict) and str(item.get("file_type") or "").strip().lower() == "pdf"
     ]
-    pdf_file = pdf_files[0] if pdf_files else None
-    pdf_path = str(
-        (pdf_file or {}).get("local_path")
-        or (file_context or {}).get("primary_pdf_path")
+    readable_pdf_files = [item for item in pdf_files if str(item.get("local_path") or "").strip()]
+    pdf_file = readable_pdf_files[0] if readable_pdf_files else (pdf_files[0] if pdf_files else None)
+    direct_pdf_path = str(
+        (file_context or {}).get("primary_pdf_path")
         or adapted_request.current_pdf_path
         or adapted_request.pdf_path
+        or ""
+    ).strip()
+    if pdf_files and len(readable_pdf_files) != len(pdf_files) and _strict_upload_minio_only():
+        if direct_pdf_path:
+            _record_original_metric(
+                "qa_original_local_fallback_attempt_total",
+                service="fastQA",
+                source_family="upload_pdf",
+                result="direct_pdf_path_blocked",
+            )
+        yield {
+            "type": "error",
+            "error": "execution_file_unavailable",
+            "message": "uploaded file is not ready for direct reading yet; retry later or refresh file metadata",
+        }
+        return
+    if not pdf_files and direct_pdf_path and _strict_upload_minio_only():
+        _record_original_metric(
+            "qa_original_local_fallback_attempt_total",
+            service="fastQA",
+            source_family="upload_pdf",
+            result="direct_pdf_path_blocked",
+        )
+        yield {
+            "type": "error",
+            "error": "execution_file_unavailable",
+            "message": "local PDF paths are disabled for file QA; retry with a MinIO-backed execution file",
+        }
+        return
+    pdf_path = str(
+        (pdf_file or {}).get("local_path")
+        or direct_pdf_path
         or ""
     ).strip()
     if pdf_files and not pdf_path:
@@ -349,7 +409,27 @@ def iter_tabular_route_events(
         if isinstance(item, dict) and str(item.get("file_type") or "").strip().lower() in {"excel", "csv", "table", "xls", "xlsx"}
     ]
     readable_table_files = [item for item in table_files if str(item.get("local_path") or "").strip()]
+    if table_files and len(readable_table_files) != len(table_files) and _strict_upload_minio_only():
+        yield {
+            "type": "error",
+            "error": "execution_file_unavailable",
+            "message": "uploaded file is not ready for direct reading yet; retry later or refresh file metadata",
+        }
+        return
     if table_files and not readable_table_files:
+        yield {
+            "type": "error",
+            "error": "execution_file_unavailable",
+            "message": "uploaded file is not ready for direct reading yet; retry later or refresh file metadata",
+        }
+        return
+    pdf_files = [
+        item
+        for item in execution_files
+        if isinstance(item, dict) and str(item.get("file_type") or "").strip().lower() == "pdf"
+    ]
+    readable_pdf_files = [item for item in pdf_files if str(item.get("local_path") or "").strip()]
+    if pdf_files and len(readable_pdf_files) != len(pdf_files) and _strict_upload_minio_only():
         yield {
             "type": "error",
             "error": "execution_file_unavailable",

@@ -84,13 +84,16 @@ def test_find_local_paper_pdf_supports_flattened_pattern_fallback(tmp_path):
 
 
 
-def test_storage_service_ensure_local_paper_pdf_returns_existing_local_file(tmp_path):
+def test_storage_service_ensure_local_paper_pdf_ignores_existing_local_when_minio_missing(monkeypatch, tmp_path):
     pdf_path = tmp_path / "10.1000_demo.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n%existing\n")
+    client = _MinioClient()
+    monkeypatch.setattr(storage_service, "_build_minio_client", lambda: (client, "agentcode", _S3Error))
 
     resolved = storage_service.ensure_local_paper_pdf(doi="10.1000/demo", papers_dir=tmp_path)
 
-    assert resolved == pdf_path.resolve()
+    assert resolved is None
+    assert pdf_path.exists()
 
 
 
@@ -131,3 +134,13 @@ def test_storage_service_ensure_local_paper_pdf_downloads_from_object_storage(mo
     assert resolved.read_bytes() == b"%PDF-1.4\n%downloaded\n"
     assert client.stat_calls == [("agentcode", object_name)]
     assert len(client.download_calls) == 1
+
+
+def test_storage_service_paper_exists_ignores_existing_local_when_minio_missing(monkeypatch, tmp_path):
+    pdf_path = tmp_path / "10.1000_demo.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n%existing\n")
+    client = _MinioClient()
+    monkeypatch.setattr(storage_service, "_build_minio_client", lambda: (client, "agentcode", _S3Error))
+
+    assert storage_service.paper_exists(doi="10.1000/demo", papers_dir=tmp_path, logger=_Logger()) is False
+    assert client.stat_calls == [("agentcode", "papers/10.1000_demo.pdf")]

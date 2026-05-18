@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
+from server.storage.object_reader import ObjectReader, ObjectReaderUnavailableError
+
 _DOWNLOAD_LOCKS: dict[str, threading.Lock] = {}
 _DOWNLOAD_LOCKS_GUARD = threading.Lock()
 
@@ -82,6 +84,15 @@ def _build_minio_client_from_env():
         return None
 
 
+def _original_minio_only() -> bool:
+    return str(os.getenv("HIGHTHINKING_ORIGINAL_MINIO_ONLY", "true")).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
 def _get_local_path_lock(local_path: Path) -> threading.Lock:
     key = str(local_path.resolve())
     with _DOWNLOAD_LOCKS_GUARD:
@@ -96,9 +107,13 @@ def paper_pdf_exists(*, doi: str, papers_dir: Path, logger: Any | None = None) -
     # Compatibility note: retained for the retired document/PDF HTTP flow and
     # should not be treated as part of the active thinking ask path.
     normalized = normalize_doi(doi)
+    if not normalized:
+        return False
     local_path = papers_dir / build_paper_filename(normalized)
     minio_ctx = _build_minio_client_from_env()
     if minio_ctx is None:
+        if _original_minio_only():
+            return False
         return local_path.exists()
 
     client, bucket, s3_error_cls = minio_ctx
@@ -108,13 +123,19 @@ def paper_pdf_exists(*, doi: str, papers_dir: Path, logger: Any | None = None) -
         return True
     except s3_error_cls as exc:
         if _is_not_found_s3_error(exc):
+            if _original_minio_only():
+                return False
             return local_path.exists()
         if logger is not None:
             logger.warning("MinIO stat_object failed for %s: %s", object_name, exc)
+        if _original_minio_only():
+            return False
         return local_path.exists()
     except Exception as exc:
         if logger is not None:
             logger.warning("MinIO stat_object failed for %s: %s", object_name, exc)
+        if _original_minio_only():
+            return False
         return local_path.exists()
 
 
@@ -131,8 +152,25 @@ def ensure_local_paper_pdf(*, doi: str, papers_dir: Path, logger: Any | None = N
     """
     papers_dir.mkdir(parents=True, exist_ok=True)
     normalized = normalize_doi(doi)
+    if not normalized:
+        return None
     local_path = papers_dir / build_paper_filename(normalized)
     lock = _get_local_path_lock(local_path)
+
+    if _original_minio_only():
+        minio_ctx = _build_minio_client_from_env()
+        if minio_ctx is None:
+            return None
+        client, bucket, _s3_error_cls = minio_ctx
+        object_name = build_paper_object_name(normalized)
+        storage_ref = f"minio://{bucket}/{object_name}"
+        reader = ObjectReader(client=client, runtime_root=papers_dir / "object-cache")
+        try:
+            return reader.materialize_temp(storage_ref, suffix=".pdf")
+        except ObjectReaderUnavailableError as exc:
+            if logger is not None:
+                logger.warning("MinIO paper materialization failed for %s: %s", object_name, exc)
+            return None
 
     with lock:
         if local_path.exists():

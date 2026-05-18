@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
+from server.patent.object_reader import parse_minio_storage_ref
 from server.patent.file_models import PatentExecutionFile, PatentFileContract
 
 
@@ -110,6 +112,7 @@ def _normalize_execution_file(value: dict[str, Any]) -> PatentExecutionFile:
         raise ValueError(f"unsupported file_type: {file_type}")
 
     payload = dict(value)
+    _validate_storage_ref(file_type=file_type, payload=payload)
     _validate_table_payload(file_type=file_type, payload=payload)
     file_name = str(payload.get("file_name") or "")
     return PatentExecutionFile(
@@ -127,11 +130,34 @@ def _require_strict_int(value: Any, *, field: str) -> int:
     return int(value)
 
 
+def _strict_minio_only() -> bool:
+    raw = str(os.getenv("PATENT_ORIGINAL_MINIO_ONLY") or "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _validate_storage_ref(*, file_type: str, payload: dict[str, Any]) -> None:
+    if not _strict_minio_only():
+        return
+    storage_ref = str(payload.get("storage_ref") or "").strip()
+    if not storage_ref:
+        raise ValueError("storage_ref is required")
+    try:
+        parse_minio_storage_ref(storage_ref)
+    except Exception as exc:
+        raise ValueError("storage_ref must be minio://") from exc
+
+
 def _validate_table_payload(*, file_type: str, payload: dict[str, Any]) -> None:
     if file_type not in {"excel", "table"}:
         return
-    local_path = str(payload.get("local_path") or "").strip()
     file_name = str(payload.get("file_name") or "").strip()
-    suffix = Path(local_path).suffix.lower() or Path(file_name).suffix.lower()
+    storage_ref = str(payload.get("storage_ref") or "").strip()
+    suffix = Path(file_name).suffix.lower()
+    if not suffix and storage_ref.startswith("minio://"):
+        try:
+            _, object_name = parse_minio_storage_ref(storage_ref)
+            suffix = Path(object_name).suffix.lower()
+        except Exception:
+            suffix = ""
     if suffix and suffix not in {".csv", ".xls", ".xlsx", ".xlsm"}:
         raise ValueError(f"unsupported spreadsheet extension: {suffix}")

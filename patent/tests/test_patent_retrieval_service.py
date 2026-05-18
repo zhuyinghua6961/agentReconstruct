@@ -1686,6 +1686,7 @@ def test_targeted_retrieval_claim_fallback_path_does_not_call_answer_builder():
 
 
 def test_build_default_patent_runtime_builds_no_vector_lexical_catalog_from_archive(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("PATENT_ORIGINAL_MINIO_ONLY", "false")
     resource_root = tmp_path / "resource" / "patentQA"
     archive_dir = resource_root / "__archive__"
     patent_dir = archive_dir / "CN115132975B"
@@ -1772,6 +1773,7 @@ def test_build_default_patent_runtime_builds_no_vector_lexical_catalog_from_arch
 
 
 def test_build_default_patent_runtime_wires_injected_execution_cache_into_real_retrieval_service(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("PATENT_ORIGINAL_MINIO_ONLY", "false")
     resource_root = tmp_path / "resource" / "patentQA"
     archive_dir = resource_root / "__archive__"
     patent_dir = archive_dir / "CN115132975B"
@@ -2460,6 +2462,50 @@ def test_build_default_runtime_wires_stage2_rerank_fn_from_env(monkeypatch, tmp_
     runtime = build_default_patent_runtime()
 
     assert callable(runtime.stage2_rerank_fn)
+
+
+def test_build_default_runtime_strict_does_not_wire_archive_loader_for_retrieval_hydration(monkeypatch, tmp_path):
+    from server.patent.resource_registry import PatentResourceRegistry
+    from server.patent.runtime import build_default_patent_runtime
+
+    class _ArchiveLoader:
+        def build_identity_registry(self):
+            return {}
+
+        def build_catalog_records(self):
+            return []
+
+        def load_tables(self, patent_id):
+            raise AssertionError(f"archive table loader should not be used for {patent_id}")
+
+        def load_claims(self, patent_id):
+            raise AssertionError(f"archive claims loader should not be used for {patent_id}")
+
+        def load_description_snippets(self, patent_id):
+            raise AssertionError(f"archive description loader should not be used for {patent_id}")
+
+    class _AnswerBuilder:
+        def close(self):
+            return None
+
+    monkeypatch.delenv("PATENT_ORIGINAL_MINIO_ONLY", raising=False)
+    archive_root = tmp_path / "archive"
+    archive_root.mkdir()
+    monkeypatch.setattr(
+        "server.patent.runtime.PatentResourceRegistry.discover",
+        lambda: PatentResourceRegistry(
+            repo_root=tmp_path,
+            abstract_db_path=tmp_path / "missing_abstract",
+            chunk_db_path=tmp_path / "missing_chunk",
+            archive_root=archive_root,
+        ),
+    )
+    monkeypatch.setattr("server.patent.runtime.PatentArchiveLoader", lambda root: _ArchiveLoader())
+    monkeypatch.setattr("server.patent.runtime.PatentAnswerBuilder.from_env", lambda: _AnswerBuilder())
+
+    runtime = build_default_patent_runtime()
+
+    assert runtime.retrieval_service._archive_loader is None
 
 
 def test_run_stage2_targeted_retrieval_passes_rerank_fn_to_service():

@@ -68,6 +68,13 @@ class PatentOriginalManifest(BaseModel):
     objects: PatentOriginalObjects
     availability: dict[str, bool]
 
+    @model_validator(mode="after")
+    def _normalize_optional_availability(self):
+        availability = dict(self.availability or {})
+        availability.setdefault("tables", False)
+        self.availability = availability
+        return self
+
 
 class PatentOriginalResolvedSection(BaseModel):
     canonical_patent_id: str

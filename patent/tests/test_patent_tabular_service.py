@@ -3,10 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 
 import httpx
+import pytest
 
 import server.patent.tabular_service as tabular_service_module
 from server.patent.file_models import PatentExecutionFile, PatentFileContract
 from server.patent.tabular_service import PatentTabularAnswerClient, PatentTabularService
+
+
+@pytest.fixture(autouse=True)
+def _legacy_local_table_mode(monkeypatch):
+    monkeypatch.setenv("PATENT_ORIGINAL_MINIO_ONLY", "false")
 
 
 def _make_contract(csv_path: Path, *, question: str = "哪个材料的容量更高") -> PatentFileContract:
@@ -69,6 +75,20 @@ def _write_csv(path: Path) -> None:
     path.write_text("material,capacity_mah,note\nLMFP,120,stable\nLFP,115,safe\n", encoding="utf-8")
 
 
+class _FakeObjectReader:
+    def __init__(self, *, payloads: dict[str, bytes], runtime_root: Path) -> None:
+        self.payloads = dict(payloads)
+        self.runtime_root = runtime_root
+        self.materialized: list[str] = []
+
+    def materialize_temp(self, storage_ref: str, *, suffix: str) -> Path:
+        payload = self.payloads[storage_ref]
+        target = self.runtime_root / f"materialized{suffix}"
+        target.write_bytes(payload)
+        self.materialized.append(storage_ref)
+        return target
+
+
 def _compare_workbook(file_name: str, *, capacity_column: str) -> dict:
     return {
         "file_name": file_name,
@@ -128,6 +148,41 @@ def test_tabular_answer_client_from_env_uses_injected_http_client_without_taking
     assert client._client is http_client
     client.close()
     assert http_client.closed is False
+
+
+def test_tabular_service_reads_table_from_minio_ref_when_local_path_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATENT_ORIGINAL_MINIO_ONLY", "true")
+    storage_ref = "minio://agentcode/uploads/claims.csv"
+    reader = _FakeObjectReader(
+        payloads={storage_ref: b"material,capacity_mah,note\nLMFP,120,stable\nLFP,115,safe\n"},
+        runtime_root=tmp_path,
+    )
+    contract = PatentFileContract(
+        route="tabular_qa",
+        source_scope="table",
+        selected_file_ids=[33],
+        primary_file_id=33,
+        execution_files=[
+            PatentExecutionFile(
+                file_id=33,
+                file_type="csv",
+                file_name="claims.csv",
+                family="table",
+                payload={"local_path": "", "storage_ref": storage_ref},
+            )
+        ],
+        file_selection={"strategy": "explicit_selection", "selected_file_ids": [33], "source_scope": "table"},
+        kb_enabled=False,
+        allow_kb_verification=False,
+        question="总结这个表格",
+    )
+    service = PatentTabularService(answer_client=None, auto_answer_client=False, object_reader=reader)
+
+    result = service.execute(contract=contract, include_kb=False)
+
+    assert reader.materialized == [storage_ref]
+    assert result["metadata"]["answer_mode"] == "table_execution_summary"
+    assert "LMFP" in result["metadata"]["table_evidence_context"]
 
 
 def test_tabular_answer_client_from_env_prefers_unified_llm_namespace(monkeypatch):

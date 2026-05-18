@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from typing import Any, Iterator
 
@@ -49,12 +50,27 @@ def _is_file_ready(file_item: dict[str, Any]) -> bool:
     return parse_status == "ready"
 
 
+def _strict_upload_minio_only() -> bool:
+    raw = str(os.getenv("FASTQA_UPLOAD_MINIO_ONLY", "") or os.getenv("QA_ORIGINAL_MINIO_ONLY", "true") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return True
+
+
+def _has_materialization_error(file_item: dict[str, Any]) -> bool:
+    return bool(str(file_item.get("storage_error") or "").strip())
+
+
 def _has_file_source(file_item: dict[str, Any], *, allow_preview: bool = False) -> bool:
+    if _has_materialization_error(file_item):
+        return False
     local_path = str(file_item.get("local_path") or "").strip()
     storage_ref = str(file_item.get("storage_ref") or "").strip()
     if local_path or storage_ref:
         return True
-    if allow_preview:
+    if allow_preview and not _strict_upload_minio_only():
         file_meta = file_item.get("file_meta") if isinstance(file_item.get("file_meta"), dict) else {}
         parsed_preview = str(file_meta.get("parsed_preview") or "").strip()
         return bool(parsed_preview)
@@ -66,6 +82,11 @@ def _is_table_file_usable(file_item: dict[str, Any]) -> bool:
 
 
 def _is_pdf_file_usable(file_item: dict[str, Any]) -> bool:
+    if _is_file_failed(file_item) or _has_materialization_error(file_item):
+        return False
+    storage_ref = str(file_item.get("storage_ref") or "").strip()
+    if _strict_upload_minio_only() and storage_ref.startswith("minio://"):
+        return bool(str(file_item.get("local_path") or "").strip())
     return (not _is_file_failed(file_item)) and _has_file_source(file_item, allow_preview=True)
 
 
@@ -333,6 +354,13 @@ class QaTabularService:
             if isinstance(item, dict) and str(item.get("file_type") or "").strip().lower() in {"excel", "csv"}
         ]
         table_files = [item for item in table_candidates if _is_table_file_usable(item)]
+        if _strict_upload_minio_only() and table_candidates and len(table_files) != len(table_candidates):
+            pending_hint = _summarize_files(table_candidates)
+            message = "表格文件仍在处理中或源文件不可用，请稍后重试"
+            if pending_hint:
+                message += f"：{pending_hint}"
+            yield _emit({"type": "error", "error": message}, sse_event)
+            return
         pending_table_files = [item for item in table_files if not _is_file_ready(item)]
         if not table_files:
             if table_candidates:
@@ -352,6 +380,13 @@ class QaTabularService:
             if isinstance(item, dict) and str(item.get("file_type") or "").strip().lower() == "pdf"
         ]
         pdf_files = [item for item in pdf_candidates if _is_pdf_file_usable(item)]
+        if hybrid_mode and _strict_upload_minio_only() and pdf_candidates and len(pdf_files) != len(pdf_candidates):
+            pending_hint = _summarize_files(pdf_candidates)
+            message = "PDF 文件仍在处理中或源文件不可用，请稍后重试"
+            if pending_hint:
+                message += f"：{pending_hint}"
+            yield _emit({"type": "error", "error": message}, sse_event)
+            return
         pending_pdf_files = [item for item in pdf_files if not _is_file_ready(item)]
         query_mode = "混合文件问答" if hybrid_mode else "表格问答"
 
@@ -400,6 +435,9 @@ class QaTabularService:
                     }
                 )
             except Exception:
+                if _strict_upload_minio_only():
+                    yield _emit({"type": "error", "error": "表格文件读取失败，请检查文件格式"}, sse_event)
+                    return
                 continue
 
         if not loaded_tables:

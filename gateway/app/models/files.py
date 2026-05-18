@@ -34,6 +34,10 @@ class ConversationFileRow:
         return str(self.file_type or "").strip().lower() == "pdf"
 
     @property
+    def has_minio_storage_ref(self) -> bool:
+        return str(self.storage_ref or "").strip().startswith("minio://")
+
+    @property
     def is_ready(self) -> bool:
         parse_status = str(self.parse_status or "").strip().lower()
         index_status = str(self.index_status or "").strip().lower()

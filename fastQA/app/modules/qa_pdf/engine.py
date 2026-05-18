@@ -74,13 +74,15 @@ def answer_from_pdf(
         except Exception:
             return False
 
-    def _normalize_first_token_timeout(value: float | None) -> float:
+    def _normalize_first_token_timeout(value: float | None) -> float | None:
         if value is None:
-            return 25.0
+            return None
         try:
             parsed = float(value)
         except (TypeError, ValueError):
-            return 25.0
+            return None
+        if parsed <= 0.0:
+            return None
         if parsed < 1.0:
             return 1.0
         if parsed > 180.0:
@@ -228,7 +230,11 @@ def answer_from_pdf(
                 producer.start()
                 _log_timing("llm_stream_producer_spawned", stream_started_at)
 
-                first_token_deadline = stream_started_at + stream_first_token_timeout_sec
+                first_token_deadline = (
+                    stream_started_at + stream_first_token_timeout_sec
+                    if stream_first_token_timeout_sec is not None
+                    else None
+                )
                 while True:
                     if _cancelled():
                         producer_stop.set()
@@ -236,7 +242,7 @@ def answer_from_pdf(
                         raise PDFQAStreamCancelledError("PDF stream cancelled")
 
                     queue_timeout = 0.2
-                    if not emitted:
+                    if not emitted and first_token_deadline is not None:
                         remaining = first_token_deadline - time.monotonic()
                         if remaining <= 0:
                             producer_stop.set()

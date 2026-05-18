@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
+from server.patent.object_reader import parse_minio_storage_ref
+
 _XML_NS = {
     "main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
     "rel": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
@@ -188,6 +190,44 @@ def _build_cache_key(*, path: str, file_name: str, file_type: str, max_sheets: i
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
+def _storage_ref_suffix(*, storage_ref: str, file_name: str, file_type: str) -> str:
+    suffix = Path(str(file_name or "")).suffix.lower()
+    if not suffix:
+        try:
+            _, object_name = parse_minio_storage_ref(storage_ref)
+            suffix = Path(object_name).suffix.lower()
+        except Exception:
+            suffix = ""
+    if not suffix:
+        normalized_type = str(file_type or "").strip().lower()
+        if normalized_type in {"csv", "xls", "xlsx", "xlsm"}:
+            suffix = f".{normalized_type}"
+        elif normalized_type in {"excel", "table"}:
+            suffix = ".xlsx"
+    return suffix or ".bin"
+
+
+def _build_storage_cache_key(*, reader: Any, storage_ref: str, file_name: str, file_type: str, max_sheets: int) -> str:
+    stat_key = "unstated"
+    stater = getattr(reader, "stat", None)
+    if callable(stater):
+        try:
+            stat = stater(storage_ref)
+            stat_key = "|".join(
+                [
+                    str(getattr(stat, "bucket", "") or ""),
+                    str(getattr(stat, "object_name", "") or ""),
+                    str(getattr(stat, "etag", "") or ""),
+                    str(getattr(stat, "size", "") or ""),
+                    str(getattr(stat, "sha256", "") or ""),
+                ]
+            )
+        except Exception:
+            stat_key = "stat_failed"
+    raw = "|".join([str(storage_ref), str(file_name), str(file_type), str(max_sheets), stat_key])
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
 def load_workbook(*, path: str, file_name: str, file_type: str, max_sheets: int = 3) -> dict[str, Any]:
     resolved = Path(path)
     if not resolved.exists() or not resolved.is_file():
@@ -254,7 +294,42 @@ def load_workbook_cached(*, path: str, file_name: str, file_type: str, max_sheet
     return workbook
 
 
+def load_workbook_from_execution_file(*, item: Any, reader: Any, max_sheets: int = 3) -> dict[str, Any]:
+    payload = dict(getattr(item, "payload", {}) or {})
+    storage_ref = str(payload.get("storage_ref") or "").strip()
+    if not storage_ref:
+        raise RuntimeError("storage_ref_missing")
+    file_name = str(getattr(item, "file_name", "") or payload.get("file_name") or "")
+    file_type = str(getattr(item, "file_type", "") or payload.get("file_type") or "").strip().lower()
+    suffix = _storage_ref_suffix(storage_ref=storage_ref, file_name=file_name, file_type=file_type)
+    cache_key = _build_storage_cache_key(
+        reader=reader,
+        storage_ref=storage_ref,
+        file_name=file_name,
+        file_type=file_type,
+        max_sheets=max_sheets,
+    )
+    cached = _WORKBOOK_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    materializer = getattr(reader, "materialize_temp", None)
+    if not callable(materializer):
+        raise RuntimeError("object_reader_materialize_unavailable")
+    scratch_path = materializer(storage_ref, suffix=suffix)
+    workbook = load_workbook(
+        path=str(scratch_path),
+        file_name=file_name or Path(str(scratch_path)).name,
+        file_type=file_type or suffix.lstrip("."),
+        max_sheets=max_sheets,
+    )
+    workbook["local_path"] = ""
+    workbook["storage_ref"] = storage_ref
+    _WORKBOOK_CACHE[cache_key] = workbook
+    return workbook
+
+
 __all__ = [
     "load_workbook",
     "load_workbook_cached",
+    "load_workbook_from_execution_file",
 ]

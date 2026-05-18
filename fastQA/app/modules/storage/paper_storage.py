@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
 import threading
@@ -9,6 +10,17 @@ from urllib.parse import unquote
 
 _DOWNLOAD_LOCKS: dict[str, threading.Lock] = {}
 _DOWNLOAD_LOCKS_GUARD = threading.Lock()
+_LOGGER = logging.getLogger("fastqa.storage.paper_storage")
+
+
+def _record_original_metric(name: str, **labels: Any) -> None:
+    try:
+        from app.modules.qa_cache.metrics import increment_cache_metric
+
+        increment_cache_metric("qa_original", name)
+    except Exception:
+        pass
+    _LOGGER.info("qa_original_metric name=%s labels=%s", name, labels)
 
 
 def normalize_doi(value: str) -> str:
@@ -103,6 +115,19 @@ def _is_not_found_s3_error(exc: Exception) -> bool:
     return code in {"NoSuchKey", "NoSuchBucket", "NoSuchObject"}
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
+def _strict_original_minio_only() -> bool:
+    return _env_bool("QA_ORIGINAL_MINIO_ONLY", True)
+
+
 def _build_minio_client_from_env():
     endpoint = os.getenv("MINIO_ENDPOINT", "").strip()
     access_key = os.getenv("MINIO_ACCESS_KEY", "").strip()
@@ -173,9 +198,16 @@ def ensure_local_paper_pdf(*, doi: str, papers_dir: str | Path, logger: Any | No
     if not normalized:
         return None
 
-    existing = find_local_paper_pdf(doi=normalized, papers_dir=base_dir, logger=logger)
-    if existing is not None and existing.exists():
-        return existing
+    if not _strict_original_minio_only():
+        existing = find_local_paper_pdf(doi=normalized, papers_dir=base_dir, logger=logger)
+        if existing is not None and existing.exists():
+            _record_original_metric(
+                "qa_original_local_fallback_attempt_total",
+                service="fastQA",
+                source_family="paper_pdf",
+                result="legacy_local_path",
+            )
+            return existing
 
     minio_ctx = _build_minio_client_from_env()
     if minio_ctx is None:
@@ -187,7 +219,13 @@ def ensure_local_paper_pdf(*, doi: str, papers_dir: str | Path, logger: Any | No
     lock = _get_local_path_lock(local_path)
 
     with lock:
-        if local_path.exists():
+        if not _strict_original_minio_only() and local_path.exists():
+            _record_original_metric(
+                "qa_original_local_fallback_attempt_total",
+                service="fastQA",
+                source_family="paper_pdf",
+                result="legacy_local_path",
+            )
             return local_path
         try:
             client.stat_object(bucket, object_name)
@@ -204,4 +242,32 @@ def ensure_local_paper_pdf(*, doi: str, papers_dir: str | Path, logger: Any | No
 
 
 def paper_exists(*, doi: str, papers_dir: str | Path, logger: Any | None = None) -> bool:
-    return find_local_paper_pdf(doi=doi, papers_dir=papers_dir, logger=logger) is not None
+    if _strict_original_minio_only():
+        normalized = normalize_doi(doi)
+        if not normalized:
+            return False
+        minio_ctx = _build_minio_client_from_env()
+        if minio_ctx is None:
+            return False
+        client, bucket, s3_error_cls = minio_ctx
+        object_name = build_paper_object_name(normalized)
+        try:
+            client.stat_object(bucket, object_name)
+            return True
+        except s3_error_cls as exc:
+            if not _is_not_found_s3_error(exc) and logger is not None:
+                logger.warning("MinIO stat_object failed for %s: %s", object_name, exc)
+        except Exception as exc:
+            if logger is not None:
+                logger.warning("MinIO stat_object failed for %s: %s", object_name, exc)
+        return False
+    existing = find_local_paper_pdf(doi=doi, papers_dir=papers_dir, logger=logger)
+    if existing is not None:
+        _record_original_metric(
+            "qa_original_local_fallback_attempt_total",
+            service="fastQA",
+            source_family="paper_pdf",
+            result="legacy_local_exists",
+        )
+        return True
+    return False

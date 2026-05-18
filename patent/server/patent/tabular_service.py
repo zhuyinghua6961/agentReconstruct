@@ -15,13 +15,14 @@ import httpx
 
 from server.patent.pdf_contract import is_summary_question
 from server.patent.file_models import PatentFileContract
+from server.patent.object_reader import ObjectReader
 from server.patent.streaming import emit_text_chunks, iter_text_output
 from server.patent.tabular_context import build_compare_tabular_context_bundle, build_tabular_context_bundle
 from server.patent.tabular.executor import execute_compare_plan, execute_tabular_plan
 from server.patent.tabular.planner import plan_tabular_query
 from server.patent.tabular.renderer import has_usable_tabular_result
 from server.patent.tabular.schema_profiler import profile_workbook
-from server.patent.tabular.workbook_loader import load_workbook_cached
+from server.patent.tabular.workbook_loader import load_workbook_cached, load_workbook_from_execution_file
 from server.patent.upstream_transport import (
     build_patent_request_timeout,
     describe_patent_transport,
@@ -627,6 +628,7 @@ class PatentTabularService:
         max_rows_per_sheet: int = 8,
         max_sheets: int = 3,
         max_table_chars: int | None = None,
+        object_reader: Any | None = None,
     ) -> None:
         self._extract_table_text_fn = extract_table_text_fn or self._extract_table_text
         self._answer_question_fn = answer_question_fn
@@ -645,6 +647,7 @@ class PatentTabularService:
         )
         self._max_table_chars = max(1000, int(resolved_max_table_chars))
         self._has_custom_extract_table_text_fn = extract_table_text_fn is not None
+        self._object_reader = object_reader
 
     def answer_backend(self) -> str:
         if callable(self._answer_question_fn) or self._client is not None:
@@ -667,6 +670,15 @@ class PatentTabularService:
         close = getattr(self._client, "close", None)
         if callable(close):
             close()
+
+    def _get_object_reader(self) -> Any:
+        if self._object_reader is None:
+            self._object_reader = ObjectReader()
+        return self._object_reader
+
+    @staticmethod
+    def _strict_minio_only() -> bool:
+        return _env_flag("PATENT_ORIGINAL_MINIO_ONLY", True)
 
     @staticmethod
     def _structured_context_bundle(
@@ -702,20 +714,29 @@ class PatentTabularService:
         for item in contract.selected_execution_files:
             if item.family != "table":
                 continue
-            local_path = str(item.payload.get("local_path") or "").strip()
-            if not local_path:
-                continue
-            resolved = Path(local_path)
-            if not resolved.exists() or not resolved.is_file():
-                continue
-            file_name = str(item.file_name or resolved.name or f"file:{item.file_id}")
+            file_name = str(item.file_name or item.payload.get("file_name") or f"file:{item.file_id}")
             try:
-                workbook = load_workbook_cached(
-                    path=str(resolved),
-                    file_name=file_name,
-                    file_type=str(item.file_type or resolved.suffix.lstrip(".")).lower(),
-                    max_sheets=self._max_sheets,
-                )
+                if self._strict_minio_only():
+                    workbook = load_workbook_from_execution_file(
+                        item=item,
+                        reader=self._get_object_reader(),
+                        max_sheets=self._max_sheets,
+                    )
+                    resolved: Path | str = ""
+                else:
+                    local_path = str(item.payload.get("local_path") or "").strip()
+                    if not local_path:
+                        continue
+                    resolved_path = Path(local_path)
+                    if not resolved_path.exists() or not resolved_path.is_file():
+                        continue
+                    resolved = resolved_path
+                    workbook = load_workbook_cached(
+                        path=str(resolved_path),
+                        file_name=file_name or resolved_path.name,
+                        file_type=str(item.file_type or resolved_path.suffix.lstrip(".")).lower(),
+                        max_sheets=self._max_sheets,
+                    )
                 profile = profile_workbook(workbook)
             except Exception:
                 skip_file_route_cache = True
@@ -1090,18 +1111,32 @@ class PatentTabularService:
         for item in contract.selected_execution_files:
             if item.family != "table":
                 continue
-            local_path = str(item.payload.get("local_path") or "").strip()
-            if not local_path:
-                continue
-            resolved = Path(local_path)
-            if not resolved.exists() or not resolved.is_file():
-                continue
+            file_name = str(item.file_name or item.payload.get("file_name") or f"file:{item.file_id}")
+            file_type = str(item.file_type or Path(file_name).suffix.lstrip(".")).lower()
+            if self._strict_minio_only():
+                storage_ref = str(item.payload.get("storage_ref") or "").strip()
+                if not storage_ref:
+                    continue
+                try:
+                    suffix = Path(file_name).suffix.lower()
+                    if not suffix:
+                        suffix = f".{file_type}" if file_type in {"csv", "xls", "xlsx", "xlsm"} else ".bin"
+                    resolved = Path(self._get_object_reader().materialize_temp(storage_ref, suffix=suffix))
+                except Exception:
+                    continue
+            else:
+                local_path = str(item.payload.get("local_path") or "").strip()
+                if not local_path:
+                    continue
+                resolved = Path(local_path)
+                if not resolved.exists() or not resolved.is_file():
+                    continue
             extracted = str(
                 self._extract_table_text_fn(
                     str(resolved),
                     question=contract.question,
-                    file_name=str(item.file_name or resolved.name or f"file:{item.file_id}"),
-                    file_type=str(item.file_type or resolved.suffix.lstrip(".")).lower(),
+                    file_name=file_name or resolved.name,
+                    file_type=file_type or resolved.suffix.lstrip(".").lower(),
                     max_rows_per_sheet=self._max_rows_per_sheet,
                     max_sheets=self._max_sheets,
                 )
@@ -1109,7 +1144,7 @@ class PatentTabularService:
             ).strip()
             if not extracted:
                 continue
-            label = str(item.file_name or resolved.name or f"file:{item.file_id}")
+            label = str(file_name or resolved.name or f"file:{item.file_id}")
             sections.append(f"文件: {label}\n{_truncate(extracted, self._max_table_chars)}")
         return "\n\n".join(sections).strip()
 

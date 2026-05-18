@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from app.integrations.storage.local import LocalStorageBackend
 from app.integrations.storage.minio import MinIOStorageBackend
 from app.core.errors import AppError
+from app.modules.documents.schemas import PatentOriginalManifest
 from app.modules.documents.service import documents_service
 from app.modules.storage.service import storage_service
 
@@ -61,6 +62,21 @@ class _CountingBackend(_FakeObjectBackend):
         _ = bucket
         self.read_calls.append(object_name)
         return super().read_object_bytes(object_name=object_name, bucket=bucket)
+
+
+class _FakeMetrics:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, object]]] = []
+
+    def increment(self, name: str, **labels: object) -> None:
+        self.events.append((name, dict(labels)))
+
+    def count(self, name: str, **labels: object) -> int:
+        return sum(
+            1
+            for metric_name, metric_labels in self.events
+            if metric_name == name and all(metric_labels.get(key) == value for key, value in labels.items())
+        )
 
 
 class _FakeResolved:
@@ -179,6 +195,50 @@ def test_patent_original_store_loads_manifest_and_original_version():
     assert store.get_original_version(CANONICAL_PATENT_ID) == manifest.original_version
 
 
+def test_patent_original_store_records_manifest_read_metric():
+    store_module = _load_store_module()
+    metrics = _FakeMetrics()
+    store = store_module.PatentOriginalStore(backend=_backend(), metrics=metrics)
+
+    store.load_manifest(CANONICAL_PATENT_ID)
+
+    assert metrics.count(
+        "qa_original_minio_read_total",
+        service="public-service",
+        source_family="patent_structured",
+        result="success",
+    ) == 1
+
+
+def test_patent_manifest_defaults_tables_availability_false_without_object():
+    payload = _manifest_payload()
+    assert "tables" not in payload["availability"]
+    assert "tables" not in payload["objects"]["structured"]
+
+    manifest = PatentOriginalManifest.model_validate(payload)
+
+    assert manifest.availability["tables"] is False
+    assert "tables" not in manifest.objects.structured
+
+
+def test_patent_original_store_tables_unavailable_does_not_block_original_sections():
+    store_module = _load_store_module()
+    manifest_payload = _manifest_payload()
+    manifest_payload["availability"]["tables"] = False
+    manifest_payload["objects"]["structured"].pop("tables", None)
+    backend = _backend()
+    backend._objects[storage_service.build_patent_original_manifest_object_name(CANONICAL_PATENT_ID)] = json.dumps(
+        manifest_payload,
+        ensure_ascii=False,
+    ).encode("utf-8")
+    store = store_module.PatentOriginalStore(backend=backend)
+
+    claim = store.resolve_section(canonical_patent_id=CANONICAL_PATENT_ID, section="claim", claim_number=1)
+
+    assert claim.claim_number == 1
+    assert store.load_manifest(CANONICAL_PATENT_ID).availability["tables"] is False
+
+
 def test_patent_original_store_resolve_section_can_reuse_loaded_manifest():
     store_module = _load_store_module()
     backend = _CountingBackend(_backend()._objects)
@@ -199,7 +259,7 @@ def test_patent_original_store_resolve_section_can_reuse_loaded_manifest():
 def test_patent_original_store_requires_manifest_minimum_fields(tmp_path):
     store_module = _load_store_module()
     backend = _write_local_fixture_corpus(tmp_path, drop_field="country")
-    store = store_module.PatentOriginalStore(backend=backend)
+    store = store_module.PatentOriginalStore(backend=backend, strict_minio_only=False)
 
     with pytest.raises(ValidationError):
         store.load_manifest(CANONICAL_PATENT_ID)
@@ -209,7 +269,7 @@ def test_patent_original_store_requires_manifest_minimum_fields(tmp_path):
 def test_patent_original_store_requires_remaining_manifest_minimum_fields(tmp_path, missing_field: str):
     store_module = _load_store_module()
     backend = _write_local_fixture_corpus(tmp_path, drop_field=missing_field)
-    store = store_module.PatentOriginalStore(backend=backend)
+    store = store_module.PatentOriginalStore(backend=backend, strict_minio_only=False)
 
     with pytest.raises(ValidationError):
         store.load_manifest(CANONICAL_PATENT_ID)
@@ -293,11 +353,20 @@ def test_patent_original_store_raises_when_summary_primary_object_drifts():
 def test_patent_original_store_keeps_local_backend_figure_media_type(tmp_path):
     store_module = _load_store_module()
     backend = _write_local_fixture_corpus(tmp_path)
-    store = store_module.PatentOriginalStore(backend=backend)
+    store = store_module.PatentOriginalStore(backend=backend, strict_minio_only=False)
 
     figure = store.resolve_section(canonical_patent_id=CANONICAL_PATENT_ID, section="figure")
 
     assert figure.media_type == "image/png"
+
+
+def test_patent_original_store_rejects_local_backend_in_strict_mode(tmp_path):
+    store_module = _load_store_module()
+    backend = _write_local_fixture_corpus(tmp_path)
+    store = store_module.PatentOriginalStore(backend=backend, strict_minio_only=True)
+
+    with pytest.raises(store_module.PatentOriginalStoreBackendError, match="local storage backend"):
+        store.load_manifest(CANONICAL_PATENT_ID)
 
 
 def test_documents_service_renders_patent_original_claim_payloads(monkeypatch):

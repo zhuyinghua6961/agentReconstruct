@@ -129,6 +129,7 @@ def test_tabular_service_emits_hybrid_evidence_step(monkeypatch):
 
 def test_hybrid_service_can_use_pdf_preview_when_file_not_ready(monkeypatch):
     _stub_successful_tabular_flow(monkeypatch)
+    monkeypatch.setenv("FASTQA_UPLOAD_MINIO_ONLY", "false")
 
     events = list(
         qa_tabular_service.iter_answer_events(
@@ -170,6 +171,48 @@ def test_hybrid_service_can_use_pdf_preview_when_file_not_ready(monkeypatch):
     assert hybrid_events[-1]["status"] == "success"
     assert events[-1]["type"] == "done"
     assert "10.1/demo" in events[-1]["references"]
+
+
+def test_hybrid_service_rejects_pdf_preview_when_strict_minio_only(monkeypatch):
+    _stub_successful_tabular_flow(monkeypatch)
+    monkeypatch.setenv("FASTQA_UPLOAD_MINIO_ONLY", "true")
+
+    events = list(
+        qa_tabular_service.iter_answer_events(
+            question="结合文献里的电压窗口和表格给结论",
+            used_files=[
+                {
+                    "file_id": 1,
+                    "file_type": "excel",
+                    "file_name": "demo.xlsx",
+                    "local_path": "/tmp/demo.xlsx",
+                    "parse_status": "ready",
+                    "index_status": "ready",
+                    "processing_stage": "ready",
+                    "storage_ref": "minio://agentcode/uploads/demo.xlsx",
+                },
+                {
+                    "file_id": 2,
+                    "file_type": "pdf",
+                    "file_name": "10.1_demo.pdf",
+                    "parse_status": "uploaded",
+                    "index_status": "pending",
+                    "processing_stage": "uploaded",
+                    "file_meta": {"parsed_preview": "文献提到电压窗口为 3.0-4.2 V，并讨论倍率性能。"},
+                    "storage_ref": "minio://agentcode/uploads/demo.pdf",
+                    "storage_error": "object_unavailable",
+                },
+            ],
+            route_hint="hybrid_qa",
+            agent=SimpleNamespace(llm=object()),
+            sse_event=lambda event: event,
+            clean_answer_for_frontend=lambda text, **_kwargs: text,
+            log_qa_interaction=lambda **_kwargs: None,
+            extract_pdf_text_fn=lambda _path: "",
+        )
+    )
+
+    assert events == [{"type": "error", "error": "PDF 文件仍在处理中或源文件不可用，请稍后重试：10.1_demo.pdf"}]
 
 
 def test_tabular_service_logs_summary_diagnostics(monkeypatch):

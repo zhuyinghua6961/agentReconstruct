@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any
 
 from app.modules.documents.schemas import PatentOriginalManifest, PatentOriginalResolvedSection
+from app.integrations.storage.factory import get_storage_backend
+from app.integrations.storage.local import LocalStorageBackend
 from app.modules.storage.service import storage_service
 
 
@@ -22,16 +26,104 @@ class PatentOriginalStoreBackendError(PatentOriginalStoreError):
     pass
 
 
+_LOGGER = logging.getLogger("public_service.documents.patent_original_store")
+
+
+def _record_metric(metrics: Any | None, name: str, **labels: Any) -> None:
+    if metrics is None:
+        try:
+            from app.modules.qa_cache.metrics import increment_cache_metric
+
+            increment_cache_metric("qa_original", name)
+        except Exception:
+            pass
+        _LOGGER.info("qa_original_metric name=%s labels=%s", name, labels)
+        return
+    for method_name in ("increment", "inc", "record"):
+        method = getattr(metrics, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            method(name, **labels)
+            return
+        except TypeError:
+            try:
+                method(name, labels)
+                return
+            except TypeError:
+                continue
+    counter = getattr(metrics, "counter", None)
+    if callable(counter):
+        try:
+            metric = counter(name, **labels)
+            inc = getattr(metric, "inc", None)
+            if callable(inc):
+                inc()
+                return
+        except TypeError:
+            pass
+    if callable(metrics):
+        try:
+            metrics(name, **labels)
+        except TypeError:
+            metrics(name, labels)
+
+
+def _source_family_for_object(object_name: str) -> str:
+    lower = str(object_name or "").lower()
+    if lower.endswith("/structured/tables.json") or "/structured/tables" in lower:
+        return "patent_table"
+    if "/fulltext/" in lower or lower.endswith(".pdf"):
+        return "patent_fulltext"
+    return "patent_structured"
+
+
 class PatentOriginalStore:
-    def __init__(self, *, backend: Any | None = None, project_root: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        backend: Any | None = None,
+        project_root: str | None = None,
+        metrics: Any | None = None,
+        strict_minio_only: bool | None = None,
+    ) -> None:
         self._backend = backend
         self._project_root = project_root
+        self._metrics = metrics
+        self._strict_minio_only = self._resolve_strict_minio_only() if strict_minio_only is None else bool(strict_minio_only)
+
+    @staticmethod
+    def _resolve_strict_minio_only() -> bool:
+        import os
+
+        raw = str(os.getenv("QA_ORIGINAL_MINIO_ONLY", "true")).strip().lower()
+        return raw not in {"0", "false", "no", "off"}
+
+    def _resolve_backend(self) -> Any:
+        if self._backend is not None:
+            return self._backend
+        return get_storage_backend(project_root=self._project_root)
 
     def load_manifest(self, canonical_patent_id: str) -> PatentOriginalManifest:
         object_name = storage_service.build_patent_original_manifest_object_name(canonical_patent_id)
         payload = self._read_json_object(object_name)
         if not isinstance(payload, dict):
+            _record_metric(
+                self._metrics,
+                "qa_original_minio_read_failed_total",
+                service="public-service",
+                source_family="patent_structured",
+                result="failure",
+                reason="manifest_unavailable",
+            )
             raise PatentOriginalNotFoundError(f"manifest not found for {canonical_patent_id}")
+        _record_metric(
+            self._metrics,
+            "qa_original_minio_read_total",
+            service="public-service",
+            source_family="patent_structured",
+            result="success",
+        )
         return PatentOriginalManifest.model_validate(payload)
 
     def get_original_version(self, canonical_patent_id: str) -> str:
@@ -62,28 +154,106 @@ class PatentOriginalStore:
 
     def _read_json_object(self, object_name: str) -> dict[str, Any] | list[Any] | None:
         try:
-            return storage_service.read_json_object(
-                object_name=object_name,
-                project_root=self._project_root,
-                backend=self._backend,
-            )
+            backend = self._resolve_backend()
+            if self._strict_minio_only and isinstance(backend, LocalStorageBackend):
+                _record_metric(
+                    self._metrics,
+                    "qa_original_minio_read_failed_total",
+                    service="public-service",
+                    source_family=_source_family_for_object(object_name),
+                    result="failure",
+                    reason="local_backend_disallowed",
+                )
+                raise PatentOriginalStoreBackendError("local storage backend unavailable in strict MinIO mode")
+            reader = getattr(backend, "read_object_bytes", None)
+            if callable(reader):
+                payload = reader(object_name=object_name)
+                return None if payload is None else json.loads(payload.decode("utf-8"))
+            path = storage_service._resolve_local_backend_path(backend=backend, object_name=object_name)  # type: ignore[attr-defined]
+            if not path.exists() or not path.is_file():
+                return None
+            return json.loads(path.read_text(encoding="utf-8"))
+        except PatentOriginalStoreBackendError:
+            raise
         except Exception as exc:
+            _record_metric(
+                self._metrics,
+                "qa_original_minio_read_failed_total",
+                service="public-service",
+                source_family=_source_family_for_object(object_name),
+                result="failure",
+                reason="object_read_failed",
+            )
             raise PatentOriginalStoreBackendError(f"failed to read object: {object_name}") from exc
 
     def _stat_object(self, object_name: str) -> dict[str, Any] | None:
         try:
-            return storage_service.stat_object(
-                object_name=object_name,
-                project_root=self._project_root,
-                backend=self._backend,
-            )
+            backend = self._resolve_backend()
+            if self._strict_minio_only and isinstance(backend, LocalStorageBackend):
+                _record_metric(
+                    self._metrics,
+                    "qa_original_minio_read_failed_total",
+                    service="public-service",
+                    source_family=_source_family_for_object(object_name),
+                    result="failure",
+                    reason="local_backend_disallowed",
+                )
+                raise PatentOriginalStoreBackendError("local storage backend unavailable in strict MinIO mode")
+            stater = getattr(backend, "stat_object", None)
+            if callable(stater):
+                stat = stater(object_name=object_name)
+            else:
+                path = storage_service._resolve_local_backend_path(backend=backend, object_name=object_name)  # type: ignore[attr-defined]
+                if not path.exists() or not path.is_file():
+                    stat = None
+                else:
+                    stat = {
+                        "object_name": object_name,
+                        "etag": "",
+                        "size": int(path.stat().st_size),
+                    }
+        except PatentOriginalStoreBackendError:
+            raise
         except Exception as exc:
+            _record_metric(
+                self._metrics,
+                "qa_original_minio_read_failed_total",
+                service="public-service",
+                source_family=_source_family_for_object(object_name),
+                result="failure",
+                reason="object_stat_failed",
+            )
             raise PatentOriginalStoreBackendError(f"failed to stat object: {object_name}") from exc
+        if stat is None:
+            _record_metric(
+                self._metrics,
+                "qa_original_minio_read_failed_total",
+                service="public-service",
+                source_family=_source_family_for_object(object_name),
+                result="failure",
+                reason="object_missing",
+            )
+        else:
+            _record_metric(
+                self._metrics,
+                "qa_original_minio_read_total",
+                service="public-service",
+                source_family=_source_family_for_object(object_name),
+                result="success",
+            )
+        return stat
 
     def _load_structured_object(self, object_name: str) -> dict[str, Any]:
         payload = self._read_json_object(object_name)
         if not isinstance(payload, dict):
             raise PatentOriginalUnavailableError(f"structured object unavailable: {object_name}")
+        _record_metric(
+            self._metrics,
+            "qa_original_minio_read_total",
+            service="public-service",
+            source_family=_source_family_for_object(object_name),
+            result="success",
+        )
         return payload
 
     def _resolve_claim(self, manifest: PatentOriginalManifest, *, claim_number: int | None) -> PatentOriginalResolvedSection:

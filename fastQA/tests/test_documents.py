@@ -17,9 +17,10 @@ class _FakeRequest:
         self.method = "GET"
 
 
-def test_view_pdf_returns_inline_response(tmp_path):
+def test_view_pdf_returns_inline_response(monkeypatch, tmp_path):
     pdf_path = tmp_path / "10.1_test.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n%test\n")
+    monkeypatch.setattr("app.modules.documents.service.storage_service.ensure_local_paper_pdf", lambda **_kwargs: pdf_path)
     request = _FakeRequest(tmp_path)
     request.method = "HEAD"
     response = view_pdf("10.1/test", request)
@@ -33,9 +34,10 @@ def test_view_pdf_returns_inline_response(tmp_path):
     assert get_response.headers["content-disposition"].startswith("inline;")
 
 
-def test_check_pdf_returns_exists_payload(tmp_path):
+def test_check_pdf_returns_exists_payload(monkeypatch, tmp_path):
     pdf_path = tmp_path / "10.1_demo.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n%test\n")
+    monkeypatch.setattr("app.modules.documents.service.storage_service.paper_exists", lambda **_kwargs: True)
     response = check_pdf("10.1/demo", _FakeRequest(tmp_path))
     payload = json.loads(response.body)
 
@@ -44,9 +46,10 @@ def test_check_pdf_returns_exists_payload(tmp_path):
     assert payload["filename"] == "10.1_demo.pdf"
 
 
-def test_view_pdf_handles_encoded_pdf_suffix_and_parentheses(tmp_path):
+def test_view_pdf_handles_encoded_pdf_suffix_and_parentheses(monkeypatch, tmp_path):
     pdf_path = tmp_path / "10.2_demo.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n%test\n")
+    monkeypatch.setattr("app.modules.documents.service.storage_service.ensure_local_paper_pdf", lambda **_kwargs: pdf_path)
     response = view_pdf("(10.2%2Fdemo.pdf)", _FakeRequest(tmp_path))
 
     assert response.status_code == 200

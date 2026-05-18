@@ -3,10 +3,20 @@
 """PDF lookup and chunk extraction helpers for generation-driven RAG."""
 
 import glob
+import os
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from app.modules.storage.service import storage_service
+
+
+def _strict_original_minio_only() -> bool:
+    raw = str(os.getenv("FASTQA_UPLOAD_MINIO_ONLY", "") or os.getenv("QA_ORIGINAL_MINIO_ONLY", "true") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return True
 
 
 def find_pdf_path(*, doi: str, papers_dir: str | Path, logger: Any) -> Optional[str]:
@@ -17,6 +27,10 @@ def find_pdf_path(*, doi: str, papers_dir: str | Path, logger: Any) -> Optional[
     if resolved:
         logger.debug(f"   📄 找到PDF（MinIO/本地）: {resolved.name}")
         return str(resolved)
+
+    if _strict_original_minio_only():
+        logger.debug(f"   ⚠️ strict MinIO-only mode skipped local PDF fallback: {doi}")
+        return None
 
     doi_clean = str(doi or "").strip()
     if not doi_clean:

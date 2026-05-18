@@ -4,12 +4,23 @@ from app.services.file_context_resolver import FileContextResolver
 
 resolver = FileContextResolver()
 
-PDF = ConversationFileRow(file_id=11, file_type="pdf", file_name="solid-state-review.pdf")
-PDF_2 = ConversationFileRow(file_id=22, file_type="pdf", file_name="battery-paper.pdf")
+PDF = ConversationFileRow(
+    file_id=11,
+    file_type="pdf",
+    file_name="solid-state-review.pdf",
+    storage_ref="minio://agentcode/uploads/solid-state-review.pdf",
+)
+PDF_2 = ConversationFileRow(
+    file_id=22,
+    file_type="pdf",
+    file_name="battery-paper.pdf",
+    storage_ref="minio://agentcode/uploads/battery-paper.pdf",
+)
 TABLE = ConversationFileRow(
     file_id=33,
     file_type="excel",
     file_name="cells.xlsx",
+    storage_ref="minio://agentcode/uploads/cells.xlsx",
     file_meta={"columns": ["电芯编号", "开路电压_V", "供应商"]},
 )
 PROCESSING_PDF = ConversationFileRow(
@@ -40,6 +51,21 @@ class _StubClassifier:
     def classify(self, **kwargs):
         self.calls.append(dict(kwargs))
         return self.result
+
+
+class _FakeMetrics:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, object]]] = []
+
+    def increment(self, name: str, **labels: object) -> None:
+        self.events.append((name, dict(labels)))
+
+    def count(self, name: str, **labels: object) -> int:
+        return sum(
+            1
+            for metric_name, metric_labels in self.events
+            if metric_name == name and all(metric_labels.get(key) == value for key, value in labels.items())
+        )
 
 
 def test_no_files_and_plain_question_stays_kb():
@@ -85,6 +111,77 @@ def test_selected_files_with_explicit_file_action_routes_to_file_qa():
     assert decision.route == "pdf_qa"
     assert decision.turn_mode == "file_only"
     assert decision.selected_file_ids == [11]
+
+
+def test_gateway_rejects_local_only_execution_file_when_minio_only_enabled(monkeypatch):
+    monkeypatch.setenv("QA_ORIGINAL_MINIO_ONLY", "true")
+    local_only = ConversationFileRow(
+        file_id=66,
+        file_type="pdf",
+        file_name="local-only.pdf",
+        local_path="/tmp/local-only.pdf",
+        storage_ref="",
+    )
+
+    decision = resolver.resolve(
+        question="请总结这篇文献",
+        pdf_context={"selected_ids": [66]},
+        available_files=[local_only],
+    )
+
+    assert decision.execution_files == []
+    assert decision.status_code == "FILE_STORAGE_REF_MISSING"
+    assert decision.status_error == "storage_ref_missing"
+    assert "storage_ref_missing" in decision.status_detail["reason_codes"]
+
+
+def test_gateway_keeps_minio_backed_file_without_local_path(monkeypatch):
+    monkeypatch.setenv("QA_ORIGINAL_MINIO_ONLY", "true")
+    minio_only = ConversationFileRow(
+        file_id=67,
+        file_type="pdf",
+        file_name="minio-only.pdf",
+        local_path="",
+        storage_ref="minio://agentcode/uploads/minio-only.pdf",
+    )
+
+    decision = resolver.resolve(
+        question="请总结这篇文献",
+        pdf_context={"selected_ids": [67]},
+        available_files=[minio_only],
+    )
+
+    assert decision.route == "pdf_qa"
+    assert decision.execution_files[0]["storage_ref"] == "minio://agentcode/uploads/minio-only.pdf"
+    assert decision.execution_files[0]["local_path"] == ""
+
+
+def test_gateway_records_storage_ref_missing_metric(monkeypatch):
+    monkeypatch.setenv("QA_ORIGINAL_MINIO_ONLY", "true")
+    metrics = _FakeMetrics()
+    resolver = FileContextResolver(metrics=metrics)
+    local_only = ConversationFileRow(
+        file_id=68,
+        file_type="pdf",
+        file_name="local-only.pdf",
+        local_path="/tmp/local-only.pdf",
+        storage_ref="",
+    )
+
+    decision = resolver.resolve(
+        question="请总结这篇文献",
+        pdf_context={"selected_ids": [68]},
+        available_files=[local_only],
+    )
+
+    assert decision.status_error == "storage_ref_missing"
+    assert metrics.count(
+        "qa_original_storage_ref_missing_total",
+        service="gateway",
+        source_family="upload_pdf",
+        result="blocked",
+        reason="storage_ref_missing",
+    ) == 1
 
 
 def test_doi_lookup_with_singular_literature_word_stays_kb_with_available_files():
@@ -306,8 +403,22 @@ def test_explicit_ref_uses_display_order_reference_universe():
         question="#1",
         pdf_context={"all_available_ids": [11, 22]},
         available_files=[
-            ConversationFileRow(file_id=11, file_type="pdf", file_name="b.pdf", display_no=2, file_no=2),
-            ConversationFileRow(file_id=22, file_type="pdf", file_name="a.pdf", display_no=1, file_no=1),
+            ConversationFileRow(
+                file_id=11,
+                file_type="pdf",
+                file_name="b.pdf",
+                display_no=2,
+                file_no=2,
+                storage_ref="minio://agentcode/uploads/b.pdf",
+            ),
+            ConversationFileRow(
+                file_id=22,
+                file_type="pdf",
+                file_name="a.pdf",
+                display_no=1,
+                file_no=1,
+                storage_ref="minio://agentcode/uploads/a.pdf",
+            ),
         ],
     )
 
@@ -320,9 +431,30 @@ def test_ordinal_ref_uses_display_order_reference_universe():
         question="前 2 个文件",
         pdf_context={"all_available_ids": [11, 22, 33]},
         available_files=[
-            ConversationFileRow(file_id=11, file_type="pdf", file_name="b.pdf", display_no=3, file_no=3),
-            ConversationFileRow(file_id=22, file_type="pdf", file_name="a.pdf", display_no=1, file_no=1),
-            ConversationFileRow(file_id=33, file_type="pdf", file_name="c.pdf", display_no=2, file_no=2),
+            ConversationFileRow(
+                file_id=11,
+                file_type="pdf",
+                file_name="b.pdf",
+                display_no=3,
+                file_no=3,
+                storage_ref="minio://agentcode/uploads/b.pdf",
+            ),
+            ConversationFileRow(
+                file_id=22,
+                file_type="pdf",
+                file_name="a.pdf",
+                display_no=1,
+                file_no=1,
+                storage_ref="minio://agentcode/uploads/a.pdf",
+            ),
+            ConversationFileRow(
+                file_id=33,
+                file_type="pdf",
+                file_name="c.pdf",
+                display_no=2,
+                file_no=2,
+                storage_ref="minio://agentcode/uploads/c.pdf",
+            ),
         ],
     )
 
@@ -405,6 +537,7 @@ def test_multiple_table_candidates_include_candidate_summary_in_clarification():
         file_id=34,
         file_type="excel",
         file_name="cells-2.xlsx",
+        storage_ref="minio://agentcode/uploads/cells-2.xlsx",
         file_meta={"columns": ["温度", "电压"]},
     )
     decision = resolver.resolve(

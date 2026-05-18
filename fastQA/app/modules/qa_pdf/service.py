@@ -234,7 +234,7 @@ class PdfQaService:
                 question,
                 "\n".join(merged_parts),
                 stream=True,
-                first_token_timeout_sec=_resolve_multi_pdf_first_token_timeout(),
+                first_token_timeout_sec=None,
                 is_cancelled=is_cancelled,
             )
         except TypeError:
@@ -416,16 +416,3 @@ class PdfQaService:
 
 
 pdf_qa_service = PdfQaService()
-
-
-def _resolve_multi_pdf_first_token_timeout() -> float:
-    raw = str(os.getenv("UPLOAD_QA_FIRST_TOKEN_TIMEOUT_SEC", "25") or "25").strip()
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        value = 25.0
-    if value < 1.0:
-        return 1.0
-    if value > 180.0:
-        return 180.0
-    return value

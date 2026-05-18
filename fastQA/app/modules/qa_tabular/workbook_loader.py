@@ -8,6 +8,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from app.modules.storage.object_reader import ObjectReader
 from app.modules.storage.uploaded_file_storage import materialize_uploaded_file
 
 
@@ -62,6 +63,33 @@ def _stable_json(value: Any) -> str:
 
 
 def build_file_signature(file_item: dict) -> str:
+    storage_ref = str(file_item.get("storage_ref") or "").strip()
+    if storage_ref.startswith("minio://"):
+        stat_bits = "missing"
+        try:
+            stat = ObjectReader().stat(storage_ref)
+            stat_bits = _stable_json(
+                {
+                    "bucket": stat.bucket,
+                    "object_name": stat.object_name,
+                    "etag": stat.etag,
+                    "size": stat.size,
+                    "sha256": stat.sha256,
+                }
+            )
+        except Exception:
+            pass
+        raw = _stable_json(
+            {
+                "file_id": _safe_int(file_item.get("file_id"), 0),
+                "file_name": str(file_item.get("file_name") or ""),
+                "storage_ref": storage_ref,
+                "status_updated_at": str(file_item.get("status_updated_at") or ""),
+                "stat": stat_bits,
+            }
+        )
+        return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
     local_path = str(file_item.get("local_path") or "").strip()
     stat_bits = "missing"
     if local_path:
@@ -185,13 +213,24 @@ def _load_excel(local_path: Path) -> list[dict[str, Any]]:
 
 
 def load_workbook(file_item: dict) -> dict[str, Any]:
-    resolved_file_item = materialize_uploaded_file(file_item=file_item)
-    local_path_text = str(resolved_file_item.get("local_path") or "").strip()
-    if not local_path_text:
-        raise RuntimeError("missing readable source for uploaded table")
-    local_path = Path(local_path_text)
+    resolved_file_item = dict(file_item or {})
+    storage_ref = str(resolved_file_item.get("storage_ref") or "").strip()
+    public_local_path = ""
+    if storage_ref.startswith("minio://"):
+        suffix = Path(str(resolved_file_item.get("file_name") or "")).suffix
+        if not suffix:
+            suffix = Path(storage_ref.rsplit("/", 1)[-1]).suffix
+        local_path = ObjectReader().materialize_temp(storage_ref, suffix=suffix or ".bin")
+    else:
+        resolved_file_item = materialize_uploaded_file(file_item=file_item)
+        local_path_text = str(resolved_file_item.get("local_path") or "").strip()
+        if not local_path_text:
+            raise RuntimeError("missing readable source for uploaded table")
+        local_path = Path(local_path_text)
+        public_local_path = str(local_path)
+
     if not local_path.exists() or not local_path.is_file():
-        raise RuntimeError(f"table file not found: {local_path_text}")
+        raise RuntimeError(f"table file not found: {local_path}")
 
     suffix = local_path.suffix.lower()
     if suffix == ".csv":
@@ -204,7 +243,7 @@ def load_workbook(file_item: dict) -> dict[str, Any]:
     return {
         "file_id": _safe_int(resolved_file_item.get("file_id"), 0),
         "file_name": str(resolved_file_item.get("file_name") or local_path.name),
-        "local_path": str(local_path),
+        "local_path": public_local_path,
         "storage_ref": str(resolved_file_item.get("storage_ref") or ""),
         "signature": build_file_signature(resolved_file_item),
         "sheets": sheets,
