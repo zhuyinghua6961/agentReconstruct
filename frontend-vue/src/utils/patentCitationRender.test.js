@@ -60,7 +60,7 @@ test('readable patent citations are linkified in new-path rendering', async () =
   }
 })
 
-test('plain inline patent ids are linkified and duplicate trailing patent citations are removed', async () => {
+test('plain inline patent ids stay readable while later duplicate patent citations remain clickable', async () => {
   const { formatAnswer, formatStreamingAnswer } = await loadRenderUtils()
   const input = [
     '双颗粒级配：CN109192948B 使用球形小颗粒填充大颗粒空隙，压实密度达 2.69–2.72 g/cm³（实施例1–3），同时1C放电比容量为149–150 mAh/g (CN109192948B)。',
@@ -78,9 +78,31 @@ test('plain inline patent ids are linkified and duplicate trailing patent citati
     assert.equal((html.match(/data-patent-id="CN109192948B"/g) || []).length, 1)
     assert.equal((html.match(/data-patent-id="CN113562714A"/g) || []).length, 1)
     assert.equal((html.match(/data-patent-id="CN115863630B"/g) || []).length, 1)
-    assert.doesNotMatch(html, /\(.*CN109192948B.*\)/)
-    assert.doesNotMatch(html, /\(.*CN113562714A.*\)/)
-    assert.doesNotMatch(html, /\(.*CN115863630B.*\)/)
+    assert.match(html, /双颗粒级配：CN109192948B 使用球形小颗粒/)
+    assert.match(html, /多粒度混合：CN113562714A 将大颗粒磷酸铁/)
+    assert.match(html, /数学模型优化：CN115863630B 通过公式/)
+    assert.match(html, /\(<a href="#" class="doi-link patent-link" data-patent-id="CN109192948B">CN109192948B<\/a>\)。/)
+    assert.match(html, /\(<a href="#" class="doi-link patent-link" data-patent-id="CN113562714A">CN113562714A<\/a>\)。/)
+    assert.match(html, /\(<a href="#" class="doi-link patent-link" data-patent-id="CN115863630B">CN115863630B<\/a>\)。/)
+    assert.doesNotMatch(html, /双颗粒级配：<a href="#" class="doi-link patent-link" data-patent-id="CN109192948B"/)
+  }
+})
+
+test('inline patent ids stay plain when same-patent citation appears before the paragraph continues', async () => {
+  const { formatAnswer, formatStreamingAnswer } = await loadRenderUtils()
+  const input = '精确调控粒度分布是提升压实密度的关键。 CN118156497A要求粒径<1 μm的颗粒体积占比50–75%，粒径≥3 μm的颗粒占比5–25%，中间粒径（1–3 μm）填充孔隙。实施例显示，当<1 μm占比52.15%、≥3 μm占比20.24%时，压实密度为2.544 g/cm³，且3C/0.1C容量保持率0.82。若分布过宽（如<1 μm占比93.35%），压实密度降至2.387 g/cm³，倍率性能为10（3C/0.1C=0.58） (CN118156497A)。球形化工艺也可改善堆积密度，CN101877401A通过共沉淀法制备纳米级一次颗粒，与碳粉混合后喷雾干燥形成球形二次颗粒，烧结后振实密度显著提升 (CN101877401A)；CN113086959B结合大粒径二次球形颗粒。'
+
+  const finalHtml = formatAnswer(input)
+  const streamingHtml = formatStreamingAnswer(input)
+
+  for (const html of [finalHtml, streamingHtml]) {
+    assert.equal((html.match(/data-patent-id="CN118156497A"/g) || []).length, 1)
+    assert.equal((html.match(/data-patent-id="CN101877401A"/g) || []).length, 1)
+    assert.equal((html.match(/data-patent-id="CN113086959B"/g) || []).length, 1)
+    assert.match(html, /CN118156497A要求粒径&lt;1 μm/)
+    assert.match(html, /CN101877401A通过共沉淀法/)
+    assert.match(html, /\(<a href="#" class="doi-link patent-link" data-patent-id="CN118156497A">CN118156497A<\/a>\)。球形化工艺/)
+    assert.match(html, /\(<a href="#" class="doi-link patent-link" data-patent-id="CN101877401A">CN101877401A<\/a>\)；<a href="#" class="doi-link patent-link" data-patent-id="CN113086959B">CN113086959B<\/a>/)
   }
 })
 
@@ -182,7 +204,7 @@ test('bare patent ids inside inline code are linkified while code fences stay pr
   assert.match(formatAnswer(fencedCodeInput), /<pre><code>CN109192948B[\s\S]*<\/code><\/pre>/)
 })
 
-test('duplicate trailing patent citation is removed when the earlier patent id appears as a backticked patent id', async () => {
+test('earlier backticked patent id stays plain when a later duplicate patent citation exists', async () => {
   const { formatAnswer, formatStreamingAnswer } = await loadRenderUtils()
   const input = '示例：`CN109192948B` (CN109192948B)。'
 
@@ -191,9 +213,9 @@ test('duplicate trailing patent citation is removed when the earlier patent id a
 
   for (const html of [finalHtml, streamingHtml]) {
     assert.doesNotMatch(html, /<code>CN109192948B<\/code>/)
-    assert.match(html, /data-patent-id="CN109192948B"/)
+    assert.match(html, /示例：CN109192948B/)
     assert.equal((html.match(/data-patent-id="CN109192948B"/g) || []).length, 1)
-    assert.doesNotMatch(html, /\(<a href="#" class="doi-link patent-link" data-patent-id="CN109192948B">CN109192948B<\/a>\)。/)
+    assert.match(html, /\(<a href="#" class="doi-link patent-link" data-patent-id="CN109192948B">CN109192948B<\/a>\)。/)
   }
 })
 
