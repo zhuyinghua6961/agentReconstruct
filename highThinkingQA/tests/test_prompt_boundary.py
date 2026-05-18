@@ -241,8 +241,26 @@ def test_highthinking_answer_summary_experiment_appends_summary_block_when_enabl
     )
 
     assert "\n\n## 总结\n\n- " in answer
+    summary_block = answer.split("\n\n## 总结\n\n", 1)[1]
+    assert "[10." not in summary_block
     assert meta["generated"] is True
     assert meta["format"] == "bullet_fallback"
+    assert meta["has_citation"] is False
+
+
+def test_highthinking_answer_summary_experiment_removes_citations_from_existing_summary_only():
+    answer, meta = apply_thinking_answer_summary_experiment(
+        "## 分析\n\n厚电极在高倍率下首先暴露的是液相传输受限问题 [10.1/body, Results]。\n\n## 总结\n\n- 液相传输受限会放大浓差极化 [10.1/summary, Results]。\n- 需要同步优化孔结构和润湿条件 [10.2/summary, Discussion]。",
+        enabled=True,
+    )
+
+    body, summary_block = answer.split("\n\n## 总结\n\n", 1)
+    assert "[10.1/body, Results]" in body
+    assert "[10." not in summary_block
+    assert "液相传输受限会放大浓差极化。" in summary_block
+    assert meta["generated"] is True
+    assert meta["format"] == "existing"
+    assert meta["has_citation"] is False
 
 
 def test_highthinking_synthesis_prompt_includes_summary_instruction_when_enabled(monkeypatch):

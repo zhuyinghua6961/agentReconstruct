@@ -915,8 +915,26 @@ def test_fast_answer_summary_experiment_appends_summary_block_when_enabled():
 
     assert answer.startswith("## 主结论")
     assert "\n\n## 总结\n\n- " in answer
+    summary_block = answer.split("\n\n## 总结\n\n", 1)[1]
+    assert "(doi=" not in summary_block
     assert meta["generated"] is True
     assert meta["format"] == "bullet_fallback"
+    assert meta["has_citation"] is False
+
+
+def test_fast_answer_summary_experiment_removes_citations_from_existing_summary_only():
+    answer, meta = apply_fast_answer_summary_experiment(
+        "## 主结论\n\n厚电极在高电流密度下容易形成更大的液相锂盐浓度梯度 (doi=10.1/body)。\n\n## 总结\n\n- 液相传输受限会放大浓差极化 (doi=10.1/summary)。\n- 需要同步优化孔结构和润湿条件 (doi=10.2/summary)。",
+        enabled=True,
+    )
+
+    body, summary_block = answer.split("\n\n## 总结\n\n", 1)
+    assert "(doi=10.1/body)" in body
+    assert "(doi=" not in summary_block
+    assert "液相传输受限会放大浓差极化。" in summary_block
+    assert meta["generated"] is True
+    assert meta["format"] == "existing"
+    assert meta["has_citation"] is False
 
 
 def test_fast_answer_summary_experiment_skips_short_answer():

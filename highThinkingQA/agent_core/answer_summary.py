@@ -29,8 +29,8 @@ def build_summary_instruction(*, enabled: bool | None = None) -> str:
         return ''
     return (
         '\n\nAdditional requirement: append a final `## 总结` section at the end of the answer. '
-        'Use 2-4 concise sentences or 3-5 bullets. Do not introduce any new evidence or new citations in the summary; '
-        'only compress conclusions already stated in the main body.'
+        'Use 2-4 concise sentences or 3-5 bullets. Do not include citations, DOI markers, or literature reference tags '
+        'inside the summary; only compress conclusions already stated in the main body.'
     )
 
 
@@ -42,6 +42,14 @@ def _strip_markdown_prefix(line: str) -> str:
     value = re.sub(r'^>\s*', '', value)
     value = value.strip('` ').strip()
     return value
+
+
+def _strip_summary_citations(value: str) -> str:
+    cleaned = _DOI_RE.sub('', str(value or ''))
+    cleaned = re.sub(r'[ \t]+([。！？!?，,；;：:.])', r'\1', cleaned)
+    cleaned = re.sub(r'[ \t]+\n', '\n', cleaned)
+    cleaned = re.sub(r'[ \t]{2,}', ' ', cleaned)
+    return cleaned
 
 
 def _collect_sentences(answer: str) -> list[str]:
@@ -64,7 +72,7 @@ def _collect_sentences(answer: str) -> list[str]:
             sentence = ' '.join(match.group(0).split()).strip()
             if len(sentence) < 12:
                 continue
-            normalized = _DOI_RE.sub('', sentence).strip().lower()
+            normalized = _strip_summary_citations(sentence).strip().lower()
             if not normalized or normalized in seen:
                 continue
             seen.add(normalized)
@@ -89,12 +97,15 @@ def apply_answer_summary_experiment(answer: str, *, enabled: bool | None = None)
     if not text:
         meta['skipped_reason'] = 'empty_answer'
         return text, meta
-    if _SUMMARY_HEADING_RE.search(text):
+    summary_match = _SUMMARY_HEADING_RE.search(text)
+    if summary_match:
+        summary_body = _strip_summary_citations(text[summary_match.end():])
+        summarized = f'{text[:summary_match.end()]}{summary_body}'.strip()
         meta['generated'] = True
         meta['format'] = 'existing'
-        meta['length'] = len(text)
-        meta['has_citation'] = bool(_DOI_RE.search(text))
-        return text, meta
+        meta['length'] = len(summary_body.strip())
+        meta['has_citation'] = bool(_DOI_RE.search(summary_body))
+        return summarized, meta
 
     sentences = _collect_sentences(text)
     if len(text) < 160 or len(sentences) <= 2:
@@ -106,10 +117,13 @@ def apply_answer_summary_experiment(answer: str, *, enabled: bool | None = None)
     for sentence in sentences:
         if len(selected) >= 3:
             break
-        sentence_len = len(sentence)
+        cleaned_sentence = _strip_summary_citations(sentence).strip()
+        if not cleaned_sentence:
+            continue
+        sentence_len = len(cleaned_sentence)
         if total_chars + sentence_len > 280 and selected:
             break
-        selected.append(sentence)
+        selected.append(cleaned_sentence)
         total_chars += sentence_len
 
     if len(selected) < 2:
