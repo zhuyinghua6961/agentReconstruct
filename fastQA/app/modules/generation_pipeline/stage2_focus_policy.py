@@ -154,14 +154,11 @@ def expand_focus_evidence_terms(
         for g in group:
             _add(g)
 
-    # Vague 「高压实型」questions align with powder tap-density literature; do not require
-    # the user to spell「振实密度」before we add tapping-side lexical hints.
+    # 「高压实型」类等未写清指标时：显式拉上粉体侧与电极两侧的代表词，
+    # 避免把整条问题默认当成仅振实／tap-density 文献轴（旧逻辑会灌注整条 tappingAxis 词表）。
     if intent == "ambiguous":
-        for kind, group in _FOCUS_SYNONYM_GROUPS:
-            if kind != "tapping_axis":
-                continue
-            for g in group:
-                _add(g)
+        for g in ("振实密度", "压实密度", "极片压实", "极片辊压"):
+            _add(g)
 
     return out
 

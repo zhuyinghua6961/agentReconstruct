@@ -12,6 +12,7 @@ from app.modules.generation_pipeline.stage2_evidence_merge import maybe_merge_st
 from app.modules.generation_pipeline.stage2_focus_policy import rerank_dois_for_focus_evidence
 from app.modules.graph_kb.models import GraphRagPayload
 from app.modules.qa_cache.metrics import increment_cache_metric
+from app.modules.qa_cache.pipeline_cache_flags import resolve_qa_pipeline_cache_redis
 from app.modules.qa_cache.singleflight import run_singleflight
 from app.modules.qa_cache.stage1_cache import (
     build_stage1_lock_key,
@@ -279,6 +280,35 @@ class GenerationPipelineOrchestrator:
         return result
 
     @staticmethod
+    def _intent_step_from_stage1(stage1_result: dict[str, Any]) -> dict[str, Any] | None:
+        intent_result = stage1_result.get("intent_detect") if isinstance(stage1_result, dict) else None
+        if not isinstance(intent_result, dict):
+            return None
+        intent_tag = str(intent_result.get("intent_tag") or "generic").strip() or "generic"
+        ok = bool(intent_result.get("ok"))
+        data: dict[str, Any] = {
+            "intent_tag": intent_tag,
+            "ok": ok,
+        }
+        elapsed_ms = intent_result.get("elapsed_ms")
+        if isinstance(elapsed_ms, (int, float)) and elapsed_ms >= 0:
+            data["elapsed_ms"] = round(float(elapsed_ms), 3)
+        model = str(intent_result.get("model") or "").strip()
+        if model:
+            data["model"] = model
+        error = str(intent_result.get("error") or "").strip()
+        return {
+            "type": "step",
+            "step": "intent_detect",
+            "title": "意图识别",
+            "message": f"意图识别：{intent_tag}",
+            "detail": "快速判断问题意图，辅助阶段一规划",
+            "status": "success" if ok else "error",
+            "data": data,
+            **({"error": error} if error else {}),
+        }
+
+    @staticmethod
     def _supports_kwarg(target: Callable[..., Any], name: str) -> bool:
         try:
             signature = inspect.signature(target)
@@ -364,6 +394,7 @@ class GenerationPipelineOrchestrator:
         graph_evidence: GraphRagPayload | None = None,
         should_cancel: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
+        redis_service = resolve_qa_pipeline_cache_redis(redis_service)
         cached = get_cached_stage1_result(
             redis_service=redis_service,
             runtime=runtime,
@@ -435,6 +466,7 @@ class GenerationPipelineOrchestrator:
         comparison_plan: dict[str, Any] | None = None,
         query_focus_terms: list[str] | None = None,
     ) -> dict[str, Any]:
+        redis_service = resolve_qa_pipeline_cache_redis(redis_service)
         cached = get_cached_stage2_result(
             redis_service=redis_service,
             runtime=runtime,
@@ -515,6 +547,7 @@ class GenerationPipelineOrchestrator:
         redis_service: RedisService | None,
         should_cancel: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
+        redis_service = resolve_qa_pipeline_cache_redis(redis_service)
         cached = get_cached_stage25_result(
             redis_service=redis_service,
             runtime=runtime,
@@ -636,6 +669,7 @@ class GenerationPipelineOrchestrator:
         max_chunks_per_doi: int,
         should_cancel: Callable[[], bool] | None,
     ) -> dict[str, list[dict[str, Any]]]:
+        redis_service = resolve_qa_pipeline_cache_redis(redis_service)
         cached = get_cached_stage3_result(
             redis_service=redis_service,
             dois=dois,
@@ -1074,6 +1108,9 @@ class GenerationPipelineOrchestrator:
         if not stage1_result.get("success"):
             yield sse_event({"type": "error", "error": stage1_result.get("error", "阶段一失败")})
             return
+        intent_step = self._intent_step_from_stage1(stage1_result)
+        if intent_step:
+            yield sse_event(intent_step)
 
         deep_answer = str(stage1_result.get("deep_answer") or "")
         answer_plan = stage1_result.get("answer_plan") if isinstance(stage1_result.get("answer_plan"), dict) else {}

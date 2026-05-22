@@ -231,3 +231,33 @@ Stage4 结束后还会做：
 4. Stage4 要求强引用、强 DOI、强机理解释、强定量信息，本质上仍是 prompt discipline 驱动，而不是结构化强约束生成。
 5. conversation context 已接入 Stage1 和 Stage4，但“如何既承接上下文又不污染证据优先级”仍主要依赖提示词，而不是硬边界。
 
+### 11.1 Stage2 对比支路 embedding 去 peer（可选）
+
+| 环境变量 | 默认 | 含义 |
+| --- | --- | --- |
+| `QA_STAGE2_COMPARISON_PEER_STRIP_ENABLED` | `true` | 对比检索时从 embedding 的 `must_include` 中剔除**其它对比对象**的标签/别名，避免各路 query 完全一致；设为 `false` 关闭 |
+
+### 11.2 生成流水线 Redis 缓存（Stage1–3）
+
+`GenerationPipelineOrchestrator` 在 Stage1、Stage2、Stage2.5、Stage3 会按 key 读写 Redis，并用 `run_singleflight` 做分布式去重。**不影响** Redis 的其它用途，仅对上述阶段短路。
+
+| 环境变量 | 默认 | 含义 |
+| --- | --- | --- |
+| `QA_PIPELINE_CACHE_ENABLED` | `true` | 设为 `0`/`false`/`off` 时关闭上述缓存读、写及 singleflight **锁键**（每次请求重头算）；用于 A/B 或调试意图模型 |
+
+## 12. Pre-Stage1 意图快筛（可选）
+
+在 `run_stage1_pre_answer_and_planning()` 中，可在主 Stage1 调用前先跑一次**轻量 chat 意图分类**：`build_intent_detect_system_prompt()` 作为 **system**，**user 仅为当前用户问题原文**。模型从若干固定英文 **tag 键名** 中选一个输出（`temperature=0`），再在 Stage1 user 侧注入「快速意图识别」段落。**默认意图模型 ID 为 `qwen3-8b`**（以你网关登记名为准）；统一配置放在 `resource/config/shared/model-endpoints.shared.env` 和对应的 secret env 中。
+
+| 环境变量 | 默认 | 含义 |
+| --- | --- | --- |
+| `INTENT_MODEL_ENABLED` | `false` | 设为 `1` 或 `true` 时开启；旧 `QA_INTENT_DETECT_ENABLED` 仍兼容 |
+| `INTENT_MODEL` | `qwen3-8b` | 传给 `chat.completions` 的 `model`；旧 `QA_INTENT_DETECT_MODEL` 仍兼容 |
+| `INTENT_MODEL_BASE_URL` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | 轻量意图模型 OpenAI-compatible endpoint |
+| `INTENT_MODEL_API_KEY` | 空 | 放在 `model-endpoints.secret.env`；为空时复用主 LLM client |
+| `INTENT_MODEL_TIMEOUT_SECONDS` | `30` | 独立 intent endpoint 请求超时时间 |
+| `QA_INTENT_DETECT_OVERRIDE_FOCUS` | `0` | 设为 `true` 时：若快筛为 `mechanism_analysis` 且 Stage1 归一化后为 `synthesis_preparation`/`generic`，将 `question_focus.focus_type` 纠偏为 `mechanism_analysis` |
+
+与主 Stage1 共用同一 `client`（`compatible-mode/v1`）与 API Key。失败时降级为 `generic`，不阻塞 Stage1。
+
+相关实现：`intent_detect.py`。

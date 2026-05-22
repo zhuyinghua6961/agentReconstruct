@@ -38,6 +38,30 @@ def test_build_comparison_plan_extracts_method_objects():
     assert "sol-gel" in plan["objects"][2]["aliases"]
 
 
+def test_build_comparison_plan_uses_stage1_question_focus_axes():
+    plan = build_comparison_plan(
+        "固相法、水热法制备 LFP 的反应机理有什么区别？",
+        stage1_result={
+            "question_focus": {
+                "focus_type": "mechanism_analysis",
+                "focus_summary": "固相与水热的反应路径差异",
+                "evidence_axes": ["反应机理", "成核长大", "Fe/P 迁移"],
+                "secondary_axes": ["杂质相"],
+                "confidence": "high",
+            }
+        },
+        retrieval_claims=[],
+    )
+
+    assert plan["enabled"] is True
+    assert plan["comparison_focus_type"] == "mechanism_analysis"
+    assert plan["dimensions"][:3] == ["反应机理", "成核长大", "Fe/P 迁移"]
+    claims = build_retrieval_claims_from_comparison_plan(plan)
+    assert len(claims) == 2
+    assert all("反应机理" in c["claim"] for c in claims)
+    assert any("固相法" in c["comparison_object"] for c in claims)
+
+
 def test_build_retrieval_claims_from_comparison_plan_locks_each_object():
     plan = build_comparison_plan(
         "葡萄糖、蔗糖、柠檬酸作为碳源或还原剂各适用什么场景？",

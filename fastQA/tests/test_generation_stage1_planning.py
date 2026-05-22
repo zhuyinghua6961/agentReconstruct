@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 from types import SimpleNamespace
 
 from app.modules.generation_pipeline.stage1_planning import (
@@ -63,6 +64,13 @@ class _CaptureLogger(_Logger):
 
     def warning(self, msg, *args, **kwargs):
         self.records.append(("warning", msg % args if args else msg))
+
+
+@pytest.fixture(autouse=True)
+def _disable_intent_detect_for_stage1_unit_tests(monkeypatch):
+    monkeypatch.setenv("INTENT_MODEL_ENABLED", "0")
+    monkeypatch.delenv("QA_INTENT_DETECT_ENABLED", raising=False)
+    monkeypatch.delenv("INTENT_MODEL_API_KEY", raising=False)
 
 
 def test_stage1_planning_parses_json_and_normalizes_claims():
@@ -382,6 +390,36 @@ def test_stage1_planning_propagates_pool_timeout_without_swallowing():
     assert client.calls[0]["response_format"] == {"type": "json_object"}
 
 
+def test_stage1_optional_retrieval_claims_log(monkeypatch):
+    monkeypatch.setenv("QA_STAGE1_LOG_RETRIEVAL_CLAIMS", "1")
+    monkeypatch.setenv("QA_STAGE1_LOG_CLAIM_MAX_CHARS", "200")
+    client = _FakeClient(
+        """{
+          "deep_answer": "draft",
+          "retrieval_claims": [
+            {
+              "claim": "断言 A 用于检索",
+              "keywords": ["磷酸铁锂", "固相"],
+              "preferred_sections": ["methods"]
+            }
+          ]
+        }"""
+    )
+    logger = _CaptureLogger()
+    result = run_stage1_pre_answer_and_planning(
+        user_question="固态电池相关",
+        stage1_prompt="prompt",
+        vector_db_context="",
+        client=client,
+        model="gpt-test",
+        logger=logger,
+    )
+    assert result["success"] is True
+    messages = [message for _level, message in logger.records]
+    assert any("阶段一 retrieval_claims 明细" in message for message in messages)
+    assert any("[1/1] claim=" in message and "断言 A 用于检索" in message for message in messages)
+
+
 def test_stage1_planning_logs_prompt_and_llm_boundaries():
     client = _FakeClient('{"deep_answer":"answer","retrieval_claims":[]}')
     logger = _CaptureLogger()
@@ -431,7 +469,7 @@ def test_stage1_planning_normalizes_question_focus_and_effective_terms():
         }'''
     )
     result = run_stage1_pre_answer_and_planning(
-        user_question="制备高压实LFP粉末",
+        user_question="制备可用于喷雾干燥的磷酸铁锂前驱体",
         stage1_prompt="prompt",
         vector_db_context="",
         client=client,
@@ -444,3 +482,66 @@ def test_stage1_planning_normalizes_question_focus_and_effective_terms():
     assert qf_obj["confidence"] == "medium"
     assert qf_obj["evidence_axes"] == ["喷雾干燥"]
     assert result["effective_query_focus_terms"] == ["高压实型", "喷雾干燥"]
+
+
+def test_stage1_density_disambiguation_strips_singleton_metrics_when_vague_dense():
+    """ambiguous 「高压实型」题干不得把单一振实/压实短语钉进 Stage2 must-include."""
+
+    payload = """{
+          "deep_answer": "draft",
+          "query_focus_terms": ["高压实型", "振实密度", "球形颗粒"],
+          "question_focus": {
+            "focus_type": "powder_dense_morphology",
+            "focus_summary": "summary",
+            "evidence_axes": ["振实密度", "喷雾干燥"],
+            "secondary_axes": [],
+            "confidence": "high"
+          },
+          "retrieval_claims": []
+        }"""
+    client = _FakeClient(payload)
+    result = run_stage1_pre_answer_and_planning(
+        user_question="如何制备高压实型磷酸铁锂材料",
+        stage1_prompt="prompt",
+        vector_db_context="",
+        client=client,
+        model="gpt-test",
+        logger=_Logger(),
+    )
+    assert result["success"] is True
+    assert "振实密度" not in (result.get("query_focus_terms") or [])
+    assert result["question_focus"]["focus_type"] == "density_metric_ambiguity"
+    axes = result["question_focus"]["evidence_axes"]
+    assert isinstance(axes, list)
+    assert "振实密度" not in axes
+    assert "喷雾干燥" in axes
+    assert "【指标辨析】" in result["question_focus"]["focus_summary"]
+
+
+def test_stage1_density_disambiguation_keeps_explicit_tap_question_terms():
+    client = _FakeClient(
+        """{
+          "deep_answer":"d",
+          "query_focus_terms":["振实密度","球形颗粒"],
+          "question_focus":{
+             "focus_type":"powder_dense_morphology",
+             "focus_summary":"tap",
+             "evidence_axes":["振实密度"],
+             "secondary_axes":[],
+             "confidence":"high"
+          },
+          "retrieval_claims":[]
+        }"""
+    )
+    result = run_stage1_pre_answer_and_planning(
+        user_question="怎样提高磷酸铁锂粉末的振实密度？",
+        stage1_prompt="p",
+        vector_db_context="",
+        client=client,
+        model="gpt-test",
+        logger=_Logger(),
+    )
+    assert result["success"] is True
+    assert "振实密度" in (result.get("query_focus_terms") or [])
+    assert result["question_focus"]["evidence_axes"] == ["振实密度"]
+    assert result["question_focus"]["focus_type"] == "powder_dense_morphology"

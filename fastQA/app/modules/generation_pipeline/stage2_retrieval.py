@@ -351,6 +351,70 @@ def apply_stage2_query_constraints(
     return constrained, details
 
 
+def _comparison_plan_object_rows(comparison_plan: dict[str, Any] | None) -> list[tuple[str, list[str]]]:
+    """Each entry is (label, alias_strings) for one comparison object."""
+    if not isinstance(comparison_plan, dict) or not comparison_plan.get("enabled"):
+        return []
+    rows: list[tuple[str, list[str]]] = []
+    for item in comparison_plan.get("objects") or []:
+        if not isinstance(item, dict):
+            continue
+        lab = str(item.get("label") or "").strip()
+        if not lab:
+            continue
+        aliases = [str(x).strip() for x in list(item.get("aliases") or []) if str(x).strip()]
+        rows.append((lab, aliases))
+    return rows
+
+
+def _term_references_peer_comparison_object(
+    term: str,
+    *,
+    peers: list[tuple[str, list[str]]],
+) -> bool:
+    """True if `term` mentions another route's label/alias (peers), substring match."""
+    t = str(term or "")
+    if not t.strip():
+        return False
+    tl = t.lower()
+    for lab, aliases in peers:
+        if len(lab) >= 2 and lab in t:
+            return True
+        for a in aliases:
+            a = str(a or "").strip()
+            if len(a) >= 3 and a.lower() in tl:
+                return True
+    return False
+
+
+def _strip_peer_comparison_terms(
+    terms: list[str],
+    *,
+    current_object: str,
+    comparison_plan: dict[str, Any] | None,
+) -> tuple[list[str], list[str]]:
+    """Remove tokens that reference **other** comparison objects' names/aliases (not the current one)."""
+    current = str(current_object or "").strip()
+    rows = _comparison_plan_object_rows(comparison_plan)
+    labels = {lab for lab, _ in rows}
+    if not current or not rows or current not in labels:
+        return list(terms), []
+    peers = [(lab, als) for lab, als in rows if lab != current]
+    if not peers:
+        return list(terms), []
+    kept: list[str] = []
+    dropped: list[str] = []
+    for term in terms:
+        s = str(term or "").strip()
+        if not s:
+            continue
+        if _term_references_peer_comparison_object(s, peers=peers):
+            dropped.append(s)
+            continue
+        kept.append(s)
+    return kept, dropped
+
+
 def merge_graph_hints_into_retrieval(
     *,
     query: str,
@@ -1002,13 +1066,52 @@ def run_stage2_targeted_retrieval(
             )
 
         must_include: List[str] = []
-        must_include.extend(str(t) for t in focus_for_injection if str(t or "").strip())
-        must_include.extend(
-            str(x) for x in (query_guardrail_details.get("injected_keywords") or []) if str(x or "").strip()
-        )
-        must_include.extend(
-            str(x) for x in (query_guardrail_details.get("injected_entities") or []) if str(x or "").strip()
-        )
+        focus_slice = [str(t).strip() for t in focus_for_injection if str(t or "").strip()]
+        inj_kw = [str(x).strip() for x in (query_guardrail_details.get("injected_keywords") or []) if str(x or "").strip()]
+        inj_ent = [str(x).strip() for x in (query_guardrail_details.get("injected_entities") or []) if str(x or "").strip()]
+
+        if (
+            env_bool("QA_STAGE2_COMPARISON_PEER_STRIP_ENABLED", True)
+            and comparison_group
+            and comparison_object
+            and comparison_enabled
+        ):
+            plan_ref = comparison_plan if isinstance(comparison_plan, dict) else None
+            focus_slice, df = _strip_peer_comparison_terms(
+                focus_slice,
+                current_object=comparison_object,
+                comparison_plan=plan_ref,
+            )
+            inj_kw, di = _strip_peer_comparison_terms(
+                inj_kw,
+                current_object=comparison_object,
+                comparison_plan=plan_ref,
+            )
+            inj_ent, de = _strip_peer_comparison_terms(
+                inj_ent,
+                current_object=comparison_object,
+                comparison_plan=plan_ref,
+            )
+            if df or di or de:
+                query_guardrail_details["comparison_peer_strip"] = {
+                    "current_object": comparison_object,
+                    "dropped_focus_terms": df,
+                    "dropped_injected_keywords": di,
+                    "dropped_injected_entities": de,
+                }
+                logger.info(
+                    "[%s/%s] comparison peer strip current=%s dropped_focus=%s dropped_inj_kw=%s dropped_ent=%s",
+                    index,
+                    len(claims),
+                    comparison_object,
+                    df,
+                    di,
+                    de,
+                )
+
+        must_include.extend(focus_slice)
+        must_include.extend(inj_kw)
+        must_include.extend(inj_ent)
         lock_extra = query_guardrail_details.get("comparison_object_lock")
         if isinstance(lock_extra, list):
             must_include.extend(str(x) for x in lock_extra if str(x or "").strip())

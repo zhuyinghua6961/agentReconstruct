@@ -92,6 +92,44 @@ def test_service_iter_generation_answer_events_streams_payloads():
     assert events[-1]["type"] == "done"
 
 
+def test_service_iter_generation_answer_events_emits_intent_step_with_elapsed_ms():
+    runtime = _Runtime(
+        stage1_payload={
+            "success": True,
+            "deep_answer": "deep",
+            "retrieval_claims": [{"claim": "x"}],
+            "intent_detect": {
+                "ok": True,
+                "intent_tag": "comparison_query",
+                "elapsed_ms": 123.4,
+                "model": "qwen3-8b",
+            },
+        },
+        stage2_payload={"success": True, "documents": ["doc"], "metadatas": [{"doi": "10.1"}], "distances": [0.1]},
+        doi_payload=["10.1"],
+        stage25_payload={"enabled": False, "applied": False, "md_chunks_by_doi": {}, "stats": {}},
+        stage3_payload={"10.1": [{"text": "evidence"}]},
+        stage4_payload=["a", {"success": True, "final_answer": "a", "query_mode": "生成驱动检索（PDF溯源）", "references": []}],
+    )
+
+    events = list(
+        qa_kb_service.iter_generation_answer_events(
+            question="hello",
+            generation_runtime=runtime,
+            redis_service=None,
+            sse_event=lambda payload: payload,
+            n_results_per_claim=5,
+        )
+    )
+
+    intent_steps = [event for event in events if event.get("type") == "step" and event.get("step") == "intent_detect"]
+    assert len(intent_steps) == 1
+    assert intent_steps[0]["message"].startswith("意图识别：")
+    assert intent_steps[0]["status"] == "success"
+    assert intent_steps[0]["data"]["intent_tag"] == "comparison_query"
+    assert intent_steps[0]["data"]["elapsed_ms"] == 123.4
+
+
 def test_service_iter_answer_events_normalizes_thinking_into_steps():
     runtime = _Runtime(
         stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]},

@@ -4,10 +4,188 @@ import json
 import os
 import re
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal
 
 from app.integrations.llm import raise_if_upstream_pool_timeout
+from app.modules.generation_pipeline.intent_detect import (
+    apply_intent_tag_to_question_focus,
+    format_intent_hint_for_stage1_user_block,
+    intent_detect_enabled,
+    run_intent_detect_quick_tag,
+)
 from app.modules.generation_pipeline.text_processing import _clean_retrieval_token
+
+
+def _env_bool_truthy(raw: str | None, *, default: bool = False) -> bool:
+    value = str(raw or "").strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _stage1_log_retrieval_claims_enabled() -> bool:
+    """When true, INFO-log each normalized retrieval claim (truncate long text). Enabled via QA_STAGE1_LOG_RETRIEVAL_CLAIMS."""
+
+    return _env_bool_truthy(os.getenv("QA_STAGE1_LOG_RETRIEVAL_CLAIMS"))
+
+
+def _stage1_claim_log_max_chars() -> int:
+    try:
+        return max(80, min(int(str(os.getenv("QA_STAGE1_LOG_CLAIM_MAX_CHARS", "360")).strip()), 8000))
+    except ValueError:
+        return 360
+
+
+def _stage1_claim_log_preview(text: str, *, max_chars: int) -> str:
+    t = str(text or "").strip().replace("\r", " ").replace("\n", " ")
+    if len(t) <= max_chars:
+        return t
+    return t[: max_chars - 1] + "…"
+
+
+_DensityBucket = Literal["neutral", "tap_only", "compaction_only", "both", "ambiguous_dense"]
+
+
+_DENSITY_TERM_TAP_FULL = frozenset(
+    {
+        "振实密度",
+        "敲击密度",
+        "tap density",
+        "tap-density",
+        "tapping density",
+    }
+)
+
+
+_DENSITY_TERM_COMP_FULL = frozenset(
+    {
+        "压实密度",
+        "压片密度",
+        "极片压实密度",
+        "电极压实密度",
+        "电极片压实密度",
+        "compaction density",
+    }
+)
+
+
+def _density_axis_bucket(user_question: str) -> _DensityBucket:
+    """Classify user wording for deterministic tap vs compaction vs vague high-compaction."""
+
+    raw = str(user_question or "")
+    qc = raw.lower()
+
+    tap = bool(
+        re.search(
+            r"(振实密度|敲击密度|粉末振实|tap[-\s]*density|tapping\s+density)",
+            raw,
+            flags=re.I,
+        )
+    )
+    compaction = bool(
+        re.search(
+            r"(压实密度|压片密度|极片压实|电极压实|电极片压实|compaction\s+density)",
+            raw,
+            flags=re.I,
+        )
+    )
+    compaction = compaction or ("calendering" in qc and re.search(r"(辊压|极片)", raw))
+    compaction = compaction or ("calender" in qc and re.search(r"(辊压|极片)", raw))
+
+    if tap and compaction:
+        return "both"
+    if tap:
+        return "tap_only"
+    if compaction:
+        return "compaction_only"
+    if re.search(r"(高压实型|高压实|粉末致密|致密化)", raw):
+        return "ambiguous_dense"
+    return "neutral"
+
+
+def _is_pure_density_metric_token(term: str) -> bool:
+    t = _clean_retrieval_token(str(term or "").strip(), max_len=96)
+    if not t:
+        return False
+    tl = t.lower()
+    return t in _DENSITY_TERM_TAP_FULL.union(_DENSITY_TERM_COMP_FULL) or tl in {"tap density", "tap-density"}
+
+
+def _filter_focus_term_list(items: List[str], bucket: _DensityBucket) -> List[str]:
+    if bucket == "neutral" or bucket == "both":
+        return items
+
+    out: list[str] = []
+    for item in items:
+        ck = _clean_retrieval_token(str(item or "").strip(), max_len=96)
+        if not ck:
+            continue
+        lower_ck = ck.lower()
+
+        # Vague 「高压实型」questions: strip LLM-inserted singleton metric anchors so Stage2 won't
+        # must-include a single polarity (typically tap-density) exclusively.
+        if bucket == "ambiguous_dense":
+            if _is_pure_density_metric_token(ck):
+                continue
+            out.append(ck)
+            continue
+
+        tap_hit = ck in _DENSITY_TERM_TAP_FULL or ("tap density" in lower_ck) or ("tap-density" in lower_ck)
+        comp_hit = ck in _DENSITY_TERM_COMP_FULL or ("compaction density" in lower_ck)
+        tapish = tap_hit or re.search(r"(振实|敲击密度|tap\s*density|tapping\s+density)", ck, flags=re.I)
+        compish = comp_hit or re.search(r"(压实密度|压片密度|极片压实|电极压实)", ck)
+
+        if bucket == "compaction_only" and tapish and not compish:
+            continue
+        if bucket == "tap_only" and compish and not tapish:
+            continue
+        out.append(ck)
+    return out
+
+
+def _apply_stage1_density_disambiguation(
+    *,
+    user_question: str,
+    query_focus_terms: List[str],
+    question_focus: dict[str, Any],
+) -> tuple[List[str], dict[str, Any]]:
+    """Strip conflicting density-metric anchors and annotate ambiguous 「高压实」questions."""
+
+    bucket = _density_axis_bucket(user_question)
+    if bucket == "neutral":
+        return query_focus_terms, question_focus
+
+    qf_filtered = _filter_focus_term_list(query_focus_terms, bucket)
+    q_focus = dict(question_focus or {})
+
+    for axis_key in ("evidence_axes", "secondary_axes"):
+        inner = q_focus.get(axis_key)
+        if isinstance(inner, list):
+            q_focus[axis_key] = _filter_focus_term_list([str(x) for x in inner], bucket)
+
+    if bucket == "ambiguous_dense":
+        clar = (
+            "【指标辨析】题干偏重高压实/致密但未点明表征口径：粉体侧常用振实密度与球形／堆积；"
+            "电极侧用压实密度及辊压。二者物理含义不同，检索与行文不应混为一谈。"
+        )
+        summary = str(q_focus.get("focus_summary") or "").strip()
+        if clar not in summary:
+            sep = "\n" if summary else ""
+            q_focus["focus_summary"] = f"{summary}{sep}{clar}".strip()
+
+        prev_type = str(q_focus.get("focus_type") or "").strip().lower()
+        if prev_type in {
+            "",
+            "generic",
+            "powder_dense_morphology",
+            "synthesis_preparation",
+            "electrode_compaction_process",
+        }:
+            q_focus["focus_type"] = "density_metric_ambiguity"
+
+    return qf_filtered, q_focus
 
 
 def _is_response_format_capability_error(exc: Exception) -> bool:
@@ -321,11 +499,22 @@ def run_stage1_pre_answer_and_planning(
                 "error": "cancelled",
                 "metadata": {"cancelled": True},
             }
+        intent_result: dict[str, Any] | None = None
+        if intent_detect_enabled():
+            intent_result = run_intent_detect_quick_tag(
+                client=client,
+                user_question=user_question,
+                logger=logger,
+            )
+        intent_hint = format_intent_hint_for_stage1_user_block(intent_result=intent_result or {})
+
         full_system_prompt = stage1_prompt + (("\n\n" + vector_db_context) if vector_db_context else "")
         context_block = _format_conversation_context(conversation_context)
         user_content = f"{context_block}\n\n用户问题：{user_question}" if context_block else f"用户问题：{user_question}"
         if graph_context:
             user_content = f"图谱结构化线索：\n{graph_context}\n\n{user_content}"
+        if intent_hint:
+            user_content = f"{intent_hint}\n{user_content}"
         logger.info(
             "阶段一提示词拼装完成: prompt_chars=%s user_content_chars=%s context_chars=%s elapsed_ms=%.3f",
             len(
@@ -411,6 +600,16 @@ def run_stage1_pre_answer_and_planning(
 
         retrieval_claims = [item for item in retrieval_claims if str(item.get("claim") or "").strip()]
         query_focus_terms = _normalize_query_focus_terms(stage1_result.get("query_focus_terms"))
+        query_focus_terms, question_focus = _apply_stage1_density_disambiguation(
+            user_question=user_question,
+            query_focus_terms=query_focus_terms,
+            question_focus=question_focus,
+        )
+        if intent_result and intent_result.get("ok"):
+            question_focus = apply_intent_tag_to_question_focus(
+                intent_tag=str(intent_result.get("intent_tag") or ""),
+                question_focus=question_focus,
+            )
         merged_focus = effective_query_focus_terms_for_stage2(
             {
                 "query_focus_terms": query_focus_terms,
@@ -426,7 +625,35 @@ def run_stage1_pre_answer_and_planning(
             {"type": question_focus.get("focus_type"), "axes": len(question_focus.get("evidence_axes") or [])},
             merged_focus,
         )
-        return {
+
+        if _stage1_log_retrieval_claims_enabled() and retrieval_claims:
+            cap = _stage1_claim_log_max_chars()
+            logger.info(
+                "阶段一 retrieval_claims 明细 (%s 条，单条预览上限约 %s 字符，keywords 最多展示 12 项)",
+                len(retrieval_claims),
+                cap,
+            )
+            for idx, item in enumerate(retrieval_claims, start=1):
+                claim_txt = _stage1_claim_log_preview(str(item.get("claim") or ""), max_chars=cap)
+                keywords = item.get("keywords") or []
+                kw_line = ""
+                if isinstance(keywords, list):
+                    flat = [str(x).strip() for x in keywords if str(x).strip()]
+                    kw_line = "; ".join(flat[:12])
+                secs = item.get("preferred_sections") or []
+                sec_line = ""
+                if isinstance(secs, list):
+                    sec_line = "; ".join(str(x).strip() for x in secs if str(x).strip())[:240]
+                logger.info(
+                    "  [%s/%s] claim=%s keywords=%s sections=%s",
+                    idx,
+                    len(retrieval_claims),
+                    claim_txt,
+                    kw_line or "(none)",
+                    sec_line or "(none)",
+                )
+
+        out: Dict[str, Any] = {
             "success": True,
             "deep_answer": deep_answer,
             "answer_plan": answer_plan,
@@ -436,6 +663,9 @@ def run_stage1_pre_answer_and_planning(
             "effective_query_focus_terms": merged_focus,
             "raw_response": cleaned_text,
         }
+        if intent_result is not None:
+            out["intent_detect"] = intent_result
+        return out
     except Exception as exc:
         raise_if_upstream_pool_timeout(exc)
         logger.error("阶段一执行失败: %s", exc)

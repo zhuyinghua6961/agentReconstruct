@@ -219,7 +219,9 @@ def test_stage2_comparison_keeps_reranked_candidates_without_hard_noise_filter(m
     ]
     assert result["metadatas"] == [{"doi": "10.1/good"}, {"doi": "10.1/recycling"}, {"doi": "10.1/application"}]
     assert result["comparison_groups"][0]["doi_candidates"] == ["10.1/good", "10.1/recycling", "10.1/application"]
-    assert result["claim_to_results"]["比较对象“磷酸铁”在当前问题中的优势、劣势、适用场景和限制"]["noise_filter"] == {
+    comparison_claim_key = next(iter(result["claim_to_results"]))
+    assert comparison_claim_key.startswith("围绕当前问题检索「磷酸铁」")
+    assert result["claim_to_results"][comparison_claim_key]["noise_filter"] == {
         "enabled": False,
         "before": 3,
         "after": 3,

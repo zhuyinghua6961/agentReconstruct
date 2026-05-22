@@ -197,6 +197,92 @@ def _extract_context_keywords(question: str, retrieval_claims: list[dict[str, An
     return _dedupe(keywords)
 
 
+def _question_focus_axes_and_meta(
+    stage1_result: dict[str, Any] | None,
+) -> tuple[list[str], str, str]:
+    """Return (deduped axes from Stage1 question_focus, focus_type, trimmed focus_summary)."""
+
+    if not isinstance(stage1_result, dict):
+        return [], "generic", ""
+
+    qf = stage1_result.get("question_focus")
+    if not isinstance(qf, dict):
+        return [], "generic", ""
+
+    axes: list[str] = []
+    for key in ("evidence_axes", "secondary_axes"):
+        inner = qf.get(key)
+        if not isinstance(inner, list):
+            continue
+        for item in inner:
+            t = str(item or "").strip()
+            if t:
+                axes.append(t)
+
+    axes = _dedupe(axes)
+    focus_raw = str(qf.get("focus_type") or "").strip().lower().replace(" ", "_")
+    focus_type = focus_raw if focus_raw else "generic"
+    summary = str(qf.get("focus_summary") or "").strip()
+    if len(summary) > 160:
+        summary = summary[:157].rsplit(maxsplit=1)[0].strip() + "…"
+
+    return axes, focus_type, summary
+
+
+def _resolved_comparison_dimensions(stage_axes: list[str]) -> list[str]:
+    """Prefer Stage1 evidence axes; fall back to defaults when Stage1 signal is thin."""
+
+    if len(stage_axes) >= 2:
+        return stage_axes[:8]
+    if len(stage_axes) == 1:
+        return _dedupe([stage_axes[0], *_DEFAULT_DIMENSIONS])[:8]
+    return list(_DEFAULT_DIMENSIONS)
+
+
+_DIM_PREVIEW_MAX = 4
+
+
+def _comparison_claim_for_object(
+    *,
+    label: str,
+    dimensions: list[str],
+    focus_type: str,
+) -> str:
+    """Claim text aligned with Stage1 focus_type and comparison dimensions (method A)."""
+
+    preview_dims = dimensions[:_DIM_PREVIEW_MAX]
+    dim_join = "、".join(preview_dims) if preview_dims else "制备与性能"
+
+    if focus_type == "mechanism_analysis":
+        return f"检索对比对象「{label}」在{dim_join}等方面的反应机理与工艺路径证据"
+    if focus_type == "comparative_tradeoff":
+        return f"对比对象「{label}」在{dim_join}上的差异、优劣与适用场景"
+    if focus_type == "electrochemical_performance":
+        return f"检索「{label}」在{dim_join}及电化学性能相关的证据片段"
+    if focus_type == "synthesis_preparation":
+        return f"检索「{label}」在{dim_join}及合成制备路线相关的论述"
+    if focus_type == "characterization":
+        return f"检索「{label}」在{dim_join}及表征与结构相关的证据"
+    if focus_type == "cost_scaleup":
+        return f"检索「{label}」在{dim_join}及成本与放大相关的论述"
+    if focus_type == "recycling_sustainability":
+        return f"检索「{label}」在{dim_join}及回收与可持续性相关的论述"
+    if focus_type == "density_metric_ambiguity":
+        return f"检索「{label}」在{dim_join}及粉体/电极密度口径相关的论述"
+    if focus_type == "powder_dense_morphology":
+        return f"检索「{label}」在{dim_join}及粉体形貌致密化相关的论述"
+    if focus_type == "electrode_compaction_process":
+        return f"检索「{label}」在{dim_join}及极片压实工艺相关的论述"
+    if focus_type == "carbon_coating_conductivity":
+        return f"检索「{label}」在{dim_join}及碳包覆导电网络相关的论述"
+    if focus_type == "doping_structure":
+        return f"检索「{label}」在{dim_join}及掺杂与结构演变相关的论述"
+    if focus_type == "safety_reliability":
+        return f"检索「{label}」在{dim_join}及安全性可靠性相关的论述"
+
+    return f"围绕当前问题检索「{label}」在{dim_join}方面的关键论述与证据"
+
+
 def build_comparison_plan(
     question: str,
     *,
@@ -226,11 +312,16 @@ def build_comparison_plan(
             }
         )
 
+    stage_axes, comparison_focus_type, comparison_focus_summary = _question_focus_axes_and_meta(stage1_result)
+    dimensions = _resolved_comparison_dimensions(stage_axes)
+
     return {
         "enabled": True,
         "task_type": "multi_object_comparison",
         "objects": plan_objects,
-        "dimensions": list(_DEFAULT_DIMENSIONS),
+        "dimensions": dimensions,
+        "comparison_focus_type": comparison_focus_type,
+        "comparison_focus_summary": comparison_focus_summary,
         "context_keywords": _extract_context_keywords(question, claims),
         "min_docs_per_object": 3,
         "min_md_chunks_per_object": 2,
@@ -335,6 +426,9 @@ def build_retrieval_claims_from_comparison_plan(plan: dict[str, Any]) -> list[di
         return []
     context_keywords = [str(item).strip() for item in list(plan.get("context_keywords") or []) if str(item).strip()]
     dimensions = [str(item).strip() for item in list(plan.get("dimensions") or []) if str(item).strip()]
+    focus_type = str(plan.get("comparison_focus_type") or "").strip().lower().replace(" ", "_") or "generic"
+    focus_summary = str(plan.get("comparison_focus_summary") or "").strip()
+    summary_kw = focus_summary if len(focus_summary) <= 48 else ""
     claims: list[dict[str, Any]] = []
     for item in list(plan.get("objects") or []):
         if not isinstance(item, dict):
@@ -346,10 +440,11 @@ def build_retrieval_claims_from_comparison_plan(plan: dict[str, Any]) -> list[di
         retrieval_queries = [str(query).strip() for query in list(item.get("retrieval_queries") or []) if str(query).strip()]
         positive_context_terms = [str(term).strip() for term in list(item.get("positive_context_terms") or []) if str(term).strip()]
         negative_context_terms = [str(term).strip() for term in list(item.get("negative_context_terms") or []) if str(term).strip()]
-        keywords = _dedupe([*context_keywords, label, *aliases, *dimensions])
+        kw_extra = [summary_kw] if summary_kw else []
+        keywords = _dedupe([*context_keywords, *kw_extra, label, *aliases, *dimensions])
         claims.append(
             {
-                "claim": f"比较对象“{label}”在当前问题中的优势、劣势、适用场景和限制",
+                "claim": _comparison_claim_for_object(label=label, dimensions=dimensions, focus_type=focus_type),
                 "query": retrieval_queries[0] if retrieval_queries else "",
                 "retrieval_queries": retrieval_queries,
                 "keywords": keywords,

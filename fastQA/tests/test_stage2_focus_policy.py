@@ -26,8 +26,8 @@ def test_expand_focus_synonyms_and_user_hints():
     )
     assert "高压实型" in out or "高压实" in out
     assert "球形颗粒" in out
-    # Ambiguous「高压实」defaults to powder/tapping hints — do not inject electrode compaction synonyms.
-    assert "压实密度" not in out
+    # 「高压实型」未定指标：并列拉上粉体振实与电极压实侧代表词，避免仅偏向单侧文献轴。
+    assert "压实密度" in out or "极片压实" in out or "极片辊压" in out
     assert "振实密度" in out or "tap density" in out
 
 

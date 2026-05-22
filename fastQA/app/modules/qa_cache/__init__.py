@@ -1,4 +1,5 @@
 from app.modules.qa_cache.metrics import increment_cache_metric, reset_cache_metrics, snapshot_cache_metrics
+from app.modules.qa_cache.pipeline_cache_flags import resolve_qa_pipeline_cache_redis
 from app.modules.qa_cache.singleflight import run_singleflight
 from app.modules.qa_cache.stage1_cache import (
     build_stage1_cache_key,
@@ -44,6 +45,7 @@ __all__ = [
     "get_cached_stage3_result",
     "increment_cache_metric",
     "reset_cache_metrics",
+    "resolve_qa_pipeline_cache_redis",
     "run_singleflight",
     "snapshot_cache_metrics",
 ]
