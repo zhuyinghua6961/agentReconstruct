@@ -59,19 +59,21 @@ def _build_kwargs(
     """
     构建 API 调用参数，统一处理思考模式逻辑。
 
-    思考模式下：
+    流式思考模式下：
     - 通过 extra_body 传递 enable_thinking
     - max_tokens 自动扩大（思考 + 回答都计入 max_tokens）
     - 不主动设 temperature，使用模型默认值
+    - DashScope 仅允许流式请求使用 enable_thinking，非流式请求会降级为普通调用
     """
     thinking = enable_thinking if enable_thinking is not None else config.MAIN_LLM_THINKING_ENABLED
+    stream_thinking = bool(thinking and stream)
 
     kwargs = {
         "model": model or config.LLM_MODEL,
         "messages": messages,
     }
 
-    if thinking:
+    if stream_thinking:
         kwargs["extra_body"] = {"enable_thinking": True}
         # 思考 token + 回答 token 都计入 max_tokens，需要扩容
         # 至少 8192，或原值 ×2，上限 32768（qwen3-max 上限）

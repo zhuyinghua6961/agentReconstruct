@@ -34,6 +34,11 @@ from retriever.vector_retriever import batch_retrieve, RetrievedChunk
 from ingest.embedder import get_embedding_client
 from ingest.vector_store import get_or_create_collection
 from server.services.stage_cache import get_or_compute_decompose, get_or_compute_direct_answer
+from agent_core.intent_detect import (
+    format_intent_hint_for_thinking_user_block,
+    intent_detect_enabled,
+    run_intent_detect_quick_tag,
+)
 
 logger = logging.getLogger(__name__)
 _PARTIAL_RETRIEVAL_FLUSH_WAIT_SECONDS = 0.8
@@ -466,6 +471,34 @@ def run_agent(
         async_llm_client = get_async_llm_client()
         embedding_client = get_embedding_client()
 
+        llm_question = working_question
+        if intent_detect_enabled():
+            _raise_if_cancelled()
+            intent_result = run_intent_detect_quick_tag(
+                client=direct_llm_client,
+                user_question=working_question,
+                logger=logger,
+            )
+            state.conversation_context["intent_detect"] = intent_result
+            hint = format_intent_hint_for_thinking_user_block(intent_result=intent_result)
+            trimmed = hint.strip()
+            if trimmed:
+                llm_question = f"{trimmed}\n\n{working_question}"
+            elapsed_ms = float(intent_result.get("elapsed_ms") or 0.0)
+            state.timings["intent_detect_ms"] = round(elapsed_ms / 1000.0, 6)
+            _emit_progress(
+                "step0_intent",
+                "success" if intent_result.get("ok") else "warning",
+                (
+                    "意图快筛完成"
+                    if intent_result.get("ok")
+                    else "意图快筛失败，已降级为 generic"
+                ),
+                intent_tag=intent_result.get("intent_tag"),
+                intent_model=intent_result.get("model"),
+                intent_elapsed_ms=elapsed_ms,
+            )
+
         # ============================================================
         # Step 1: 并行执行路径 A (直接回答) 和路径 B 第一步 (查询分解)
         # ============================================================
@@ -480,11 +513,11 @@ def run_agent(
             started_at = time.time()
             logger.info("%sstep1 direct_answer start", _trace_prefix(trace_id))
             answer = get_or_compute_direct_answer(
-                question=working_question,
+                question=llm_question,
                 model=config.LLM_MODEL,
                 enable_thinking=resolved_direct_answer_enable_thinking,
                 compute_fn=lambda: direct_answer(
-                    working_question,
+                    llm_question,
                     client=direct_llm_client,
                     enable_thinking=resolved_direct_answer_enable_thinking,
                 ),
@@ -502,12 +535,12 @@ def run_agent(
             started_at = time.time()
             logger.info("%sstep1 decompose start", _trace_prefix(trace_id))
             questions = get_or_compute_decompose(
-                question=working_question,
+                question=llm_question,
                 model=config.LLM_MODEL,
                 enable_thinking=resolved_decompose_enable_thinking,
                 num_sub_questions=resolved_num_sub_questions,
                 compute_fn=lambda: decompose_question(
-                    working_question,
+                    llm_question,
                     client=pipeline_llm_client,
                     num_sub_questions=resolved_num_sub_questions,
                     enable_thinking=resolved_decompose_enable_thinking,
@@ -564,7 +597,7 @@ def run_agent(
                 progress_callback=progress_callback,
                 cancel_event=cancel_event,
                 trace_id=trace_id,
-                original_question=working_question,
+                original_question=llm_question,
             )
             _raise_if_cancelled()
             state.retrieval_queries = [
@@ -667,7 +700,7 @@ def run_agent(
             draft_stream_started = False
             logger.info("%sstep4 synthesis stream start", _trace_prefix(trace_id))
             for chunk in synthesize_answer_stream(
-                question=working_question,
+                question=llm_question,
                 direct_answer=state.direct_answer,
                 all_retrieved_chunks=state.retrieved_chunks,
                 sub_questions=state.sub_questions,
@@ -692,7 +725,7 @@ def run_agent(
         else:
             logger.info("%sstep4 synthesis blocking start", _trace_prefix(trace_id))
             state.draft_answer = synthesize_answer(
-                question=working_question,
+                question=llm_question,
                 direct_answer=state.direct_answer,
                 all_retrieved_chunks=state.retrieved_chunks,
                 sub_questions=state.sub_questions,
@@ -772,7 +805,7 @@ def run_agent(
                         timeout_error=CheckerTimeoutError("checker llm request timed out"),
                         cancel_event=cancel_event,
                         cancel_error=RuntimeError("cancelled"),
-                        question=working_question,
+                        question=llm_question,
                         answer=current_answer,
                         all_retrieved_chunks=state.retrieved_chunks,
                         client=verification_llm_client,
@@ -859,7 +892,7 @@ def run_agent(
                         timeout_error=ReviserTimeoutError("reviser llm request timed out"),
                         cancel_event=cancel_event,
                         cancel_error=RuntimeError("cancelled"),
-                        question=working_question,
+                        question=llm_question,
                         answer=current_answer,
                         issues=issues,
                         client=verification_llm_client,

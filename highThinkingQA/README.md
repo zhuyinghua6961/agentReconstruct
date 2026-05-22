@@ -76,6 +76,15 @@ Legacy variables remain valid:
 - `CHROMA_PERSIST_DIR`
 - `PROMPTS_DIR`
 
+### Intent fast-tag (`qwen3-8b` 等)
+
+与 fastQA、patent 相同套路：可选地在主流程 Step1（直接回答与分解并行）之前，用轻量 `chat.completions` 调用从固定 snake_case tag 中选一个主轴类型，并把一段中文提示前缀到 **effective_question** 再交给分解、直接回答、子问题预回答、综合与 Checker/Reviser。默认关闭；在同一 OpenAI 兼容网关下通常需登记轻量模型名（默认 **`qwen3-8b`**）。
+
+- **`QA_INTENT_DETECT_ENABLED`** / **`HT_QA_INTENT_DETECT_ENABLED`**：任一为 truthy 则开启。
+- **`QA_INTENT_DETECT_MODEL`** / **`HT_QA_INTENT_DETECT_MODEL`**：模型 ID；后者优先。
+
+详见仓库内 `config.shared.env` 注释。
+
 ## Notes
 
 - Runtime path resolution is now decoupled from the old root layout.
