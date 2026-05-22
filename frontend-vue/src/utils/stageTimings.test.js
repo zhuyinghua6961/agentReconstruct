@@ -136,3 +136,22 @@ test('maps generation stage titles and keys to stage timing labels', () => {
   assert.equal(getStepTimingDurationLabel(message, { step: 'stage1', title: '阶段一' }), '1.0s')
   assert.equal(getStepTimingDurationLabel(message, { step: 'stage25', title: '阶段二点五' }), '2.5s')
 })
+
+test('uses step data elapsed_ms for intent substep without adding it to total timings', () => {
+  const message = {
+    metadata: {
+      timings: {
+        stage1: 1000,
+      },
+    },
+  }
+
+  assert.equal(
+    getStepTimingDurationLabel(message, {
+      step: 'intent_detect',
+      title: '意图识别',
+      data: { elapsed_ms: 123.4 },
+    }),
+    '123ms'
+  )
+})

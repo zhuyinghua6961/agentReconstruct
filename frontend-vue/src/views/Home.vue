@@ -93,7 +93,7 @@ const canToggleStreaming = computed(() => {
   return Boolean(canSend.value)
 })
 const askModeOptions = [
-  { value: 'fast', label: '快速' },
+  { value: 'fast', label: '文献' },
   { value: 'thinking', label: '深度' },
   { value: 'patent', label: '专利' }
 ]

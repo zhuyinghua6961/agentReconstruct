@@ -1125,6 +1125,7 @@ function normalizeMalformedHeadingLine(line) {
 
   return splitGluedHeadingMarkers(source)
     .flatMap((headingLine) => splitHeadingInlineBody(headingLine))
+    .map((headingLine) => stripDanglingHeadingDash(headingLine))
     .join('\n\n')
 }
 
@@ -1160,13 +1161,39 @@ function splitHeadingInlineBody(line) {
 
   const content = String(match[2] || '').trim()
   for (const boundary of content.matchAll(/\s+/g)) {
-    const title = content.slice(0, boundary.index).trim()
-    const body = content.slice(Number(boundary.index) + boundary[0].length).trim()
+    const rawTitle = content.slice(0, boundary.index).trim()
+    const rawBody = content.slice(Number(boundary.index) + boundary[0].length).trim()
+    const { title, body } = normalizeInlineHeadingSplit(rawTitle, rawBody)
     if (!isHeadingTitleCandidate(title) || !looksLikeInlineHeadingBody(body)) continue
     return [`${match[1]}${title}`, body]
   }
 
   return [source]
+}
+
+function normalizeInlineHeadingSplit(title, body) {
+  let normalizedTitle = String(title || '').trim()
+  let normalizedBody = String(body || '').trim()
+  const titleWithoutDash = stripDanglingDashText(normalizedTitle)
+  if (titleWithoutDash !== normalizedTitle && isHeadingTitleCandidate(titleWithoutDash) && normalizedBody) {
+    normalizedTitle = titleWithoutDash
+    normalizedBody = `\\- ${normalizedBody}`
+  }
+  return { title: normalizedTitle, body: normalizedBody }
+}
+
+function stripDanglingHeadingDash(line) {
+  const source = String(line || '')
+  const match = source.match(/^(\s{0,3}#{1,6}\s+)(.+)$/)
+  if (!match) return source
+  const title = String(match[2] || '').trim()
+  const stripped = stripDanglingDashText(title)
+  if (stripped === title || !isHeadingTitleCandidate(stripped)) return source
+  return `${match[1]}${stripped}`
+}
+
+function stripDanglingDashText(text) {
+  return String(text || '').replace(/\s+[-–—－]\s*$/, '').trim()
 }
 
 function stripHeadingMarker(line) {
@@ -1189,7 +1216,7 @@ function looksLikeInlineHeadingBody(text) {
   if (/^(?:根据|例如|通过|追求|不同|常规|优化|元素|烧结|专利|该|这一|这些|这种|其|可|在|同时|此外|需要|通常|一般|主要|对于|实际应用|应用|材料|工艺|结构|性能|采用|利用|显示|表明|形成|包括|具有)/.test(body)) {
     return true
   }
-  if (/^[\u4e00-\u9fffA-Za-z0-9/()（）+\-.]{2,18}(?:是|可|能|能够|有助于|会|通常|一般|主要|直接|间接|需要|影响|决定)/.test(body)) {
+  if (/^[\u4e00-\u9fffA-Za-z0-9/()（）+\-.]{2,24}(?:是|以|中|采用|使用|通过|涉及|可|能|能够|有助于|会|通常|一般|主要|直接|间接|需要|影响|决定|具有|表现|包括)/.test(body)) {
     return true
   }
   return /[，。；：]/.test(body.slice(0, 90))

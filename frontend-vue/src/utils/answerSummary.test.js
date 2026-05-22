@@ -147,6 +147,54 @@ test('heading lines with inline prose body keep prose out of the heading style',
   }
 })
 
+test('route subsection headings with same-prefix prose keep prose out of h3 style', () => {
+  const markdown = [
+    '### 铁红路线（Fe₂O₃为铁源） 铁红路线以三氧化二铁（Fe₂O₃）为铁源，其反应机理涉及多步还原和化合过程。Fe₂O₃首先在碳热还原作用下被还原为金属铁或氧化亚铁，随后与磷源和锂源反应生成LiFePO₄ (CN103700851B)。',
+  ].join('\n')
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.match(html, /<h3>铁红路线（Fe₂O₃为铁源）<\/h3>/)
+    assert.match(html, /<p>铁红路线以三氧化二铁/)
+    assert.doesNotMatch(html, /<h3>铁红路线（Fe₂O₃为铁源） 铁红路线以/)
+    assert.match(html, /data-patent-id="CN103700851B"/)
+  }
+})
+
+test('section heading followed by inline dash intro keeps dash body out of heading style', () => {
+  const markdown = [
+    '### 各路线性能特点对比 - 铁红路线：工艺相对复杂，需要较高温度和强还原条件，但原料成本较低。',
+  ].join('\n')
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.match(html, /<h3>各路线性能特点对比<\/h3>/)
+    assert.match(html, /<p>- 铁红路线：工艺相对复杂/)
+    assert.doesNotMatch(html, /<h3>各路线性能特点对比 - 铁红路线/)
+  }
+})
+
+test('standalone heading with dangling dash drops the dash from heading text', () => {
+  const markdown = [
+    '### 各路线性能特点对比 -',
+    '',
+    '- 铁红路线：工艺相对复杂。',
+  ].join('\n')
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.match(html, /<h3>各路线性能特点对比<\/h3>/)
+    assert.doesNotMatch(html, /<h3>各路线性能特点对比 -<\/h3>/)
+    assert.match(html, /<li>(?:<p>)?铁红路线：工艺相对复杂。(?:<\/p>)?[\s\S]*?<\/li>/)
+  }
+})
+
 test('glued section and subsection heading markers are split into separate headings', () => {
   const markdown = [
     '## 提升压实密度的关键策略 ### 颗粒级配与形貌控制',

@@ -170,6 +170,11 @@ function normalizeStepTitleForTiming(step = {}) {
 }
 
 export function getStepTimingDurationLabel(message, step = {}) {
+  const stepData = isPlainObject(step?.data) ? step.data : {}
+  const stepElapsedMs = toFiniteNonNegativeNumber(stepData.elapsed_ms ?? stepData.elapsedMs)
+  if (stepElapsedMs !== null) {
+    return formatStageDuration(stepElapsedMs)
+  }
   const stepKey = String(step?.step || '').trim()
   const title = normalizeStepTitleForTiming(step)
   const candidateKeys = [
