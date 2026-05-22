@@ -1,5 +1,9 @@
-FROM highthinking-python-base:latest
+FROM lifeo4agent/python-base:latest
 
 WORKDIR /app
+COPY highThinkingQA/ /app/highThinkingQA/
+COPY resource/config/ /app/resource/config/
+COPY resource/assets/ /app/resource/assets/
+WORKDIR /app/highThinkingQA
 EXPOSE 8009
-CMD ["gunicorn", "server_fastapi.asgi:app", "--chdir", "/app/highThinkingQA", "-c", "/app/highThinkingQA/server_fastapi/gunicorn.conf.py"]
+CMD ["gunicorn", "server_fastapi.asgi:app", "-c", "server_fastapi/gunicorn.conf.py"]

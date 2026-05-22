@@ -80,6 +80,26 @@ class _MinioTablesBackfillTarget:
                 pass
 
 
+class FileTablesBackfillTarget:
+    def __init__(self, bucket_dir: str | Path) -> None:
+        self._bucket_dir = Path(bucket_dir).resolve()
+
+    def object_exists(self, *, object_name: str) -> bool:
+        return (self._bucket_dir / object_name).is_file()
+
+    def upload_bytes(self, *, object_name: str, payload: bytes, content_type: str) -> None:
+        _ = content_type
+        target = self._bucket_dir / object_name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+
+    def read_object_bytes(self, *, object_name: str) -> bytes | None:
+        target = self._bucket_dir / object_name
+        if not target.is_file():
+            return None
+        return target.read_bytes()
+
+
 def discover_table_source_dirs(source_root: str | Path) -> list[Path]:
     root = Path(source_root).resolve()
     return sorted(path.parent for path in root.rglob("*_tables.json") if path.is_file())
@@ -180,7 +200,7 @@ def backfill_tables_for_source_dir(
 
     manifest_bytes = target.read_object_bytes(object_name=manifest_object_name)
     if manifest_bytes is None:
-        raise RuntimeError(f"manifest not found in MinIO: {manifest_object_name}")
+        raise RuntimeError(f"manifest not found in target: {manifest_object_name}")
     existing_manifest = _read_json_bytes(manifest_bytes, object_name=manifest_object_name)
     updated_manifest = _build_updated_manifest(
         existing_manifest=existing_manifest,
@@ -246,12 +266,23 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Backfill patent table JSON objects into MinIO original manifests")
     parser.add_argument("--source-root", default=str(DEFAULT_SOURCE_ROOT))
     parser.add_argument("--source-dir", action="append", default=[])
+    parser.add_argument("--target", choices=("minio", "file"), default="minio")
+    parser.add_argument("--bucket-dir", default="")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--progress", action="store_true")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument("--summary-only", action="store_true")
     return parser.parse_args()
+
+
+def _build_target(args: argparse.Namespace) -> TablesBackfillTarget:
+    if args.target == "file":
+        bucket_dir = str(args.bucket_dir or "").strip()
+        if not bucket_dir:
+            raise RuntimeError("--bucket-dir is required when --target=file")
+        return FileTablesBackfillTarget(bucket_dir)
+    return _MinioTablesBackfillTarget()
 
 
 def _resolve_source_dirs(args: argparse.Namespace) -> list[Path]:
@@ -274,7 +305,7 @@ def _render_progress_bar(completed: int, total: int, *, width: int = 24) -> str:
 def main() -> int:
     args = _parse_args()
     source_dirs = _resolve_source_dirs(args)
-    target = _MinioTablesBackfillTarget()
+    target = _build_target(args)
     results: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []
     uploaded_count = 0

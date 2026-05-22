@@ -116,6 +116,51 @@ def test_backfill_resumes_when_table_uploaded_but_manifest_still_old(tmp_path: P
     assert [item[0] for item in target.uploads] == [manifest_key]
 
 
+def test_file_target_writes_tables_and_manifest_under_bucket_dir(tmp_path: Path) -> None:
+    module = _load_module()
+    source_dir = _write_tables_file(tmp_path / "source")
+    bucket_dir = tmp_path / "seed"
+    prefix = f"patent/originals/{PATENT_ID}"
+    manifest_key = f"{prefix}/manifest.json"
+    tables_key = f"{prefix}/structured/tables.json"
+    manifest_path = bucket_dir / manifest_key
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_bytes(_json_bytes(_existing_manifest()))
+
+    target = module.FileTablesBackfillTarget(bucket_dir)
+    first = module.backfill_tables_for_source_dir(source_dir=source_dir, target=target)
+
+    assert first["status"] == "updated"
+    assert json.loads((bucket_dir / tables_key).read_text(encoding="utf-8")) == [
+        {"table_title": "表1", "columns": ["A"], "rows": [{"A": "1"}]}
+    ]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["objects"]["structured"]["tables"] == tables_key
+    assert manifest["availability"]["tables"] is True
+
+    second = module.backfill_tables_for_source_dir(source_dir=source_dir, target=target)
+
+    assert second["status"] == "skipped"
+    assert second["skipped_objects"] == [tables_key, manifest_key]
+
+
+def test_backfill_marks_empty_tables_payload_unavailable(tmp_path: Path) -> None:
+    module = _load_module()
+    source_dir = _write_tables_file(tmp_path, payload=[])
+    prefix = f"patent/originals/{PATENT_ID}"
+    manifest_key = f"{prefix}/manifest.json"
+    tables_key = f"{prefix}/structured/tables.json"
+    target = FakeTarget({manifest_key: _json_bytes(_existing_manifest())})
+
+    result = module.backfill_tables_for_source_dir(source_dir=source_dir, target=target)
+
+    assert result["status"] == "updated"
+    assert json.loads(target.objects[tables_key].decode("utf-8")) == []
+    manifest = json.loads(target.objects[manifest_key].decode("utf-8"))
+    assert manifest["objects"]["structured"]["tables"] == tables_key
+    assert manifest["availability"]["tables"] is False
+
+
 def test_backfill_dry_run_reports_missing_objects_without_uploading(tmp_path: Path) -> None:
     module = _load_module()
     source_dir = _write_tables_file(tmp_path, payload=[])

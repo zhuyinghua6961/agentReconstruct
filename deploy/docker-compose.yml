@@ -1,7 +1,7 @@
 services:
   mysql:
-    image: mysql:${MYSQL_IMAGE_TAG}
-    container_name: ${COMPOSE_PROJECT_NAME}-mysql
+    image: mysql:${MYSQL_IMAGE_TAG:-8.0}
+    container_name: ${COMPOSE_PROJECT_NAME:-lifeo4agent}-mysql
     restart: unless-stopped
     command:
       - mysqld
@@ -9,9 +9,11 @@ services:
       - --collation-server=utf8mb4_unicode_ci
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_DATABASE: agentcode
+      MYSQL_USER: ${MYSQL_APP_USER:-agentcode}
+      MYSQL_PASSWORD: ${MYSQL_APP_PASSWORD}
     ports:
-      - "${MYSQL_PUBLISH_PORT}:3306"
+      - "${MYSQL_PUBLISH_PORT:-3306}:3306"
     volumes:
       - mysql_data:/var/lib/mysql
       - ./mysql-init:/docker-entrypoint-initdb.d:ro
@@ -23,14 +25,14 @@ services:
       start_period: 20s
 
   redis:
-    image: redis:${REDIS_IMAGE_TAG}
-    container_name: ${COMPOSE_PROJECT_NAME}-redis
+    image: redis:${REDIS_IMAGE_TAG:-7}
+    container_name: ${COMPOSE_PROJECT_NAME:-lifeo4agent}-redis
     restart: unless-stopped
     command: ["sh", "-c", "redis-server --appendonly yes --requirepass \"$${REDIS_PASSWORD}\""]
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD}
     ports:
-      - "${REDIS_PUBLISH_PORT}:6379"
+      - "${REDIS_PUBLISH_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -41,22 +43,22 @@ services:
       start_period: 10s
 
   minio:
-    image: minio/minio:${MINIO_IMAGE_TAG}
-    container_name: ${COMPOSE_PROJECT_NAME}-minio
+    image: minio/minio:${MINIO_IMAGE_TAG:-latest}
+    container_name: ${COMPOSE_PROJECT_NAME:-lifeo4agent}-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     ports:
-      - "${MINIO_API_PUBLISH_PORT}:9000"
-      - "${MINIO_CONSOLE_PUBLISH_PORT}:9001"
+      - "${MINIO_API_PUBLISH_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PUBLISH_PORT:-9001}:9001"
     volumes:
       - minio_data:/data
 
   minio-init:
-    image: minio/mc:${MINIO_MC_IMAGE_TAG}
-    container_name: ${COMPOSE_PROJECT_NAME}-minio-init
+    image: minio/mc:${MINIO_MC_IMAGE_TAG:-latest}
+    container_name: ${COMPOSE_PROJECT_NAME:-lifeo4agent}-minio-init
     restart: "no"
     depends_on:
       minio:
@@ -70,46 +72,200 @@ services:
       - ./minio-init:/scripts:ro
 
   minio-seed:
-    image: minio/mc:${MINIO_MC_IMAGE_TAG}
-    container_name: ${COMPOSE_PROJECT_NAME}-minio-seed
+    image: ${SEED_TOOLS_IMAGE:-lifeo4agent/seed-tools:latest}
+    container_name: ${COMPOSE_PROJECT_NAME:-lifeo4agent}-minio-seed
     restart: "no"
     depends_on:
       minio-init:
         condition: service_completed_successfully
-    entrypoint: ["/bin/sh", "/scripts/import.sh"]
+    entrypoint: ["/bin/sh", "/seed-tools/seed_minio_originals.sh"]
     environment:
+      DATA_PACKAGE_VERSION: ${DATA_PACKAGE_VERSION:-latest}
+      DATA_SEED_FORCE: ${DATA_SEED_FORCE:-0}
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
       MINIO_BUCKET: ${MINIO_BUCKET}
+      MINIO_SEED_ENDPOINT: ${MINIO_SEED_ENDPOINT:-http://minio:9000}
+      MINIO_ORIGINALS_PACKAGE_FILE: minio-originals.tar.zst
     volumes:
-      - ./minio-init:/scripts:ro
-      - ./minio-seed:/seed:ro
+      - ./data:/data:ro
+      - ./seed-tools:/seed-tools:ro
+      - seed_work:/work
 
-  init-data:
-    image: alpine:${ALPINE_IMAGE_TAG}
-    container_name: ${COMPOSE_PROJECT_NAME}-init-data
+  public-service-ref-seed:
+    image: ${SEED_TOOLS_IMAGE:-lifeo4agent/seed-tools:latest}
+    container_name: ${COMPOSE_PROJECT_NAME:-lifeo4agent}-public-service-ref-seed
     restart: "no"
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        set -eu
-        mkdir -p /targets/public-service /targets/fastqa-state /targets/highthinking-state /targets/patentqa
-        if [ -d /seed/public-service ]; then cp -a /seed/public-service/. /targets/public-service/; fi
-        if [ -d /seed/fastQA ]; then cp -a /seed/fastQA/. /targets/fastqa-state/; fi
-        if [ -d /seed/highThinkingQA ]; then cp -a /seed/highThinkingQA/. /targets/highthinking-state/; fi
-        if [ -d /seed/patentQA ]; then cp -a /seed/patentQA/. /targets/patentqa/; fi
+    entrypoint: ["/bin/sh", "/seed-tools/seed_ref_data.sh"]
+    environment:
+      DATA_PACKAGE_VERSION: ${DATA_PACKAGE_VERSION:-latest}
+      DATA_SEED_FORCE: ${DATA_SEED_FORCE:-0}
+      PACKAGE_NAME: public-service-ref
+      PACKAGE_FILE: public-service-ref.tar.zst
     volumes:
-      - ./seed-data:/seed:ro
-      - public_service_data:/targets/public-service
-      - fastqa_state:/targets/fastqa-state
-      - highthinking_state:/targets/highthinking-state
-      - patentqa_data:/targets/patentqa
+      - ./data:/data:ro
+      - ./seed-tools:/seed-tools:ro
+      - public_service_ref_data:/target
+
+  fastqa-ref-seed:
+    image: ${SEED_TOOLS_IMAGE:-lifeo4agent/seed-tools:latest}
+    container_name: ${COMPOSE_PROJECT_NAME:-lifeo4agent}-fastqa-ref-seed
+    restart: "no"
+    entrypoint: ["/bin/sh", "/seed-tools/seed_ref_data.sh"]
+    environment:
+      DATA_PACKAGE_VERSION: ${DATA_PACKAGE_VERSION:-latest}
+      DATA_SEED_FORCE: ${DATA_SEED_FORCE:-0}
+      PACKAGE_NAME: fastqa-ref
+      PACKAGE_FILE: fastqa-ref.tar.zst
+    volumes:
+      - ./data:/data:ro
+      - ./seed-tools:/seed-tools:ro
+      - fastqa_ref_data:/target
+
+  highthinking-ref-seed:
+    image: ${SEED_TOOLS_IMAGE:-lifeo4agent/seed-tools:latest}
+    container_name: ${COMPOSE_PROJECT_NAME:-lifeo4agent}-highthinking-ref-seed
+    restart: "no"
+    entrypoint: ["/bin/sh", "/seed-tools/seed_ref_data.sh"]
+    environment:
+      DATA_PACKAGE_VERSION: ${DATA_PACKAGE_VERSION:-latest}
+      DATA_SEED_FORCE: ${DATA_SEED_FORCE:-0}
+      PACKAGE_NAME: highthinking-ref
+      PACKAGE_FILE: highthinking-ref.tar.zst
+    volumes:
+      - ./data:/data:ro
+      - ./seed-tools:/seed-tools:ro
+      - highthinking_ref_data:/target
+
+  patentqa-ref-seed:
+    image: ${SEED_TOOLS_IMAGE:-lifeo4agent/seed-tools:latest}
+    container_name: ${COMPOSE_PROJECT_NAME:-lifeo4agent}-patentqa-ref-seed
+    restart: "no"
+    entrypoint: ["/bin/sh", "/seed-tools/seed_ref_data.sh"]
+    environment:
+      DATA_PACKAGE_VERSION: ${DATA_PACKAGE_VERSION:-latest}
+      DATA_SEED_FORCE: ${DATA_SEED_FORCE:-0}
+      PACKAGE_NAME: patentqa-ref
+      PACKAGE_FILE: patentqa-ref.tar.zst
+    volumes:
+      - ./data:/data:ro
+      - ./seed-tools:/seed-tools:ro
+      - patentqa_ref_data:/target
+
+  neo4j-literature-prepare:
+    image: ${SEED_TOOLS_IMAGE:-lifeo4agent/seed-tools:latest}
+    container_name: ${COMPOSE_PROJECT_NAME:-lifeo4agent}-neo4j-literature-prepare
+    restart: "no"
+    entrypoint: ["/bin/sh", "/seed-tools/prepare_neo4j_dump.sh"]
+    environment:
+      DATA_PACKAGE_VERSION: ${DATA_PACKAGE_VERSION:-latest}
+      DATA_SEED_FORCE: ${DATA_SEED_FORCE:-0}
+      PACKAGE_NAME: neo4j-literature
+      PACKAGE_FILE: neo4j-literature.dump.zst
+      DUMP_NAME: neo4j.dump
+    volumes:
+      - ./data:/data:ro
+      - ./seed-tools:/seed-tools:ro
+      - neo4j_literature_dump_work:/work/neo4j-dumps
+
+  neo4j-literature-seed:
+    image: neo4j:${NEO4J_IMAGE_TAG:-5.26.12}
+    container_name: ${COMPOSE_PROJECT_NAME:-lifeo4agent}-neo4j-literature-seed
+    restart: "no"
+    depends_on:
+      neo4j-literature-prepare:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/sh", "/seed-tools/load_neo4j_dump.sh"]
+    environment:
+      DATA_PACKAGE_VERSION: ${DATA_PACKAGE_VERSION:-latest}
+      DATA_SEED_FORCE: ${DATA_SEED_FORCE:-0}
+      PACKAGE_NAME: neo4j-literature
+      NEO4J_DATABASE: neo4j
+      DUMP_NAME: neo4j.dump
+    volumes:
+      - ./seed-tools:/seed-tools:ro
+      - neo4j_literature_dump_work:/work/neo4j-dumps:ro
+      - neo4j_literature_data:/data
+
+  neo4j-literature:
+    image: neo4j:${NEO4J_IMAGE_TAG:-5.26.12}
+    container_name: ${COMPOSE_PROJECT_NAME:-lifeo4agent}-neo4j-literature
+    restart: unless-stopped
+    depends_on:
+      neo4j-literature-seed:
+        condition: service_completed_successfully
+    environment:
+      NEO4J_AUTH: neo4j/${INTERNAL_NEO4J_PASSWORD:-lifeo4agent_neo4j_internal_123456}
+      HEALTHCHECK_NEO4J_PASSWORD: ${INTERNAL_NEO4J_PASSWORD:-lifeo4agent_neo4j_internal_123456}
+    volumes:
+      - neo4j_literature_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p \"$${HEALTHCHECK_NEO4J_PASSWORD}\" 'RETURN 1' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+
+  neo4j-patent-prepare:
+    image: ${SEED_TOOLS_IMAGE:-lifeo4agent/seed-tools:latest}
+    container_name: ${COMPOSE_PROJECT_NAME:-lifeo4agent}-neo4j-patent-prepare
+    restart: "no"
+    entrypoint: ["/bin/sh", "/seed-tools/prepare_neo4j_dump.sh"]
+    environment:
+      DATA_PACKAGE_VERSION: ${DATA_PACKAGE_VERSION:-latest}
+      DATA_SEED_FORCE: ${DATA_SEED_FORCE:-0}
+      PACKAGE_NAME: neo4j-patent
+      PACKAGE_FILE: neo4j-patent.dump.zst
+      DUMP_NAME: neo4j.dump
+    volumes:
+      - ./data:/data:ro
+      - ./seed-tools:/seed-tools:ro
+      - neo4j_patent_dump_work:/work/neo4j-dumps
+
+  neo4j-patent-seed:
+    image: neo4j:${NEO4J_IMAGE_TAG:-5.26.12}
+    container_name: ${COMPOSE_PROJECT_NAME:-lifeo4agent}-neo4j-patent-seed
+    restart: "no"
+    depends_on:
+      neo4j-patent-prepare:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/sh", "/seed-tools/load_neo4j_dump.sh"]
+    environment:
+      DATA_PACKAGE_VERSION: ${DATA_PACKAGE_VERSION:-latest}
+      DATA_SEED_FORCE: ${DATA_SEED_FORCE:-0}
+      PACKAGE_NAME: neo4j-patent
+      NEO4J_DATABASE: neo4j
+      DUMP_NAME: neo4j.dump
+    volumes:
+      - ./seed-tools:/seed-tools:ro
+      - neo4j_patent_dump_work:/work/neo4j-dumps:ro
+      - neo4j_patent_data:/data
+
+  neo4j-patent:
+    image: neo4j:${NEO4J_IMAGE_TAG:-5.26.12}
+    container_name: ${COMPOSE_PROJECT_NAME:-lifeo4agent}-neo4j-patent
+    restart: unless-stopped
+    depends_on:
+      neo4j-patent-seed:
+        condition: service_completed_successfully
+    environment:
+      NEO4J_AUTH: neo4j/${INTERNAL_NEO4J_PASSWORD:-lifeo4agent_neo4j_internal_123456}
+      HEALTHCHECK_NEO4J_PASSWORD: ${INTERNAL_NEO4J_PASSWORD:-lifeo4agent_neo4j_internal_123456}
+    volumes:
+      - neo4j_patent_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p \"$${HEALTHCHECK_NEO4J_PASSWORD}\" 'RETURN 1' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
 
   public-service:
-    image: ${PUBLIC_SERVICE_IMAGE}
-    container_name: ${COMPOSE_PROJECT_NAME}-public-service
+    image: ${PUBLIC_SERVICE_IMAGE:-lifeo4agent/public-service:latest}
+    container_name: ${COMPOSE_PROJECT_NAME:-lifeo4agent}-public-service
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       mysql:
         condition: service_healthy
@@ -119,35 +275,41 @@ services:
         condition: service_completed_successfully
       minio-seed:
         condition: service_completed_successfully
-      init-data:
+      public-service-ref-seed:
         condition: service_completed_successfully
+      neo4j-literature:
+        condition: service_healthy
     environment:
-      APP_ENV: ${APP_ENV}
+      APP_ENV: ${APP_ENV:-production}
       PUBLIC_SERVICE_HOST: 0.0.0.0
       PUBLIC_SERVICE_PORT: 8102
-      PUBLIC_SERVICE_DATA_ROOT: /data/public-service
-      PUBLIC_SERVICE_CORS_ORIGINS: ${PUBLIC_SERVICE_CORS_ORIGINS}
+      PUBLIC_SERVICE_DATA_ROOT: /data/public-service/runtime
+      PUBLIC_SERVICE_CORS_ORIGINS: "*"
       JWT_SECRET: ${JWT_SECRET}
       PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN: ${PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN}
       MYSQL_HOST: mysql
       MYSQL_PORT: 3306
-      MYSQL_USER: ${MYSQL_APP_USER}
+      MYSQL_USER: ${MYSQL_APP_USER:-agentcode}
       MYSQL_PASSWORD: ${MYSQL_APP_PASSWORD}
-      MYSQL_DATABASE: ${MYSQL_DATABASE}
-      REDIS_ENABLED: ${PUBLIC_SERVICE_REDIS_ENABLED}
+      MYSQL_DATABASE: agentcode
+      REDIS_ENABLED: "1"
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD: ${REDIS_PASSWORD}
-      REDIS_DB: ${PUBLIC_SERVICE_REDIS_DB}
-      REDIS_KEY_PREFIX: ${PUBLIC_SERVICE_REDIS_KEY_PREFIX}
+      REDIS_DB: 0
+      REDIS_KEY_PREFIX: public_service
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
       MINIO_BUCKET: ${MINIO_BUCKET}
       MINIO_SECURE: "0"
-      MINIO_REGION: ${MINIO_REGION}
-      MINIO_USE_PROXY: ${PUBLIC_SERVICE_MINIO_USE_PROXY}
-      MINIO_DOWNLOAD_EXPIRES: ${PUBLIC_SERVICE_MINIO_DOWNLOAD_EXPIRES}
+      MINIO_REGION: ${MINIO_REGION:-us-east-1}
+      MINIO_USE_PROXY: "1"
+      MINIO_DOWNLOAD_EXPIRES: 3600
+      PAPERS_DIR: /data/public-service/runtime/papers
+      VECTOR_DB_PATH: /ref/public-service/vector_database
+      LOCAL_STORAGE_ROOT: /data/public-service/runtime/storage
+      TRANSLATION_CACHE_DIR: /data/public-service/runtime/translation_cache
       LLM_API_KEY: ${LLM_API_KEY}
       LLM_BASE_URL: ${LLM_BASE_URL}
       LLM_MODEL: ${LLM_MODEL}
@@ -156,18 +318,20 @@ services:
       OPENAI_MODEL: ${LLM_MODEL}
       DASHSCOPE_API_KEY: ${LLM_API_KEY}
       DASHSCOPE_BASE_URL: ${LLM_BASE_URL}
-      NEO4J_URL: ${PUBLIC_SERVICE_NEO4J_URL}
-      NEO4J_USERNAME: ${PUBLIC_SERVICE_NEO4J_USERNAME}
-      NEO4J_PASSWORD: ${PUBLIC_SERVICE_NEO4J_PASSWORD}
-    ports:
-      - "${PUBLIC_SERVICE_PUBLISH_PORT}:8102"
+      NEO4J_URL: bolt://neo4j-literature:7687
+      NEO4J_USERNAME: neo4j
+      NEO4J_PASSWORD: ${INTERNAL_NEO4J_PASSWORD:-lifeo4agent_neo4j_internal_123456}
+      NEO4J_DATABASE: neo4j
     volumes:
-      - public_service_data:/data/public-service
+      - public_service_data:/data/public-service/runtime
+      - public_service_ref_data:/ref/public-service
 
   fastqa:
-    image: ${FASTQA_IMAGE}
-    container_name: ${COMPOSE_PROJECT_NAME}-fastqa
+    image: ${FASTQA_IMAGE:-lifeo4agent/fastqa:latest}
+    container_name: ${COMPOSE_PROJECT_NAME:-lifeo4agent}-fastqa
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       redis:
         condition: service_healthy
@@ -175,12 +339,14 @@ services:
         condition: service_completed_successfully
       minio-seed:
         condition: service_completed_successfully
-      init-data:
+      fastqa-ref-seed:
         condition: service_completed_successfully
       public-service:
         condition: service_started
+      neo4j-literature:
+        condition: service_healthy
     environment:
-      APP_ENV: ${APP_ENV}
+      APP_ENV: ${APP_ENV:-production}
       FASTAPI_HOST: 0.0.0.0
       FASTAPI_PORT: 8008
       FASTQA_SERVICE_STATE_ROOT: /data/fastqa/state
@@ -188,18 +354,28 @@ services:
       FASTQA_SERVICE_ASSET_ROOT: /app/resource/assets
       RESOURCE_ROOT: /app/resource
       PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN: ${PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN}
-      REDIS_ENABLED: ${FASTQA_REDIS_ENABLED}
+      REDIS_ENABLED: "1"
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD: ${REDIS_PASSWORD}
-      REDIS_DB: ${FASTQA_REDIS_DB}
-      REDIS_KEY_PREFIX: ${FASTQA_REDIS_KEY_PREFIX}
+      REDIS_DB: 0
+      REDIS_KEY_PREFIX: fastqa
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
       MINIO_BUCKET: ${MINIO_BUCKET}
       MINIO_SECURE: "0"
+      QA_ORIGINAL_MINIO_ONLY: "true"
       PUBLIC_SERVICE_INTERNAL_BASE_URL: http://public-service:8102
+      VECTOR_DB_PATH: /ref/fastqa/vector_database
+      VECTOR_DB_MD_PATH: /ref/fastqa/vector_database_md
+      VECTOR_DB_COMMUNITY_PATH: /ref/fastqa/community_vector_database
+      TOPIC_INDEX_PATH: /ref/fastqa/vector_db_topic_index.json
+      PAPERS_DIR: /data/fastqa/runtime/papers
+      FASTQA_NEO4J_URL: bolt://neo4j-literature:7687
+      FASTQA_NEO4J_USERNAME: neo4j
+      FASTQA_NEO4J_PASSWORD: ${INTERNAL_NEO4J_PASSWORD:-lifeo4agent_neo4j_internal_123456}
+      FASTQA_NEO4J_DATABASE: neo4j
       LLM_API_KEY: ${LLM_API_KEY}
       LLM_BASE_URL: ${LLM_BASE_URL}
       LLM_MODEL: ${LLM_MODEL}
@@ -208,25 +384,35 @@ services:
       OPENAI_MODEL: ${LLM_MODEL}
       DASHSCOPE_API_KEY: ${LLM_API_KEY}
       DASHSCOPE_BASE_URL: ${LLM_BASE_URL}
-      EMBEDDING_MODEL_TYPE: ${QA_EMBEDDING_MODEL_TYPE}
+      INTENT_MODEL_ENABLED: ${INTENT_MODEL_ENABLED:-false}
+      INTENT_MODEL_API_KEY: ${INTENT_MODEL_API_KEY:-}
+      INTENT_MODEL_BASE_URL: ${INTENT_MODEL_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      INTENT_MODEL: ${INTENT_MODEL:-qwen3-8b}
+      INTENT_MODEL_TIMEOUT_SECONDS: ${INTENT_MODEL_TIMEOUT_SECONDS:-30}
+      EMBEDDING_MODEL_TYPE: remote
       EMBEDDING_API_URL: ${QA_EMBEDDING_BASE_URL}
       EMBEDDING_API_MODEL: ${QA_EMBEDDING_MODEL}
       EMBEDDING_API_KEY: ${QA_EMBEDDING_API_KEY}
+      RERANK_PROVIDER: ${RERANK_PROVIDER}
+      RERANK_BASE_URL: ${RERANK_BASE_URL}
+      RERANK_MODEL: ${RERANK_MODEL}
+      RERANK_API_KEY: ${RERANK_API_KEY}
       QA_RETRIEVAL_RERANK_PROVIDER: ${RERANK_PROVIDER}
       QA_RETRIEVAL_RERANK_BASE_URL: ${RERANK_BASE_URL}
       QA_RETRIEVAL_RERANK_MODEL: ${RERANK_MODEL}
       QA_RETRIEVAL_RERANK_API_KEY: ${RERANK_API_KEY}
-      PDFQA_SIDECAR_BASE_URL_INTERNAL: ${FASTQA_PDFQA_SIDECAR_BASE_URL_INTERNAL}
-    ports:
-      - "${FASTQA_PUBLISH_PORT}:8008"
+      PDFQA_SIDECAR_BASE_URL_INTERNAL: http://127.0.0.1:8012
     volumes:
       - fastqa_state:/data/fastqa/state
       - fastqa_runtime:/data/fastqa/runtime
+      - fastqa_ref_data:/ref/fastqa
 
   highthinkingqa:
-    image: ${HIGHTHINKINGQA_IMAGE}
-    container_name: ${COMPOSE_PROJECT_NAME}-highthinkingqa
+    image: ${HIGHTHINKINGQA_IMAGE:-lifeo4agent/highthinkingqa:latest}
+    container_name: ${COMPOSE_PROJECT_NAME:-lifeo4agent}-highthinkingqa
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       mysql:
         condition: service_healthy
@@ -236,12 +422,12 @@ services:
         condition: service_completed_successfully
       minio-seed:
         condition: service_completed_successfully
-      init-data:
+      highthinking-ref-seed:
         condition: service_completed_successfully
       public-service:
         condition: service_started
     environment:
-      APP_ENV: ${APP_ENV}
+      APP_ENV: ${APP_ENV:-production}
       APP_HOST: 0.0.0.0
       APP_PORT: 8009
       HIGHTHINKINGQA_SERVICE_STATE_ROOT: /data/highthinkingqa/state
@@ -252,38 +438,45 @@ services:
       PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN: ${PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN}
       MYSQL_HOST: mysql
       MYSQL_PORT: 3306
-      MYSQL_USER: ${MYSQL_APP_USER}
+      MYSQL_USER: ${MYSQL_APP_USER:-agentcode}
       MYSQL_PASSWORD: ${MYSQL_APP_PASSWORD}
-      MYSQL_DATABASE: ${MYSQL_DATABASE}
-      REDIS_ENABLED: ${HIGHTHINKINGQA_REDIS_ENABLED}
+      MYSQL_DATABASE: agentcode
+      REDIS_ENABLED: "1"
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD: ${REDIS_PASSWORD}
-      REDIS_DB: ${HIGHTHINKINGQA_REDIS_DB}
-      REDIS_KEY_PREFIX: ${HIGHTHINKINGQA_REDIS_KEY_PREFIX}
+      REDIS_DB: 0
+      REDIS_KEY_PREFIX: highthinkingqa
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
       MINIO_BUCKET: ${MINIO_BUCKET}
       MINIO_SECURE: "0"
-      MINIO_REGION: ${MINIO_REGION}
+      MINIO_REGION: ${MINIO_REGION:-us-east-1}
+      HIGHTHINKING_ORIGINAL_MINIO_ONLY: "true"
+      CHROMA_PERSIST_DIR: /ref/highthinkingqa/vectordb
+      PAPERS_DIR: /data/highthinkingqa/runtime/papers
       LLM_API_KEY: ${LLM_API_KEY}
       LLM_BASE_URL: ${LLM_BASE_URL}
       LLM_MODEL: ${LLM_MODEL}
+      HIGHTHINKINGQA_EMBEDDING_API_KEY: ${HIGHTHINKINGQA_EMBEDDING_API_KEY}
+      HIGHTHINKINGQA_EMBEDDING_BASE_URL: ${HIGHTHINKINGQA_EMBEDDING_BASE_URL}
+      HIGHTHINKINGQA_EMBEDDING_MODEL: ${HIGHTHINKINGQA_EMBEDDING_MODEL}
       EMBEDDING_API_KEY: ${HIGHTHINKINGQA_EMBEDDING_API_KEY}
       EMBEDDING_BASE_URL: ${HIGHTHINKINGQA_EMBEDDING_BASE_URL}
       EMBEDDING_MODEL: ${HIGHTHINKINGQA_EMBEDDING_MODEL}
       PUBLIC_SERVICE_INTERNAL_BASE_URL: http://public-service:8102
-    ports:
-      - "${HIGHTHINKINGQA_PUBLISH_PORT}:8009"
     volumes:
       - highthinking_state:/data/highthinkingqa/state
       - highthinking_runtime:/data/highthinkingqa/runtime
+      - highthinking_ref_data:/ref/highthinkingqa
 
   patent:
-    image: ${PATENT_IMAGE}
-    container_name: ${COMPOSE_PROJECT_NAME}-patent
+    image: ${PATENT_IMAGE:-lifeo4agent/patent:latest}
+    container_name: ${COMPOSE_PROJECT_NAME:-lifeo4agent}-patent
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       mysql:
         condition: service_healthy
@@ -293,27 +486,37 @@ services:
         condition: service_completed_successfully
       minio-seed:
         condition: service_completed_successfully
-      init-data:
+      patentqa-ref-seed:
         condition: service_completed_successfully
       public-service:
         condition: service_started
+      neo4j-patent:
+        condition: service_healthy
     environment:
-      APP_ENV: ${APP_ENV}
+      APP_ENV: ${APP_ENV:-production}
       PATENT_ENV: production
       PATENT_HOST: 0.0.0.0
       PATENT_PORT: 8010
-      PATENT_GUNICORN_WORKERS: ${PATENT_GUNICORN_WORKERS}
-      PATENT_GUNICORN_THREADS: ${PATENT_GUNICORN_THREADS}
-      PATENT_GUNICORN_TIMEOUT: ${PATENT_GUNICORN_TIMEOUT}
+      PATENT_GUNICORN_WORKERS: 8
+      PATENT_GUNICORN_THREADS: 8
+      PATENT_GUNICORN_TIMEOUT: 120
       RESOURCE_ROOT: /app/resource
+      PATENT_SERVICE_RUNTIME_ROOT: /data/patent/runtime
+      PATENT_ORIGINAL_MINIO_ONLY: "true"
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+      MINIO_SECURE: "0"
+      MINIO_REGION: ${MINIO_REGION:-us-east-1}
       JWT_SECRET: ${JWT_SECRET}
       PATENT_DURABLE_MODE_ENABLED: "true"
       PATENT_DURABLE_AUTHORITY_ENABLED: "true"
       PATENT_AUTHORITY_BASE_URL: http://public-service:8102
       PATENT_AUTHORITY_INTERNAL_TOKEN: ${PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN}
-      PATENT_REDIS_ENABLED: ${PATENT_REDIS_ENABLED}
-      PATENT_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/${PATENT_REDIS_DB}
-      PATENT_REDIS_KEY_PREFIX: ${PATENT_REDIS_KEY_PREFIX}
+      PATENT_REDIS_ENABLED: "1"
+      PATENT_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      PATENT_REDIS_KEY_PREFIX: patent
       LLM_API_KEY: ${LLM_API_KEY}
       LLM_BASE_URL: ${LLM_BASE_URL}
       LLM_MODEL: ${LLM_MODEL}
@@ -325,32 +528,40 @@ services:
       PATENT_OPENAI_API_KEY: ${LLM_API_KEY}
       PATENT_OPENAI_BASE_URL: ${LLM_BASE_URL}
       PATENT_OPENAI_MODEL: ${LLM_MODEL}
-      EMBEDDING_MODEL_TYPE: ${QA_EMBEDDING_MODEL_TYPE}
+      INTENT_MODEL_ENABLED: ${INTENT_MODEL_ENABLED:-false}
+      INTENT_MODEL_API_KEY: ${INTENT_MODEL_API_KEY:-}
+      INTENT_MODEL_BASE_URL: ${INTENT_MODEL_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      INTENT_MODEL: ${INTENT_MODEL:-qwen3-8b}
+      INTENT_MODEL_TIMEOUT_SECONDS: ${INTENT_MODEL_TIMEOUT_SECONDS:-30}
+      EMBEDDING_MODEL_TYPE: remote
       EMBEDDING_API_URL: ${QA_EMBEDDING_BASE_URL}
       EMBEDDING_API_MODEL: ${QA_EMBEDDING_MODEL}
       EMBEDDING_API_KEY: ${QA_EMBEDDING_API_KEY}
-      PATENT_EMBEDDING_MODEL_TYPE: ${QA_EMBEDDING_MODEL_TYPE}
+      PATENT_EMBEDDING_MODEL_TYPE: remote
       PATENT_EMBEDDING_API_URL: ${QA_EMBEDDING_BASE_URL}
       PATENT_EMBEDDING_API_MODEL: ${QA_EMBEDDING_MODEL}
+      RERANK_PROVIDER: ${RERANK_PROVIDER}
+      RERANK_BASE_URL: ${RERANK_BASE_URL}
+      RERANK_MODEL: ${RERANK_MODEL}
+      RERANK_API_KEY: ${RERANK_API_KEY}
       PATENT_STAGE2_RERANK_PROVIDER: ${RERANK_PROVIDER}
       PATENT_STAGE2_RERANK_BASE_URL: ${RERANK_BASE_URL}
       PATENT_STAGE2_RERANK_MODEL: ${RERANK_MODEL}
       PATENT_STAGE2_RERANK_API_KEY: ${RERANK_API_KEY}
-      PATENT_GRAPH_KB_ENABLED: ${PATENT_GRAPH_KB_ENABLED}
-      PATENT_GRAPH_KB_V2_ENABLED: ${PATENT_GRAPH_KB_V2_ENABLED}
-      PATENT_GRAPH_KB_RAG_INJECTION_ENABLED: ${PATENT_GRAPH_KB_RAG_INJECTION_ENABLED}
-      PATENT_NEO4J_URL: ${PATENT_NEO4J_URL}
-      PATENT_NEO4J_USERNAME: ${PATENT_NEO4J_USERNAME}
-      PATENT_NEO4J_PASSWORD: ${PATENT_NEO4J_PASSWORD}
-      PATENT_NEO4J_DATABASE: ${PATENT_NEO4J_DATABASE}
-    ports:
-      - "${PATENT_PUBLISH_PORT}:8010"
+      PATENT_GRAPH_KB_ENABLED: "true"
+      PATENT_GRAPH_KB_V2_ENABLED: "true"
+      PATENT_GRAPH_KB_RAG_INJECTION_ENABLED: "true"
+      PATENT_NEO4J_URL: bolt://neo4j-patent:7687
+      PATENT_NEO4J_USERNAME: neo4j
+      PATENT_NEO4J_PASSWORD: ${INTERNAL_NEO4J_PASSWORD:-lifeo4agent_neo4j_internal_123456}
+      PATENT_NEO4J_DATABASE: neo4j
     volumes:
-      - patentqa_data:/app/resource/patentQA
+      - patentqa_runtime:/data/patent/runtime
+      - patentqa_ref_data:/app/resource/patentQA
 
   gateway:
-    image: ${GATEWAY_IMAGE}
-    container_name: ${COMPOSE_PROJECT_NAME}-gateway
+    image: ${GATEWAY_IMAGE:-lifeo4agent/gateway:latest}
+    container_name: ${COMPOSE_PROJECT_NAME:-lifeo4agent}-gateway
     restart: unless-stopped
     depends_on:
       public-service:
@@ -369,38 +580,68 @@ services:
       THINKING_BACKEND_BASE_URL: http://highthinkingqa:8009
       PATENT_BACKEND_BASE_URL: http://patent:8010
       PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN: ${PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN}
-      GATEWAY_CONVERSATION_FILE_PROVIDER: ${GATEWAY_CONVERSATION_FILE_PROVIDER}
-      GATEWAY_REQUEST_TIMEOUT_SECONDS: ${GATEWAY_REQUEST_TIMEOUT_SECONDS}
-      GATEWAY_SSE_TIMEOUT_SECONDS: ${GATEWAY_SSE_TIMEOUT_SECONDS}
-    ports:
-      - "${GATEWAY_PUBLISH_PORT}:8101"
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      REDIS_DB: 0
+      REDIS_KEY_PREFIX: gateway
+      GATEWAY_CONVERSATION_FILE_PROVIDER: public_http
+      GATEWAY_REQUEST_TIMEOUT_SECONDS: 30
+      GATEWAY_SSE_TIMEOUT_SECONDS: 600
 
   frontend:
-    image: ${FRONTEND_IMAGE}
-    container_name: ${COMPOSE_PROJECT_NAME}-frontend
+    image: ${FRONTEND_IMAGE:-lifeo4agent/frontend:latest}
+    container_name: ${COMPOSE_PROJECT_NAME:-lifeo4agent}-frontend
     restart: unless-stopped
     depends_on:
       gateway:
         condition: service_started
     ports:
-      - "${FRONTEND_PUBLISH_PORT}:80"
+      - "${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${FRONTEND_PUBLISH_PORT:-8080}:80"
+
+  edge:
+    image: nginx:${NGINX_IMAGE_TAG:-1.27-alpine}
+    container_name: ${COMPOSE_PROJECT_NAME:-lifeo4agent}-edge
+    restart: unless-stopped
+    depends_on:
+      frontend:
+        condition: service_started
+    environment:
+      DOLLAR: "$$"
+      HTTPS_SERVER_NAME: ${HTTPS_SERVER_NAME:-lifeo4.agent.test}
+      HTTPS_REDIRECT_HOST: ${HTTPS_REDIRECT_HOST:-lifeo4.agent.test}
+    ports:
+      - "${HTTP_PUBLISH_PORT:-80}:80"
+      - "${HTTPS_PUBLISH_PORT:-443}:443"
+    volumes:
+      - ./nginx/edge-https.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./certs:/etc/nginx/certs:ro
 
 volumes:
   mysql_data:
   redis_data:
   minio_data:
+  seed_work:
   public_service_data:
+  public_service_ref_data:
   fastqa_state:
   fastqa_runtime:
+  fastqa_ref_data:
   highthinking_state:
   highthinking_runtime:
-  patentqa_data:
+  highthinking_ref_data:
+  patentqa_runtime:
+  patentqa_ref_data:
+  neo4j_literature_data:
+  neo4j_literature_dump_work:
+  neo4j_patent_data:
+  neo4j_patent_dump_work:
 
 networks:
   default:
-    name: ${COMPOSE_PROJECT_NAME}-net
+    name: ${COMPOSE_PROJECT_NAME:-lifeo4agent}-net
     driver: bridge
     ipam:
       config:
-        - subnet: ${DOCKER_BRIDGE_SUBNET}
-          gateway: ${DOCKER_BRIDGE_GATEWAY}
+        - subnet: ${DOCKER_BRIDGE_SUBNET:-172.20.0.0/24}
+          gateway: ${DOCKER_BRIDGE_GATEWAY:-172.20.0.1}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 
@@ -11,20 +12,73 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _service_block(compose: str, service_name: str) -> str:
+    marker = f"  {service_name}:\n"
+    start = compose.index(marker)
+    match = re.search(r"\n  [A-Za-z0-9_-]+:\n", compose[start + len(marker) :])
+    next_start = -1 if match is None else start + len(marker) + match.start()
+    return compose[start:] if next_start == -1 else compose[start:next_start]
+
+
+def _has_env_mapping(block: str, key: str, value: str) -> bool:
+    return re.search(rf"^\s+{re.escape(key)}:\s+{re.escape(value)}$", block, re.MULTILINE) is not None
+
+
 def test_offline_compose_includes_patent_and_frontend_services() -> None:
     content = _read(DEPLOY / "docker-compose.yml")
 
     assert "  patent:" in content
-    assert "image: ${PATENT_IMAGE:-highthinking/patent:latest}" in content
+    assert "image: ${PATENT_IMAGE:-lifeo4agent/patent:latest}" in content
     assert "PATENT_PORT: 8010" in content
     assert "PATENT_AUTHORITY_BASE_URL: http://public-service:8102" in content
-    assert "PATENT_NEO4J_URL: ${PATENT_NEO4J_URL}" in content
-    assert "- patentqa_data:/app/resource/patentQA" in content
+    assert "PATENT_NEO4J_URL: bolt://neo4j-patent:7687" in content
+    assert "- patentqa_ref_data:/app/resource/patentQA" in content
 
     assert "  frontend:" in content
-    assert "image: ${FRONTEND_IMAGE:-highthinking/frontend:latest}" in content
-    assert '"${FRONTEND_PUBLISH_PORT:-8080}:80"' in content
+    assert "image: ${FRONTEND_IMAGE:-lifeo4agent/frontend:latest}" in content
+    assert '"${FRONTEND_BIND_ADDRESS:-127.0.0.1}:${FRONTEND_PUBLISH_PORT:-8080}:80"' in content
     assert "gateway:" in content
+
+
+def test_offline_compose_includes_https_edge_service() -> None:
+    compose = _read(DEPLOY / "docker-compose.yml")
+    edge_template = _read(DEPLOY / "nginx" / "edge-https.conf.template")
+    env_template = _read(DEPLOY / ".env.production.example")
+
+    assert "  edge:" in compose
+    assert "image: nginx:${NGINX_IMAGE_TAG:-1.27-alpine}" in compose
+    assert '"${HTTP_PUBLISH_PORT:-80}:80"' in compose
+    assert '"${HTTPS_PUBLISH_PORT:-443}:443"' in compose
+    assert "./nginx/edge-https.conf.template:/etc/nginx/templates/default.conf.template:ro" in compose
+    assert "./certs:/etc/nginx/certs:ro" in compose
+    assert "HTTPS_SERVER_NAME: ${HTTPS_SERVER_NAME:-lifeo4.agent.test}" in compose
+    assert "HTTPS_REDIRECT_HOST: ${HTTPS_REDIRECT_HOST:-lifeo4.agent.test}" in compose
+
+    assert "ssl_certificate /etc/nginx/certs/fullchain.pem;" in edge_template
+    assert "ssl_certificate_key /etc/nginx/certs/privkey.pem;" in edge_template
+    assert "proxy_pass http://frontend:80;" in edge_template
+    assert "return 308 https://${HTTPS_REDIRECT_HOST}${DOLLAR}request_uri;" in edge_template
+
+    for variable in [
+        "HTTP_PUBLISH_PORT",
+        "HTTPS_PUBLISH_PORT",
+        "HTTPS_SERVER_NAME",
+        "HTTPS_REDIRECT_HOST",
+    ]:
+        assert f"{variable}=" in env_template
+
+
+def test_neo4j_runtime_services_do_not_export_invalid_password_setting() -> None:
+    compose = _read(DEPLOY / "docker-compose.yml")
+
+    for service_name in ["neo4j-literature", "neo4j-patent"]:
+        block = _service_block(compose, service_name)
+        assert "NEO4J_AUTH: neo4j/${INTERNAL_NEO4J_PASSWORD:-lifeo4agent_neo4j_internal_123456}" in block
+        assert "\n      NEO4J_PASSWORD:" not in block
+        assert "NEO4J_HEALTHCHECK_PASSWORD:" not in block
+        assert "HEALTHCHECK_NEO4J_PASSWORD: ${INTERNAL_NEO4J_PASSWORD:-lifeo4agent_neo4j_internal_123456}" in block
+        assert "cypher-shell -u neo4j" in block
+        assert "$${HEALTHCHECK_NEO4J_PASSWORD}" in block
 
 
 def test_offline_export_includes_business_and_infrastructure_images() -> None:
@@ -45,15 +99,41 @@ def test_offline_export_includes_business_and_infrastructure_images() -> None:
         'REDIS_IMAGE_TAG="${REDIS_IMAGE_TAG:-7}"',
         'MINIO_IMAGE_TAG="${MINIO_IMAGE_TAG:-latest}"',
         'MINIO_MC_IMAGE_TAG="${MINIO_MC_IMAGE_TAG:-latest}"',
-        'ALPINE_IMAGE_TAG="${ALPINE_IMAGE_TAG:-3.20}"',
+        'NEO4J_IMAGE_TAG="${NEO4J_IMAGE_TAG:-5.26.12}"',
         'NGINX_IMAGE_TAG="${NGINX_IMAGE_TAG:-1.27-alpine}"',
+        'SEED_TOOLS_IMAGE="${SEED_TOOLS_IMAGE:-lifeo4agent/seed-tools:latest}"',
     ]:
         assert image_ref in content
+
+
+def test_python_base_image_includes_neo4j_driver() -> None:
+    content = _read(DEPLOY / "docker" / "base.Dockerfile")
+
+    assert "\n      neo4j\n" in content
+
+
+def test_preflight_requires_mysql_admin_seed() -> None:
+    content = _read(DEPLOY / "scripts" / "preflight_check.sh")
+
+    assert "$DEPLOY_DIR/mysql-init/003_seed_admin.sql" in content
 
 
 def test_offline_dockerfiles_exist_for_patent_and_frontend() -> None:
     assert (DEPLOY / "docker" / "Dockerfile.patent").exists()
     assert (DEPLOY / "docker" / "Dockerfile.frontend-nginx").exists()
+
+
+def test_service_dockerfiles_run_gunicorn_from_service_roots() -> None:
+    hq_dockerfile = _read(DEPLOY / "docker" / "Dockerfile.highthinkingqa")
+    patent_dockerfile = _read(DEPLOY / "docker" / "Dockerfile.patent")
+
+    assert "WORKDIR /app/highThinkingQA" in hq_dockerfile
+    assert '"-c", "server_fastapi/gunicorn.conf.py"' in hq_dockerfile
+    assert "--chdir" not in hq_dockerfile
+
+    assert "WORKDIR /app/patent" in patent_dockerfile
+    assert '"-c", "server_fastapi/gunicorn.conf.py"' in patent_dockerfile
+    assert "--chdir" not in patent_dockerfile
 
 
 def test_patent_corpus_is_seed_data_not_docker_build_context() -> None:
@@ -116,6 +196,9 @@ def test_deploy_env_uses_simplified_model_connection_variables() -> None:
         "OPENAI_API_KEY: ${LLM_API_KEY}",
         "LLM_API_KEY: ${LLM_API_KEY}",
         "PATENT_OPENAI_API_KEY: ${LLM_API_KEY}",
+        "HIGHTHINKINGQA_EMBEDDING_API_KEY: ${HIGHTHINKINGQA_EMBEDDING_API_KEY}",
+        "HIGHTHINKINGQA_EMBEDDING_BASE_URL: ${HIGHTHINKINGQA_EMBEDDING_BASE_URL}",
+        "HIGHTHINKINGQA_EMBEDDING_MODEL: ${HIGHTHINKINGQA_EMBEDDING_MODEL}",
         "EMBEDDING_MODEL_TYPE: remote",
         "EMBEDDING_API_URL: ${QA_EMBEDDING_BASE_URL}",
         "PATENT_EMBEDDING_API_URL: ${QA_EMBEDDING_BASE_URL}",
@@ -129,6 +212,31 @@ def test_deploy_env_uses_simplified_model_connection_variables() -> None:
     assert "OCR_MODEL:" not in compose
 
 
+def test_fastqa_and_patent_receive_runtime_rerank_variables() -> None:
+    compose = _read(DEPLOY / "docker-compose.yml")
+
+    fastqa = _service_block(compose, "fastqa")
+    patent = _service_block(compose, "patent")
+
+    for block in [fastqa, patent]:
+        assert _has_env_mapping(block, "RERANK_PROVIDER", "${RERANK_PROVIDER}")
+        assert _has_env_mapping(block, "RERANK_BASE_URL", "${RERANK_BASE_URL}")
+        assert _has_env_mapping(block, "RERANK_MODEL", "${RERANK_MODEL}")
+        assert _has_env_mapping(block, "RERANK_API_KEY", "${RERANK_API_KEY}")
+
+
+def test_patent_receives_minio_originals_configuration() -> None:
+    compose = _read(DEPLOY / "docker-compose.yml")
+    patent = _service_block(compose, "patent")
+
+    assert _has_env_mapping(patent, "MINIO_ENDPOINT", "minio:9000")
+    assert _has_env_mapping(patent, "MINIO_ACCESS_KEY", "${MINIO_ROOT_USER}")
+    assert _has_env_mapping(patent, "MINIO_SECRET_KEY", "${MINIO_ROOT_PASSWORD}")
+    assert _has_env_mapping(patent, "MINIO_BUCKET", "${MINIO_BUCKET}")
+    assert _has_env_mapping(patent, "MINIO_SECURE", '"0"')
+    assert _has_env_mapping(patent, "MINIO_REGION", "${MINIO_REGION:-us-east-1}")
+
+
 def test_deploy_env_exposes_only_customer_facing_configuration() -> None:
     compose = _read(DEPLOY / "docker-compose.yml")
     env_template = _read(DEPLOY / ".env.production.example")
@@ -139,12 +247,11 @@ def test_deploy_env_exposes_only_customer_facing_configuration() -> None:
         if line and not line.startswith("#") and "=" in line
     }
     expected_customer_keys = {
+        "HTTP_PUBLISH_PORT",
+        "HTTPS_PUBLISH_PORT",
+        "HTTPS_SERVER_NAME",
+        "HTTPS_REDIRECT_HOST",
         "FRONTEND_PUBLISH_PORT",
-        "GATEWAY_PUBLISH_PORT",
-        "PUBLIC_SERVICE_PUBLISH_PORT",
-        "FASTQA_PUBLISH_PORT",
-        "HIGHTHINKINGQA_PUBLISH_PORT",
-        "PATENT_PUBLISH_PORT",
         "MYSQL_PUBLISH_PORT",
         "REDIS_PUBLISH_PORT",
         "MINIO_API_PUBLISH_PORT",
@@ -157,11 +264,18 @@ def test_deploy_env_exposes_only_customer_facing_configuration() -> None:
         "MINIO_ROOT_PASSWORD",
         "MINIO_BUCKET",
         "MINIO_REGION",
+        "DATA_PACKAGE_VERSION",
+        "DATA_SEED_FORCE",
         "JWT_SECRET",
         "PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN",
         "LLM_API_KEY",
         "LLM_BASE_URL",
         "LLM_MODEL",
+        "INTENT_MODEL_ENABLED",
+        "INTENT_MODEL_API_KEY",
+        "INTENT_MODEL_BASE_URL",
+        "INTENT_MODEL",
+        "INTENT_MODEL_TIMEOUT_SECONDS",
         "QA_EMBEDDING_API_KEY",
         "QA_EMBEDDING_BASE_URL",
         "QA_EMBEDDING_MODEL",
@@ -172,10 +286,6 @@ def test_deploy_env_exposes_only_customer_facing_configuration() -> None:
         "RERANK_BASE_URL",
         "RERANK_MODEL",
         "RERANK_API_KEY",
-        "PATENT_NEO4J_URL",
-        "PATENT_NEO4J_USERNAME",
-        "PATENT_NEO4J_PASSWORD",
-        "PATENT_NEO4J_DATABASE",
     }
 
     assert customer_keys == expected_customer_keys
@@ -207,6 +317,15 @@ def test_deploy_env_exposes_only_customer_facing_configuration() -> None:
         "PUBLIC_SERVICE_CORS_ORIGINS",
         "PUBLIC_SERVICE_MINIO_USE_PROXY",
         "PUBLIC_SERVICE_MINIO_DOWNLOAD_EXPIRES",
+        "PATENT_NEO4J_URL",
+        "PATENT_NEO4J_USERNAME",
+        "PATENT_NEO4J_PASSWORD",
+        "PATENT_NEO4J_DATABASE",
+        "GATEWAY_PUBLISH_PORT",
+        "PUBLIC_SERVICE_PUBLISH_PORT",
+        "FASTQA_PUBLISH_PORT",
+        "HIGHTHINKINGQA_PUBLISH_PORT",
+        "PATENT_PUBLISH_PORT",
     }
     for key in hidden_internal_keys:
         assert f"{key}=" not in env_template

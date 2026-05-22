@@ -57,6 +57,7 @@ Environment overrides:
   HIGHTHINKINGQA_PAPERS_SRC
   PATENT_ORIGINALS_SRC
   PATENT_ORIGINALS_PROVIDER
+  PATENT_TABLES_BACKFILL_ENABLED
 USAGE
 }
 
@@ -80,6 +81,77 @@ copy_papers_from_dir() {
     cp -a "$file_path" "$dest/$file_name"
     echo "copied: $file_path -> $dest/$file_name"
   done
+}
+
+backfill_patent_tables_into_seed() {
+  if [[ "${PATENT_TABLES_BACKFILL_ENABLED:-1}" != "1" ]]; then
+    echo "skip: patent tables backfill disabled"
+    return 0
+  fi
+
+  "$PYTHON_BIN" "$ROOT_DIR/scripts/patent_original_tables_backfill.py" \
+    --target file \
+    --bucket-dir "$TARGET_DIR" \
+    --source-root "$PATENT_ORIGINALS_SRC" \
+    --summary-only
+}
+
+check_patent_tables_seed_consistency() {
+  if [[ "${PATENT_TABLES_BACKFILL_ENABLED:-1}" != "1" ]]; then
+    return 0
+  fi
+
+  "$PYTHON_BIN" - "$PATENT_ORIGINALS_SRC" "$TARGET_DIR" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+source_root = Path(sys.argv[1]).resolve()
+bucket_dir = Path(sys.argv[2]).resolve()
+patent_seed_root = bucket_dir / "patent" / "originals"
+
+source_table_files = sorted(path for path in source_root.rglob("*_tables.json") if path.is_file())
+source_patent_ids = {path.parent.name.strip().upper() for path in source_table_files}
+seed_table_files = sorted(patent_seed_root.glob("*/structured/tables.json")) if patent_seed_root.is_dir() else []
+
+errors: list[str] = []
+if len(seed_table_files) != len(source_table_files):
+    errors.append(f"tables count mismatch: source={len(source_table_files)} seed={len(seed_table_files)}")
+
+for patent_id in sorted(source_patent_ids):
+    prefix = f"patent/originals/{patent_id}"
+    tables_ref = f"{prefix}/structured/tables.json"
+    tables_path = bucket_dir / tables_ref
+    manifest_path = bucket_dir / prefix / "manifest.json"
+    if not tables_path.is_file():
+        errors.append(f"missing seed tables object: {tables_ref}")
+        continue
+    if not manifest_path.is_file():
+        errors.append(f"missing manifest for tables object: {prefix}/manifest.json")
+        continue
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        errors.append(f"invalid manifest json for {patent_id}: {exc}")
+        continue
+    structured = dict((manifest.get("objects") or {}).get("structured") or {})
+    availability = dict(manifest.get("availability") or {})
+    if structured.get("tables") != tables_ref:
+        errors.append(f"manifest does not register tables for {patent_id}")
+    if "tables" not in availability:
+        errors.append(f"manifest availability missing tables for {patent_id}")
+
+if errors:
+    for item in errors[:50]:
+        print(f"error: {item}", file=sys.stderr)
+    if len(errors) > 50:
+        print(f"error: ... {len(errors) - 50} more consistency errors", file=sys.stderr)
+    raise SystemExit(1)
+
+print(f"patent tables seed consistency ok: tables={len(seed_table_files)} manifests={len(source_patent_ids)}")
+PY
 }
 
 while [[ $# -gt 0 ]]; do
@@ -124,10 +196,10 @@ fi
 
 if [[ "$PAPERS_ENABLED" == "1" ]]; then
   mkdir -p "$TARGET_DIR/papers"
-  copy_papers_from_dir "$PUBLIC_SERVICE_PAPERS_SRC" "$TARGET_DIR/papers"
-  copy_papers_from_dir "$HIGHTHINKINGQA_PAPERS_SRC" "$TARGET_DIR/papers"
   copy_papers_from_dir "$FASTQA_PAPERS_SRC" "$TARGET_DIR/papers"
+  copy_papers_from_dir "$HIGHTHINKINGQA_PAPERS_SRC" "$TARGET_DIR/papers"
   copy_papers_from_dir "$FASTQA_LOCAL_PAPERS_SRC" "$TARGET_DIR/papers"
+  copy_papers_from_dir "$PUBLIC_SERVICE_PAPERS_SRC" "$TARGET_DIR/papers"
 fi
 
 if [[ "$PATENT_ORIGINALS_ENABLED" == "1" ]]; then
@@ -210,6 +282,8 @@ print(
 )
 raise SystemExit(1 if failed else 0)
 PY
+    backfill_patent_tables_into_seed
+    check_patent_tables_seed_consistency
   fi
 fi
 

@@ -2,29 +2,45 @@
 
 ## Build Order
 
-Build the shared base image first from the repository root:
+Build the shared Python dependency base first:
 
 ```bash
-docker build -f deploy/docker/base.Dockerfile -t highthinking-python-base:latest .
+docker build -f deploy/docker/base.Dockerfile -t lifeo4agent/python-base:latest .
 ```
 
-Then build the service images:
+Build seed tools and runtime services:
 
 ```bash
-docker build -f deploy/docker/Dockerfile.gateway -t ghcr.io/example/highthinking-gateway:latest .
-docker build -f deploy/docker/Dockerfile.public-service -t ghcr.io/example/highthinking-public-service:latest .
-docker build -f deploy/docker/Dockerfile.fastqa -t ghcr.io/example/highthinking-fastqa:latest .
-docker build -f deploy/docker/Dockerfile.highthinkingqa -t ghcr.io/example/highthinking-highthinkingqa:latest .
-docker build -f deploy/docker/Dockerfile.patent -t ghcr.io/example/highthinking-patent:latest .
+docker build -f deploy/docker/Dockerfile.seed-tools -t lifeo4agent/seed-tools:latest .
+docker build -f deploy/docker/Dockerfile.gateway -t lifeo4agent/gateway:latest .
+docker build -f deploy/docker/Dockerfile.public-service -t lifeo4agent/public-service:latest .
+docker build -f deploy/docker/Dockerfile.fastqa -t lifeo4agent/fastqa:latest .
+docker build -f deploy/docker/Dockerfile.highthinkingqa -t lifeo4agent/highthinkingqa:latest .
+docker build -f deploy/docker/Dockerfile.patent -t lifeo4agent/patent:latest .
 cd frontend-vue && npm ci && npm run build && cd ..
-docker build -f deploy/docker/Dockerfile.frontend-nginx -t ghcr.io/example/highthinking-frontend:latest .
+docker build -f deploy/docker/Dockerfile.frontend-nginx -t lifeo4agent/frontend:latest .
 ```
 
-Update `deploy/.env.example` or the real deployment `.env` so the image references match the tags you publish or load.
+The service Dockerfiles copy only their own source tree plus shared
+`resource/config` and `resource/assets`. Large originals, vector DBs, and graph
+data are delivered by `deploy/data/*.tar.zst` packages.
 
-## Notes
+## Seed Tools
 
-- These Dockerfiles package the repository into the image and do not depend on host source mounts.
-- The Python dependency set is intentionally broad because the current repository does not expose a single complete, normalized runtime manifest for all backend services.
-- The frontend image serves the prebuilt `frontend-vue/dist` bundle through nginx and proxies `/api/` to the gateway service inside Docker.
-- `deploy/docker-compose.yml` assumes the images already exist and focuses on runtime orchestration, initialization hooks, and persistent data volumes.
+`Dockerfile.seed-tools` builds the small `lifeo4agent/seed-tools` image. It
+contains:
+
+- `tar`
+- `zstd`
+- `jq`
+- `mc`
+- seed entrypoint scripts under `/seed-tools`
+
+Compose uses this image for MinIO originals, reference data volume seeding, and
+Neo4j dump preparation.
+
+## Legacy MinIO Originals Image
+
+`Dockerfile.minio-originals` is kept only for legacy/debug builds of the older
+large data-image approach. The recommended offline delivery now uses
+`deploy/data/minio-originals.tar.zst`.

@@ -1,65 +1,40 @@
-# MinIO Seed Layout
+# MinIO Seed Staging Layout
 
-Put portable MinIO object seeds here before building a release bundle.
+This directory is a local staging area used before creating
+`deploy/data/minio-originals.tar.zst`. It is not mounted by Compose on the
+deployment machine.
 
 Expected layout:
 
-- `<bucket>/`
-  - `papers/`
-  - `patent/originals/<canonical_patent_id>/`
-    - `manifest.json`
-    - `structured/claims.json`
-    - `structured/description.json`
-    - `structured/bibliography.json`
-    - `fulltext/original.pdf`
-    - `figures/...`
+- `<bucket>/papers/`
+- `<bucket>/patent/originals/<canonical_patent_id>/manifest.json`
+- `<bucket>/patent/originals/<canonical_patent_id>/structured/*.json`
+- `<bucket>/patent/originals/<canonical_patent_id>/fulltext/original.pdf`
+- `<bucket>/patent/originals/<canonical_patent_id>/figures/...`
 
-Recommended collection command:
+Collect from the current worktree:
 
 ```bash
 bash deploy/scripts/collect_minio_seed.sh agentcode --clean
 ```
 
-This populates:
+The current corpus should primarily come from `resource/fastqa/papers`, with
+patent originals from `resource/patentQA`.
 
-- `deploy/minio-seed/agentcode/papers/`
-- `deploy/minio-seed/agentcode/patent/originals/`
+Patent originals are converted to the runtime MinIO object layout. Local
+`*_tables.json` files are written as `structured/tables.json`, and each
+corresponding `manifest.json` gets `objects.structured.tables` and
+`availability.tables=true`.
 
-Default source directories:
-
-- `public-service/data/runtime/papers`
-- prefer `resource/highThinkingQA/papers`, fallback `resource/state/dev/highThinkingQA/papers`
-- prefer `resource/fastqa/papers`, fallback `resource/state/dev/fastQA/papers`
-- `resource/state/dev/fastQA/papers_local`
-- `resource/patentQA`
-
-In the current worktree, the main corpus is under `resource/fastqa/papers`, so the
-portable MinIO seed should normally be built from that directory rather than the
-smaller `resource/state/dev/fastQA/papers` cache.
-
-Patent originals are not raw-copied. The collection script uses the patent
-service's original asset tooling to convert each local patent directory into the
-same object structure used by runtime MinIO:
-
-- local `著录项目.json` -> `structured/bibliography.json`
-- local `权利要求.json` -> `structured/claims.json`
-- local `说明书.json` -> `structured/description.json`
-- local PDF -> `fulltext/original.pdf`
-- local figures -> `figures/summary` and `figures/fulltext`
-
-Useful variants:
+After collection, run:
 
 ```bash
-bash deploy/scripts/collect_minio_seed.sh agentcode --patent-only
-bash deploy/scripts/collect_minio_seed.sh agentcode --papers-only
-PATENT_ORIGINALS_SRC=/path/to/patentQA bash deploy/scripts/collect_minio_seed.sh agentcode --patent-only
+bash deploy/scripts/package_data.sh deploy/.env
 ```
 
-During deployment, `docker-compose.yml` runs the `minio-seed` one-shot container
-after bucket creation and imports everything under:
+That script packages the bucket-independent contents as
+`deploy/data/minio-originals.tar.zst`, where the tar root contains `papers/` and
+`patent/originals/`.
 
-- `deploy/minio-seed/<bucket>/`
-
-into:
-
-- `minio://<bucket>/`
+The older `build_minio_originals_image.sh` path is retained only for
+legacy/debug use.

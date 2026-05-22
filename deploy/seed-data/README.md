@@ -1,50 +1,19 @@
-# Seed Data Layout
+# Legacy Seed Data Layout
 
-Put portable deployment data here before building a release bundle.
+`deploy/seed-data/` was the earlier staging directory for copying reference data
+directly into Compose volumes. The recommended offline delivery now packages
+reference data into versioned archives under `deploy/data/`:
 
-Expected subdirectories:
+- `fastqa-ref.tar.zst`
+- `highthinking-ref.tar.zst`
+- `patentqa-ref.tar.zst`
+- `public-service-ref.tar.zst`
 
-- `public-service/`
-  - `vector_database/`
-  - `papers/`
-  - `storage/`
-  - `translation_cache/` if you want to carry translated cache data
-- `fastQA/`
-  - `vector_database/`
-  - `vector_database_local/`
-  - `vector_database_md/`
-  - `community_vector_database/`
-  - `vector_db_topic_index.json`
-- `highThinkingQA/`
-  - `vectordb/`
-  - `papers/`
-- `patentQA/`
-  - `vector_db_patent_abstracts/`
-  - `vector_db_patent_chunks/`
-
-Recommended collection command:
+Use the unified packager instead:
 
 ```bash
-bash deploy/scripts/collect_seed_data.sh --clean
+bash deploy/scripts/package_data.sh deploy/.env
 ```
 
-Default source paths used by the helper script:
-
-- `public-service`: `public-service/data/runtime/`
-- `fastQA`: prefer `resource/fastqa/`, fallback `resource/state/dev/fastQA/`
-- `highThinkingQA`: prefer `resource/highThinkingQA/`, fallback `resource/state/dev/highThinkingQA/`
-- `patentQA`: `resource/patentQA/`
-
-`fastQA` papers are intentionally excluded from `seed-data/` because the portable
-deployment bundle carries them through `deploy/minio-seed/<bucket>/papers/`.
-That avoids packaging the same corpus twice.
-
-You can override the source roots with environment variables:
-
-```bash
-PUBLIC_SERVICE_SRC=/path/to/public-service/runtime \
-FASTQA_SRC=/path/to/fastqa/data-root \
-HIGHTHINKINGQA_SRC=/path/to/highthinkingqa/data-root \
-PATENTQA_SRC=/path/to/patentqa/data-root \
-bash deploy/scripts/collect_seed_data.sh --clean
-```
+`collect_seed_data.sh` remains available for legacy/debug workflows, but the
+current `docker-compose.yml` seeds from `deploy/data/*.tar.zst`.

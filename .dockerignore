@@ -9,7 +9,12 @@
 archive/
 deploy/seed-data/
 deploy/minio-seed/
+deploy/data/
 deploy/*.tar
+deploy/*.zst
+
+**/.env
+**/*.secret.env
 
 public-service/data/runtime/
 resource/state/

@@ -40,7 +40,7 @@ RUN python -m pip install --upgrade pip setuptools wheel && \
       flask-cors \
       langchain-core \
       langchain-openai \
-      langchain-community
+      langchain-community \
+      neo4j
 
 WORKDIR /app
-COPY . /app

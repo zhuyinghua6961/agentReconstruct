@@ -37,7 +37,7 @@ CREATE TABLE `conversation_files` (
   KEY `idx_conversation_files_user` (`user_id`,`created_at`),
   KEY `idx_conversation_files_conversation_user` (`conversation_id`,`user_id`),
   CONSTRAINT `fk_conversation_files_conversation_user` FOREIGN KEY (`conversation_id`, `user_id`) REFERENCES `conversations` (`id`, `user_id`) ON DELETE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=250 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `conversation_json_outbox`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -61,7 +61,7 @@ CREATE TABLE `conversation_json_outbox` (
   UNIQUE KEY `uq_chat_json_outbox_conv_ver` (`conversation_id`,`json_version`),
   KEY `idx_chat_json_outbox_status_due` (`status`,`next_retry_at`,`created_at`),
   KEY `idx_chat_json_outbox_conversation` (`conversation_id`,`created_at`)
-) ENGINE=InnoDB AUTO_INCREMENT=1365 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `conversation_messages`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -78,7 +78,7 @@ CREATE TABLE `conversation_messages` (
   KEY `idx_messages_conversation_created` (`conversation_id`,`created_at`),
   KEY `idx_messages_conversation_user` (`conversation_id`,`user_id`),
   CONSTRAINT `fk_messages_conversation_user` FOREIGN KEY (`conversation_id`, `user_id`) REFERENCES `conversations` (`id`, `user_id`) ON DELETE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=411 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `conversations`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -102,7 +102,7 @@ CREATE TABLE `conversations` (
   KEY `idx_conversations_user_updated` (`user_id`,`updated_at`),
   KEY `idx_conversations_chat_json_sync` (`chat_json_sync_status`),
   CONSTRAINT `fk_conversations_user_id` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=518 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `password_history`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -115,7 +115,7 @@ CREATE TABLE `password_history` (
   PRIMARY KEY (`id`),
   KEY `idx_password_history_user_created` (`user_id`,`created_at` DESC),
   CONSTRAINT `fk_password_history_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=61 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `personnel_records`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -141,7 +141,7 @@ CREATE TABLE `personnel_records` (
   CONSTRAINT `fk_personnel_primary_department` FOREIGN KEY (`primary_department_id`) REFERENCES `primary_departments` (`id`) ON DELETE SET NULL,
   CONSTRAINT `fk_personnel_secondary_department` FOREIGN KEY (`secondary_department_id`) REFERENCES `secondary_departments` (`id`) ON DELETE SET NULL,
   CONSTRAINT `fk_personnel_tertiary_department` FOREIGN KEY (`tertiary_department_id`) REFERENCES `tertiary_departments` (`id`) ON DELETE SET NULL
-) ENGINE=InnoDB AUTO_INCREMENT=26 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `primary_departments`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -154,7 +154,7 @@ CREATE TABLE `primary_departments` (
   `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_primary_departments_name` (`name`)
-) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `quota_configs`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -174,7 +174,7 @@ CREATE TABLE `quota_configs` (
   `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `quota_type` (`quota_type`)
-) ENGINE=InnoDB AUTO_INCREMENT=8 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `secondary_departments`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -190,7 +190,7 @@ CREATE TABLE `secondary_departments` (
   UNIQUE KEY `uq_secondary_departments_primary_name` (`primary_department_id`,`name`),
   KEY `idx_secondary_departments_primary` (`primary_department_id`),
   CONSTRAINT `fk_secondary_departments_primary` FOREIGN KEY (`primary_department_id`) REFERENCES `primary_departments` (`id`) ON DELETE RESTRICT
-) ENGINE=InnoDB AUTO_INCREMENT=7 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `tertiary_departments`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -206,7 +206,7 @@ CREATE TABLE `tertiary_departments` (
   UNIQUE KEY `uq_tertiary_departments_secondary_name` (`secondary_department_id`,`name`),
   KEY `idx_tertiary_departments_secondary` (`secondary_department_id`),
   CONSTRAINT `fk_tertiary_departments_secondary` FOREIGN KEY (`secondary_department_id`) REFERENCES `secondary_departments` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=11 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `user_quota_overrides`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -223,7 +223,7 @@ CREATE TABLE `user_quota_overrides` (
   KEY `idx_user_quota_overrides_quota_type` (`quota_type`),
   CONSTRAINT `fk_user_quota_overrides_quota_type` FOREIGN KEY (`quota_type`) REFERENCES `quota_configs` (`quota_type`) ON DELETE CASCADE,
   CONSTRAINT `fk_user_quota_overrides_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `user_quota_usage`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -242,7 +242,7 @@ CREATE TABLE `user_quota_usage` (
   KEY `idx_user_quota_usage_quota_type` (`quota_type`),
   CONSTRAINT `fk_user_quota_usage_quota_type` FOREIGN KEY (`quota_type`) REFERENCES `quota_configs` (`quota_type`) ON DELETE CASCADE,
   CONSTRAINT `fk_user_quota_usage_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=946 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `user_security_questions`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -259,7 +259,7 @@ CREATE TABLE `user_security_questions` (
   UNIQUE KEY `uk_user_security_questions_user_sort` (`user_id`,`sort_order`),
   KEY `idx_user_security_questions_user` (`user_id`),
   CONSTRAINT `fk_user_security_questions_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=13 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `users`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -294,7 +294,7 @@ CREATE TABLE `users` (
   CONSTRAINT `fk_users_primary_department` FOREIGN KEY (`primary_department_id`) REFERENCES `primary_departments` (`id`) ON DELETE SET NULL,
   CONSTRAINT `fk_users_secondary_department` FOREIGN KEY (`secondary_department_id`) REFERENCES `secondary_departments` (`id`) ON DELETE SET NULL,
   CONSTRAINT `fk_users_tertiary_department` FOREIGN KEY (`tertiary_department_id`) REFERENCES `tertiary_departments` (`id`) ON DELETE SET NULL
-) ENGINE=InnoDB AUTO_INCREMENT=126 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 

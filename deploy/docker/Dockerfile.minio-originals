@@ -1,0 +1,44 @@
+ARG MINIO_MC_IMAGE_TAG=latest
+FROM minio/mc:${MINIO_MC_IMAGE_TAG}
+
+COPY . /seed
+
+ENV MINIO_SEED_ENDPOINT=http://minio:9000 \
+    MINIO_ORIGINALS_DATA_VERSION=latest \
+    MINIO_ORIGINALS_FORCE=0
+
+RUN printf '%s\n' \
+  '#!/bin/sh' \
+  'set -eu' \
+  ': "${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}"' \
+  ': "${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}"' \
+  ': "${MINIO_BUCKET:?MINIO_BUCKET is required}"' \
+  'endpoint="${MINIO_SEED_ENDPOINT:-http://minio:9000}"' \
+  'version="${MINIO_ORIGINALS_DATA_VERSION:-latest}"' \
+  'force="${MINIO_ORIGINALS_FORCE:-0}"' \
+  'case "$force" in 1|true|yes|on) force=1 ;; *) force=0 ;; esac' \
+  'marker="_deploy/minio-originals/${version}.done"' \
+  'until mc alias set local "$endpoint" "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; do' \
+  '  sleep 2' \
+  'done' \
+  'mc mb --ignore-existing "local/$MINIO_BUCKET"' \
+  'if [ "$force" != "1" ] && mc stat "local/$MINIO_BUCKET/$marker" >/dev/null 2>&1; then' \
+  '  echo "minio originals seed skipped: version already imported: $version"' \
+  '  exit 0' \
+  'fi' \
+  'has_seed=0' \
+  'for seed_path in /seed/papers /seed/patent; do' \
+  '  if [ -e "$seed_path" ]; then has_seed=1; fi' \
+  'done' \
+  'if [ "$has_seed" != "1" ]; then' \
+  '  echo "minio originals seed failed: /seed is empty" >&2' \
+  '  exit 1' \
+  'fi' \
+  'mc mirror --overwrite /seed "local/$MINIO_BUCKET"' \
+  'mkdir -p /tmp/minio-originals-marker' \
+  'printf "version=%s\nimported_at=%s\n" "$version" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /tmp/minio-originals-marker/done' \
+  'mc cp /tmp/minio-originals-marker/done "local/$MINIO_BUCKET/$marker"' \
+  'echo "minio originals seed import complete: bucket=$MINIO_BUCKET version=$version"' \
+  > /usr/local/bin/import-minio-originals && chmod +x /usr/local/bin/import-minio-originals
+
+ENTRYPOINT ["/usr/local/bin/import-minio-originals"]

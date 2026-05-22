@@ -1,5 +1,8 @@
-FROM highthinking-python-base:latest
+FROM lifeo4agent/python-base:latest
 
 WORKDIR /app
+COPY fastQA/ /app/fastQA/
+COPY resource/config/ /app/resource/config/
+COPY resource/assets/ /app/resource/assets/
 EXPOSE 8008
 CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "app.main:app", "--chdir", "/app/fastQA", "--bind", "0.0.0.0:8008", "--workers", "8", "--timeout", "600"]

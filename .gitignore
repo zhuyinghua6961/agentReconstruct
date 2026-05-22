@@ -31,7 +31,7 @@ config.secret.env
 archive/patentOldCode
 scripts/gateway
 .vendor/
-
+deploy_docs
 archive/frontend-vue-legacy/
 archive/*legacy*/
 fastQA/logs/
@@ -41,6 +41,14 @@ resource/logs/
 # Deploy local env and release artifacts
 deploy/.env
 deploy/*.tar
+deploy/data/*
+!deploy/data/
+!deploy/data/README.md
+
+# Deploy TLS certificates are supplied per installation.
+deploy/certs/*
+!deploy/certs/
+!deploy/certs/README.md
 
 # Deploy generated seed content; keep docs and placeholders tracked
 deploy/seed-data/*
@@ -54,6 +62,10 @@ deploy/minio-seed/*
 !deploy/minio-seed/README.md
 !deploy/minio-seed/*/
 deploy/minio-seed/*/*
+
+# Legacy local Neo4j seed copies; current delivery uses deploy/data/*.dump.zst
+deploy/neo4j-seed/*
+!deploy/neo4j-seed/README.md
 
 # Local developer artifacts
 .codex

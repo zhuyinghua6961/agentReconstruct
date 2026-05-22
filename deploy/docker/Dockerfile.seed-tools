@@ -1,0 +1,23 @@
+ARG ALPINE_IMAGE_TAG=3.20
+ARG MINIO_MC_IMAGE_TAG=latest
+
+FROM minio/mc:${MINIO_MC_IMAGE_TAG} AS mc
+
+FROM alpine:${ALPINE_IMAGE_TAG}
+
+RUN apk add --no-cache \
+    bash \
+    ca-certificates \
+    coreutils \
+    findutils \
+    jq \
+    tar \
+    zstd
+
+COPY --from=mc /usr/bin/mc /usr/bin/mc
+COPY deploy/seed-tools/ /seed-tools/
+
+RUN chmod +x /seed-tools/*.sh
+
+WORKDIR /work
+CMD ["/bin/sh"]
