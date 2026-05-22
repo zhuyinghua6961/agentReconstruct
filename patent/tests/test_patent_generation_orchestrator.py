@@ -124,6 +124,34 @@ def test_orchestrator_runs_patent_stages_in_order_and_marks_stage25_skip():
     ]
 
 
+def test_orchestrator_records_intent_step_with_elapsed_ms_when_stage1_reports_intent():
+    class _IntentRuntime(_FakeRuntime):
+        def stage1_pre_answer_and_planning(self, user_question: str, conversation_context=None) -> dict[str, object]:
+            payload = dict(super().stage1_pre_answer_and_planning(user_question, conversation_context=conversation_context))
+            payload["intent_detect"] = {
+                "ok": True,
+                "intent_tag": "comparison_query",
+                "elapsed_ms": 88.5,
+                "model": "qwen3-8b",
+            }
+            return payload
+
+    progress_steps: list[dict[str, object]] = []
+    result = PatentGenerationOrchestrator().run(
+        question="How should we compare replacement risk?",
+        runtime=_IntentRuntime(),
+        progress_callback=progress_steps.append,
+    )
+
+    intent_steps = [step for step in result.raw["steps"] if step.get("step") == "intent_detect"]
+    assert len(intent_steps) == 1
+    assert intent_steps[0]["title"] == "意图识别"
+    assert intent_steps[0]["status"] == "success"
+    assert intent_steps[0]["data"]["intent_tag"] == "comparison_query"
+    assert intent_steps[0]["data"]["elapsed_ms"] == 88.5
+    assert any(step.get("step") == "intent_detect" for step in progress_steps)
+
+
 def test_orchestrator_stream_and_final_payloads_do_not_expose_raw_patent_id_citations():
     class _ReadableCitationRuntime(_FakeRuntime):
         class _StreamingBuilder:

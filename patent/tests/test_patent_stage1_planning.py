@@ -19,6 +19,21 @@ class _FakeClient:
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=self.content))])
 
 
+class _SequentialClient:
+    def __init__(self, replies: list[str]) -> None:
+        self.replies = list(replies)
+        self.calls: list[dict] = []
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        index = len(self.calls) - 1
+        if index >= len(self.replies):
+            raise AssertionError("unexpected extra completion call")
+        body = self.replies[index]
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=body))])
+
+
 class _ResponseFormatRejectingClient(_FakeClient):
     def _create(self, **kwargs):
         self.calls.append(kwargs)
@@ -461,3 +476,39 @@ def test_patent_stage1_planning_logs_prompt_and_llm_boundaries():
     assert any("patent stage1 planning prompt prepared" in message and "prompt_chars=" in message for message in messages)
     assert any("patent stage1 planning llm request start" in message and "model=gpt-test" in message for message in messages)
     assert any("patent stage1 planning llm response received" in message and "response_chars=" in message for message in messages)
+
+
+def test_stage1_prepends_intent_hint_when_patent_intent_detect_enabled(monkeypatch):
+    monkeypatch.delenv("INTENT_MODEL_API_KEY", raising=False)
+    monkeypatch.delenv("INTENT_MODEL_BASE_URL", raising=False)
+    monkeypatch.delenv("INTENT_MODEL", raising=False)
+    monkeypatch.setenv("PATENT_INTENT_DETECT_ENABLED", "true")
+    monkeypatch.delenv("QA_INTENT_DETECT_ENABLED", raising=False)
+    monkeypatch.delenv("PATENT_INTENT_DETECT_MODEL", raising=False)
+    monkeypatch.delenv("QA_INTENT_DETECT_MODEL", raising=False)
+    planner_json = (
+        '{"deep_answer":"初步判断这项技术仍处于导入窗口。",'
+        '"retrieval_claims":[{"claim":"主张一","keywords":["LiFePO4"],'
+        '"preferred_sections":["methods"],"filters":{}}]}'
+    )
+    client = _SequentialClient(["mechanism_analysis", planner_json])
+    result = run_stage1_pre_answer_and_planning(
+        user_question="LiFePO4 碳包覆对倍率有何影响？",
+        client=client,
+        model="gpt-test",
+        logger=_Logger(),
+    )
+    assert result["success"] is True
+    assert len(client.calls) == 2
+    intent_call = client.calls[0]
+    plan_call = client.calls[1]
+    assert intent_call["model"] == "qwen3-8b"
+    assert intent_call["max_tokens"] == 64
+    assert plan_call["model"] == "gpt-test"
+    plan_user = str(plan_call["messages"][1]["content"])
+    assert "快速意图识别" in plan_user
+    assert plan_user.startswith("【快速意图识别")
+    assert "用户问题：" in plan_user
+    intent_meta = dict(result.get("intent_detect") or {})
+    assert intent_meta.get("ok") is True
+    assert intent_meta.get("intent_tag") == "mechanism_analysis"

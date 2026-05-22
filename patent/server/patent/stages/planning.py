@@ -5,8 +5,14 @@ import re
 import time
 from typing import Any
 
+from server.patent.intent_detect import (
+    format_intent_hint_for_stage1_user_block,
+    intent_detect_enabled,
+    run_intent_detect_quick_tag,
+)
 from server.patent.models import PatentRetrievalClaim, PatentRetrievalPlan
 from server.patent.prompt_loader import load_patent_prompt_template
+from server.patent.upstream_transport import is_patent_pool_timeout
 
 
 DEFAULT_PATENT_STAGE1_PROMPT = load_patent_prompt_template("stage1_planning.txt")
@@ -450,7 +456,14 @@ def run_stage1_pre_answer_and_planning(
             "fallback": "planner_unavailable",
         }
 
+    intent_result: dict[str, Any] | None = None
+    if intent_detect_enabled():
+        intent_result = run_intent_detect_quick_tag(client=client, user_question=question, logger=logger)
+    intent_hint = format_intent_hint_for_stage1_user_block(intent_result=intent_result or {})
+
     user_content = f"{context_block}\n\n用户问题：{question}" if context_block else f"用户问题：{question}"
+    if intent_hint:
+        user_content = f"{intent_hint}\n{user_content}"
     system_content = str(stage1_prompt or "").strip()
     logger.info(
         "patent stage1 planning prompt prepared prompt_chars=%s user_content_chars=%s elapsed_ms=%.3f",
@@ -485,7 +498,7 @@ def run_stage1_pre_answer_and_planning(
                 len(result_text),
                 retrieval_plan.question_type,
             )
-            return {
+            out_json_fail: dict[str, Any] = {
                 "success": True,
                 "deep_answer": result_text,
                 "retrieval_claims": retrieval_claims,
@@ -493,6 +506,9 @@ def run_stage1_pre_answer_and_planning(
                 "raw_response": result_text,
                 "fallback": "json_parse_failed",
             }
+            if intent_detect_enabled():
+                out_json_fail["intent_detect"] = intent_result or {}
+            return out_json_fail
 
         retrieval_claims = _normalize_claims(payload.get("retrieval_claims"), question=question)
         if not retrieval_claims:
@@ -512,18 +528,23 @@ def run_stage1_pre_answer_and_planning(
             list(retrieval_plan.preferred_sections or []),
             len(deep_answer),
         )
-        return {
+        out_ok: dict[str, Any] = {
             "success": True,
             "deep_answer": deep_answer,
             "retrieval_claims": retrieval_claims,
             "retrieval_plan": retrieval_plan,
             "raw_response": cleaned_text or result_text,
         }
+        if intent_detect_enabled():
+            out_ok["intent_detect"] = intent_result or {}
+        return out_ok
     except Exception as exc:
+        if is_patent_pool_timeout(exc):
+            raise
         logger.error("patent stage1 planning failed: %s", exc)
         retrieval_claims = _seed_retrieval_claims_from_graph(question=question, conversation_context=conversation_context)
         retrieval_plan = _retrieval_plan_from_claims(retrieval_claims, question=question) if retrieval_claims else _empty_retrieval_plan(question)
-        return {
+        err_out: dict[str, Any] = {
             "success": True,
             "deep_answer": _fallback_deep_answer(question, retrieval_plan),
             "retrieval_claims": retrieval_claims,
@@ -531,3 +552,6 @@ def run_stage1_pre_answer_and_planning(
             "fallback": "planner_error",
             "error": str(exc),
         }
+        if intent_detect_enabled():
+            err_out["intent_detect"] = intent_result or {}
+        return err_out

@@ -14,6 +14,7 @@ from server.patent.cache_keys import (
     build_stage3_cache_fingerprint,
     build_stage4_cache_fingerprint,
 )
+from server.patent.intent_detect import patent_intent_detect_cache_signature
 from server.patent.models import PatentQaExecutionMetadata, PatentQaExecutionResult, PatentRetrievalPlan
 from server.patent.models import PatentRetrievalClaim
 from server.patent.streaming import emit_text_chunks
@@ -194,6 +195,7 @@ def _build_stage_steps(
     timings: dict[str, float],
     stage25_result: dict[str, Any] | None,
     success: bool,
+    stage1_result: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     ordered = [
         ("stage1", "阶段一", "阶段一：已完成深度预回答与检索规划", "阶段一：深度预回答与检索规划失败"),
@@ -232,7 +234,41 @@ def _build_stage_steps(
                 "status": status,
             }
         )
+        if key == "stage1":
+            intent_step = _intent_step_from_stage1(stage1_result)
+            if intent_step:
+                steps.append(intent_step)
     return steps
+
+
+def _intent_step_from_stage1(stage1_result: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(stage1_result, dict):
+        return None
+    intent_result = stage1_result.get("intent_detect")
+    if not isinstance(intent_result, dict):
+        return None
+    intent_tag = str(intent_result.get("intent_tag") or "generic").strip() or "generic"
+    ok = bool(intent_result.get("ok"))
+    data: dict[str, Any] = {
+        "intent_tag": intent_tag,
+        "ok": ok,
+    }
+    elapsed_ms = intent_result.get("elapsed_ms")
+    if isinstance(elapsed_ms, (int, float)) and elapsed_ms >= 0:
+        data["elapsed_ms"] = round(float(elapsed_ms), 3)
+    model = str(intent_result.get("model") or "").strip()
+    if model:
+        data["model"] = model
+    error = str(intent_result.get("error") or "").strip()
+    return {
+        "step": "intent_detect",
+        "title": "意图识别",
+        "message": f"意图识别：{intent_tag}",
+        "detail": "快速判断问题意图，辅助阶段一规划",
+        "status": "success" if ok else "error",
+        "data": data,
+        **({"error": error} if error else {}),
+    }
 
 
 class PatentGenerationOrchestrator:
@@ -461,6 +497,7 @@ class PatentGenerationOrchestrator:
                 runtime_signature={
                     "planning_model": getattr(runtime, "planning_model", ""),
                     "stage1_prompt": getattr(runtime, "stage1_prompt", ""),
+                    **patent_intent_detect_cache_signature(),
                 },
             )
             stage1_result = self._timed(
@@ -473,6 +510,9 @@ class PatentGenerationOrchestrator:
                     should_cancel=should_cancel,
                 ),
             )
+            intent_step = _intent_step_from_stage1(dict(stage1_result or {}))
+            if intent_step:
+                _emit_progress_step(progress_callback, **intent_step)
             retrieval_plan = _as_retrieval_plan(dict(stage1_result or {}).get("retrieval_plan"))
             retrieval_claims = _as_retrieval_claims(dict(stage1_result or {}).get("retrieval_claims"))
             deep_answer = str(dict(stage1_result or {}).get("deep_answer") or "")
@@ -493,6 +533,7 @@ class PatentGenerationOrchestrator:
                     timings=timings,
                     stage25_result={},
                     success=success,
+                    stage1_result=dict(stage1_result or {}),
                 )
                 stage_cache_hits = {
                     "stage1": _payload_cache_hit(dict(stage1_result or {})),
@@ -717,6 +758,7 @@ class PatentGenerationOrchestrator:
                 timings=timings,
                 stage25_result=dict(stage25_result or {}),
                 success=success,
+                stage1_result=dict(stage1_result or {}),
             )
             stage_cache_hits = {
                 "stage1": _payload_cache_hit(dict(stage1_result or {})),
