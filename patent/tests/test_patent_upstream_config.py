@@ -65,3 +65,14 @@ def test_config_shared_env_example_documents_patent_planning_gate_defaults():
 
     assert "PATENT_PLANNING_UPSTREAM_GATE_ENABLED" not in content
     assert "PATENT_PLANNING_UPSTREAM_GATE_LIMIT=1" in content
+
+
+def test_config_shared_env_example_documents_patent_intent_detect_defaults():
+    content = (ROOT_DIR / "config.shared.env.example").read_text(encoding="utf-8")
+    shared_content = (ROOT_DIR.parent / "resource/config/shared/model-endpoints.shared.env").read_text(encoding="utf-8")
+    secret_template = (ROOT_DIR.parent / "resource/config/shared/model-endpoints.secret.env.example").read_text(encoding="utf-8")
+
+    assert "PATENT_INTENT_DETECT_ENABLED=false" not in content
+    assert "INTENT_MODEL_ENABLED=true" in shared_content
+    assert "INTENT_MODEL=qwen3-8b" in shared_content
+    assert "INTENT_MODEL_API_KEY=" in secret_template
