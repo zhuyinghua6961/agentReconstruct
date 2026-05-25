@@ -23,6 +23,12 @@ from server.patent.tabular.planner import plan_tabular_query
 from server.patent.tabular.renderer import has_usable_tabular_result
 from server.patent.tabular.schema_profiler import profile_workbook
 from server.patent.tabular.workbook_loader import load_workbook_cached, load_workbook_from_execution_file
+from server.patent.thinking import (
+    LLM_STAGE_STAGE4_FINAL_ANSWER,
+    apply_openai_compatible_thinking,
+    auth_headers,
+    resolve_thinking_controls,
+)
 from server.patent.upstream_transport import (
     build_patent_request_timeout,
     describe_patent_transport,
@@ -527,7 +533,7 @@ class PatentTabularAnswerClient:
         api_key = _first_env("LLM_API_KEY")
         base_url = _first_env("LLM_BASE_URL")
         model = _first_env("LLM_MODEL")
-        if not api_key or not base_url or not model:
+        if not base_url or not model:
             return None
         return cls(
             api_key=api_key,
@@ -583,23 +589,27 @@ class PatentTabularAnswerClient:
         )
         dispatch_started = time.perf_counter()
         try:
+            request_payload = {
+                "model": self._model,
+                "temperature": 0.2,
+                "top_p": self._top_p,
+                "max_tokens": self._max_tokens,
+                "stream": False,
+                "messages": [
+                    {"role": "system", "content": _TABULAR_QA_SYSTEM_MESSAGE},
+                    {"role": "user", "content": prompt},
+                ],
+            }
+            controls = resolve_thinking_controls(
+                stage=LLM_STAGE_STAGE4_FINAL_ANSWER,
+                max_tokens=self._max_tokens,
+                stream=False,
+            )
+            apply_openai_compatible_thinking(request_payload, controls)
             response = self._client.post(
                 f"{self._base_url.rstrip('/')}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": self._model,
-                    "temperature": 0.2,
-                    "top_p": self._top_p,
-                    "max_tokens": self._max_tokens,
-                    "stream": False,
-                    "messages": [
-                        {"role": "system", "content": _TABULAR_QA_SYSTEM_MESSAGE},
-                        {"role": "user", "content": prompt},
-                    ],
-                },
+                headers=auth_headers(self._api_key),
+                json=request_payload,
                 timeout=request_timeout,
             )
         except Exception as exc:

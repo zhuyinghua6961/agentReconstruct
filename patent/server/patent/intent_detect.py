@@ -18,6 +18,9 @@ from typing import Any
 
 import httpx
 
+from server.patent.thinking import (
+    auth_headers,
+)
 from server.patent.upstream_transport import is_patent_pool_timeout
 
 # 百炼/兼容网关登记的轻量意图分类模型 ID（可用 env 覆盖）。
@@ -97,20 +100,18 @@ def _intent_model_timeout_seconds() -> float:
 
 def _create_dedicated_intent_completion(*, model: str, messages: list[dict[str, Any]]) -> Any:
     base_url = _intent_model_base_url().rstrip("/")
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.0,
+        "max_tokens": 64,
+        "stream": False,
+        "enable_thinking": False,
+    }
     response = httpx.post(
         f"{base_url}/chat/completions",
-        headers={
-            "Authorization": f"Bearer {_intent_model_api_key()}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "messages": messages,
-            "temperature": 0.0,
-            "max_tokens": 64,
-            "stream": False,
-            "enable_thinking": False,
-        },
+        headers=auth_headers(_intent_model_api_key()),
+        json=payload,
         timeout=_intent_model_timeout_seconds(),
     )
     response.raise_for_status()
@@ -122,13 +123,15 @@ def _create_dedicated_intent_completion(*, model: str, messages: list[dict[str, 
 def _create_intent_completion(*, client: Any, model: str, messages: list[dict[str, Any]]) -> Any:
     if _intent_model_api_key():
         return _create_dedicated_intent_completion(model=model, messages=messages)
-    return client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=0.0,
-        max_tokens=64,
-        stream=False,
-    )
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.0,
+        "max_tokens": 64,
+        "stream": False,
+        "extra_body": {"enable_thinking": False},
+    }
+    return client.chat.completions.create(**kwargs)
 
 
 _FENCE_STRIP_RE = re.compile(r"^\s*```(?:[a-zA-Z0-9_-]+)?\s*", re.MULTILINE)

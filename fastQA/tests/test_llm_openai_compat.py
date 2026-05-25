@@ -130,6 +130,52 @@ def test_openai_compat_client_matches_openai_shape():
     assert stream[0].choices[0].delta.content == "a"
 
 
+def test_openai_compat_omits_authorization_when_api_key_blank():
+    post_response = _FakeResponse(payload={"choices": [{"message": {"content": "answer"}}]})
+    stream_response = _FakeResponse(lines=["data: [DONE]"])
+    fake_client = _FakeClient(post_response=post_response, stream_response=stream_response)
+    fake_httpx = _FakeHttpx(client=fake_client)
+    client = OpenAICompatClient(
+        httpx_module=fake_httpx,
+        endpoint="https://example.com/v1/chat/completions",
+        api_key="",
+    )
+
+    client.chat.completions.create(model="m", messages=[{"role": "user", "content": "hi"}])
+
+    headers = fake_client.calls[0][2]["headers"]
+    assert "Authorization" not in headers
+
+
+def test_openai_compat_accepts_reasoning_effort_and_omits_sampling_when_requested():
+    post_response = _FakeResponse(payload={"choices": [{"message": {"content": "answer"}}]})
+    stream_response = _FakeResponse(lines=["data: [DONE]"])
+    fake_client = _FakeClient(post_response=post_response, stream_response=stream_response)
+    fake_httpx = _FakeHttpx(client=fake_client)
+    client = OpenAICompatClient(
+        httpx_module=fake_httpx,
+        endpoint="https://example.com/v1/chat/completions",
+        api_key="token",
+    )
+
+    client.chat.completions.create(
+        model="m",
+        messages=[{"role": "user", "content": "hi"}],
+        temperature=0.5,
+        top_p=0.9,
+        max_tokens=4000,
+        extra_body={"thinking": {"type": "enabled"}},
+        reasoning_effort="high",
+        omit_sampling_parameters=True,
+    )
+
+    payload = fake_client.calls[0][2]["json"]
+    assert payload["thinking"] == {"type": "enabled"}
+    assert payload["reasoning_effort"] == "high"
+    assert "temperature" not in payload
+    assert "top_p" not in payload
+
+
 def test_builders_return_openai_compat_types():
     adapter = build_chat_adapter(api_key="token", base_url="https://example.com/v1", model="m")
     client = build_chat_completions_client(api_key="token", base_url="https://example.com/v1")

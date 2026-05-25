@@ -346,6 +346,38 @@ def test_stage2_query_generation_uses_leased_chat_lane(monkeypatch):
     assert result["claim_to_results"]["claim one"]["query"] == "lane generated query"
 
 
+def test_stage2_query_generation_disables_thinking_for_thinking_model(monkeypatch):
+    monkeypatch.setenv("LLM_IS_THINKING_MODEL", "true")
+    monkeypatch.setenv("LLM_THINKING_ENABLED", "true")
+    monkeypatch.setenv("QA_STAGE2_FORCE_KEYWORD_INJECTION", "false")
+    monkeypatch.setenv("QA_STAGE2_ENTITY_LOCK_ENABLED", "false")
+    expert = _Expert(
+        responses={
+            "generated query": {
+                "documents": ["doc-a"],
+                "metadatas": [{"doi": "10.2/a"}],
+                "distances": [0.1],
+            }
+        }
+    )
+    client = _FakeClient("generated query")
+
+    result = run_stage2_targeted_retrieval(
+        retrieval_claims=[{"claim": "claim one", "keywords": []}],
+        n_results_per_claim=1,
+        user_question="battery cycle life",
+        literature_expert=expert,
+        logger=logging.getLogger("test.stage2"),
+        client=client,
+        model="gpt-test",
+        preprocess_retrieval_query_fn=lambda query: query,
+        validate_retrieval_relevance_fn=lambda results, query, claim: results,
+    )
+
+    assert result["success"] is True
+    assert client.calls[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
 def test_stage2_query_generation_logs_chat_lane_lease(monkeypatch, caplog):
     monkeypatch.setenv("QA_STAGE2_FORCE_KEYWORD_INJECTION", "false")
     monkeypatch.setenv("QA_STAGE2_ENTITY_LOCK_ENABLED", "false")

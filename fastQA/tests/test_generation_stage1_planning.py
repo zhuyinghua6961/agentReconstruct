@@ -94,6 +94,24 @@ def test_stage1_planning_parses_json_and_normalizes_claims():
     assert client.calls[0]["response_format"] == {"type": "json_object"}
 
 
+def test_stage1_disables_thinking_for_thinking_model(monkeypatch):
+    monkeypatch.setenv("LLM_IS_THINKING_MODEL", "true")
+    monkeypatch.setenv("LLM_THINKING_ENABLED", "true")
+    client = _FakeClient('{"deep_answer":"answer","retrieval_claims":[]}')
+
+    result = run_stage1_pre_answer_and_planning(
+        user_question="what is lfp?",
+        stage1_prompt="prompt",
+        vector_db_context="context",
+        client=client,
+        model="gpt-test",
+        logger=_Logger(),
+    )
+
+    assert result["success"] is True
+    assert client.calls[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
 def test_stage1_planning_normalizes_query_focus_terms():
     client = _FakeClient(
         '{"deep_answer":"ok","query_focus_terms":["高压实型","高压实型","辊压"],"retrieval_claims":[]}'

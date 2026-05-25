@@ -9,6 +9,7 @@ import time
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from app.integrations.llm import Stage2UpstreamGateCancelled, raise_if_upstream_pool_timeout
+from app.integrations.llm.thinking import LLM_STAGE_CONTROL, merge_extra_body, resolve_thinking_controls
 from app.modules.graph_kb.models import GraphRagPayload
 from app.modules.generation_pipeline.feature_flags import env_bool, env_int
 from app.modules.generation_pipeline.retrieval_validation import validate_retrieval_relevance
@@ -636,6 +637,11 @@ def _generate_ai_query(
                             str(trace_label or ""),
                             int(getattr(leased_lane, "lane_id", -1)),
                         )
+                controls = resolve_thinking_controls(
+                    stage=LLM_STAGE_CONTROL,
+                    max_tokens=150,
+                    stream=False,
+                )
                 response = _run_cancelable_upstream_call(
                     call=lambda: active_client.chat.completions.create(
                         model=model,
@@ -644,7 +650,8 @@ def _generate_ai_query(
                             {"role": "user", "content": prompt},
                         ],
                         temperature=0.3,
-                        max_tokens=150,
+                        max_tokens=controls.max_tokens,
+                        extra_body=merge_extra_body(None, controls),
                     ),
                     should_cancel=should_cancel,
                     abort=(
@@ -656,6 +663,11 @@ def _generate_ai_query(
                 )
                 return str(response.choices[0].message.content or "").strip()
 
+    controls = resolve_thinking_controls(
+        stage=LLM_STAGE_CONTROL,
+        max_tokens=150,
+        stream=False,
+    )
     response = active_client.chat.completions.create(
         model=model,
         messages=[
@@ -663,7 +675,8 @@ def _generate_ai_query(
             {"role": "user", "content": prompt},
         ],
         temperature=0.3,
-        max_tokens=150,
+        max_tokens=controls.max_tokens,
+        extra_body=merge_extra_body(None, controls),
     )
     return str(response.choices[0].message.content or "").strip()
 

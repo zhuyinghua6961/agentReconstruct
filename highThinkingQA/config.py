@@ -172,6 +172,8 @@ class RuntimeSettings:
     llm_base_url: str
     llm_model: str
     llm_api_key: str
+    llm_is_thinking_model: bool
+    llm_thinking_enabled: bool
     main_llm_thinking_enabled: bool
     direct_stage_thinking_enabled: bool
     decompose_stage_thinking_enabled: bool
@@ -263,7 +265,9 @@ def get_runtime_settings() -> RuntimeSettings:
         llm_base_url=str(os.getenv("LLM_BASE_URL") or "https://dashscope.aliyuncs.com/compatible-mode/v1").strip(),
         llm_model=llm_model,
         llm_api_key=llm_api_key,
-        main_llm_thinking_enabled=True,
+        llm_is_thinking_model=_get_bool("LLM_IS_THINKING_MODEL", False),
+        llm_thinking_enabled=_get_bool("LLM_THINKING_ENABLED", False),
+        main_llm_thinking_enabled=_get_bool("LLM_THINKING_ENABLED", False),
         direct_stage_thinking_enabled=False,
         decompose_stage_thinking_enabled=False,
         embedding_base_url=_first_env(
@@ -382,9 +386,11 @@ GUNICORN_SETTINGS = get_gunicorn_settings()
 LLM_BASE_URL = SETTINGS.llm_base_url
 LLM_MODEL = SETTINGS.llm_model
 LLM_API_KEY = SETTINGS.llm_api_key
-MAIN_LLM_THINKING_ENABLED = SETTINGS.main_llm_thinking_enabled
-DIRECT_STAGE_THINKING_ENABLED = SETTINGS.direct_stage_thinking_enabled
-DECOMPOSE_STAGE_THINKING_ENABLED = SETTINGS.decompose_stage_thinking_enabled
+LLM_IS_THINKING_MODEL = SETTINGS.llm_is_thinking_model
+LLM_THINKING_ENABLED = SETTINGS.llm_thinking_enabled
+MAIN_LLM_THINKING_ENABLED = SETTINGS.llm_thinking_enabled
+DIRECT_STAGE_THINKING_ENABLED = False
+DECOMPOSE_STAGE_THINKING_ENABLED = False
 EMBEDDING_BASE_URL = SETTINGS.embedding_base_url
 EMBEDDING_MODEL = SETTINGS.embedding_model
 EMBEDDING_API_KEY = SETTINGS.embedding_api_key

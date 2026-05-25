@@ -342,15 +342,23 @@ def _warm_stage2_chat_lane(
     timeout_seconds: float,
     reason: str = "manual",
 ) -> None:
+    from app.integrations.llm.thinking import LLM_STAGE_CONTROL, merge_extra_body, resolve_thinking_controls
+
     _ = reason
     client = getattr(lane, "client", None)
     if client is None:
         raise RuntimeError("chat lane client unavailable")
+    controls = resolve_thinking_controls(
+        stage=LLM_STAGE_CONTROL,
+        max_tokens=1,
+        stream=False,
+    )
     client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": "warm"}],
         temperature=0.0,
-        max_tokens=1,
+        max_tokens=controls.max_tokens,
+        extra_body=merge_extra_body(None, controls),
         timeout=timeout_seconds,
     )
 
@@ -462,8 +470,6 @@ def bootstrap_generation_runtime(runtime: Any) -> None:
             model=None,
             config=None,
         )
-        if not str(resolved.api_key or "").strip():
-            raise ValueError("LLM_API_KEY is required")
         if not str(resolved.base_url or "").strip():
             raise ValueError("LLM_BASE_URL is required")
 

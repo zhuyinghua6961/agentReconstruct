@@ -25,9 +25,11 @@ class _Logger:
 class _FakeClient:
     def __init__(self, content: str) -> None:
         self.content = content
+        self.calls: list[dict] = []
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
     def _create(self, **kwargs):
+        self.calls.append(dict(kwargs))
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=self.content))])
 
 
@@ -43,6 +45,8 @@ def _clear_intent_model_env(monkeypatch):
         "PATENT_INTENT_DETECT_MODEL",
         "QA_INTENT_DETECT_ENABLED",
         "QA_INTENT_DETECT_MODEL",
+        "LLM_IS_THINKING_MODEL",
+        "LLM_THINKING_ENABLED",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -132,6 +136,47 @@ def test_run_intent_detect_uses_dedicated_endpoint_when_key_is_configured(monkey
     assert calls[0]["headers"]["Authorization"] == "Bearer intent-key"
     assert calls[0]["json"]["model"] == "intent-model"
     assert calls[0]["json"]["enable_thinking"] is False
+    assert "thinking" not in calls[0]["json"]
+
+
+def test_run_intent_detect_disables_thinking_for_thinking_model(monkeypatch):
+    calls: list[dict] = []
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "comparative_tradeoff"}}]}
+
+    def _post(url, **kwargs):
+        calls.append({"url": url, **kwargs})
+        return _Response()
+
+    monkeypatch.setenv("LLM_IS_THINKING_MODEL", "true")
+    monkeypatch.setenv("LLM_THINKING_ENABLED", "true")
+    monkeypatch.setenv("INTENT_MODEL_API_KEY", "intent-key")
+    monkeypatch.setenv("INTENT_MODEL_BASE_URL", "https://intent.example/v1")
+    monkeypatch.setattr(idetect.httpx, "post", _post)
+
+    got = run_intent_detect_quick_tag(client=object(), user_question="对比两种路线？", logger=_Logger())
+
+    assert got["ok"] is True
+    assert calls[0]["json"]["enable_thinking"] is False
+    assert "thinking" not in calls[0]["json"]
+    assert "reasoning_effort" not in calls[0]["json"]
+
+
+def test_run_intent_detect_client_path_disables_thinking_for_thinking_model(monkeypatch):
+    monkeypatch.setenv("LLM_IS_THINKING_MODEL", "true")
+    monkeypatch.setenv("LLM_THINKING_ENABLED", "true")
+    client = _FakeClient("generic")
+
+    got = run_intent_detect_quick_tag(client=client, user_question="反应机理？", logger=_Logger())
+
+    assert got["ok"] is True
+    assert client.calls[0]["extra_body"] == {"enable_thinking": False}
+    assert "reasoning_effort" not in client.calls[0]
 
 
 def test_run_intent_detect_quick_tag_normalizes_tag():

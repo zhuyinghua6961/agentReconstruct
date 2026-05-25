@@ -7,6 +7,7 @@ import time
 from typing import Any, Dict, List, Literal
 
 from app.integrations.llm import raise_if_upstream_pool_timeout
+from app.integrations.llm.thinking import LLM_STAGE_CONTROL, merge_extra_body, resolve_thinking_controls
 from app.modules.generation_pipeline.intent_detect import (
     apply_intent_tag_to_question_focus,
     format_intent_hint_for_stage1_user_block,
@@ -199,12 +200,19 @@ def _is_response_format_capability_error(exc: Exception) -> bool:
 
 
 def _create_stage1_completion(*, client: Any, model: str, messages: list[dict[str, Any]], logger: Any) -> Any:
+    controls = resolve_thinking_controls(
+        stage=LLM_STAGE_CONTROL,
+        max_tokens=3000,
+        stream=False,
+    )
+    extra_body = merge_extra_body(None, controls)
     try:
         return client.chat.completions.create(
             model=model,
             messages=messages,
             temperature=0.5,
-            max_tokens=3000,
+            max_tokens=controls.max_tokens,
+            extra_body=extra_body,
             response_format={"type": "json_object"},
         )
     except Exception as exc:
@@ -215,7 +223,8 @@ def _create_stage1_completion(*, client: Any, model: str, messages: list[dict[st
             model=model,
             messages=messages,
             temperature=0.5,
-            max_tokens=3000,
+            max_tokens=controls.max_tokens,
+            extra_body=extra_body,
         )
 
 

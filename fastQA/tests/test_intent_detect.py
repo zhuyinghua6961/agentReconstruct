@@ -112,6 +112,36 @@ def test_intent_detect_uses_dedicated_endpoint_when_key_is_configured(monkeypatc
     assert calls[0]["headers"]["Authorization"] == "Bearer intent-key"
     assert calls[0]["json"]["model"] == "intent-model"
     assert calls[0]["json"]["enable_thinking"] is False
+    assert "thinking" not in calls[0]["json"]
+
+
+def test_intent_detect_dedicated_endpoint_disables_deepseek_thinking(monkeypatch):
+    calls: list[dict] = []
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "characterization"}}]}
+
+    def _post(url, **kwargs):
+        calls.append({"url": url, **kwargs})
+        return _Response()
+
+    monkeypatch.setenv("LLM_IS_THINKING_MODEL", "true")
+    monkeypatch.setenv("LLM_THINKING_ENABLED", "true")
+    monkeypatch.setenv("INTENT_MODEL_API_KEY", "intent-key")
+    monkeypatch.setenv("INTENT_MODEL_BASE_URL", "https://intent.example/v1")
+    monkeypatch.setenv("INTENT_MODEL", "intent-model")
+    monkeypatch.setattr(idetect.httpx, "post", _post)
+    primary_client = MagicMock()
+
+    r = run_intent_detect_quick_tag(client=primary_client, user_question="SEM 能看出什么？", logger=None)
+
+    assert r["ok"] is True
+    assert calls[0]["json"]["enable_thinking"] is False
+    assert "thinking" not in calls[0]["json"]
 
 
 def test_format_hint_empty_when_not_ok():

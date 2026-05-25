@@ -310,6 +310,52 @@ def test_tabular_answer_client_uses_injected_http_client_and_preserves_timeout_d
     assert http_client.closed is False
 
 
+def test_tabular_answer_client_stage4_enables_thinking(monkeypatch):
+    class _FakeHttpClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def post(self, url, *, headers=None, json=None, timeout=None):
+            self.calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", str(url)),
+                json={"choices": [{"message": {"content": "table answer"}}]},
+            )
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setenv("LLM_IS_THINKING_MODEL", "true")
+    monkeypatch.setenv("LLM_THINKING_ENABLED", "true")
+    http_client = _FakeHttpClient()
+    client = PatentTabularAnswerClient(
+        api_key="",
+        base_url="https://example.com",
+        model="model",
+        max_tokens=2500,
+        http_client=http_client,
+    )
+
+    answer = client.answer(
+        question="哪个材料的容量更高",
+        table_text="文件: claims.csv\nLMFP 120mAh\nLFP 115mAh",
+        include_kb=False,
+        route_hint="tabular_qa",
+        source_scope="table",
+    )
+
+    assert answer == "table answer"
+    call = http_client.calls[0]
+    payload = call["json"]
+    assert "Authorization" not in call["headers"]
+    assert payload["thinking"] == {"type": "enabled"}
+    assert payload["reasoning_effort"] == "high"
+    assert payload["max_tokens"] == 8192
+    assert "temperature" not in payload
+    assert "top_p" not in payload
+
+
 def test_tabular_service_prefers_answer_question_fn_before_answer_client(tmp_path):
     csv_path = tmp_path / "claims.csv"
     _write_csv(csv_path)

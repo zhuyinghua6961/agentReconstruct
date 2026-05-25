@@ -13,19 +13,30 @@ from openai import AsyncOpenAI, OpenAI
 import config
 from agent_core.llm_client import get_async_llm_client, load_prompt_template
 from agent_core.question_anchor import prepend_question_anchor
+from agent_core.thinking import LLM_STAGE_CONTROL, merge_extra_body, resolve_thinking_controls
 
 logger = logging.getLogger(__name__)
 
 
 def _build_sub_answer_kwargs(prompt: str) -> dict:
     """构建子问题预回答的 API 调用参数（关闭思考模式以加快速度）"""
-    return {
+    controls = resolve_thinking_controls(
+        is_thinking_model=config.LLM_IS_THINKING_MODEL,
+        thinking_enabled=False,
+        stage=LLM_STAGE_CONTROL,
+        max_tokens=1024,
+        stream=False,
+    )
+    kwargs = {
         "model": config.LLM_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "extra_body": {"enable_thinking": False},
         "temperature": 0.5,
-        "max_tokens": 1024,
+        "max_tokens": controls.max_tokens,
     }
+    extra_body = merge_extra_body(None, controls)
+    if extra_body:
+        kwargs["extra_body"] = extra_body
+    return kwargs
 
 
 def pre_answer_sub_question(

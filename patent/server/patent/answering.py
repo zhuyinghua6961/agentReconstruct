@@ -13,6 +13,12 @@ import httpx
 
 from server.patent.prompt_loader import load_patent_prompt_template
 from server.patent.retrieval_models import PatentEvidence, PatentRetrievalOutcome, PatentTableSupplement
+from server.patent.thinking import (
+    LLM_STAGE_STAGE4_FINAL_ANSWER,
+    apply_openai_compatible_thinking,
+    auth_headers,
+    resolve_thinking_controls,
+)
 from server.patent.upstream_transport import (
     build_patent_request_timeout,
     describe_patent_transport,
@@ -626,7 +632,7 @@ class PatentAnswerBuilder:
         allowed_patent_ids = _normalize_patent_id_list(
             list(context.get("allowed_patent_ids") or []) or list(retrieval_outcome.references)
         )
-        if not self.api_key or not self.base_url or not self.model:
+        if not self.base_url or not self.model:
             _LOGGER.warning(
                 "patent answer builder missing llm config api_key_set=%s base_url_set=%s model=%s; using fallback answer",
                 bool(self.api_key),
@@ -666,10 +672,7 @@ class PatentAnswerBuilder:
         )
         try:
             request_url = f"{self.base_url.rstrip('/')}/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            }
+            headers = auth_headers(self.api_key)
             payload = self._build_request_payload(
                 prompt=prompt,
                 question=question,
@@ -803,7 +806,7 @@ class PatentAnswerBuilder:
         allowed_patent_ids = _normalize_patent_id_list(
             list(context.get("allowed_patent_ids") or []) or list(retrieval_outcome.references)
         )
-        if not self.api_key or not self.base_url or not self.model:
+        if not self.base_url or not self.model:
             _LOGGER.warning(
                 "patent answer builder missing llm config api_key_set=%s base_url_set=%s model=%s; using fallback streamed answer",
                 bool(self.api_key),
@@ -852,10 +855,7 @@ class PatentAnswerBuilder:
         chunk_count = 0
         answer_chars = 0
         request_url = f"{self.base_url.rstrip('/')}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = auth_headers(self.api_key)
         payload = self._build_request_payload(
             prompt=prompt,
             question=question,
@@ -1198,7 +1198,7 @@ class PatentAnswerBuilder:
             sys_cite_fine=_escape_prompt_value(sys_cite_fine),
             sys_cite_format=_escape_prompt_value(sys_cite_format),
         )
-        return {
+        payload = {
             "model": self.model,
             "temperature": 0.2,
             "stream": bool(stream),
@@ -1210,6 +1210,13 @@ class PatentAnswerBuilder:
                 {"role": "user", "content": prompt},
             ],
         }
+        controls = resolve_thinking_controls(
+            stage=LLM_STAGE_STAGE4_FINAL_ANSWER,
+            max_tokens=4096,
+            stream=stream,
+        )
+        apply_openai_compatible_thinking(payload, controls)
+        return payload
 
     def _build_sanitized_fallback_answer(
         self,

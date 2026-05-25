@@ -9,6 +9,7 @@ from server.patent.prompt_loader import load_patent_prompt_template
 from server.patent.retrieval_guardrails import apply_patent_stage2_query_guardrails
 from server.patent.retrieval_service import PatentRetrievalService
 from server.patent.stage2_controls import resolve_stage2_runtime_toggles
+from server.patent.thinking import LLM_STAGE_CONTROL, merge_extra_body, resolve_thinking_controls
 
 
 DEFAULT_PATENT_STAGE2_QUERY_PROMPT = load_patent_prompt_template("stage2_query_generation.txt")
@@ -27,12 +28,22 @@ class _NullLogger:
 
 def _create_stage2_completion(*, client: Any, model: str, messages: list[dict[str, Any]], logger: Any) -> Any:
     del logger
-    return client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=0.3,
+    controls = resolve_thinking_controls(
+        stage=LLM_STAGE_CONTROL,
         max_tokens=150,
+        stream=False,
+        thinking_enabled=False,
     )
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.3,
+        "max_tokens": controls.max_tokens,
+    }
+    extra_body = merge_extra_body(None, controls)
+    if extra_body:
+        kwargs["extra_body"] = extra_body
+    return client.chat.completions.create(**kwargs)
 
 
 def _unwrap_outer_json_fence(text: str) -> str | None:

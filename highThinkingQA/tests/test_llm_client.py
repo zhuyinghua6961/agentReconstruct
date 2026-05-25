@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from agent_core.llm_client import chat_completion, chat_completion_stream, get_llm_client
+from agent_core.llm_client import chat_completion, chat_completion_stream, get_async_llm_client, get_llm_client
+from agent_core.thinking import LLM_STAGE_STAGE4_FINAL_ANSWER
 from server.services.documents_service import DocumentsService
 
 
@@ -25,6 +26,16 @@ class _FakeChat:
 class _FakeClient:
     def __init__(self, completions):
         self.chat = _FakeChat(completions)
+
+
+class _FakeStreamCompletions(_FakeCompletions):
+    def __init__(self, chunks):
+        super().__init__()
+        self._chunks = chunks
+
+    def create(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        return iter(self._chunks)
 
 
 def test_chat_completion_forwards_timeout_to_sdk_call():
@@ -59,15 +70,34 @@ def test_chat_completion_omits_enable_thinking_for_non_stream_calls():
     assert call["temperature"] == 0.7
 
 
-def test_chat_completion_stream_sends_enable_thinking_for_stream_calls():
-    class _FakeStreamCompletions(_FakeCompletions):
-        def create(self, **kwargs):
-            self.calls.append(dict(kwargs))
-            delta = SimpleNamespace(content="ok", reasoning_content=None)
-            chunk = SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
-            return iter([chunk])
+def test_chat_completion_disables_thinking_for_control_stage_when_model_supports_thinking(monkeypatch):
+    monkeypatch.setattr("agent_core.llm_client.config.LLM_IS_THINKING_MODEL", True, raising=False)
+    monkeypatch.setattr("agent_core.llm_client.config.LLM_THINKING_ENABLED", True, raising=False)
+    completions = _FakeCompletions()
+    client = _FakeClient(completions)
 
-    completions = _FakeStreamCompletions()
+    result = chat_completion(
+        prompt="demo",
+        client=client,
+        enable_thinking=True,
+    )
+
+    assert result == "ok"
+    call = completions.calls[0]
+    assert call["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning_effort" not in call
+    assert call["temperature"] == 0.7
+
+
+def test_stage4_stream_enables_deepseek_thinking_and_drops_reasoning(monkeypatch):
+    monkeypatch.setattr("agent_core.llm_client.config.LLM_IS_THINKING_MODEL", True, raising=False)
+    monkeypatch.setattr("agent_core.llm_client.config.LLM_THINKING_ENABLED", True, raising=False)
+    completions = _FakeStreamCompletions(
+        [
+            SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=None, reasoning_content="secret"))]),
+            SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="ok", reasoning_content=None))]),
+        ]
+    )
     client = _FakeClient(completions)
 
     result = "".join(
@@ -75,14 +105,46 @@ def test_chat_completion_stream_sends_enable_thinking_for_stream_calls():
             prompt="demo",
             client=client,
             enable_thinking=True,
+            stage=LLM_STAGE_STAGE4_FINAL_ANSWER,
+            max_tokens=4096,
         )
     )
 
     assert result == "ok"
     call = completions.calls[0]
     assert call["stream"] is True
-    assert call["extra_body"] == {"enable_thinking": True}
+    assert call["extra_body"] == {"thinking": {"type": "enabled"}}
+    assert call["reasoning_effort"] == "high"
+    assert call["max_tokens"] == 8192
+    assert "temperature" not in call
 
+
+def test_stage4_stream_respects_global_thinking_disabled(monkeypatch):
+    monkeypatch.setattr("agent_core.llm_client.config.LLM_IS_THINKING_MODEL", True, raising=False)
+    monkeypatch.setattr("agent_core.llm_client.config.LLM_THINKING_ENABLED", False, raising=False)
+    completions = _FakeStreamCompletions(
+        [
+            SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="ok", reasoning_content=None))]),
+        ]
+    )
+    client = _FakeClient(completions)
+
+    result = "".join(
+        chat_completion_stream(
+            prompt="demo",
+            client=client,
+            enable_thinking=True,
+            stage=LLM_STAGE_STAGE4_FINAL_ANSWER,
+            max_tokens=4096,
+        )
+    )
+
+    assert result == "ok"
+    call = completions.calls[0]
+    assert call["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning_effort" not in call
+    assert call["max_tokens"] == 4096
+    assert call["temperature"] == 0.7
 
 
 def test_get_llm_client_forwards_max_retries_override(monkeypatch):
@@ -103,17 +165,38 @@ def test_get_llm_client_forwards_max_retries_override(monkeypatch):
     assert captured["max_retries"] == 0
 
 
-def test_get_async_llm_client_requires_llm_api_key(monkeypatch):
+def test_get_llm_client_uses_placeholder_for_blank_llm_api_key(monkeypatch):
+    captured = {}
     monkeypatch.setattr("agent_core.llm_client.config.LLM_API_KEY", "")
+    monkeypatch.setattr("agent_core.llm_client.config.LLM_BASE_URL", "https://example.invalid/v1")
 
-    try:
-        from agent_core.llm_client import get_async_llm_client
+    def fake_openai(**kwargs):
+        captured.update(kwargs)
+        return object()
 
-        get_async_llm_client()
-    except RuntimeError as exc:
-        assert str(exc) == "LLM_API_KEY is not configured"
-    else:
-        raise AssertionError("expected RuntimeError")
+    monkeypatch.setattr("agent_core.llm_client.OpenAI", fake_openai)
+
+    client = get_llm_client()
+
+    assert client is not None
+    assert captured["api_key"] == "local-openai-compatible"
+
+
+def test_get_async_llm_client_uses_placeholder_for_blank_llm_api_key(monkeypatch):
+    captured = {}
+    monkeypatch.setattr("agent_core.llm_client.config.LLM_API_KEY", "")
+    monkeypatch.setattr("agent_core.llm_client.config.LLM_BASE_URL", "https://example.invalid/v1")
+
+    def fake_async_openai(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("agent_core.llm_client.AsyncOpenAI", fake_async_openai)
+
+    client = get_async_llm_client()
+
+    assert client is not None
+    assert captured["api_key"] == "local-openai-compatible"
 
 
 def test_documents_service_prefers_unified_llm_namespace(monkeypatch):

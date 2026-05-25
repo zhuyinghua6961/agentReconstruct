@@ -813,6 +813,76 @@ def test_patent_answer_builder_uses_injected_http_client_and_request_timeout():
     assert http_client.closed is False
 
 
+def test_patent_answer_builder_stage4_enables_thinking(monkeypatch):
+    class _FakeHttpClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def post(self, url, *, headers=None, content=None, json=None, timeout=None):
+            raw = content.decode("utf-8") if isinstance(content, bytes) else content
+            self.calls.append(
+                {
+                    "url": url,
+                    "headers": headers,
+                    "json": json if json is not None else __import__("json").loads(raw),
+                    "timeout": timeout,
+                }
+            )
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", str(url)),
+                json={"choices": [{"message": {"content": "answer (patent_id=CN115132975B)"}}]},
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setenv("LLM_IS_THINKING_MODEL", "true")
+    monkeypatch.setenv("LLM_THINKING_ENABLED", "true")
+    http_client = _FakeHttpClient()
+    builder = PatentAnswerBuilder(
+        api_key="",
+        base_url="http://example.invalid",
+        model="test-model",
+        http_client=http_client,
+    )
+
+    answer = builder(
+        question="如何评估该方案的替代窗口与风险？",
+        retrieval_outcome=PatentRetrievalOutcome(
+            retrieval_backend="vector_hybrid",
+            retrieval_version="retrieval-v2",
+            catalog_index_version="catalog-v2",
+            references=["CN115132975B"],
+            reference_objects=[dict(_sample_retrieval_results()["reference_objects"][0])],
+            reference_links=[dict(_sample_retrieval_results()["reference_links"][0])],
+            original_links=[dict(_sample_retrieval_results()["original_links"][0])],
+            evidences=[
+                PatentEvidence(
+                    canonical_patent_id="CN115132975B",
+                    publication_number="CN115132975B",
+                    application_number="CN202110320984.1",
+                    title="一种锂离子电池及动力车辆",
+                    abstract_text="通过 LMFP/LFP/三元复配改善充电安全与低 SOC 放电功率。",
+                    matched_section_type="claim",
+                    matched_section_label="Claim 1",
+                    matched_snippet="一种锂离子电池，其正极活性材料包括 LMFP、LFP 与三元材料。",
+                )
+            ],
+        ),
+        context={"allowed_patent_ids": ["CN115132975B"]},
+    )
+
+    assert "CN115132975B" in answer
+    call = http_client.calls[0]
+    payload = call["json"]
+    assert "Authorization" not in call["headers"]
+    assert payload["thinking"] == {"type": "enabled"}
+    assert payload["reasoning_effort"] == "high"
+    assert payload["max_tokens"] == 8192
+    assert "temperature" not in payload
+
+
 def test_patent_answer_builder_rejects_transport_and_http_client_mix():
     with pytest.raises(ValueError, match="transport"):
         PatentAnswerBuilder(

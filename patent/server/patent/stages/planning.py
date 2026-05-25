@@ -12,6 +12,7 @@ from server.patent.intent_detect import (
 )
 from server.patent.models import PatentRetrievalClaim, PatentRetrievalPlan
 from server.patent.prompt_loader import load_patent_prompt_template
+from server.patent.thinking import LLM_STAGE_CONTROL, merge_extra_body, resolve_thinking_controls
 from server.patent.upstream_transport import is_patent_pool_timeout
 
 
@@ -33,24 +34,31 @@ def _is_response_format_capability_error(exc: Exception) -> bool:
 
 
 def _create_stage1_completion(*, client: Any, model: str, messages: list[dict[str, Any]], logger: Any) -> Any:
+    controls = resolve_thinking_controls(
+        stage=LLM_STAGE_CONTROL,
+        max_tokens=1800,
+        stream=False,
+        thinking_enabled=False,
+    )
+    extra_body = merge_extra_body(None, controls)
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.3,
+        "max_tokens": controls.max_tokens,
+    }
+    if extra_body:
+        kwargs["extra_body"] = extra_body
     try:
         return client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.3,
-            max_tokens=1800,
+            **kwargs,
             response_format={"type": "json_object"},
         )
     except Exception as exc:
         if not _is_response_format_capability_error(exc):
             raise
         logger.warning("patent stage1 response_format unsupported; retrying without it: %s", exc)
-        return client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.3,
-            max_tokens=1800,
-        )
+        return client.chat.completions.create(**kwargs)
 
 
 def _unwrap_outer_json_fence(text: str) -> str | None:

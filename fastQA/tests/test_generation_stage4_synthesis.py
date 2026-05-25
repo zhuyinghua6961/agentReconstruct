@@ -95,6 +95,10 @@ def _chunk(text: str):
     return SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=text))])
 
 
+def _reasoning_chunk(text: str):
+    return SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=None, reasoning_content=text))])
+
+
 def _escape_braces(text: str) -> str:
     return str(text or "").replace("{", "{{").replace("}", "}}")
 
@@ -156,6 +160,43 @@ def test_stage4_synthesis_streams_content_and_final_result(monkeypatch):
     assert outputs[-1]["success"] is True
     assert outputs[-1]["final_answer"] == "结论 (doi=10.1/a)"
     assert outputs[-1]["references"][0]["doi"] == "10.1/a"
+
+
+def test_stage4_synthesis_enables_thinking_and_drops_reasoning(monkeypatch):
+    monkeypatch.setenv("LLM_IS_THINKING_MODEL", "true")
+    monkeypatch.setenv("LLM_THINKING_ENABLED", "true")
+    monkeypatch.setenv("QA_STAGE4_MIN_CITATIONS", "1")
+    client = _FakeClient([_reasoning_chunk("secret reasoning"), _chunk("结论"), _chunk(" (doi=10.1/a)")])
+
+    outputs = list(
+        iter_stage4_synthesis_with_pdf_chunks(
+            user_question="what is lfp?",
+            deep_answer="draft",
+            pdf_chunks={"10.1/a": [{"text": "evidence", "page": 1}]},
+            retrieval_results={"claim_to_results": {}},
+            stage2_prompt="prompt {user_question} {deep_answer} {evidence_documents} {top5_references}",
+            client=client,
+            model="m",
+            safe_dict_cls=_SafeDict,
+            escape_braces_fn=_escape_braces,
+            format_pdf_chunks_evidence_fn=_format_pdf_chunks_evidence,
+            build_top5_reference_context_fn=build_top5_reference_context,
+            extract_cited_dois_fn=extract_cited_dois,
+            log_top5_coverage_fn=log_top5_coverage,
+            build_references_from_pdf_chunks_fn=build_references_from_pdf_chunks,
+            logger=_logger(),
+        )
+    )
+
+    assert outputs[0] == "结论"
+    assert outputs[1] == " (doi=10.1/a)"
+    assert outputs[-1]["success"] is True
+    assert outputs[-1]["final_answer"] == "结论 (doi=10.1/a)"
+    call = client.calls[0]
+    assert call["extra_body"] == {"thinking": {"type": "enabled"}}
+    assert call["reasoning_effort"] == "high"
+    assert call["max_tokens"] == 8192
+    assert "temperature" not in call
 
 
 def test_stage4_synthesis_logs_llm_request_first_chunk_and_completion(monkeypatch):

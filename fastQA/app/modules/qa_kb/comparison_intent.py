@@ -4,6 +4,8 @@ import re
 import json
 from typing import Any
 
+from app.integrations.llm.thinking import LLM_STAGE_CONTROL, merge_extra_body, resolve_thinking_controls
+
 
 _DEFAULT_DIMENSIONS = ["成本", "储存稳定性", "反应路径", "还原需求", "杂质风险", "电化学表现"]
 
@@ -392,6 +394,11 @@ def generate_comparison_retrieval_profile(
     if not isinstance(comparison_plan, dict) or not comparison_plan.get("enabled"):
         return comparison_plan
     try:
+        controls = resolve_thinking_controls(
+            stage=LLM_STAGE_CONTROL,
+            max_tokens=1200,
+            stream=False,
+        )
         response = client.chat.completions.create(
             model=model,
             messages=[
@@ -406,7 +413,8 @@ def generate_comparison_retrieval_profile(
                 },
             ],
             temperature=0.1,
-            max_tokens=1200,
+            max_tokens=controls.max_tokens,
+            extra_body=merge_extra_body(None, controls),
             stream=False,
         )
         raw = str(response.choices[0].message.content or "").strip()

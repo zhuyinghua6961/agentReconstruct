@@ -59,6 +59,28 @@ def test_run_intent_detect_quick_tag_strips_noise() -> None:
     assert out["intent_tag"] == "mechanism_analysis"
 
 
+def test_run_intent_detect_disables_thinking_for_thinking_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(idetect.config, "LLM_IS_THINKING_MODEL", True, raising=False)
+    monkeypatch.setattr(idetect.config, "LLM_THINKING_ENABLED", True, raising=False)
+    client = MagicMock()
+    choice = MagicMock()
+    choice.message.content = "generic"
+    resp = MagicMock()
+    resp.choices = [choice]
+    client.chat.completions.create.return_value = resp
+
+    out = idetect.run_intent_detect_quick_tag(
+        client=client,
+        user_question="hello",
+        logger=None,
+    )
+
+    assert out["ok"] is True
+    call = client.chat.completions.create.call_args.kwargs
+    assert call["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning_effort" not in call
+
+
 def test_pool_timeout_propagates() -> None:
     client = MagicMock()
     PoolTimeoutExc = type("PoolTimeout", (Exception,), {})

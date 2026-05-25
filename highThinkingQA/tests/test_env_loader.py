@@ -237,6 +237,8 @@ def test_config_uses_env_values_and_resolves_relative_paths(monkeypatch):
     monkeypatch.setenv("LLM_API_KEY", "masked")
     monkeypatch.setenv("LLM_MODEL", "unit-test-model")
     monkeypatch.setenv("LLM_ENABLE_THINKING", "0")
+    monkeypatch.setenv("LLM_IS_THINKING_MODEL", "1")
+    monkeypatch.setenv("LLM_THINKING_ENABLED", "0")
     monkeypatch.setenv("DECOMPOSE_MODEL", "legacy-decompose")
     monkeypatch.setenv("DIRECT_ANSWER_MODEL", "legacy-direct")
     monkeypatch.setenv("SUB_ANSWER_MODEL", "legacy-sub")
@@ -255,7 +257,9 @@ def test_config_uses_env_values_and_resolves_relative_paths(monkeypatch):
 
     assert reloaded.LLM_API_KEY == "masked"
     assert reloaded.LLM_MODEL == "unit-test-model"
-    assert reloaded.MAIN_LLM_THINKING_ENABLED is True
+    assert reloaded.LLM_IS_THINKING_MODEL is True
+    assert reloaded.LLM_THINKING_ENABLED is False
+    assert reloaded.MAIN_LLM_THINKING_ENABLED is False
     assert reloaded.DIRECT_STAGE_THINKING_ENABLED is False
     assert reloaded.DECOMPOSE_STAGE_THINKING_ENABLED is False
     assert reloaded.PAPERS_DIR == str((state_root / "tmp-papers").resolve())

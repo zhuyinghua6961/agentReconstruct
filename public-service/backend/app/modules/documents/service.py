@@ -13,6 +13,12 @@ from app.core.config import get_settings
 from app.core.runtime import PublicServiceRuntime
 from app.core.errors import AppError
 from app.modules.documents.cache import build_patent_original_cache_control, build_patent_original_etag
+from app.modules.documents.llm_thinking import (
+    LLM_STAGE_DOCUMENT_SUMMARY,
+    local_sdk_api_key,
+    merge_extra_body,
+    resolve_thinking_controls,
+)
 from app.modules.documents.patent_original_store import (
     PatentOriginalNotFoundError,
     PatentOriginalStore,
@@ -618,16 +624,26 @@ class DocumentsService:
                 f"{full_text}"
             )
 
-            client = OpenAI(api_key=self._openai_api_key, base_url=self._openai_base_url)
-            resp = client.chat.completions.create(
-                model=self._openai_model,
-                messages=[
+            client = OpenAI(api_key=local_sdk_api_key(self._openai_api_key), base_url=self._openai_base_url)
+            controls = resolve_thinking_controls(
+                stage=LLM_STAGE_DOCUMENT_SUMMARY,
+                max_tokens=650,
+                stream=False,
+                thinking_enabled=False,
+            )
+            kwargs: dict[str, Any] = {
+                "model": self._openai_model,
+                "messages": [
                     {"role": "system", "content": "你是一名材料领域文献速读助手，擅长用中文提炼论文要点。"},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.3,
-                max_tokens=650,
-            )
+                "temperature": 0.3,
+                "max_tokens": controls.max_tokens,
+            }
+            extra_body = merge_extra_body(None, controls)
+            if extra_body:
+                kwargs["extra_body"] = extra_body
+            resp = client.chat.completions.create(**kwargs)
             summary = str(resp.choices[0].message.content or "").strip()
             logger.info("✅ PDF总结生成完成")
             return {"doi": normalized, "summary": summary}, 200

@@ -108,7 +108,8 @@ def test_build_hybrid_synthesis_contract_includes_internal_contexts_and_source_m
     }
 
 
-def test_build_hybrid_synthesis_contract_uses_richer_pdf_context_than_public_preview(tmp_path):
+def test_build_hybrid_synthesis_contract_uses_richer_pdf_context_than_public_preview(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATENT_ORIGINAL_MINIO_ONLY", "false")
     pdf_path = tmp_path / "battery-paper.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\nplaceholder\n")
     service = PatentPdfService(
@@ -217,6 +218,46 @@ def test_hybrid_synthesis_client_from_env_reads_hybrid_budget(monkeypatch):
 
     assert client is not None
     assert client.runtime_signature()["max_tokens"] == 4096
+
+
+def test_hybrid_synthesis_client_stage4_enables_thinking(monkeypatch):
+    class _FakeHttpClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def post(self, url, *, headers=None, json=None, timeout=None):
+            self.calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", str(url)),
+                json={"choices": [{"message": {"content": "hybrid answer"}}]},
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setenv("LLM_IS_THINKING_MODEL", "true")
+    monkeypatch.setenv("LLM_THINKING_ENABLED", "true")
+    http_client = _FakeHttpClient()
+    client = PatentHybridSynthesisClient(
+        api_key="",
+        base_url="https://example.com",
+        model="model",
+        max_tokens=3000,
+        http_client=http_client,
+    )
+
+    answer = client.answer(synthesis_contract=_sample_contract())
+
+    assert answer == "hybrid answer"
+    call = http_client.calls[0]
+    payload = call["json"]
+    assert "Authorization" not in call["headers"]
+    assert payload["thinking"] == {"type": "enabled"}
+    assert payload["reasoning_effort"] == "high"
+    assert payload["max_tokens"] == 8192
+    assert "temperature" not in payload
+    assert "top_p" not in payload
 
 
 def test_hybrid_synthesis_client_from_env_prefers_unified_llm_namespace(monkeypatch):

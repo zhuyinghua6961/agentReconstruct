@@ -77,7 +77,54 @@ def test_smart_translator_ignores_retired_llm_aliases(monkeypatch):
     assert translator.api_key == ""
     assert translator.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
     assert translator.model == "deepseek-v3.1"
-    assert calls == {}
+    assert calls == {
+        "api_key": "local-openai-compatible",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    }
+
+
+def test_smart_translator_uses_placeholder_for_blank_llm_api_key(monkeypatch):
+    calls: dict[str, object] = {}
+
+    class _FakeOpenAI:
+        def __init__(self, **kwargs):
+            calls.update(kwargs)
+
+    monkeypatch.setenv("LLM_API_KEY", "")
+    monkeypatch.setenv("LLM_BASE_URL", "http://local-llm/v1")
+    monkeypatch.setenv("LLM_MODEL", "local-model")
+
+    translator = SmartTranslator(_FakeOpenAI)
+
+    assert translator.enabled is True
+    assert calls == {"api_key": "local-openai-compatible", "base_url": "http://local-llm/v1"}
+
+
+def test_smart_translator_disables_thinking_for_thinking_model(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _FakeCompletions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="译文"))])
+
+    class _FakeOpenAI:
+        def __init__(self, **_kwargs):
+            self.chat = SimpleNamespace(completions=_FakeCompletions())
+
+    monkeypatch.setenv("LLM_IS_THINKING_MODEL", "true")
+    monkeypatch.setenv("LLM_THINKING_ENABLED", "true")
+    translator = SmartTranslator(
+        _FakeOpenAI,
+        api_key="",
+        base_url="http://local-llm/v1",
+        model="local-model",
+    )
+    source_text = f"thinking-control-unique-input-{time.time_ns()}"
+
+    assert translator.translate(source_text, show_progress=False) == "译文"
+    assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning_effort" not in captured
 
 
 def test_documents_service_prefers_unified_llm_aliases(monkeypatch, tmp_path):
@@ -116,6 +163,41 @@ def test_documents_service_ignores_retired_llm_aliases(monkeypatch, tmp_path):
     assert service._openai_api_key == ""
     assert service._openai_base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
     assert service._openai_model == "deepseek-v3.1"
+
+
+def test_documents_service_summary_disables_thinking_for_thinking_model(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+
+    class _FakeCompletions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="总结"))])
+
+    class _FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client_kwargs"] = kwargs
+            self.chat = SimpleNamespace(completions=_FakeCompletions())
+
+    monkeypatch.setenv("PUBLIC_SERVICE_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("LLM_API_KEY", "")
+    monkeypatch.setenv("LLM_BASE_URL", "http://local-llm/v1")
+    monkeypatch.setenv("LLM_MODEL", "local-model")
+    monkeypatch.setenv("LLM_IS_THINKING_MODEL", "true")
+    monkeypatch.setenv("LLM_THINKING_ENABLED", "true")
+    monkeypatch.setattr("app.modules.documents.service.OpenAI", _FakeOpenAI)
+    service = DocumentsService()
+    monkeypatch.setattr(service, "_ensure_local_pdf", lambda doi, logger: pdf_path)
+    monkeypatch.setattr(service, "_extract_pdf_body", lambda **_kwargs: "This paper reports data." * 20)
+
+    payload, status = service.summarize_pdf("10.1000/test", logger=SimpleNamespace(info=lambda *a, **k: None, error=lambda *a, **k: None))
+
+    assert status == 200
+    assert payload["summary"] == "总结"
+    assert captured["client_kwargs"]["api_key"] == "local-openai-compatible"
+    assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning_effort" not in captured
 
 
 def test_view_pdf_route_serves_file(monkeypatch, tmp_path):

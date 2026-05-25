@@ -139,4 +139,23 @@ def init_llm(logger, *, http_client: Any | None = None) -> Any:
             logger.info("LLM初始化成功，回退OpenAI兼容适配器: %s", model)
             return llm
 
-    raise ValueError("请设置LLM_API_KEY环境变量")
+    llm = build_chat_adapter(
+        api_key="",
+        base_url=dashscope_base_url,
+        model=model,
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
+        logger=logger,
+        connect_timeout_seconds=transport_config.connect_timeout_seconds,
+        read_timeout_seconds=transport_config.read_timeout_seconds,
+        stream_read_timeout_seconds=transport_config.stream_read_timeout_seconds,
+        write_timeout_seconds=transport_config.write_timeout_seconds,
+        pool_timeout_seconds=transport_config.pool_timeout_seconds,
+        keepalive_expiry_seconds=transport_config.keepalive_expiry_seconds,
+        max_connections=transport_config.max_connections,
+        max_keepalive_connections=transport_config.max_keepalive_connections,
+        http_client=http_client,
+    )
+    logger.info("LLM初始化成功，使用本地OpenAI兼容模型: %s", model)
+    return llm

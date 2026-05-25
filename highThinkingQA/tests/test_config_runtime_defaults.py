@@ -159,3 +159,22 @@ def test_config_ignores_legacy_embedding_and_llm_aliases(monkeypatch, tmp_path):
     assert reloaded.VLM_PAGES_PER_BATCH == 3
     assert reloaded.VLM_MAX_RETRIES == 5
     assert reloaded.VLM_RETRY_BASE == 3
+    assert reloaded.LLM_IS_THINKING_MODEL is False
+    assert reloaded.LLM_THINKING_ENABLED is False
+    assert reloaded.MAIN_LLM_THINKING_ENABLED is False
+
+
+def test_config_reads_simplified_llm_thinking_flags(monkeypatch, tmp_path):
+    _isolate_config_root(monkeypatch, tmp_path)
+    monkeypatch.setenv("LLM_IS_THINKING_MODEL", "true")
+    monkeypatch.setenv("LLM_THINKING_ENABLED", "true")
+
+    import config
+
+    reloaded = importlib.reload(config)
+
+    assert reloaded.LLM_IS_THINKING_MODEL is True
+    assert reloaded.LLM_THINKING_ENABLED is True
+    assert reloaded.MAIN_LLM_THINKING_ENABLED is True
+    assert reloaded.DIRECT_STAGE_THINKING_ENABLED is False
+    assert reloaded.DECOMPOSE_STAGE_THINKING_ENABLED is False

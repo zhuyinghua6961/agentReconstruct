@@ -12,6 +12,13 @@ from pathlib import Path
 from typing import Any
 
 import config
+from agent_core.thinking import (
+    LLM_STAGE_DOCUMENT_SUMMARY,
+    LLM_STAGE_TRANSLATION,
+    local_sdk_api_key,
+    merge_extra_body,
+    resolve_thinking_controls,
+)
 from ingest.vector_store import get_collection_count
 from server.services.pdf_extractor import extract_pdf_text as extract_pdf_text_impl
 from server.storage.paper_storage import build_paper_filename, ensure_local_paper_pdf, normalize_doi, paper_pdf_exists
@@ -51,9 +58,26 @@ class DocumentsService:
         if OpenAI is None:
             return None
         api_key = self._llm_api_key()
-        if not api_key:
+        if not self._llm_base_url() or not self._llm_model():
             return None
-        return OpenAI(api_key=api_key, base_url=self._llm_base_url())
+        return OpenAI(api_key=local_sdk_api_key(api_key), base_url=self._llm_base_url())
+
+    @staticmethod
+    def _disabled_llm_kwargs(*, stage: str, max_tokens: int | None = None) -> dict[str, Any]:
+        controls = resolve_thinking_controls(
+            is_thinking_model=config.LLM_IS_THINKING_MODEL,
+            thinking_enabled=False,
+            stage=stage,
+            max_tokens=max_tokens,
+            stream=False,
+        )
+        kwargs: dict[str, Any] = {}
+        if controls.max_tokens is not None:
+            kwargs["max_tokens"] = controls.max_tokens
+        extra_body = merge_extra_body(None, controls)
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+        return kwargs
 
     def _extract_pdf_body(
         self,
@@ -132,6 +156,7 @@ class DocumentsService:
                         },
                     ],
                     temperature=0.3,
+                    **self._disabled_llm_kwargs(stage=LLM_STAGE_TRANSLATION),
                 )
                 translated = str(resp.choices[0].message.content or "").strip()
             except Exception as exc:
@@ -216,7 +241,7 @@ class DocumentsService:
                     },
                 ],
                 temperature=0.3,
-                max_tokens=650,
+                **self._disabled_llm_kwargs(stage=LLM_STAGE_DOCUMENT_SUMMARY, max_tokens=650),
             )
             summary = str(resp.choices[0].message.content or "").strip()
         except Exception as exc:

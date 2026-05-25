@@ -126,7 +126,8 @@ def test_run_agent_streams_draft_chunks_and_keeps_final_answer(monkeypatch):
 
 
 
-def test_run_agent_streaming_synthesis_disables_thinking_for_smoother_first_chunk(monkeypatch):
+def test_run_agent_streaming_synthesis_allows_stage4_thinking_request(monkeypatch):
+    monkeypatch.setattr("agent_core.graph.config.LLM_THINKING_ENABLED", True, raising=False)
     monkeypatch.setattr("agent_core.graph.get_llm_client", lambda *args, **kwargs: object())
     monkeypatch.setattr("agent_core.graph.get_async_llm_client", lambda: object())
     monkeypatch.setattr("agent_core.graph.get_embedding_client", lambda: object())
@@ -156,7 +157,7 @@ def test_run_agent_streaming_synthesis_disables_thinking_for_smoother_first_chun
 
     assert state.error == ""
     assert streamed_chunks == ["draft"]
-    assert captured["enable_thinking"] is False
+    assert captured["enable_thinking"] is True
 
 
 def test_run_agent_emits_step5_check_and_revise_progress(monkeypatch):

@@ -8,6 +8,10 @@ from types import SimpleNamespace
 from typing import Any, Iterable, Iterator, Mapping
 
 from app.core.logging import beijing_now_iso
+from app.integrations.llm.thinking import (
+    LLM_STAGE_STAGE4_FINAL_ANSWER,
+    resolve_thinking_controls,
+)
 
 DEFAULT_LLM_COMPATIBLE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
@@ -226,11 +230,14 @@ class _OpenAICompatBase(_TimingMixin):
         )
 
     def _headers(self) -> dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self._cfg.api_key}",
+        headers = {
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
         }
+        api_key = str(self._cfg.api_key or "").strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        return headers
 
     def _stream_read_timeout_seconds(self, explicit: float | None) -> float | None:
         if explicit is not None:
@@ -333,6 +340,8 @@ class _OpenAICompatBase(_TimingMixin):
         top_p: float | None = None,
         max_tokens: int | None = None,
         extra_body: Mapping[str, Any] | None = None,
+        reasoning_effort: str | None = None,
+        omit_sampling_parameters: bool = False,
         response_format: Any | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -340,12 +349,14 @@ class _OpenAICompatBase(_TimingMixin):
             "messages": messages,
             "stream": stream,
         }
-        if temperature is not None:
+        if temperature is not None and not omit_sampling_parameters:
             payload["temperature"] = temperature
-        if top_p is not None:
+        if top_p is not None and not omit_sampling_parameters:
             payload["top_p"] = top_p
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
         if response_format is not None:
             payload["response_format"] = response_format
         if isinstance(extra_body, Mapping):
@@ -430,6 +441,11 @@ class OpenAICompatChatAdapter(_OpenAICompatBase):
         if not messages:
             return SimpleNamespace(content="")
         started_at = time.monotonic()
+        thinking_controls = resolve_thinking_controls(
+            stage=LLM_STAGE_STAGE4_FINAL_ANSWER,
+            max_tokens=self._max_tokens,
+            stream=False,
+        )
         request_kwargs: dict[str, Any] = {
             "headers": self._headers(),
             "json": self._build_payload(
@@ -438,7 +454,10 @@ class OpenAICompatChatAdapter(_OpenAICompatBase):
                 stream=False,
                 temperature=self._temperature,
                 top_p=self._top_p,
-                max_tokens=self._max_tokens,
+                max_tokens=thinking_controls.max_tokens,
+                extra_body=thinking_controls.extra_body,
+                reasoning_effort=thinking_controls.reasoning_effort,
+                omit_sampling_parameters=thinking_controls.enabled,
             ),
         }
         request_timeout = self._build_timeout(
@@ -484,6 +503,11 @@ class OpenAICompatChatAdapter(_OpenAICompatBase):
         request_started_at = time.monotonic()
         self._log_timing("openai_compat_stream_start", request_started_at, message_count=len(messages))
         first_chunk_logged = False
+        thinking_controls = resolve_thinking_controls(
+            stage=LLM_STAGE_STAGE4_FINAL_ANSWER,
+            max_tokens=self._max_tokens,
+            stream=True,
+        )
         request_kwargs: dict[str, Any] = {
             "headers": self._headers(),
             "json": self._build_payload(
@@ -492,7 +516,10 @@ class OpenAICompatChatAdapter(_OpenAICompatBase):
                 stream=True,
                 temperature=self._temperature,
                 top_p=self._top_p,
-                max_tokens=self._max_tokens,
+                max_tokens=thinking_controls.max_tokens,
+                extra_body=thinking_controls.extra_body,
+                reasoning_effort=thinking_controls.reasoning_effort,
+                omit_sampling_parameters=thinking_controls.enabled,
             ),
         }
         request_timeout = self._build_timeout(
@@ -521,7 +548,14 @@ class OpenAICompatChatAdapter(_OpenAICompatBase):
                     message_count=len(messages),
                 )
                 iter_started_at = time.monotonic()
+                reasoning_chars = 0
                 for payload_json in self._iter_sse_json(response):
+                    choices = payload_json.get("choices") or []
+                    if choices:
+                        delta = (choices[0] or {}).get("delta") or {}
+                        reasoning = delta.get("reasoning_content")
+                        if reasoning:
+                            reasoning_chars += len(str(reasoning))
                     content = extract_openai_compatible_text(payload_json)
                     if not content:
                         continue
@@ -529,6 +563,8 @@ class OpenAICompatChatAdapter(_OpenAICompatBase):
                         self._log_timing("openai_compat_first_chunk", iter_started_at, first_chunk_chars=len(content))
                         first_chunk_logged = True
                     yield SimpleNamespace(content=content)
+                if reasoning_chars and self._logger is not None:
+                    self._logger.info("openai_compat_stream reasoning_chars=%s thinking_enabled=%s", reasoning_chars, thinking_controls.enabled)
         except Exception as exc:
             self._handle_transport_error(stage="openai_compat_stream_error", started_at=request_started_at, exc=exc)
 
@@ -547,6 +583,8 @@ class _CompatCompletions:
         top_p: float | None = None,
         max_tokens: int | None = None,
         extra_body: Mapping[str, Any] | None = None,
+        reasoning_effort: str | None = None,
+        omit_sampling_parameters: bool = False,
         response_format: Any | None = None,
         timeout: Any | None = None,
         connect_timeout_seconds: float | None = None,
@@ -564,6 +602,8 @@ class _CompatCompletions:
                 top_p=top_p,
                 max_tokens=max_tokens,
                 extra_body=extra_body,
+                reasoning_effort=reasoning_effort,
+                omit_sampling_parameters=omit_sampling_parameters,
                 response_format=response_format,
                 timeout=timeout,
                 connect_timeout_seconds=connect_timeout_seconds,
@@ -578,6 +618,8 @@ class _CompatCompletions:
             top_p=top_p,
             max_tokens=max_tokens,
             extra_body=extra_body,
+            reasoning_effort=reasoning_effort,
+            omit_sampling_parameters=omit_sampling_parameters,
             response_format=response_format,
             timeout=timeout,
             connect_timeout_seconds=connect_timeout_seconds,
@@ -636,6 +678,8 @@ class OpenAICompatClient(_OpenAICompatBase):
         top_p: float | None,
         max_tokens: int | None,
         extra_body: Mapping[str, Any] | None,
+        reasoning_effort: str | None,
+        omit_sampling_parameters: bool,
         response_format: Any | None,
         timeout: Any | None,
         connect_timeout_seconds: float | None,
@@ -654,6 +698,8 @@ class OpenAICompatClient(_OpenAICompatBase):
                 top_p=top_p,
                 max_tokens=max_tokens,
                 extra_body=extra_body,
+                reasoning_effort=reasoning_effort,
+                omit_sampling_parameters=omit_sampling_parameters,
                 response_format=response_format,
             ),
         }
@@ -693,6 +739,8 @@ class OpenAICompatClient(_OpenAICompatBase):
         top_p: float | None,
         max_tokens: int | None,
         extra_body: Mapping[str, Any] | None,
+        reasoning_effort: str | None,
+        omit_sampling_parameters: bool,
         response_format: Any | None,
         timeout: Any | None,
         connect_timeout_seconds: float | None,
@@ -713,6 +761,8 @@ class OpenAICompatClient(_OpenAICompatBase):
                 top_p=top_p,
                 max_tokens=max_tokens,
                 extra_body=extra_body,
+                reasoning_effort=reasoning_effort,
+                omit_sampling_parameters=omit_sampling_parameters,
                 response_format=response_format,
             ),
         }

@@ -88,21 +88,26 @@ def test_file_routes_fallback_path_still_works_when_shared_pool_disabled(monkeyp
     assert built[0]["http_client"] is None
 
 
-def test_resolve_app_owned_llm_error_mentions_unified_llm_keys(monkeypatch):
+def test_resolve_app_owned_llm_allows_blank_local_llm_api_key(monkeypatch):
     app_state = SimpleNamespace(
         shared_llm_adapter=None,
         aux_llm=None,
         shared_llm_http_pool=None,
     )
+    built: list[dict[str, object]] = []
+    sentinel = _FakeLlm()
     monkeypatch.setattr(
         file_route_service_module,
         "resolve_generation_runtime_inputs",
-        lambda **kwargs: SimpleNamespace(api_key="", base_url="", model=""),
+        lambda **kwargs: SimpleNamespace(api_key="", base_url="https://example.com/v1", model="m"),
+    )
+    monkeypatch.setattr(
+        file_route_service_module,
+        "build_chat_adapter",
+        lambda **kwargs: built.append(kwargs) or sentinel,
     )
 
-    try:
-        file_route_service_module.resolve_app_owned_llm(app_state=app_state, logger=None)
-    except RuntimeError as exc:
-        assert "LLM_API_KEY" in str(exc)
-    else:
-        raise AssertionError("expected RuntimeError")
+    llm = file_route_service_module.resolve_app_owned_llm(app_state=app_state, logger=None)
+
+    assert llm is sentinel
+    assert built[0]["api_key"] == ""

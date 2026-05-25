@@ -58,8 +58,6 @@ def resolve_app_owned_llm(*, app_state: Any, logger: Any) -> Any:
         return aux_llm
 
     resolved = resolve_generation_runtime_inputs(api_key=None, base_url=None, model=None, config=None)
-    if not str(resolved.api_key or "").strip():
-        raise RuntimeError("LLM_API_KEY is required for file QA")
     if not str(resolved.base_url or "").strip():
         raise RuntimeError("LLM_BASE_URL is required for file QA")
 

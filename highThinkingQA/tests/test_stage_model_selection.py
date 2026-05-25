@@ -64,7 +64,11 @@ def test_direct_answer_ignores_retired_stage_runtime_bounds(monkeypatch):
 
 def test_sub_answer_kwargs_use_unified_llm_model(monkeypatch):
     monkeypatch.setattr(sub_answerer.config, "LLM_MODEL", "llm-test-model")
+    monkeypatch.setattr(sub_answerer.config, "LLM_IS_THINKING_MODEL", True, raising=False)
+    monkeypatch.setattr(sub_answerer.config, "LLM_THINKING_ENABLED", True, raising=False)
 
     kwargs = sub_answerer._build_sub_answer_kwargs("demo")
 
     assert kwargs["model"] == "llm-test-model"
+    assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning_effort" not in kwargs

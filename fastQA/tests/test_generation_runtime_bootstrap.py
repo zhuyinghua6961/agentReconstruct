@@ -104,6 +104,50 @@ def test_resolve_generation_runtime_inputs_prefers_unified_llm_namespace(monkeyp
     assert resolved.model == "llm-model"
 
 
+def test_bootstrap_generation_runtime_allows_blank_local_llm_api_key(monkeypatch):
+    from app.core.runtime import bootstrap_generation_runtime
+
+    runtime = SimpleNamespace(
+        settings=SimpleNamespace(generation_runtime_enabled=True),
+        generation_runtime=None,
+        generation_runtime_ready=False,
+        component_status={},
+        health_flags={},
+        shared_llm_http_pool=None,
+    )
+    monkeypatch.setenv("FASTQA_LLM_HTTP_SHARED_POOL_ENABLED", "0")
+    monkeypatch.setattr(
+        "app.modules.generation_pipeline.runtime_bootstrap.resolve_generation_runtime_inputs",
+        lambda **kwargs: SimpleNamespace(api_key="", base_url="https://example.com/v1", model="m"),
+    )
+    monkeypatch.setattr(
+        "app.modules.generation_pipeline.generation_driven_rag_facade.GenerationDrivenRAG",
+        lambda **kwargs: SimpleNamespace(model="m", base_url="https://example.com/v1", literature_expert=SimpleNamespace(available=True)),
+    )
+
+    bootstrap_generation_runtime(runtime)
+
+    assert runtime.generation_runtime_ready is True
+
+
+def test_warm_stage2_chat_lane_disables_thinking_for_thinking_model(monkeypatch):
+    from app.core.runtime import _warm_stage2_chat_lane
+
+    calls: list[dict[str, object]] = []
+    client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(create=lambda **kwargs: calls.append(kwargs) or SimpleNamespace())
+        )
+    )
+    lane = SimpleNamespace(client=client)
+    monkeypatch.setenv("LLM_IS_THINKING_MODEL", "true")
+    monkeypatch.setenv("LLM_THINKING_ENABLED", "true")
+
+    _warm_stage2_chat_lane(lane=lane, model="m", timeout_seconds=1.0)
+
+    assert calls[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
 def test_query_expander_prefers_unified_llm_model(monkeypatch):
     monkeypatch.setenv("LLM_API_KEY", "llm-key")
     monkeypatch.setenv("LLM_BASE_URL", "https://llm.example/v1")
@@ -115,6 +159,26 @@ def test_query_expander_prefers_unified_llm_model(monkeypatch):
     assert expander.api_key == "llm-key"
     assert expander.base_url == "https://llm.example/v1"
     assert expander.model == "llm-model"
+
+
+def test_query_expander_allows_blank_local_llm_api_key(monkeypatch):
+    sentinel = object()
+    calls: dict[str, object] = {}
+
+    def _fake_builder(**kwargs):
+        calls.update(kwargs)
+        return sentinel
+
+    monkeypatch.setenv("LLM_API_KEY", "")
+    monkeypatch.setenv("LLM_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("LLM_MODEL", "llm-model")
+    monkeypatch.setattr("app.modules.generation_pipeline.query_expander.build_chat_completions_client", _fake_builder)
+
+    expander = QueryExpander()
+
+    assert expander._get_client() is sentinel
+    assert calls["api_key"] == ""
+    assert calls["base_url"] == "https://llm.example/v1"
 
 
 def test_build_openai_client_uses_local_factory(monkeypatch):

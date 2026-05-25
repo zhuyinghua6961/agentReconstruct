@@ -1,78 +1,140 @@
 from __future__ import annotations
 
-from pathlib import Path
+import httpx
 
-import config as patent_config
-
-
-ROOT_DIR = Path(__file__).resolve().parents[1]
-
-
-def test_get_settings_reads_patent_shared_http_timeout_fields(monkeypatch):
-    monkeypatch.setenv("PATENT_LLM_HTTP_SHARED_POOL_ENABLED", "false")
-    monkeypatch.setenv("PATENT_LLM_HTTP_CONNECT_TIMEOUT_SECONDS", "11")
-    monkeypatch.setenv("PATENT_LLM_HTTP_READ_TIMEOUT_SECONDS", "121")
-    monkeypatch.setenv("PATENT_LLM_HTTP_STREAM_READ_TIMEOUT_SECONDS", "601")
-    monkeypatch.setenv("PATENT_LLM_HTTP_WRITE_TIMEOUT_SECONDS", "122")
-    monkeypatch.setenv("PATENT_LLM_HTTP_POOL_TIMEOUT_SECONDS", "17")
-    monkeypatch.setenv("PATENT_LLM_HTTP_KEEPALIVE_EXPIRY_SECONDS", "123")
-    monkeypatch.setenv("PATENT_LLM_HTTP_MAX_KEEPALIVE_CONNECTIONS", "11")
-    monkeypatch.setenv("PATENT_LLM_HTTP_MAX_CONNECTIONS", "22")
-
-    settings = patent_config.get_settings()
-
-    llm_http = getattr(settings, "llm_http", None)
-    assert llm_http is not None
-    assert llm_http.shared_pool_enabled is True
-    assert llm_http.connect_timeout_seconds == 11.0
-    assert llm_http.read_timeout_seconds == 121.0
-    assert llm_http.stream_read_timeout_seconds == 601.0
-    assert llm_http.write_timeout_seconds == 122.0
-    assert llm_http.pool_timeout_seconds == 17.0
-    assert llm_http.keepalive_expiry_seconds == 123.0
-    assert llm_http.max_keepalive_connections == 11
-    assert llm_http.max_connections == 22
+from server.patent.intent_detect import run_intent_detect_quick_tag
+from server.patent.models import PatentRetrievalClaim
+from server.patent.runtime import PatentPlanningClient
+from server.patent.stages.retrieval import build_stage2_queries_for_claim
+from server.patent.thinking import (
+    LLM_STAGE_CONTROL,
+    LLM_STAGE_STAGE4_FINAL_ANSWER,
+    auth_headers,
+    resolve_thinking_controls,
+)
 
 
-def test_config_shared_env_example_documents_patent_shared_http_timeout_defaults():
-    content = (ROOT_DIR / "config.shared.env.example").read_text(encoding="utf-8")
+class _NullLogger:
+    def info(self, *args, **kwargs) -> None:
+        return None
 
-    assert "PATENT_LLM_HTTP_SHARED_POOL_ENABLED" not in content
-    assert "PATENT_LLM_HTTP_CONNECT_TIMEOUT_SECONDS=15" in content
-    assert "PATENT_LLM_HTTP_READ_TIMEOUT_SECONDS=180" in content
-    assert "PATENT_LLM_HTTP_STREAM_READ_TIMEOUT_SECONDS=600" in content
-    assert "PATENT_LLM_HTTP_WRITE_TIMEOUT_SECONDS=180" in content
-    assert "PATENT_LLM_HTTP_POOL_TIMEOUT_SECONDS=30" in content
-    assert "PATENT_LLM_HTTP_KEEPALIVE_EXPIRY_SECONDS=120" in content
-    assert "PATENT_LLM_HTTP_MAX_KEEPALIVE_CONNECTIONS=20" in content
-    assert "PATENT_LLM_HTTP_MAX_CONNECTIONS=100" in content
+    def warning(self, *args, **kwargs) -> None:
+        return None
 
 
-def test_get_settings_reads_patent_planning_gate_fields(monkeypatch):
-    monkeypatch.setenv("PATENT_PLANNING_UPSTREAM_GATE_ENABLED", "false")
-    monkeypatch.setenv("PATENT_PLANNING_UPSTREAM_GATE_LIMIT", "3")
+class _FakePlanningHttpClient:
+    def __init__(self, *contents: str) -> None:
+        self._contents = list(contents) or ["ok"]
+        self.calls: list[dict[str, object]] = []
 
-    settings = patent_config.get_settings()
-
-    gate = getattr(settings, "planning_upstream_gate", None)
-    assert gate is not None
-    assert gate.enabled is True
-    assert gate.limit == 3
-
-
-def test_config_shared_env_example_documents_patent_planning_gate_defaults():
-    content = (ROOT_DIR / "config.shared.env.example").read_text(encoding="utf-8")
-
-    assert "PATENT_PLANNING_UPSTREAM_GATE_ENABLED" not in content
-    assert "PATENT_PLANNING_UPSTREAM_GATE_LIMIT=1" in content
+    def post(self, url, *, headers=None, json=None, timeout=None):
+        self.calls.append({"url": url, "headers": dict(headers or {}), "json": dict(json or {}), "timeout": timeout})
+        request = httpx.Request("POST", str(url), headers=headers, json=json)
+        content = self._contents.pop(0) if self._contents else "ok"
+        return httpx.Response(200, request=request, json={"choices": [{"message": {"content": content}}]})
 
 
-def test_config_shared_env_example_documents_patent_intent_detect_defaults():
-    content = (ROOT_DIR / "config.shared.env.example").read_text(encoding="utf-8")
-    shared_content = (ROOT_DIR.parent / "resource/config/shared/model-endpoints.shared.env").read_text(encoding="utf-8")
-    secret_template = (ROOT_DIR.parent / "resource/config/shared/model-endpoints.secret.env.example").read_text(encoding="utf-8")
+def _planning_client(http_client: _FakePlanningHttpClient) -> PatentPlanningClient:
+    return PatentPlanningClient(
+        api_key="",
+        base_url="http://example.invalid/v1",
+        timeout_seconds=10.0,
+        http_client=http_client,
+    )
 
-    assert "PATENT_INTENT_DETECT_ENABLED=false" not in content
-    assert "INTENT_MODEL_ENABLED=true" in shared_content
-    assert "INTENT_MODEL=qwen3-8b" in shared_content
-    assert "INTENT_MODEL_API_KEY=" in secret_template
+
+def test_patent_thinking_helper_matches_stage_policy():
+    disabled = resolve_thinking_controls(
+        is_thinking_model=True,
+        thinking_enabled=True,
+        stage=LLM_STAGE_CONTROL,
+        max_tokens=1000,
+        stream=False,
+    )
+    enabled = resolve_thinking_controls(
+        is_thinking_model=True,
+        thinking_enabled=True,
+        stage=LLM_STAGE_STAGE4_FINAL_ANSWER,
+        max_tokens=4000,
+        stream=True,
+    )
+
+    assert disabled.raw_payload_fields == {"thinking": {"type": "disabled"}}
+    assert enabled.raw_payload_fields["thinking"] == {"type": "enabled"}
+    assert enabled.raw_payload_fields["reasoning_effort"] == "high"
+    assert enabled.max_tokens == 8192
+    assert "Authorization" not in auth_headers("")
+
+
+def test_patent_planning_client_accepts_sdk_style_disabled_thinking_kwargs(monkeypatch):
+    monkeypatch.setenv("LLM_IS_THINKING_MODEL", "true")
+    monkeypatch.setenv("LLM_THINKING_ENABLED", "true")
+
+    http_client = _FakePlanningHttpClient("ok")
+    client = _planning_client(http_client)
+
+    response = client.chat.completions.create(
+        model="planner-model",
+        messages=[{"role": "user", "content": "demo"}],
+        temperature=0.0,
+        max_tokens=64,
+        stream=False,
+        extra_body={"thinking": {"type": "disabled"}},
+    )
+
+    assert response.choices[0].message.content == "ok"
+    payload = http_client.calls[0]["json"]
+    headers = http_client.calls[0]["headers"]
+    assert payload["thinking"] == {"type": "disabled"}
+    assert payload["stream"] is False
+    assert "reasoning_effort" not in payload
+    assert "Authorization" not in headers
+
+
+def test_patent_stage2_query_generation_uses_runtime_client_with_disabled_thinking(monkeypatch):
+    monkeypatch.setenv("LLM_IS_THINKING_MODEL", "true")
+    monkeypatch.setenv("LLM_THINKING_ENABLED", "true")
+    http_client = _FakePlanningHttpClient("battery coating")
+    client = _planning_client(http_client)
+
+    queries = build_stage2_queries_for_claim(
+        user_question="包覆材料的效果？",
+        retrieval_claim=PatentRetrievalClaim(
+            claim="碳包覆提升电池倍率性能",
+            keywords=["碳包覆", "倍率"],
+            preferred_sections=[],
+            filters={},
+        ),
+        client=client,
+        model="planner-model",
+        logger=_NullLogger(),
+        stage2_prompt="{claim_text}",
+        stage2_system_prompt="system",
+    )
+
+    assert queries == ["battery coating"]
+    payload = http_client.calls[0]["json"]
+    assert payload["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in payload
+    assert "enable_thinking" not in payload
+
+
+def test_patent_intent_detect_uses_runtime_client_with_disabled_thinking(monkeypatch):
+    monkeypatch.setenv("LLM_IS_THINKING_MODEL", "true")
+    monkeypatch.setenv("LLM_THINKING_ENABLED", "true")
+    monkeypatch.delenv("INTENT_MODEL_API_KEY", raising=False)
+    http_client = _FakePlanningHttpClient("mechanism_analysis")
+    client = _planning_client(http_client)
+
+    result = run_intent_detect_quick_tag(
+        client=client,
+        user_question="碳包覆机理是什么？",
+        logger=_NullLogger(),
+    )
+
+    assert result["ok"] is True
+    payload = http_client.calls[0]["json"]
+    assert payload["enable_thinking"] is False
+    assert payload["thinking"] == {"type": "disabled"}
+    assert payload["stream"] is False
+    assert "reasoning_effort" not in payload

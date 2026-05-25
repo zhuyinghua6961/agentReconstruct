@@ -419,14 +419,10 @@ def run_agent(
     )
     total_start = time.time()
     working_question = state.effective_question or state.question
-    resolved_enable_thinking = config.MAIN_LLM_THINKING_ENABLED if enable_thinking is None else bool(enable_thinking)
-    resolved_stream_synthesis_enable_thinking = False if stream_callback else resolved_enable_thinking
-    resolved_direct_answer_enable_thinking = (
-        config.DIRECT_STAGE_THINKING_ENABLED if enable_thinking is None else bool(enable_thinking)
-    )
-    resolved_decompose_enable_thinking = (
-        config.DECOMPOSE_STAGE_THINKING_ENABLED if enable_thinking is None else bool(enable_thinking)
-    )
+    resolved_enable_thinking = config.LLM_THINKING_ENABLED
+    resolved_stream_synthesis_enable_thinking = resolved_enable_thinking
+    resolved_direct_answer_enable_thinking = False
+    resolved_decompose_enable_thinking = False
     resolved_num_sub_questions = int(num_sub_questions) if num_sub_questions is not None else int(config.NUM_SUB_QUESTIONS)
     resolved_retrieval_top_k = int(retrieval_top_k) if retrieval_top_k is not None else int(config.RETRIEVAL_TOP_K)
     resolved_max_check_loops = int(max_check_loops) if max_check_loops is not None else int(config.MAX_CHECK_LOOPS)

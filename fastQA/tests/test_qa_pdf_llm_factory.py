@@ -155,23 +155,22 @@ def test_init_llm_prefers_unified_llm_aliases(monkeypatch):
     assert calls["model"] == "llm-model"
 
 
-def test_init_llm_ignores_retired_llm_aliases(monkeypatch):
+def test_init_llm_allows_blank_local_llm_api_key(monkeypatch):
     for name in ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("PDF_QA_MODEL", "pdf-model")
-    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://openai.example/v1")
-    monkeypatch.setenv("OPENAI_MODEL", "openai-model")
-    monkeypatch.setenv("DASHSCOPE_API_KEY", "dash-key")
-    monkeypatch.setenv("DASHSCOPE_BASE_URL", "https://dash.example/v1")
-    monkeypatch.setenv("DASHSCOPE_MODEL", "dash-model")
+    monkeypatch.setenv("LLM_API_KEY", "")
+    monkeypatch.setenv("LLM_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("LLM_MODEL", "llm-model")
+    calls: dict[str, object] = {}
+    sentinel = object()
 
-    try:
-        llm_factory.init_llm(_FakeLogger())
-    except ValueError as exc:
-        assert str(exc) == "请设置LLM_API_KEY环境变量"
-    else:  # pragma: no cover - enforced by failing test before fix
-        raise AssertionError("expected retired aliases to be ignored")
+    monkeypatch.setattr(llm_factory, "should_use_dashscope_native", lambda **_kwargs: True)
+    monkeypatch.setattr(llm_factory, "build_chat_adapter", lambda **kwargs: calls.update(kwargs) or sentinel)
+
+    assert llm_factory.init_llm(_FakeLogger()) is sentinel
+    assert calls["api_key"] == ""
+    assert calls["base_url"] == "https://llm.example/v1"
+    assert calls["model"] == "llm-model"
 
 
 def test_init_llm_prefers_unified_llm_timeouts_over_fastqa_http_aliases(monkeypatch):

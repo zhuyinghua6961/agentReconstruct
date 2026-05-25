@@ -478,6 +478,23 @@ def test_patent_stage1_planning_logs_prompt_and_llm_boundaries():
     assert any("patent stage1 planning llm response received" in message and "response_chars=" in message for message in messages)
 
 
+def test_stage1_planning_disables_thinking_for_thinking_model(monkeypatch):
+    monkeypatch.setenv("LLM_IS_THINKING_MODEL", "true")
+    monkeypatch.setenv("LLM_THINKING_ENABLED", "true")
+    client = _FakeClient('{"deep_answer":"answer","retrieval_claims":[]}')
+
+    result = run_stage1_pre_answer_and_planning(
+        user_question="请评估 CN115132975B。",
+        client=client,
+        model="gpt-test",
+        logger=_Logger(),
+    )
+
+    assert result["success"] is True
+    assert client.calls[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning_effort" not in client.calls[0]
+
+
 def test_stage1_prepends_intent_hint_when_patent_intent_detect_enabled(monkeypatch):
     monkeypatch.delenv("INTENT_MODEL_API_KEY", raising=False)
     monkeypatch.delenv("INTENT_MODEL_BASE_URL", raising=False)

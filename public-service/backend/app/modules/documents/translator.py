@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from .llm_thinking import LLM_STAGE_TRANSLATION, local_sdk_api_key, merge_extra_body, resolve_thinking_controls
 from .translation_cache_impl import TranslationCache
 
 DEFAULT_LLM_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -33,10 +34,10 @@ class SmartTranslator:
         self.base_url = base_url or _first_env("LLM_BASE_URL", default=DEFAULT_LLM_BASE_URL)
         self.model = model or _first_env("LLM_MODEL", default="deepseek-v3.1")
 
-        if not self.api_key:
+        if not self.base_url or not self.model:
             self.client = None
         else:
-            self.client = openai_client_cls(api_key=self.api_key, base_url=self.base_url)
+            self.client = openai_client_cls(api_key=local_sdk_api_key(self.api_key), base_url=self.base_url)
 
         self.cache = TranslationCache()
 
@@ -65,12 +66,18 @@ class SmartTranslator:
             return cached
 
         if not self.client:
-            return "❌ 翻译功能未启用（缺少API密钥）"
+            return "❌ 翻译功能未启用（缺少模型连接配置）"
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
+            controls = resolve_thinking_controls(
+                stage=LLM_STAGE_TRANSLATION,
+                max_tokens=None,
+                stream=False,
+                thinking_enabled=False,
+            )
+            kwargs: dict[str, Any] = {
+                "model": self.model,
+                "messages": [
                     {
                         "role": "system",
                         "content": "你是专业的学术论文翻译专家。请将英文文献翻译成准确、流畅的中文，保持专业术语的准确性。",
@@ -85,7 +92,13 @@ class SmartTranslator:
                         ),
                     },
                 ],
-                temperature=0.3,
+                "temperature": 0.3,
+            }
+            extra_body = merge_extra_body(None, controls)
+            if extra_body:
+                kwargs["extra_body"] = extra_body
+            response = self.client.chat.completions.create(
+                **kwargs,
             )
 
             translation = str(response.choices[0].message.content or "").strip()

@@ -7,6 +7,12 @@ import time
 from typing import Any, Callable, Dict, List, Set, Tuple
 
 from app.integrations.llm import raise_if_upstream_pool_timeout
+from app.integrations.llm.thinking import (
+    LLM_STAGE_CONTROL,
+    LLM_STAGE_STAGE4_FINAL_ANSWER,
+    merge_extra_body,
+    resolve_thinking_controls,
+)
 from app.modules.generation_pipeline.feature_flags import env_bool, env_int
 from app.modules.generation_pipeline.answer_summary import (
     apply_answer_summary_experiment,
@@ -533,6 +539,11 @@ def _extract_citable_facts_from_evidence(
         else max(200, min(int(max_tokens), 8000))
     )
     try:
+        controls = resolve_thinking_controls(
+            stage=LLM_STAGE_CONTROL,
+            max_tokens=resolved_tokens,
+            stream=False,
+        )
         response = client.chat.completions.create(
             model=model,
             messages=[
@@ -547,7 +558,8 @@ def _extract_citable_facts_from_evidence(
                 },
             ],
             temperature=0.1,
-            max_tokens=resolved_tokens,
+            max_tokens=controls.max_tokens,
+            extra_body=merge_extra_body(None, controls),
             stream=False,
         )
         raw = str(response.choices[0].message.content or "").strip()
@@ -1204,17 +1216,30 @@ def iter_stage4_synthesis_with_pdf_chunks(
             len(stream_user_prompt),
             len(top5_reference_list),
         )
-        stream = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": stream_user_prompt},
-            ],
-            temperature=stream_temperature,
+        thinking_controls = resolve_thinking_controls(
+            stage=LLM_STAGE_STAGE4_FINAL_ANSWER,
             max_tokens=4000,
             stream=True,
         )
+        stream_kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": stream_user_prompt},
+            ],
+            "max_tokens": thinking_controls.max_tokens,
+            "stream": True,
+            "extra_body": thinking_controls.extra_body,
+        }
+        if thinking_controls.reasoning_effort:
+            stream_kwargs["reasoning_effort"] = thinking_controls.reasoning_effort
+        if thinking_controls.enabled:
+            stream_kwargs["omit_sampling_parameters"] = True
+        else:
+            stream_kwargs["temperature"] = stream_temperature
+        stream = client.chat.completions.create(**stream_kwargs)
         final_chunks: list[str] = []
+        reasoning_chars = 0
         first_chunk_logged = False
         stream_started = time.perf_counter()
         for chunk in stream:
@@ -1225,6 +1250,11 @@ def iter_stage4_synthesis_with_pdf_chunks(
             if not choices:
                 continue
             delta = getattr(choices[0], "delta", None)
+            reasoning = getattr(delta, "reasoning_content", None)
+            if not reasoning and hasattr(delta, "model_extra"):
+                reasoning = (getattr(delta, "model_extra", None) or {}).get("reasoning_content")
+            if reasoning:
+                reasoning_chars += len(str(reasoning))
             content = getattr(delta, "content", None)
             if not content:
                 continue
@@ -1241,9 +1271,11 @@ def iter_stage4_synthesis_with_pdf_chunks(
 
         final_answer = "".join(final_chunks).strip()
         logger.info(
-            "stage4 llm stream completed chunk_count=%s answer_chars=%s elapsed_ms=%.3f",
+            "stage4 llm stream completed chunk_count=%s answer_chars=%s reasoning_chars=%s thinking_enabled=%s elapsed_ms=%.3f",
             len(final_chunks),
             len(final_answer),
+            reasoning_chars,
+            thinking_controls.enabled,
             (time.perf_counter() - stream_started) * 1000,
         )
 

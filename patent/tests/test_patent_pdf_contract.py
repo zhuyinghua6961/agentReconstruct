@@ -326,6 +326,108 @@ def test_pdf_answer_client_from_env_prefers_unified_llm_namespace(monkeypatch):
     assert client._timeout_seconds == 45.0
 
 
+def test_pdf_answer_client_stage4_enables_thinking_and_omits_sampling(monkeypatch):
+    class _FakeHttpClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def post(self, url, *, headers=None, json=None, timeout=None):
+            self.calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", str(url)),
+                json={"choices": [{"message": {"content": "pdf answer"}}]},
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setenv("LLM_IS_THINKING_MODEL", "true")
+    monkeypatch.setenv("LLM_THINKING_ENABLED", "true")
+    http_client = _FakeHttpClient()
+    client = PatentPdfAnswerClient(
+        api_key="",
+        base_url="https://example.com",
+        model="model",
+        max_tokens=2500,
+        http_client=http_client,
+    )
+
+    assert client.answer(
+        question="请总结这篇文献",
+        pdf_text="标题: A study\nAbstract text\nResults text",
+        file_name="paper-a.pdf",
+        include_kb=False,
+        selected_file_labels=["paper-a.pdf"],
+    ) == "pdf answer"
+
+    call = http_client.calls[0]
+    payload = call["json"]
+    assert "Authorization" not in call["headers"]
+    assert payload["thinking"] == {"type": "enabled"}
+    assert payload["reasoning_effort"] == "high"
+    assert payload["max_tokens"] == 8192
+    assert "temperature" not in payload
+    assert "top_p" not in payload
+
+
+def test_pdf_answer_client_stream_drops_reasoning_content(monkeypatch):
+    class _StreamResponse:
+        headers = {}
+        status_code = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def raise_for_status(self):
+            return None
+
+        def iter_lines(self):
+            yield 'data: {"choices":[{"delta":{"reasoning_content":"secret"}}]}'
+            yield 'data: {"choices":[{"delta":{"content":"visible"}}]}'
+            yield "data: [DONE]"
+
+    class _FakeHttpClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def stream(self, method, url, *, headers=None, json=None, timeout=None):
+            self.calls.append({"method": method, "url": url, "headers": headers, "json": json, "timeout": timeout})
+            return _StreamResponse()
+
+        def close(self):
+            return None
+
+    monkeypatch.setenv("LLM_IS_THINKING_MODEL", "true")
+    monkeypatch.setenv("LLM_THINKING_ENABLED", "true")
+    http_client = _FakeHttpClient()
+    client = PatentPdfAnswerClient(
+        api_key="",
+        base_url="https://example.com",
+        model="model",
+        max_tokens=2500,
+        http_client=http_client,
+    )
+
+    result = "".join(
+        client.stream_answer(
+            question="请总结这篇文献",
+            pdf_text="标题: A study\nAbstract text\nResults text",
+            file_name="paper-a.pdf",
+            include_kb=False,
+            selected_file_labels=["paper-a.pdf"],
+        )
+    )
+
+    assert result == "visible"
+    payload = http_client.calls[0]["json"]
+    assert payload["thinking"] == {"type": "enabled"}
+    assert payload["reasoning_effort"] == "high"
+
+
 def test_compare_detection_accepts_implicit_compare_requests():
     assert is_compare_question("这两篇有什么异同", selected_pdf_count=2) is True
     assert is_compare_question("分别讲了什么", selected_pdf_count=2) is True

@@ -16,6 +16,9 @@ import re
 import time
 from typing import Any
 
+import config
+from agent_core.thinking import LLM_STAGE_CONTROL, merge_extra_body, resolve_thinking_controls
+
 try:
     import httpx
 except ImportError:  # pragma: no cover
@@ -126,14 +129,25 @@ def run_intent_detect_quick_tag(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": str(user_question or "").strip()},
     ]
+    controls = resolve_thinking_controls(
+        is_thinking_model=config.LLM_IS_THINKING_MODEL,
+        thinking_enabled=False,
+        stage=LLM_STAGE_CONTROL,
+        max_tokens=64,
+        stream=False,
+    )
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.0,
+        "max_tokens": controls.max_tokens,
+        "stream": False,
+    }
+    extra_body = merge_extra_body(None, controls)
+    if extra_body:
+        kwargs["extra_body"] = extra_body
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.0,
-            max_tokens=64,
-            stream=False,
-        )
+        response = client.chat.completions.create(**kwargs)
         raw = str(response.choices[0].message.content or "").strip()
     except Exception as exc:
         if is_upstream_pool_timeout(exc):

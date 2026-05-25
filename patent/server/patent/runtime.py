@@ -28,6 +28,12 @@ from server.patent.stages.retrieval import (
     run_stage25_patent_evidence_expansion,
 )
 from server.patent.stages.synthesis import run_stage4_synthesis_with_patent_evidence
+from server.patent.thinking import (
+    LLM_STAGE_CONTROL,
+    apply_openai_compatible_thinking,
+    auth_headers,
+    resolve_thinking_controls,
+)
 from server.patent.upstream_transport import (
     build_patent_request_timeout,
     describe_patent_transport,
@@ -124,17 +130,34 @@ class PatentPlanningClient:
         messages: list[dict[str, Any]],
         temperature: float,
         max_tokens: int,
+        stream: bool = False,
+        extra_body: dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
+        omit_sampling_parameters: bool = False,
         response_format: dict[str, Any] | None = None,
         timeout_seconds: float | None = None,
+        **_ignored_kwargs: Any,
     ) -> Any:
+        del reasoning_effort
         effective_timeout_seconds = self._timeout_seconds if timeout_seconds is None else max(0.001, float(timeout_seconds))
         request_url = f"{self._base_url.rstrip('/')}/chat/completions"
         payload: dict[str, Any] = {
             "model": str(model or "").strip(),
             "messages": list(messages or []),
-            "temperature": float(temperature),
+            "stream": bool(stream),
             "max_tokens": int(max_tokens),
         }
+        if not omit_sampling_parameters:
+            payload["temperature"] = float(temperature)
+        if isinstance(extra_body, dict):
+            payload.update(dict(extra_body))
+        controls = resolve_thinking_controls(
+            stage=LLM_STAGE_CONTROL,
+            max_tokens=int(max_tokens),
+            stream=False,
+            thinking_enabled=False,
+        )
+        apply_openai_compatible_thinking(payload, controls)
         if response_format is not None:
             payload["response_format"] = dict(response_format)
         payload_chars = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
@@ -159,10 +182,7 @@ class PatentPlanningClient:
             timeout_seconds=effective_timeout_seconds,
             override_client_config=timeout_seconds is not None,
         )
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = auth_headers(self._api_key)
         request = None
         if hasattr(self._http, "build_request"):
             try:
@@ -271,7 +291,7 @@ def resolve_patent_planning_runtime_model() -> str:
 
 def _build_patent_planning_runtime_inputs(*, http_client: Any | None = None) -> tuple[Any | None, str]:
     api_key, base_url, model, timeout_seconds = _resolve_patent_planning_runtime_config()
-    if not api_key or not base_url or not model:
+    if not base_url or not model:
         _LOGGER.warning(
             "Patent planning client disabled api_key_set=%s base_url_set=%s model=%s",
             bool(api_key),

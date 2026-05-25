@@ -5,6 +5,8 @@ import os
 import re
 from typing import Any
 
+from server.patent.thinking import LLM_STAGE_CONTROL, local_sdk_api_key, merge_extra_body, resolve_thinking_controls
+
 
 _LOGGER = logging.getLogger("patent.query_expander")
 
@@ -42,22 +44,20 @@ class QueryExpander:
         model: str | None = None,
         client: Any | None = None,
     ) -> None:
-        self.api_key = api_key if api_key is not None else _first_env("DASHSCOPE_API_KEY", "OPENAI_API_KEY")
-        self.base_url = base_url if base_url is not None else _first_env("DASHSCOPE_BASE_URL", "OPENAI_BASE_URL")
+        self.api_key = api_key if api_key is not None else _first_env("LLM_API_KEY", "DASHSCOPE_API_KEY", "OPENAI_API_KEY")
+        self.base_url = base_url if base_url is not None else _first_env("LLM_BASE_URL", "DASHSCOPE_BASE_URL", "OPENAI_BASE_URL")
         self.model = model if model is not None else _first_env("QUERY_EXPANSION_MODEL", default="qwen3-8b")
         self._client = client
 
     def _get_client(self) -> Any | None:
         if self._client is not None:
             return self._client
-        if not self.api_key:
-            return None
         try:
             from openai import OpenAI
         except ImportError:
             _LOGGER.warning("openai package unavailable; patent query expansion disabled")
             return None
-        self._client = OpenAI(api_key=self.api_key, base_url=self.base_url or None)
+        self._client = OpenAI(api_key=local_sdk_api_key(self.api_key), base_url=self.base_url or None)
         return self._client
 
     @staticmethod
@@ -80,10 +80,17 @@ class QueryExpander:
         client = self._get_client()
         if client is None:
             return normalized_query
+        controls = resolve_thinking_controls(
+            stage=LLM_STAGE_CONTROL,
+            max_tokens=100,
+            stream=False,
+            thinking_enabled=False,
+        )
+        extra_body = merge_extra_body(None, controls)
         try:
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=[
+            kwargs: dict[str, Any] = {
+                "model": self.model,
+                "messages": [
                     {
                         "role": "system",
                         "content": (
@@ -93,10 +100,12 @@ class QueryExpander:
                     },
                     {"role": "user", "content": EXPANSION_PROMPT.format(query=normalized_query)},
                 ],
-                temperature=0.2,
-                max_tokens=100,
-                extra_body={"enable_thinking": False},
-            )
+                "temperature": 0.2,
+                "max_tokens": controls.max_tokens,
+            }
+            if extra_body:
+                kwargs["extra_body"] = extra_body
+            response = client.chat.completions.create(**kwargs)
             expanded = str(response.choices[0].message.content or "").strip()
             if expanded and len(expanded) > 5:
                 return self._filter_density_confusion(normalized_query, expanded)

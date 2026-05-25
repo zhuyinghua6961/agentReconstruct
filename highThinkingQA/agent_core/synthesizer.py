@@ -17,6 +17,7 @@ from agent_core.llm_client import (
     load_prompt_template,
 )
 from agent_core.question_anchor import prepend_question_anchor
+from agent_core.thinking import LLM_STAGE_STAGE4_FINAL_ANSWER
 from retriever.vector_retriever import RetrievedChunk
 
 logger = logging.getLogger(__name__)
@@ -106,6 +107,7 @@ def synthesize_answer(
         temperature=0.5,
         max_tokens=8192,
         enable_thinking=enable_thinking,
+        stage=LLM_STAGE_STAGE4_FINAL_ANSWER,
     )
 
     logger.info(f"综合回答生成完成: {len(answer)} chars")
@@ -141,6 +143,7 @@ def synthesize_answer_stream(
         temperature=0.5,
         max_tokens=16384,
         enable_thinking=enable_thinking,
+        stage=LLM_STAGE_STAGE4_FINAL_ANSWER,
     )
 
     logger.info("流式综合回答生成完成")

@@ -19,6 +19,7 @@ from typing import Any
 import httpx
 
 from app.integrations.llm import raise_if_upstream_pool_timeout
+from app.integrations.llm.thinking import auth_headers
 
 # DashScope/OpenAI-compat 登记的轻量意图分类模型 ID（可自行 env 覆盖）。
 DEFAULT_INTENT_DETECT_MODEL = "qwen3-8b"
@@ -89,20 +90,18 @@ def _intent_model_timeout_seconds() -> float:
 
 def _create_dedicated_intent_completion(*, model: str, messages: list[dict[str, Any]]) -> Any:
     base_url = _intent_model_base_url().rstrip("/")
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.0,
+        "max_tokens": 64,
+        "stream": False,
+        "enable_thinking": False,
+    }
     response = httpx.post(
         f"{base_url}/chat/completions",
-        headers={
-            "Authorization": f"Bearer {_intent_model_api_key()}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "messages": messages,
-            "temperature": 0.0,
-            "max_tokens": 64,
-            "stream": False,
-            "enable_thinking": False,
-        },
+        headers=auth_headers(_intent_model_api_key()),
+        json=payload,
         timeout=_intent_model_timeout_seconds(),
     )
     response.raise_for_status()
@@ -119,6 +118,7 @@ def _create_intent_completion(*, client: Any, model: str, messages: list[dict[st
         messages=messages,
         temperature=0.0,
         max_tokens=64,
+        extra_body={"enable_thinking": False},
         stream=False,
     )
 

@@ -1,8 +1,4 @@
-"""
-LLM 客户端封装
-统一封装 qwen3-max 的调用逻辑，所有 Agent 模块共用。
-支持思考模式（enable_thinking）和流式输出。
-"""
+"""LLM 客户端封装：统一封装 OpenAI-compatible ChatCompletions 调用。"""
 
 import logging
 import time
@@ -13,22 +9,20 @@ from typing import Optional, Generator
 from openai import AsyncOpenAI, OpenAI
 
 import config
+from agent_core.thinking import (
+    LLM_STAGE_CONTROL,
+    local_sdk_api_key,
+    merge_extra_body,
+    resolve_thinking_controls,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def _require_api_key(*, api_key: str, env_name: str) -> str:
-    value = str(api_key or "").strip()
-    if value:
-        return value
-    raise RuntimeError(f"{env_name} is not configured")
-
-
 def get_llm_client(*, max_retries: int | None = None) -> OpenAI:
     """获取 LLM API 客户端"""
-    api_key = _require_api_key(api_key=config.LLM_API_KEY, env_name="LLM_API_KEY")
     kwargs = {
-        "api_key": api_key,
+        "api_key": local_sdk_api_key(config.LLM_API_KEY),
         "base_url": config.LLM_BASE_URL,
     }
     if max_retries is not None:
@@ -38,9 +32,8 @@ def get_llm_client(*, max_retries: int | None = None) -> OpenAI:
 
 def get_async_llm_client(*, max_retries: int | None = None) -> AsyncOpenAI:
     """获取异步 LLM API 客户端。"""
-    api_key = _require_api_key(api_key=config.LLM_API_KEY, env_name="LLM_API_KEY")
     kwargs = {
-        "api_key": api_key,
+        "api_key": local_sdk_api_key(config.LLM_API_KEY),
         "base_url": config.LLM_BASE_URL,
     }
     if max_retries is not None:
@@ -55,34 +48,33 @@ def _build_kwargs(
     enable_thinking: Optional[bool],
     stream: bool = False,
     model: Optional[str] = None,
+    stage: str = LLM_STAGE_CONTROL,
 ) -> dict:
-    """
-    构建 API 调用参数，统一处理思考模式逻辑。
-
-    流式思考模式下：
-    - 通过 extra_body 传递 enable_thinking
-    - max_tokens 自动扩大（思考 + 回答都计入 max_tokens）
-    - 不主动设 temperature，使用模型默认值
-    - DashScope 仅允许流式请求使用 enable_thinking，非流式请求会降级为普通调用
-    """
-    thinking = enable_thinking if enable_thinking is not None else config.MAIN_LLM_THINKING_ENABLED
-    stream_thinking = bool(thinking and stream)
-
+    """构建 API 调用参数，统一处理 DeepSeek/OpenAI-compatible thinking 参数。"""
+    requested = bool(config.LLM_THINKING_ENABLED and (True if enable_thinking is None else bool(enable_thinking)))
+    controls = resolve_thinking_controls(
+        is_thinking_model=config.LLM_IS_THINKING_MODEL,
+        thinking_enabled=requested,
+        stage=stage,
+        max_tokens=max_tokens,
+        stream=stream,
+    )
     kwargs = {
         "model": model or config.LLM_MODEL,
         "messages": messages,
     }
 
-    if stream_thinking:
-        kwargs["extra_body"] = {"enable_thinking": True}
-        # 思考 token + 回答 token 都计入 max_tokens，需要扩容
-        # 至少 8192，或原值 ×2，上限 32768（qwen3-max 上限）
-        effective_max = max(max_tokens * 2, 8192)
-        kwargs["max_tokens"] = min(effective_max, 32768)
+    if controls.enabled:
+        kwargs["max_tokens"] = controls.max_tokens
     else:
         kwargs["temperature"] = temperature
-        kwargs["max_tokens"] = max_tokens
+        kwargs["max_tokens"] = controls.max_tokens
 
+    extra_body = merge_extra_body(None, controls)
+    if extra_body:
+        kwargs["extra_body"] = extra_body
+    if controls.reasoning_effort:
+        kwargs["reasoning_effort"] = controls.reasoning_effort
     if stream:
         kwargs["stream"] = True
 
@@ -106,6 +98,7 @@ def chat_completion(
     enable_thinking: Optional[bool] = None,
     model: Optional[str] = None,
     timeout_seconds: Optional[float] = None,
+    stage: str = LLM_STAGE_CONTROL,
 ) -> str:
     """
     调用 LLM 获取回复。
@@ -130,17 +123,16 @@ def chat_completion(
         messages.append({"role": "system", "content": system_message})
     messages.append({"role": "user", "content": prompt})
 
-    kwargs = _build_kwargs(messages, temperature, max_tokens, enable_thinking, model=model)
+    kwargs = _build_kwargs(messages, temperature, max_tokens, enable_thinking, model=model, stage=stage)
 
     if timeout_seconds is not None:
         kwargs["timeout"] = float(timeout_seconds)
 
     response = client.chat.completions.create(**kwargs)
 
-    # 记录思考内容（调试用）
     reasoning = _extract_reasoning(response.choices[0].message)
     if reasoning:
-        logger.debug(f"LLM 思考过程 ({len(reasoning)} chars): {reasoning[:200]}...")
+        logger.debug("LLM non-stream reasoning omitted chars=%s", len(reasoning))
 
     return response.choices[0].message.content
 
@@ -154,6 +146,7 @@ def chat_completion_stream(
     enable_thinking: Optional[bool] = None,
     model: Optional[str] = None,
     timeout_seconds: Optional[float] = None,
+    stage: str = LLM_STAGE_CONTROL,
 ) -> Generator[str, None, None]:
     """
     流式调用 LLM，逐块 yield 回复文本。
@@ -179,13 +172,21 @@ def chat_completion_stream(
         messages.append({"role": "system", "content": system_message})
     messages.append({"role": "user", "content": prompt})
 
-    kwargs = _build_kwargs(messages, temperature, max_tokens, enable_thinking, stream=True, model=model)
+    kwargs = _build_kwargs(
+        messages,
+        temperature,
+        max_tokens,
+        enable_thinking,
+        stream=True,
+        model=model,
+        stage=stage,
+    )
     if timeout_seconds is not None:
         kwargs["timeout"] = float(timeout_seconds)
 
     response = client.chat.completions.create(**kwargs)
 
-    reasoning_chunks = []
+    reasoning_chars = 0
     started_at = time.time()
     first_reasoning_logged = False
     first_content_logged = False
@@ -200,7 +201,7 @@ def chat_completion_stream(
         if not reasoning and hasattr(delta, "model_extra"):
             reasoning = (delta.model_extra or {}).get("reasoning_content")
         if reasoning:
-            reasoning_chunks.append(reasoning)
+            reasoning_chars += len(reasoning)
             if not first_reasoning_logged:
                 first_reasoning_logged = True
                 logger.info("LLM stream first_reasoning_chunk elapsed=%.3fs chars=%s", time.time() - started_at, len(reasoning))
@@ -213,10 +214,8 @@ def chat_completion_stream(
                 logger.info("LLM stream first_content_chunk elapsed=%.3fs chars=%s", time.time() - started_at, len(delta.content))
             yield delta.content
 
-    # 记录完整思考过程
-    if reasoning_chunks:
-        full_reasoning = "".join(reasoning_chunks)
-        logger.debug(f"LLM 思考过程 ({len(full_reasoning)} chars): {full_reasoning[:300]}...")
+    if reasoning_chars:
+        logger.debug("LLM stream reasoning omitted chars=%s", reasoning_chars)
 
 
 def load_prompt_template(template_name: str) -> str:

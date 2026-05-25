@@ -11,6 +11,18 @@ from app.integrations.llm.openai_compat import (
     normalize_messages,
     normalize_openai_compatible_endpoint,
 )
+from app.integrations.llm.thinking import (
+    LLM_STAGE_CONTROL,
+    LLM_STAGE_DOCUMENT_SUMMARY,
+    LLM_STAGE_STAGE4_FINAL_ANSWER,
+    LLM_STAGE_TRANSLATION,
+    ThinkingControls,
+    apply_openai_compatible_thinking,
+    auth_headers,
+    local_sdk_api_key,
+    merge_extra_body,
+    resolve_thinking_controls,
+)
 
 
 def is_upstream_pool_timeout(exc: BaseException | None) -> bool:
@@ -58,6 +70,16 @@ __all__ = [
     "extract_openai_compatible_text",
     "normalize_messages",
     "normalize_openai_compatible_endpoint",
+    "LLM_STAGE_CONTROL",
+    "LLM_STAGE_DOCUMENT_SUMMARY",
+    "LLM_STAGE_STAGE4_FINAL_ANSWER",
+    "LLM_STAGE_TRANSLATION",
+    "ThinkingControls",
+    "apply_openai_compatible_thinking",
+    "auth_headers",
+    "local_sdk_api_key",
+    "merge_extra_body",
+    "resolve_thinking_controls",
     "is_upstream_pool_timeout",
     "raise_if_upstream_pool_timeout",
     "should_use_dashscope_native",

@@ -37,6 +37,12 @@ from server.patent.summary_formatting import (
     extract_support_points,
 )
 from server.patent.streaming import emit_text_chunks, iter_text_output
+from server.patent.thinking import (
+    LLM_STAGE_STAGE4_FINAL_ANSWER,
+    apply_openai_compatible_thinking,
+    auth_headers,
+    resolve_thinking_controls,
+)
 from server.patent.upstream_transport import (
     build_patent_request_timeout,
     describe_patent_transport,
@@ -871,7 +877,7 @@ class PatentPdfAnswerClient:
         api_key = _first_env("LLM_API_KEY")
         base_url = _first_env("LLM_BASE_URL")
         model = _first_env("LLM_MODEL")
-        if not api_key or not base_url or not model:
+        if not base_url or not model:
             return None
         return cls(
             api_key=api_key,
@@ -940,6 +946,12 @@ class PatentPdfAnswerClient:
                 self._max_tokens,
                 self._top_p,
             )
+        controls = resolve_thinking_controls(
+            stage=LLM_STAGE_STAGE4_FINAL_ANSWER,
+            max_tokens=self._max_tokens,
+            stream=stream,
+        )
+        apply_openai_compatible_thinking(payload, controls)
         return payload
 
     @staticmethod
@@ -1002,11 +1014,7 @@ class PatentPdfAnswerClient:
             response_context = self._client.stream(
                 "POST",
                 f"{self._base_url.rstrip('/')}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json, text/event-stream",
-                },
+                headers=auth_headers(self._api_key, accept="application/json, text/event-stream"),
                 json=request_payload,
                 timeout=request_timeout,
             )
@@ -1072,10 +1080,7 @@ class PatentPdfAnswerClient:
         try:
             response = self._client.post(
                 f"{self._base_url.rstrip('/')}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                },
+                headers=auth_headers(self._api_key),
                 json=request_payload,
                 timeout=request_timeout,
             )
