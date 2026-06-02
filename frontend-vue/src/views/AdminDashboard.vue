@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, onMounted } from 'vue'
+import { computed, ref, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { authApi } from '../services/auth'
 import { adminApi } from '../services/admin'
@@ -16,6 +16,7 @@ const router = useRouter()
 
 const DEFAULT_ADMIN_TAB = 'users'
 const ADMIN_TAB_ITEMS = [
+  { key: 'models', label: '模型状态' },
   { key: 'quota', label: '配额管理' },
   { key: 'users', label: '用户管理' },
   { key: 'departments', label: '部门管理' },
@@ -28,6 +29,10 @@ const error = ref('')
 const success = ref('')
 const pagination = ref({ page: 1, pageSize: 10, total: 0 })
 const activeUserManagementTab = ref('accounts')
+const modelStatus = ref(null)
+const modelStatusLoading = ref(false)
+const modelStatusError = ref('')
+const modelTestStates = ref({})
 
 const showPasswordModal = ref(false)
 const showStatusModal = ref(false)
@@ -67,6 +72,11 @@ const activeAdminTab = computed(() => {
   const normalized = String(rawTab || '').trim().toLowerCase()
   return ADMIN_TAB_ITEMS.some(item => item.key === normalized) ? normalized : DEFAULT_ADMIN_TAB
 })
+const modelStatusEndpoints = computed(() => {
+  const endpoints = modelStatus.value?.endpoints
+  return Array.isArray(endpoints) ? endpoints : []
+})
+const modelStatusSummary = computed(() => modelStatus.value?.summary || {})
 
 async function setAdminTab(tab) {
   if (!ADMIN_TAB_ITEMS.some(item => item.key === tab) || activeAdminTab.value === tab) {
@@ -180,6 +190,99 @@ async function fetchUsers() {
   } finally {
     loading.value = false
   }
+}
+
+async function fetchModelStatus() {
+  modelStatusLoading.value = true
+  modelStatusError.value = ''
+  try {
+    const result = await adminApi.getModelStatus()
+    if (result.success) {
+      modelStatus.value = result.data || {}
+      modelTestStates.value = {}
+      return
+    }
+    modelStatusError.value = result.error || '获取模型状态失败'
+  } catch {
+    modelStatusError.value = '获取模型状态失败'
+  } finally {
+    modelStatusLoading.value = false
+  }
+}
+
+function getModelStatusText(status) {
+  const normalized = String(status || '').trim().toLowerCase()
+  if (normalized === 'configured') return '已配置'
+  if (normalized === 'unconfigured') return '未配置'
+  if (normalized === 'disabled') return '已停用'
+  return '未知'
+}
+
+function getModelKindText(kind) {
+  const normalized = String(kind || '').trim().toLowerCase()
+  if (normalized === 'chat') return '对话'
+  if (normalized === 'embedding') return '向量'
+  if (normalized === 'rerank') return '重排'
+  return normalized || '其他'
+}
+
+function getModelTestState(id) {
+  return modelTestStates.value[id] || {}
+}
+
+function setModelTestState(id, value) {
+  modelTestStates.value = {
+    ...modelTestStates.value,
+    [id]: {
+      ...(modelTestStates.value[id] || {}),
+      ...value,
+    },
+  }
+}
+
+async function testModelEndpoint(item) {
+  if (!item?.id || !item.test_supported) {
+    return
+  }
+  setModelTestState(item.id, { loading: true, result: null, error: '' })
+  try {
+    const result = await adminApi.testModelStatus(item.id)
+    if (result.success) {
+      setModelTestState(item.id, { loading: false, result: result.data || {}, error: '' })
+      return
+    }
+    setModelTestState(item.id, { loading: false, result: null, error: result.error || '测试失败' })
+  } catch {
+    setModelTestState(item.id, { loading: false, result: null, error: '测试失败' })
+  }
+}
+
+function getModelTestText(item) {
+  const state = getModelTestState(item.id)
+  if (state.loading) return '测试中...'
+  return '测试'
+}
+
+function getModelTestResultText(item) {
+  const state = getModelTestState(item.id)
+  if (state.loading) return '测试中'
+  if (state.error) return state.error
+  const result = state.result
+  if (!result) return '未测试'
+  if (result.ok) {
+    const elapsed = result.elapsed_ms !== null && result.elapsed_ms !== undefined ? `，${result.elapsed_ms} ms` : ''
+    return `响应正常${elapsed}`
+  }
+  return result.message || '测试失败'
+}
+
+function getModelTestResultClass(item) {
+  const state = getModelTestState(item.id)
+  if (state.loading) return 'pending'
+  if (state.error) return 'failed'
+  if (state.result?.ok) return 'ok'
+  if (state.result) return 'failed'
+  return 'idle'
 }
 
 function toggleUserSelection(userId) {
@@ -583,10 +686,19 @@ async function handlePersonnelManagementUpdated() {
   })
 }
 
+watch(activeAdminTab, (tab) => {
+  if (tab === 'models' && !modelStatus.value && !modelStatusLoading.value) {
+    void fetchModelStatus()
+  }
+})
+
 onMounted(async () => {
   await ensureAdminTab()
   await fetchCurrentUser()
   await fetchUsers()
+  if (activeAdminTab.value === 'models') {
+    await fetchModelStatus()
+  }
 })
 </script>
 
@@ -625,6 +737,90 @@ onMounted(async () => {
         aria-label="配额管理"
       >
         <QuotaManagementPanel />
+      </section>
+
+      <section
+        v-else-if="activeAdminTab === 'models'"
+        class="model-status-shell"
+        aria-label="模型状态"
+      >
+        <div class="section-header">
+          <div>
+            <h2>模型状态</h2>
+            <p class="model-status-note">刷新只读取配置；点击测试才发送 hello 最小请求。</p>
+          </div>
+          <button class="action-btn" :disabled="modelStatusLoading" @click="fetchModelStatus">
+            {{ modelStatusLoading ? '刷新中...' : '刷新' }}
+          </button>
+        </div>
+
+        <div v-if="modelStatusError" class="alert alert-error">{{ modelStatusError }}</div>
+        <div v-if="modelStatusLoading && modelStatusEndpoints.length === 0" class="loading">加载中...</div>
+
+        <div v-else class="model-status-panel">
+          <div class="model-status-summary">
+            <span>总计 {{ modelStatusSummary.total || 0 }}</span>
+            <span>已配置 {{ modelStatusSummary.configured || 0 }}</span>
+            <span>未配置 {{ modelStatusSummary.unconfigured || 0 }}</span>
+            <span>已停用 {{ modelStatusSummary.disabled || 0 }}</span>
+          </div>
+
+          <table class="model-status-table">
+            <thead>
+              <tr>
+                <th>名称</th>
+                <th>类型</th>
+                <th>模型</th>
+                <th>Base URL</th>
+                <th>请求地址</th>
+                <th>鉴权</th>
+                <th>状态</th>
+                <th>测试</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in modelStatusEndpoints" :key="item.id">
+                <td>
+                  <div class="model-name-cell">
+                    <span>{{ item.label }}</span>
+                    <small v-if="item.provider">{{ item.provider }}</small>
+                  </div>
+                </td>
+                <td>{{ getModelKindText(item.kind) }}</td>
+                <td>{{ item.model || '未填写' }}</td>
+                <td class="model-url">{{ item.base_url || '未配置' }}</td>
+                <td class="model-url">{{ item.endpoint_url || '-' }}</td>
+                <td>
+                  <div class="model-auth-cell">
+                    <span>{{ item.api_key_present ? '已配置 key' : '未配置 key' }}</span>
+                    <small v-if="item.api_key_input_has_bearer">配置含 Bearer</small>
+                    <small v-if="item.key_fingerprint">fp {{ item.key_fingerprint }}</small>
+                  </div>
+                </td>
+                <td>
+                  <span class="model-status-badge" :class="'model-status-' + item.status">
+                    {{ getModelStatusText(item.status) }}
+                  </span>
+                </td>
+                <td>
+                  <div class="model-test-cell">
+                    <button
+                      class="action-btn"
+                      :disabled="!item.test_supported || getModelTestState(item.id).loading"
+                      @click="testModelEndpoint(item)"
+                    >
+                      {{ getModelTestText(item) }}
+                    </button>
+                    <span class="model-test-result" :class="'model-test-' + getModelTestResultClass(item)">
+                      {{ getModelTestResultText(item) }}
+                    </span>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-if="modelStatus?.checked_at" class="model-status-checked">检查时间：{{ modelStatus.checked_at }}</p>
+        </div>
       </section>
 
       <section
@@ -1001,6 +1197,34 @@ onMounted(async () => {
 .batch-action-btn { background: #eff6ff; border-color: #bfdbfe; color: #1d4ed8; }
 .action-btn.btn-success { background: #dcfce7; border-color: #86efac; color: #166534; }
 .action-btn.btn-danger { background: #fee2e2; border-color: #fca5a5; color: #dc2626; }
+.model-status-shell { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+.model-status-note { margin: 6px 0 0; color: #6b7280; font-size: 13px; }
+.model-status-panel { overflow-x: auto; }
+.model-status-summary { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+.model-status-summary span { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; color: #374151; font-size: 13px; padding: 6px 10px; }
+.model-status-table { width: 100%; min-width: 1080px; border-collapse: collapse; table-layout: fixed; }
+.model-status-table th, .model-status-table td { padding: 12px; text-align: left; border-bottom: 1px solid #e5e7eb; vertical-align: top; color: #1f2937; font-size: 13px; }
+.model-status-table th { background: #f9fafb; color: #374151; font-weight: 600; }
+.model-status-table th:nth-child(1) { width: 145px; }
+.model-status-table th:nth-child(2) { width: 70px; }
+.model-status-table th:nth-child(3) { width: 150px; }
+.model-status-table th:nth-child(4), .model-status-table th:nth-child(5) { width: 220px; }
+.model-status-table th:nth-child(6) { width: 130px; }
+.model-status-table th:nth-child(7) { width: 90px; }
+.model-status-table th:nth-child(8) { width: 160px; }
+.model-name-cell, .model-auth-cell, .model-test-cell { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.model-name-cell small, .model-auth-cell small { color: #6b7280; font-size: 11px; word-break: break-all; }
+.model-url { word-break: break-all; overflow-wrap: anywhere; color: #374151; }
+.model-status-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 56px; border-radius: 999px; padding: 4px 8px; font-size: 12px; font-weight: 600; }
+.model-status-configured { background: #dcfce7; color: #166534; }
+.model-status-unconfigured { background: #fef3c7; color: #92400e; }
+.model-status-disabled { background: #f3f4f6; color: #6b7280; }
+.model-test-result { font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
+.model-test-idle { color: #6b7280; }
+.model-test-pending { color: #1d4ed8; }
+.model-test-ok { color: #166534; font-weight: 600; }
+.model-test-failed { color: #dc2626; font-weight: 600; }
+.model-status-checked { margin: 12px 0 0; color: #6b7280; font-size: 12px; }
 .pagination { display: flex; justify-content: center; align-items: center; gap: 16px; margin-top: 20px; }
 .pagination button { padding: 8px 16px; border: 1px solid #d1d5db; background: white; border-radius: 6px; cursor: pointer; }
 .pagination button:disabled { opacity: 0.5; cursor: not-allowed; }

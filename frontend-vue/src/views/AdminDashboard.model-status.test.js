@@ -1,0 +1,25 @@
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import test from 'node:test'
+import assert from 'node:assert/strict'
+
+const currentDir = dirname(fileURLToPath(import.meta.url))
+const adminSource = readFileSync(join(currentDir, 'AdminDashboard.vue'), 'utf8')
+const adminServiceSource = readFileSync(join(currentDir, '../services/admin.js'), 'utf8')
+
+test('AdminDashboard exposes model status tab and model test action', () => {
+  assert.match(adminSource, /key:\s*'models'/)
+  assert.match(adminSource, /模型状态/)
+  assert.match(adminSource, /activeAdminTab === 'models'/)
+  assert.match(adminSource, /fetchModelStatus/)
+  assert.match(adminSource, /testModelEndpoint/)
+  assert.match(adminSource, /点击测试/)
+})
+
+test('adminApi exposes model status list and test endpoints', () => {
+  assert.match(adminServiceSource, /getModelStatus/)
+  assert.match(adminServiceSource, /testModelStatus/)
+  assert.match(adminServiceSource, /\/model-status/)
+  assert.match(adminServiceSource, /\/model-status\/test/)
+})

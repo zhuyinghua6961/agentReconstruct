@@ -36,8 +36,16 @@ def llm_thinking_enabled() -> bool:
     return env_bool("LLM_THINKING_ENABLED", False)
 
 
+def normalize_bearer_api_key(api_key: str | None) -> str:
+    value = str(api_key or "").strip()
+    scheme, separator, token = value.partition(" ")
+    if separator and scheme.lower() == "bearer":
+        return token.strip()
+    return value
+
+
 def local_sdk_api_key(api_key: str | None) -> str:
-    return str(api_key or "").strip() or LOCAL_OPENAI_COMPATIBLE_API_KEY
+    return normalize_bearer_api_key(api_key) or LOCAL_OPENAI_COMPATIBLE_API_KEY
 
 
 def resolve_thinking_controls(

@@ -10,7 +10,12 @@ from typing import Any, Iterable, Iterator, Mapping
 from app.core.logging import beijing_now_iso
 from app.integrations.llm.thinking import (
     LLM_STAGE_STAGE4_FINAL_ANSWER,
+    normalize_bearer_api_key,
     resolve_thinking_controls,
+)
+from app.integrations.llm.upstream_auth_logging import (
+    log_upstream_auth_failure,
+    log_upstream_auth_success_once,
 )
 
 DEFAULT_LLM_COMPATIBLE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -234,7 +239,7 @@ class _OpenAICompatBase(_TimingMixin):
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
         }
-        api_key = str(self._cfg.api_key or "").strip()
+        api_key = normalize_bearer_api_key(self._cfg.api_key)
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         return headers
@@ -273,6 +278,33 @@ class _OpenAICompatBase(_TimingMixin):
         record = getattr(self._shared_pool, "record_pool_timeout", None)
         if callable(record):
             record(wait_ms=wait_ms)
+
+    def _log_auth_success(self, *, model: str, status_code: Any = None) -> None:
+        import logging
+
+        log_upstream_auth_success_once(
+            logger=logging.getLogger(__name__),
+            service="fastQA",
+            endpoint="chat",
+            model=str(model or ""),
+            base_url=self._cfg.endpoint,
+            api_key=self._cfg.api_key,
+            status_code=status_code,
+        )
+
+    def _log_auth_failure(self, *, model: str, status_code: Any = None, exc: Exception | None = None) -> None:
+        import logging
+
+        log_upstream_auth_failure(
+            logger=logging.getLogger(__name__),
+            service="fastQA",
+            endpoint="chat",
+            model=str(model or ""),
+            base_url=self._cfg.endpoint,
+            api_key=self._cfg.api_key,
+            status_code=status_code,
+            exc=exc,
+        )
 
     def _is_pool_timeout(self, exc: Exception) -> bool:
         pool_timeout_cls = getattr(self._httpx, "PoolTimeout", None)
@@ -476,7 +508,12 @@ class OpenAICompatChatAdapter(_OpenAICompatBase):
             )
         except Exception as exc:
             self._handle_transport_error(stage="openai_compat_invoke_error", started_at=started_at, exc=exc)
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except Exception as exc:
+            self._log_auth_failure(model=self._model, status_code=getattr(response, "status_code", None), exc=exc)
+            raise
+        self._log_auth_success(model=self._model, status_code=getattr(response, "status_code", None))
         body = response.json()
         content = extract_openai_compatible_text(body)
         self._log_transport_success(
@@ -541,7 +578,12 @@ class OpenAICompatChatAdapter(_OpenAICompatBase):
             self._handle_transport_error(stage="openai_compat_stream_error", started_at=request_started_at, exc=exc)
         try:
             with stream_context as response:
-                response.raise_for_status()
+                try:
+                    response.raise_for_status()
+                except Exception as exc:
+                    self._log_auth_failure(model=self._model, status_code=getattr(response, "status_code", None), exc=exc)
+                    raise
+                self._log_auth_success(model=self._model, status_code=getattr(response, "status_code", None))
                 self._log_transport_success(
                     "openai_compat_stream_connected",
                     request_started_at,
@@ -719,7 +761,12 @@ class OpenAICompatClient(_OpenAICompatBase):
             )
         except Exception as exc:
             self._handle_transport_error(stage="openai_compat_client_invoke_error", started_at=started_at, exc=exc)
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except Exception as exc:
+            self._log_auth_failure(model=model, status_code=getattr(response, "status_code", None), exc=exc)
+            raise
+        self._log_auth_success(model=model, status_code=getattr(response, "status_code", None))
         body = response.json()
         content = extract_openai_compatible_text(body)
         self._log_transport_success(
@@ -785,7 +832,12 @@ class OpenAICompatClient(_OpenAICompatBase):
             self._handle_transport_error(stage="openai_compat_client_stream_error", started_at=request_started_at, exc=exc)
         try:
             with stream_context as response:
-                response.raise_for_status()
+                try:
+                    response.raise_for_status()
+                except Exception as exc:
+                    self._log_auth_failure(model=model, status_code=getattr(response, "status_code", None), exc=exc)
+                    raise
+                self._log_auth_success(model=model, status_code=getattr(response, "status_code", None))
                 self._log_transport_success(
                     "openai_compat_client_stream_connected",
                     request_started_at,

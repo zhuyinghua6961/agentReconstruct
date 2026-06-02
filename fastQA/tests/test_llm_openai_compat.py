@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from app.integrations.llm import (
     build_chat_adapter,
     build_chat_completions_client,
@@ -8,6 +10,7 @@ from app.integrations.llm import (
     normalize_openai_compatible_endpoint,
 )
 from app.integrations.llm.openai_compat import OpenAICompatChatAdapter, OpenAICompatClient
+from app.integrations.llm.upstream_auth_logging import reset_upstream_auth_log_state_for_tests
 
 
 class _FakeResponse:
@@ -110,6 +113,31 @@ def test_openai_compat_chat_adapter_invoke_and_stream():
     assert fake_client.calls[1][0] == "post"
     adapter.close()
     assert fake_client.closed is True
+
+
+def test_openai_compat_logs_llm_auth_success_once(caplog):
+    reset_upstream_auth_log_state_for_tests()
+    caplog.set_level(logging.INFO)
+    post_response = _FakeResponse(payload={"choices": [{"message": {"content": "answer"}}]})
+    stream_response = _FakeResponse(lines=["data: [DONE]"])
+    fake_client = _FakeClient(post_response=post_response, stream_response=stream_response)
+    fake_httpx = _FakeHttpx(client=fake_client)
+    client = OpenAICompatClient(
+        httpx_module=fake_httpx,
+        endpoint="https://example.invalid/v1/chat/completions",
+        api_key="Bearer sk-demo-secret",
+    )
+
+    client.chat.completions.create(model="m", messages=[{"role": "user", "content": "hi"}])
+    client.chat.completions.create(model="m", messages=[{"role": "user", "content": "hi"}])
+
+    messages = [record.message for record in caplog.records]
+    auth_ok = [message for message in messages if "LLM upstream auth ok" in message]
+    assert len(auth_ok) == 1
+    assert "service=fastQA" in auth_ok[0]
+    assert "model=m" in auth_ok[0]
+    assert "key_input_has_bearer=True" in auth_ok[0]
+    assert "sk-demo-secret" not in auth_ok[0]
 
 
 def test_openai_compat_client_matches_openai_shape():

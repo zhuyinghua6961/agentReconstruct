@@ -20,6 +20,11 @@ import tiktoken
 from openai import OpenAI
 
 import config
+from agent_core.thinking import local_sdk_api_key
+from agent_core.upstream_auth_logging import (
+    log_upstream_auth_failure,
+    log_upstream_auth_success_once,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +52,7 @@ def get_embedding_client() -> OpenAI:
     """
     api_key = _require_api_key(api_key=config.EMBEDDING_API_KEY, env_name="HIGHTHINKINGQA_EMBEDDING_API_KEY")
     return OpenAI(
-        api_key=api_key,
+        api_key=local_sdk_api_key(api_key),
         base_url=config.EMBEDDING_BASE_URL,
         max_retries=0,
         timeout=30.0,
@@ -128,12 +133,32 @@ def embed_texts(
         while retry_count < max_retries:
             try:
                 with _embed_semaphore:
-                    response = client.embeddings.create(
-                        model=config.EMBEDDING_MODEL,
-                        input=batch_texts,
-                        dimensions=dims,
-                        encoding_format="float",
-                    )
+                    try:
+                        response = client.embeddings.create(
+                            model=config.EMBEDDING_MODEL,
+                            input=batch_texts,
+                            dimensions=dims,
+                            encoding_format="float",
+                        )
+                    except Exception as e:
+                        log_upstream_auth_failure(
+                            logger=logger,
+                            service="highThinkingQA",
+                            endpoint="embeddings",
+                            model=config.EMBEDDING_MODEL,
+                            base_url=config.EMBEDDING_BASE_URL,
+                            api_key=config.EMBEDDING_API_KEY,
+                            exc=e,
+                        )
+                        raise
+                log_upstream_auth_success_once(
+                    logger=logger,
+                    service="highThinkingQA",
+                    endpoint="embeddings",
+                    model=config.EMBEDDING_MODEL,
+                    base_url=config.EMBEDDING_BASE_URL,
+                    api_key=config.EMBEDDING_API_KEY,
+                )
                 batch_embeddings = [item.embedding for item in response.data]
                 for orig_idx, emb in zip(batch_indices, batch_embeddings):
                     result_map[orig_idx] = emb

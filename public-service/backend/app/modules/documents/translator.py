@@ -5,12 +5,18 @@
 from __future__ import annotations
 
 import os
+import logging
 from typing import Any
 
 from .llm_thinking import LLM_STAGE_TRANSLATION, local_sdk_api_key, merge_extra_body, resolve_thinking_controls
 from .translation_cache_impl import TranslationCache
+from app.modules.system.upstream_auth_logging import (
+    log_upstream_auth_failure,
+    log_upstream_auth_success_once,
+)
 
 DEFAULT_LLM_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+logger = logging.getLogger(__name__)
 
 
 def _first_env(*names: str, default: str = "") -> str:
@@ -97,8 +103,28 @@ class SmartTranslator:
             extra_body = merge_extra_body(None, controls)
             if extra_body:
                 kwargs["extra_body"] = extra_body
-            response = self.client.chat.completions.create(
-                **kwargs,
+            try:
+                response = self.client.chat.completions.create(
+                    **kwargs,
+                )
+            except Exception as exc:
+                log_upstream_auth_failure(
+                    logger=logger,
+                    service="public-service",
+                    endpoint="chat",
+                    model=self.model,
+                    base_url=self.base_url,
+                    api_key=self.api_key,
+                    exc=exc,
+                )
+                raise
+            log_upstream_auth_success_once(
+                logger=logger,
+                service="public-service",
+                endpoint="chat",
+                model=self.model,
+                base_url=self.base_url,
+                api_key=self.api_key,
             )
 
             translation = str(response.choices[0].message.content or "").strip()

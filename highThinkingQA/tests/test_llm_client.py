@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 from agent_core.llm_client import chat_completion, chat_completion_stream, get_async_llm_client, get_llm_client
-from agent_core.thinking import LLM_STAGE_STAGE4_FINAL_ANSWER
+from agent_core.upstream_auth_logging import reset_upstream_auth_log_state_for_tests
+from agent_core.thinking import LLM_STAGE_STAGE4_FINAL_ANSWER, local_sdk_api_key
 from server.services.documents_service import DocumentsService
 
 
@@ -38,6 +40,14 @@ class _FakeStreamCompletions(_FakeCompletions):
         return iter(self._chunks)
 
 
+class _FakeUnauthorizedCompletions(_FakeCompletions):
+    def create(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        exc = RuntimeError("401 Unauthorized")
+        exc.status_code = 401
+        raise exc
+
+
 def test_chat_completion_forwards_timeout_to_sdk_call():
     completions = _FakeCompletions()
     client = _FakeClient(completions)
@@ -53,7 +63,53 @@ def test_chat_completion_forwards_timeout_to_sdk_call():
     assert completions.calls[0]["timeout"] == 12.5
 
 
-def test_chat_completion_omits_enable_thinking_for_non_stream_calls():
+def test_chat_completion_logs_llm_auth_success_once(monkeypatch, caplog):
+    reset_upstream_auth_log_state_for_tests()
+    monkeypatch.setattr("agent_core.llm_client.config.LLM_MODEL", "demo-model", raising=False)
+    monkeypatch.setattr("agent_core.llm_client.config.LLM_BASE_URL", "https://example.invalid/v1", raising=False)
+    monkeypatch.setattr("agent_core.llm_client.config.LLM_API_KEY", "Bearer sk-demo-secret", raising=False)
+    caplog.set_level(logging.INFO)
+    completions = _FakeCompletions()
+    client = _FakeClient(completions)
+
+    assert chat_completion(prompt="demo", client=client, enable_thinking=False) == "ok"
+    assert chat_completion(prompt="demo", client=client, enable_thinking=False) == "ok"
+
+    messages = [record.message for record in caplog.records]
+    auth_ok = [message for message in messages if "LLM upstream auth ok" in message]
+    assert len(auth_ok) == 1
+    assert "service=highThinkingQA" in auth_ok[0]
+    assert "model=demo-model" in auth_ok[0]
+    assert "key_present=True" in auth_ok[0]
+    assert "key_input_has_bearer=True" in auth_ok[0]
+    assert "sk-demo-secret" not in auth_ok[0]
+
+
+def test_chat_completion_logs_llm_auth_failure_status(monkeypatch, caplog):
+    reset_upstream_auth_log_state_for_tests()
+    monkeypatch.setattr("agent_core.llm_client.config.LLM_MODEL", "demo-model", raising=False)
+    monkeypatch.setattr("agent_core.llm_client.config.LLM_BASE_URL", "https://example.invalid/v1", raising=False)
+    monkeypatch.setattr("agent_core.llm_client.config.LLM_API_KEY", "sk-demo-secret", raising=False)
+    caplog.set_level(logging.WARNING)
+    completions = _FakeUnauthorizedCompletions()
+    client = _FakeClient(completions)
+
+    try:
+        chat_completion(prompt="demo", client=client, enable_thinking=False)
+    except RuntimeError:
+        pass
+
+    messages = [record.message for record in caplog.records]
+    auth_failed = [message for message in messages if "LLM upstream auth failed" in message]
+    assert len(auth_failed) == 1
+    assert "service=highThinkingQA" in auth_failed[0]
+    assert "status_code=401" in auth_failed[0]
+    assert "sk-demo-secret" not in auth_failed[0]
+
+
+def test_chat_completion_omits_enable_thinking_for_non_stream_calls(monkeypatch):
+    monkeypatch.setattr("agent_core.llm_client.config.LLM_IS_THINKING_MODEL", False, raising=False)
+    monkeypatch.setattr("agent_core.llm_client.config.LLM_THINKING_ENABLED", False, raising=False)
     completions = _FakeCompletions()
     client = _FakeClient(completions)
 
@@ -163,6 +219,29 @@ def test_get_llm_client_forwards_max_retries_override(monkeypatch):
 
     assert client is not None
     assert captured["max_retries"] == 0
+
+
+def test_local_sdk_api_key_accepts_bearer_prefixed_values():
+    assert local_sdk_api_key("Bearer sk-demo") == "sk-demo"
+    assert local_sdk_api_key("bearer sk-demo") == "sk-demo"
+    assert local_sdk_api_key("  Bearer   sk-demo  ") == "sk-demo"
+
+
+def test_get_llm_client_strips_bearer_prefix_before_sdk_adds_auth_header(monkeypatch):
+    captured = {}
+    monkeypatch.setattr("agent_core.llm_client.config.LLM_API_KEY", "bearer sk-demo")
+    monkeypatch.setattr("agent_core.llm_client.config.LLM_BASE_URL", "https://example.invalid/v1")
+
+    def fake_openai(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("agent_core.llm_client.OpenAI", fake_openai)
+
+    client = get_llm_client()
+
+    assert client is not None
+    assert captured["api_key"] == "sk-demo"
 
 
 def test_get_llm_client_uses_placeholder_for_blank_llm_api_key(monkeypatch):

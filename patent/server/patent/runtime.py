@@ -40,6 +40,10 @@ from server.patent.upstream_transport import (
     record_patent_dispatch_error,
     record_patent_dispatch_success,
 )
+from server.patent.upstream_auth_logging import (
+    log_upstream_auth_failure,
+    log_upstream_auth_success_once,
+)
 
 try:
     import chromadb
@@ -253,7 +257,29 @@ class PatentPlanningClient:
             (time.perf_counter() - request_started) * 1000,
             str(response.headers.get("content-length") or ""),
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except Exception as exc:
+            log_upstream_auth_failure(
+                logger=_LOGGER,
+                service="patent",
+                endpoint="chat",
+                model=str(model or "").strip(),
+                base_url=self._base_url,
+                api_key=self._api_key,
+                status_code=getattr(response, "status_code", None),
+                exc=exc,
+            )
+            raise
+        log_upstream_auth_success_once(
+            logger=_LOGGER,
+            service="patent",
+            endpoint="chat",
+            model=str(model or "").strip(),
+            base_url=self._base_url,
+            api_key=self._api_key,
+            status_code=getattr(response, "status_code", None),
+        )
         body = response.json()
         choices = list(body.get("choices") or [])
         message = dict((choices[0] or {}).get("message") or {}) if choices else {}

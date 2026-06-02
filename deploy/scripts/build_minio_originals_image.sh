@@ -13,10 +13,10 @@ fi
 
 echo "warning: build_minio_originals_image.sh is a legacy/debug path; recommended releases use deploy/data/minio-originals.tar.zst" >&2
 
-set -a
-# shellcheck disable=SC1090
-source "$ENV_FILE"
-set +a
+# shellcheck disable=SC1091
+source "$ROOT_DIR/scripts/env_file_loader.sh"
+capture_env_file_loader_process_keys
+load_env_files_preserving_process_env "$ENV_FILE"
 
 MINIO_BUCKET="${MINIO_BUCKET:-agentcode}"
 MINIO_ORIGINALS_IMAGE="${MINIO_ORIGINALS_IMAGE:-lifeo4agent/minio-originals:$(date +%F)}"

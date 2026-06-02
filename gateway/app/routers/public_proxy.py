@@ -260,6 +260,8 @@ _ROUTE_SPECS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (_paths("/api/quota/configs/{quota_type:path}"), ("PUT",)),
     (_paths("/api/quota/users/{user_id}"), ("GET",)),
     (_paths("/api/quota/reset/{user_id}/{quota_type:path}"), ("POST",)),
+    (_paths("/api/admin/model-status", include_v1=False), ("GET",)),
+    (_paths("/api/admin/model-status/test", include_v1=False), ("POST",)),
     (_paths("/api/admin/users", include_v1=False), ("GET", "POST")),
     (_paths("/api/admin/users/{user_id}", include_v1=False), ("DELETE",)),
     (_paths("/api/admin/users/{user_id}/username", include_v1=False), ("PUT",)),

@@ -15,6 +15,10 @@ from agent_core.thinking import (
     merge_extra_body,
     resolve_thinking_controls,
 )
+from agent_core.upstream_auth_logging import (
+    log_upstream_auth_failure,
+    log_upstream_auth_success_once,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +132,27 @@ def chat_completion(
     if timeout_seconds is not None:
         kwargs["timeout"] = float(timeout_seconds)
 
-    response = client.chat.completions.create(**kwargs)
+    try:
+        response = client.chat.completions.create(**kwargs)
+    except Exception as exc:
+        log_upstream_auth_failure(
+            logger=logger,
+            service="highThinkingQA",
+            endpoint="chat",
+            model=str(kwargs.get("model") or ""),
+            base_url=config.LLM_BASE_URL,
+            api_key=config.LLM_API_KEY,
+            exc=exc,
+        )
+        raise
+    log_upstream_auth_success_once(
+        logger=logger,
+        service="highThinkingQA",
+        endpoint="chat",
+        model=str(kwargs.get("model") or ""),
+        base_url=config.LLM_BASE_URL,
+        api_key=config.LLM_API_KEY,
+    )
 
     reasoning = _extract_reasoning(response.choices[0].message)
     if reasoning:
@@ -184,7 +208,27 @@ def chat_completion_stream(
     if timeout_seconds is not None:
         kwargs["timeout"] = float(timeout_seconds)
 
-    response = client.chat.completions.create(**kwargs)
+    try:
+        response = client.chat.completions.create(**kwargs)
+    except Exception as exc:
+        log_upstream_auth_failure(
+            logger=logger,
+            service="highThinkingQA",
+            endpoint="chat",
+            model=str(kwargs.get("model") or ""),
+            base_url=config.LLM_BASE_URL,
+            api_key=config.LLM_API_KEY,
+            exc=exc,
+        )
+        raise
+    log_upstream_auth_success_once(
+        logger=logger,
+        service="highThinkingQA",
+        endpoint="chat",
+        model=str(kwargs.get("model") or ""),
+        base_url=config.LLM_BASE_URL,
+        api_key=config.LLM_API_KEY,
+    )
 
     reasoning_chars = 0
     started_at = time.time()

@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +27,11 @@ def _service_block(compose: str, service_name: str) -> str:
 
 def _has_env_mapping(block: str, key: str, value: str) -> bool:
     return re.search(rf"^\s+{re.escape(key)}:\s+{re.escape(value)}$", block, re.MULTILINE) is not None
+
+
+def _require_openssl() -> None:
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl is required for TLS certificate script tests")
 
 
 def test_offline_compose_includes_patent_and_frontend_services() -> None:
@@ -116,6 +126,78 @@ def test_preflight_requires_mysql_admin_seed() -> None:
     content = _read(DEPLOY / "scripts" / "preflight_check.sh")
 
     assert "$DEPLOY_DIR/mysql-init/003_seed_admin.sql" in content
+
+
+def test_dev_tls_generator_preserves_existing_pair_when_ca_pair_is_invalid(tmp_path: Path) -> None:
+    _require_openssl()
+    cert_dir = tmp_path / "certs"
+    cert_dir.mkdir()
+    shutil.copy2(DEPLOY / "certs" / "fullchain.pem", cert_dir / "fullchain.pem")
+    shutil.copy2(DEPLOY / "certs" / "privkey.pem", cert_dir / "privkey.pem")
+    old_fullchain = (cert_dir / "fullchain.pem").read_bytes()
+    old_privkey = (cert_dir / "privkey.pem").read_bytes()
+
+    subprocess.run(
+        ["openssl", "genrsa", "-out", str(cert_dir / "rootCA.key"), "2048"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(cert_dir / "other-root.key"),
+            "-out",
+            str(cert_dir / "rootCA.pem"),
+            "-days",
+            "1",
+            "-subj",
+            "/C=CN/O=LiFeO4Agent/CN=Different Test Root CA",
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    env = dict(os.environ)
+    env["CERT_DIR"] = str(cert_dir)
+    result = subprocess.run(
+        ["bash", str(DEPLOY / "scripts" / "generate_dev_tls_cert.sh"), "broken-ca.test", "127.0.0.1"],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert (cert_dir / "fullchain.pem").read_bytes() == old_fullchain
+    assert (cert_dir / "privkey.pem").read_bytes() == old_privkey
+
+
+def test_dev_tls_generator_uses_legacy_compatible_san_extfile() -> None:
+    content = _read(DEPLOY / "scripts" / "generate_dev_tls_cert.sh")
+
+    assert "-copy_extensions" not in content
+    assert "-addext" not in content
+    assert "subjectAltName" in content
+    assert '-extfile "$TMP_SERVER_EXT"' in content
+    assert "-extensions v3_req" in content
+
+
+def test_preflight_validates_tls_certificate_matches_private_key() -> None:
+    content = _read(DEPLOY / "scripts" / "preflight_check.sh")
+
+    assert "TLS certificate and private key do not match" in content
+    assert 'openssl x509 -in "$1" -pubkey -noout' in content
+    assert 'openssl pkey -in "$1" -pubout -outform DER' in content
+    assert 'tls_cert_pubkey_hash "$DEPLOY_DIR/certs/fullchain.pem"' in content
+    assert 'tls_key_pubkey_hash "$DEPLOY_DIR/certs/privkey.pem"' in content
 
 
 def test_offline_dockerfiles_exist_for_patent_and_frontend() -> None:

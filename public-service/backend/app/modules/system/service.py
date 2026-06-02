@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import logging
+import hashlib
+import json
 import os
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime
 
 from app.core.timezone import BEIJING_TIMEZONE, now_beijing_iso
-from typing import Any
+from typing import Any, Callable
 
 from app.core.runtime import PublicServiceRuntime
 from app.modules.conversation.cache import (
@@ -17,9 +22,341 @@ from app.modules.conversation.cache import (
     get_recent_conversation_list_pages,
 )
 from app.modules.qa_cache.metrics import snapshot_cache_metrics
+from app.modules.system.upstream_auth_logging import (
+    log_upstream_auth_failure,
+    log_upstream_auth_success_once,
+)
 
 
 logger = logging.getLogger(__name__)
+
+RequesterFn = Callable[..., dict[str, Any]]
+MODEL_STATUS_TEST_TEXT = "hello"
+MODEL_STATUS_TEST_TIMEOUT_SECONDS = 30.0
+
+
+def _first_env(*names: str, default: str = "") -> str:
+    for name in names:
+        value = str(os.getenv(name) or "").strip()
+        if value:
+            return value
+    return str(default or "").strip()
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, "1" if default else "0") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
+def _normalize_bearer_api_key(api_key: str | None) -> str:
+    value = str(api_key or "").strip()
+    scheme, separator, token = value.partition(" ")
+    if separator and scheme.lower() == "bearer":
+        return token.strip()
+    return value
+
+
+def _key_fingerprint(api_key: str | None) -> str:
+    value = _normalize_bearer_api_key(api_key)
+    if not value:
+        return ""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+def _key_input_has_bearer(api_key: str | None) -> bool:
+    return str(api_key or "").strip().lower().startswith("bearer ")
+
+
+def _auth_headers(api_key: str | None) -> dict[str, str]:
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    key = _normalize_bearer_api_key(api_key)
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
+def _normalize_chat_endpoint(base_url: str) -> str:
+    value = str(base_url or "").strip().rstrip("/")
+    for suffix in ("/v1/chat/completions", "/chat/completions"):
+        if value.endswith(suffix):
+            value = value[: -len(suffix)].rstrip("/")
+            break
+    if not value.endswith("/v1"):
+        value = value.rstrip("/") + "/v1"
+    return value.rstrip("/") + "/chat/completions"
+
+
+def _normalize_embedding_endpoint(base_url: str) -> str:
+    value = str(base_url or "").strip().rstrip("/")
+    for suffix in ("/v1/embeddings", "/embeddings"):
+        if value.endswith(suffix):
+            return value
+    if value.endswith("/v1"):
+        return value + "/embeddings"
+    return value + "/v1/embeddings"
+
+
+def _normalize_rerank_endpoint(base_url: str, provider: str) -> str:
+    value = str(base_url or "").strip().rstrip("/")
+    provider_norm = str(provider or "").strip().lower()
+    if provider_norm == "dashscope":
+        suffix = "/api/v1/services/rerank/text-rerank/text-rerank"
+        if value.endswith(suffix):
+            return value
+        return value + suffix
+    for suffix in ("/v1/rerank", "/rerank"):
+        if value.endswith(suffix):
+            return value
+    return value + "/v1/rerank"
+
+
+def _endpoint_url_for_spec(spec: dict[str, Any]) -> str:
+    base_url = str(spec.get("base_url") or "").strip()
+    if not base_url:
+        return ""
+    kind = str(spec.get("kind") or "").strip().lower()
+    if kind == "chat":
+        return _normalize_chat_endpoint(base_url)
+    if kind == "embedding":
+        return _normalize_embedding_endpoint(base_url)
+    if kind == "rerank":
+        return _normalize_rerank_endpoint(base_url, str(spec.get("provider") or "local"))
+    return base_url
+
+
+def _model_status_specs() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "llm_chat",
+            "label": "主大模型",
+            "kind": "chat",
+            "base_url": _first_env("LLM_BASE_URL", "OPENAI_BASE_URL", "DASHSCOPE_BASE_URL"),
+            "model": _first_env("LLM_MODEL", "OPENAI_MODEL"),
+            "api_key": _first_env("LLM_API_KEY", "OPENAI_API_KEY", "DASHSCOPE_API_KEY"),
+            "enabled": True,
+            "provider": "openai_compatible",
+        },
+        {
+            "id": "intent_chat",
+            "label": "意图模型",
+            "kind": "chat",
+            "base_url": _first_env(
+                "INTENT_MODEL_BASE_URL",
+                "LLM_BASE_URL",
+                "OPENAI_BASE_URL",
+                "DASHSCOPE_BASE_URL",
+                default="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            ),
+            "model": _first_env("INTENT_MODEL", "QA_INTENT_DETECT_MODEL", default="qwen3-8b"),
+            "api_key": _first_env("INTENT_MODEL_API_KEY", "LLM_API_KEY", "OPENAI_API_KEY", "DASHSCOPE_API_KEY"),
+            "enabled": _env_bool("INTENT_MODEL_ENABLED", False),
+            "provider": "openai_compatible",
+            "test_payload_overrides": {
+                "temperature": 0.0,
+                "max_tokens": 64,
+                "enable_thinking": False,
+            },
+        },
+        {
+            "id": "fastqa_embedding",
+            "label": "FastQA 向量模型",
+            "kind": "embedding",
+            "base_url": _first_env("QA_EMBEDDING_BASE_URL", "EMBEDDING_API_URL"),
+            "model": _first_env("QA_EMBEDDING_MODEL", "EMBEDDING_API_MODEL", "EMBEDDING_MODEL_NAME"),
+            "api_key": _first_env("QA_EMBEDDING_API_KEY", "EMBEDDING_API_KEY"),
+            "enabled": True,
+            "provider": "openai_compatible",
+        },
+        {
+            "id": "highthinkingqa_embedding",
+            "label": "HighThinkingQA 向量模型",
+            "kind": "embedding",
+            "base_url": _first_env("HIGHTHINKINGQA_EMBEDDING_BASE_URL"),
+            "model": _first_env("HIGHTHINKINGQA_EMBEDDING_MODEL"),
+            "api_key": _first_env("HIGHTHINKINGQA_EMBEDDING_API_KEY"),
+            "enabled": True,
+            "provider": "openai_compatible",
+        },
+        {
+            "id": "rerank",
+            "label": "重排模型",
+            "kind": "rerank",
+            "base_url": _first_env("RERANK_BASE_URL"),
+            "model": _first_env("RERANK_MODEL"),
+            "api_key": _first_env("RERANK_API_KEY"),
+            "enabled": _first_env("RERANK_PROVIDER", default="none").lower() not in {"", "none", "disabled", "off"},
+            "provider": _first_env("RERANK_PROVIDER", default="none").lower(),
+        },
+    ]
+
+
+def _public_endpoint_spec(spec: dict[str, Any]) -> dict[str, Any]:
+    base_url = str(spec.get("base_url") or "").strip()
+    model = str(spec.get("model") or "").strip()
+    enabled = bool(spec.get("enabled"))
+    endpoint_url = _endpoint_url_for_spec(spec)
+    configured = bool(enabled and base_url and model and endpoint_url)
+    api_key = str(spec.get("api_key") or "")
+    status = "configured" if configured else "disabled" if not enabled else "unconfigured"
+    return {
+        "id": str(spec.get("id") or ""),
+        "label": str(spec.get("label") or ""),
+        "kind": str(spec.get("kind") or ""),
+        "provider": str(spec.get("provider") or ""),
+        "model": model,
+        "base_url": base_url,
+        "endpoint_url": endpoint_url,
+        "configured": configured,
+        "enabled": enabled,
+        "status": status,
+        "test_supported": configured,
+        "api_key_present": bool(_normalize_bearer_api_key(api_key)),
+        "api_key_input_has_bearer": _key_input_has_bearer(api_key),
+        "key_fingerprint": _key_fingerprint(api_key),
+    }
+
+
+def _http_post_json(*, url: str, headers: dict[str, str], payload: dict[str, Any], timeout_seconds: float) -> dict[str, Any]:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=float(timeout_seconds)) as response:
+            raw_body = response.read(65536)
+            status_code = int(response.getcode() or 0)
+    except urllib.error.HTTPError as exc:
+        raw_body = exc.read(65536)
+        return {
+            "status_code": int(exc.code or 0),
+            "json": _safe_json_loads(raw_body),
+            "text": _decode_body(raw_body),
+            "error": str(exc),
+        }
+    except Exception as exc:
+        return {
+            "status_code": 0,
+            "json": None,
+            "text": "",
+            "error": str(exc),
+        }
+    return {
+        "status_code": status_code,
+        "json": _safe_json_loads(raw_body),
+        "text": _decode_body(raw_body),
+        "error": "",
+    }
+
+
+def _decode_body(raw_body: bytes | str | None) -> str:
+    if raw_body is None:
+        return ""
+    if isinstance(raw_body, str):
+        return raw_body
+    try:
+        return raw_body.decode("utf-8", errors="replace")
+    except Exception:
+        return str(raw_body)
+
+
+def _safe_json_loads(raw_body: bytes | str | None) -> Any:
+    text = _decode_body(raw_body).strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+def _response_preview(data: Any, text: str) -> str:
+    if data is not None:
+        try:
+            text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        except Exception:
+            text = str(data)
+    value = str(text or "").strip()
+    if len(value) > 500:
+        return value[:500] + "..."
+    return value
+
+
+def _chat_test_payload(model: str, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": MODEL_STATUS_TEST_TEXT}],
+        "stream": False,
+        "max_tokens": 16,
+    }
+    if overrides:
+        payload.update(overrides)
+    return payload
+
+
+def _embedding_test_payload(model: str) -> dict[str, Any]:
+    return {
+        "model": model,
+        "input": [MODEL_STATUS_TEST_TEXT],
+    }
+
+
+def _rerank_test_payload(model: str, provider: str) -> dict[str, Any]:
+    provider_norm = str(provider or "").strip().lower()
+    if provider_norm == "dashscope":
+        return {
+            "model": model,
+            "input": {
+                "query": MODEL_STATUS_TEST_TEXT,
+                "documents": [MODEL_STATUS_TEST_TEXT, "hello world"],
+            },
+            "parameters": {
+                "return_documents": False,
+                "top_n": 1,
+            },
+        }
+    return {
+        "model": model,
+        "query": MODEL_STATUS_TEST_TEXT,
+        "documents": [MODEL_STATUS_TEST_TEXT, "hello world"],
+        "top_n": 1,
+    }
+
+
+def _test_payload_for_spec(spec: dict[str, Any]) -> dict[str, Any]:
+    model = str(spec.get("model") or "").strip()
+    kind = str(spec.get("kind") or "").strip().lower()
+    if kind == "chat":
+        overrides = spec.get("test_payload_overrides")
+        return _chat_test_payload(model, overrides if isinstance(overrides, dict) else None)
+    if kind == "embedding":
+        return _embedding_test_payload(model)
+    if kind == "rerank":
+        return _rerank_test_payload(model, str(spec.get("provider") or "local"))
+    return {"model": model, "input": MODEL_STATUS_TEST_TEXT}
+
+
+def _response_has_model_result(kind: str, data: Any) -> bool:
+    if not isinstance(data, dict):
+        return False
+    kind_norm = str(kind or "").strip().lower()
+    if kind_norm == "chat":
+        choices = data.get("choices")
+        return isinstance(choices, list) and len(choices) > 0
+    if kind_norm == "embedding":
+        if isinstance(data.get("data"), list) and len(data["data"]) > 0:
+            return True
+        return isinstance(data.get("embeddings"), list) or isinstance(data.get("embedding"), list)
+    if kind_norm == "rerank":
+        if isinstance(data.get("results"), list):
+            return True
+        output = data.get("output")
+        return isinstance(output, dict) and isinstance(output.get("results"), list)
+    return True
 
 
 class SystemService:
@@ -140,6 +477,124 @@ class SystemService:
         except Exception as exc:
             logger.warning("Failed to read background status: %s", exc)
             return {"success": False, "error": str(exc)}, 500
+
+    def build_model_status(self) -> tuple[dict[str, Any], int]:
+        endpoints = [_public_endpoint_spec(spec) for spec in _model_status_specs()]
+        summary = {
+            "total": len(endpoints),
+            "configured": sum(1 for item in endpoints if item["status"] == "configured"),
+            "unconfigured": sum(1 for item in endpoints if item["status"] == "unconfigured"),
+            "disabled": sum(1 for item in endpoints if item["status"] == "disabled"),
+            "test_supported": sum(1 for item in endpoints if item["test_supported"]),
+        }
+        return {
+            "success": True,
+            "data": {
+                "checked_at": now_beijing_iso(),
+                "probe_method": "config_only",
+                "test_method": "click_to_send_minimal_request",
+                "summary": summary,
+                "endpoints": endpoints,
+            },
+        }, 200
+
+    def test_model_status_endpoint(
+        self,
+        endpoint_id: str,
+        *,
+        requester: RequesterFn | None = None,
+    ) -> tuple[dict[str, Any], int]:
+        endpoint_id = str(endpoint_id or "").strip()
+        specs = {str(spec.get("id") or ""): spec for spec in _model_status_specs()}
+        spec = specs.get(endpoint_id)
+        if spec is None:
+            return {"success": False, "error": "model_endpoint_not_found", "message": "模型配置不存在"}, 404
+
+        public_spec = _public_endpoint_spec(spec)
+        if not public_spec["test_supported"]:
+            return {
+                "success": True,
+                "data": {
+                    **public_spec,
+                    "ok": False,
+                    "test_status": "unconfigured",
+                    "status_code": None,
+                    "elapsed_ms": None,
+                    "message": "模型未启用或 base_url/model 未配置，无法测试",
+                    "response_preview": "",
+                },
+            }, 200
+
+        endpoint_url = str(public_spec["endpoint_url"] or "")
+        api_key = str(spec.get("api_key") or "")
+        headers = _auth_headers(api_key)
+        payload = _test_payload_for_spec(spec)
+        post_json = requester or _http_post_json
+        started_at = time.monotonic()
+        response = post_json(
+            url=endpoint_url,
+            headers=headers,
+            payload=payload,
+            timeout_seconds=MODEL_STATUS_TEST_TIMEOUT_SECONDS,
+        )
+        elapsed_ms = round((time.monotonic() - started_at) * 1000.0, 2)
+        status_code = response.get("status_code")
+        try:
+            status_code_int = int(status_code or 0)
+        except Exception:
+            status_code_int = 0
+        data = response.get("json")
+        text = str(response.get("text") or "")
+        transport_error = str(response.get("error") or "")
+        status_ok = 200 <= status_code_int < 300
+        result_ok = bool(status_ok and _response_has_model_result(str(spec.get("kind") or ""), data))
+
+        if status_ok:
+            log_upstream_auth_success_once(
+                logger=logger,
+                service="public-service-admin-model-status",
+                endpoint=str(spec.get("kind") or ""),
+                model=str(spec.get("model") or ""),
+                base_url=str(spec.get("base_url") or ""),
+                api_key=api_key,
+                status_code=status_code_int,
+            )
+        else:
+            log_upstream_auth_failure(
+                logger=logger,
+                service="public-service-admin-model-status",
+                endpoint=str(spec.get("kind") or ""),
+                model=str(spec.get("model") or ""),
+                base_url=str(spec.get("base_url") or ""),
+                api_key=api_key,
+                status_code=status_code_int,
+            )
+
+        if result_ok:
+            message = "模型响应正常"
+            test_status = "ok"
+        elif status_code_int:
+            message = f"模型测试失败，HTTP {status_code_int}"
+            test_status = "failed"
+        elif transport_error:
+            message = f"模型测试失败：{transport_error}"
+            test_status = "failed"
+        else:
+            message = "模型测试失败：未获得可识别响应"
+            test_status = "failed"
+
+        return {
+            "success": True,
+            "data": {
+                **public_spec,
+                "ok": result_ok,
+                "test_status": test_status,
+                "status_code": status_code_int or None,
+                "elapsed_ms": elapsed_ms,
+                "message": message,
+                "response_preview": _response_preview(data, text or transport_error),
+            },
+        }, 200
 
     def build_kb_info(self, runtime: PublicServiceRuntime) -> tuple[dict[str, Any], int]:
         try:

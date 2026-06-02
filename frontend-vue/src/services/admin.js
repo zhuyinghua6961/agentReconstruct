@@ -106,6 +106,22 @@ async function fetchWithErrorHandling(url, options = {}) {
 }
 
 export const adminApi = {
+  async getModelStatus() {
+    const token = readStoredToken()
+    return fetchWithErrorHandling(`${API_BASE}/model-status`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+  },
+
+  async testModelStatus(id) {
+    const token = readStoredToken()
+    return fetchWithErrorHandling(`${API_BASE}/model-status/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ id })
+    })
+  },
+
   async getUsers(page = 1, pageSize = 10) {
     const token = readStoredToken()
     return fetchWithErrorHandling(`${API_BASE}/users?page=${page}&page_size=${pageSize}`, {

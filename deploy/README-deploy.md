@@ -594,6 +594,26 @@ HIGHTHINKINGQA_EMBEDDING_MODEL=text-embedding-v4
 - 这里的 base URL 通常是 OpenAI 兼容 base URL，例如 `/v1`，不是完整 `/embeddings` 路径。
 - 如果使用本地 embedding 服务，根据服务实现填写对应 base URL 和模型名。
 
+### 6.6.1 highThinkingQA 的 tiktoken 离线缓存
+
+highThinkingQA 会用 tiktoken 的 `cl100k_base` 编码估算 token 数。离线或内网环境如果没有缓存，会尝试访问：
+
+```text
+https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken
+```
+
+部署编排会把缓存目录固定到容器内：
+
+```text
+/data/highthinkingqa/runtime/tiktoken-cache
+```
+
+如果现场不能访问该地址，需要把 `cl100k_base.tiktoken` 预先放入这个目录，文件名为：
+
+```text
+9b5ad71b2ce5302211f9c61530b329a4922fc6a4
+```
+
 ### 6.7 rerank 配置
 
 ```bash
@@ -1337,4 +1357,3 @@ admin / whyxadmin123..
 - [ ] 深度问答能发起请求。
 - [ ] 专利问答能发起请求。
 - [ ] MinIO 控制台可以按配置端口访问。
-

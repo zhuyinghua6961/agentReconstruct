@@ -84,5 +84,8 @@ def test_stage4_enabled_does_not_invent_missing_max_tokens():
 def test_blank_auth_and_sdk_placeholder():
     assert "Authorization" not in auth_headers("")
     assert auth_headers("token")["Authorization"] == "Bearer token"
+    assert auth_headers("Bearer token")["Authorization"] == "Bearer token"
+    assert auth_headers("bearer token")["Authorization"] == "Bearer token"
     assert local_sdk_api_key("") == "local-openai-compatible"
     assert local_sdk_api_key("real") == "real"
+    assert local_sdk_api_key("Bearer real") == "real"

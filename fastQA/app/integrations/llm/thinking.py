@@ -39,15 +39,23 @@ def llm_thinking_enabled() -> bool:
     return env_bool("LLM_THINKING_ENABLED", False)
 
 
+def normalize_bearer_api_key(api_key: str | None) -> str:
+    value = str(api_key or "").strip()
+    scheme, separator, token = value.partition(" ")
+    if separator and scheme.lower() == "bearer":
+        return token.strip()
+    return value
+
+
 def local_sdk_api_key(api_key: str | None) -> str:
-    return str(api_key or "").strip() or LOCAL_OPENAI_COMPATIBLE_API_KEY
+    return normalize_bearer_api_key(api_key) or LOCAL_OPENAI_COMPATIBLE_API_KEY
 
 
 def auth_headers(api_key: str | None, *, accept: str | None = None) -> dict[str, str]:
     headers = {"Content-Type": "application/json"}
     if accept:
         headers["Accept"] = accept
-    key = str(api_key or "").strip()
+    key = normalize_bearer_api_key(api_key)
     if key:
         headers["Authorization"] = f"Bearer {key}"
     return headers

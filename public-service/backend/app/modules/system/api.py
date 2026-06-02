@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from app.core.deps import AuthContext
 from app.core.deps import get_runtime
@@ -11,6 +12,10 @@ from app.modules.system.service import system_service
 
 
 router = APIRouter(tags=["system"])
+
+
+class ModelStatusTestRequest(BaseModel):
+    id: str = Field(..., min_length=1)
 
 
 @router.get("/health")
@@ -27,6 +32,21 @@ async def background_status(
     _context: AuthContext = Depends(require_admin_context),
 ) -> JSONResponse:
     payload, status_code = system_service.build_background_status(runtime)
+    return JSONResponse(status_code=status_code, content=payload)
+
+
+@router.get("/api/admin/model-status")
+def admin_model_status(_context: AuthContext = Depends(require_admin_context)) -> JSONResponse:
+    payload, status_code = system_service.build_model_status()
+    return JSONResponse(status_code=status_code, content=payload)
+
+
+@router.post("/api/admin/model-status/test")
+def admin_model_status_test(
+    request: ModelStatusTestRequest,
+    _context: AuthContext = Depends(require_admin_context),
+) -> JSONResponse:
+    payload, status_code = system_service.test_model_status_endpoint(request.id)
     return JSONResponse(status_code=status_code, content=payload)
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import httpx
+import logging
 
 from server.patent.intent_detect import run_intent_detect_quick_tag
 from server.patent.models import PatentRetrievalClaim
@@ -10,8 +11,10 @@ from server.patent.thinking import (
     LLM_STAGE_CONTROL,
     LLM_STAGE_STAGE4_FINAL_ANSWER,
     auth_headers,
+    local_sdk_api_key,
     resolve_thinking_controls,
 )
+from server.patent.upstream_auth_logging import reset_upstream_auth_log_state_for_tests
 
 
 class _NullLogger:
@@ -64,6 +67,9 @@ def test_patent_thinking_helper_matches_stage_policy():
     assert enabled.raw_payload_fields["reasoning_effort"] == "high"
     assert enabled.max_tokens == 8192
     assert "Authorization" not in auth_headers("")
+    assert auth_headers("Bearer token")["Authorization"] == "Bearer token"
+    assert auth_headers("bearer token")["Authorization"] == "Bearer token"
+    assert local_sdk_api_key("Bearer token") == "token"
 
 
 def test_patent_planning_client_accepts_sdk_style_disabled_thinking_kwargs(monkeypatch):
@@ -89,6 +95,41 @@ def test_patent_planning_client_accepts_sdk_style_disabled_thinking_kwargs(monke
     assert payload["stream"] is False
     assert "reasoning_effort" not in payload
     assert "Authorization" not in headers
+
+
+def test_patent_planning_client_logs_llm_auth_success_once(caplog):
+    reset_upstream_auth_log_state_for_tests()
+    caplog.set_level(logging.INFO)
+    http_client = _FakePlanningHttpClient("ok")
+    client = PatentPlanningClient(
+        api_key="Bearer sk-demo-secret",
+        base_url="http://example.invalid/v1",
+        timeout_seconds=10.0,
+        http_client=http_client,
+    )
+
+    client.chat.completions.create(
+        model="planner-model",
+        messages=[{"role": "user", "content": "demo"}],
+        temperature=0.0,
+        max_tokens=64,
+        stream=False,
+    )
+    client.chat.completions.create(
+        model="planner-model",
+        messages=[{"role": "user", "content": "demo"}],
+        temperature=0.0,
+        max_tokens=64,
+        stream=False,
+    )
+
+    messages = [record.message for record in caplog.records]
+    auth_ok = [message for message in messages if "LLM upstream auth ok" in message]
+    assert len(auth_ok) == 1
+    assert "service=patent" in auth_ok[0]
+    assert "model=planner-model" in auth_ok[0]
+    assert "key_input_has_bearer=True" in auth_ok[0]
+    assert "sk-demo-secret" not in auth_ok[0]
 
 
 def test_patent_stage2_query_generation_uses_runtime_client_with_disabled_thinking(monkeypatch):

@@ -61,6 +61,19 @@ placeholder_patterns=(
   'replace_with_real_'
 )
 
+tls_cert_pubkey_hash() {
+  openssl x509 -in "$1" -pubkey -noout \
+    | openssl pkey -pubin -outform DER \
+    | openssl sha256 \
+    | awk '{print $2}'
+}
+
+tls_key_pubkey_hash() {
+  openssl pkey -in "$1" -pubout -outform DER \
+    | openssl sha256 \
+    | awk '{print $2}'
+}
+
 for file in "${required_files[@]}"; do
   if [[ ! -f "$file" ]]; then
     echo "missing required file: $file" >&2
@@ -68,16 +81,34 @@ for file in "${required_files[@]}"; do
   fi
 done
 
+if command -v openssl >/dev/null 2>&1; then
+  if ! tls_cert_hash="$(tls_cert_pubkey_hash "$DEPLOY_DIR/certs/fullchain.pem")"; then
+    echo "invalid TLS certificate file: $DEPLOY_DIR/certs/fullchain.pem" >&2
+    exit 1
+  fi
+  if ! tls_key_hash="$(tls_key_pubkey_hash "$DEPLOY_DIR/certs/privkey.pem")"; then
+    echo "invalid TLS private key file: $DEPLOY_DIR/certs/privkey.pem" >&2
+    exit 1
+  fi
+  if [[ "$tls_cert_hash" != "$tls_key_hash" ]]; then
+    echo "TLS certificate and private key do not match: certs/fullchain.pem certs/privkey.pem" >&2
+    echo "regenerate both files together, or replace them with a matched certificate/key pair" >&2
+    exit 1
+  fi
+else
+  echo "warn: openssl unavailable; skipping TLS certificate/private-key match check"
+fi
+
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "env file not found: $ENV_FILE" >&2
   echo "hint: cp deploy/.env.production.example deploy/.env" >&2
   exit 1
 fi
 
-set -a
-# shellcheck disable=SC1090
-source "$ENV_FILE"
-set +a
+# shellcheck disable=SC1091
+source "$ROOT_DIR/scripts/env_file_loader.sh"
+capture_env_file_loader_process_keys
+load_env_files_preserving_process_env "$ENV_FILE"
 
 DATA_DIR="${DEPLOY_DATA_DIR:-$DEPLOY_DIR/data}"
 if [[ "$DATA_DIR" != /* ]]; then

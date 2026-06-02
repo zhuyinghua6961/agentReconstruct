@@ -19,6 +19,10 @@ from app.modules.documents.llm_thinking import (
     merge_extra_body,
     resolve_thinking_controls,
 )
+from app.modules.system.upstream_auth_logging import (
+    log_upstream_auth_failure,
+    log_upstream_auth_success_once,
+)
 from app.modules.documents.patent_original_store import (
     PatentOriginalNotFoundError,
     PatentOriginalStore,
@@ -643,7 +647,27 @@ class DocumentsService:
             extra_body = merge_extra_body(None, controls)
             if extra_body:
                 kwargs["extra_body"] = extra_body
-            resp = client.chat.completions.create(**kwargs)
+            try:
+                resp = client.chat.completions.create(**kwargs)
+            except Exception as exc:
+                log_upstream_auth_failure(
+                    logger=logger,
+                    service="public-service",
+                    endpoint="chat",
+                    model=self._openai_model,
+                    base_url=self._openai_base_url,
+                    api_key=self._openai_api_key,
+                    exc=exc,
+                )
+                raise
+            log_upstream_auth_success_once(
+                logger=logger,
+                service="public-service",
+                endpoint="chat",
+                model=self._openai_model,
+                base_url=self._openai_base_url,
+                api_key=self._openai_api_key,
+            )
             summary = str(resp.choices[0].message.content or "").strip()
             logger.info("✅ PDF总结生成完成")
             return {"doi": normalized, "summary": summary}, 200

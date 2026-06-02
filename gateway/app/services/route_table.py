@@ -59,6 +59,8 @@ _PUBLIC_ROUTE_GROUPS = (
     _paths("/api/quota/users/{user_id}"),
     _paths("/api/quota/reset/{user_id}/{quota_type:path}"),
     _paths("/api/admin/users", include_v1=False),
+    _paths("/api/admin/model-status", include_v1=False),
+    _paths("/api/admin/model-status/test", include_v1=False),
     _paths("/api/admin/users/{user_id}", include_v1=False),
     _paths("/api/admin/users/{user_id}/username", include_v1=False),
     _paths("/api/admin/users/{user_id}/personnel-binding", include_v1=False),

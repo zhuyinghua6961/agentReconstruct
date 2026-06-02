@@ -11,10 +11,10 @@ if [[ ! -f "$ENV_FILE" ]]; then
   exit 1
 fi
 
-set -a
-# shellcheck disable=SC1090
-source "$ENV_FILE"
-set +a
+# shellcheck disable=SC1091
+source "$ROOT_DIR/scripts/env_file_loader.sh"
+capture_env_file_loader_process_keys
+load_env_files_preserving_process_env "$ENV_FILE"
 
 GATEWAY_IMAGE="${GATEWAY_IMAGE:-lifeo4agent/gateway:latest}"
 PUBLIC_SERVICE_IMAGE="${PUBLIC_SERVICE_IMAGE:-lifeo4agent/public-service:latest}"
