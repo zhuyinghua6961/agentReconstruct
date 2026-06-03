@@ -3,7 +3,7 @@
 import { marked } from 'marked'
 
 marked.setOptions({
-  breaks: true,
+  breaks: false,
   gfm: true,
   tables: true,
   mangle: false,
@@ -911,6 +911,59 @@ function isMarkdownListItemLine(line) {
   return /^\s{0,3}(?:[-*+]|\d+[.)])\s+/.test(String(line || ''))
 }
 
+function isMarkdownHardBreakLine(line) {
+  return /(?: {2,}|\\)$/.test(String(line || ''))
+}
+
+function isMarkdownBlockBoundaryLine(line) {
+  const trimmed = String(line || '').trim()
+  if (!trimmed) return true
+  if (/^\u27e6mdp\d+\u27e7$/.test(trimmed)) return true
+  if (trimmed.startsWith('```')) return true
+  if (/^\s{0,3}#{1,6}\s+/.test(trimmed)) return true
+  if (isMarkdownListItemLine(trimmed)) return true
+  if (/^\s{0,3}(?:---+|\*\*\*+|___+)\s*$/.test(trimmed)) return true
+  if (trimmed.includes('|')) return true
+  return false
+}
+
+function getLastTextChar(text) {
+  const trimmed = String(text || '').trimEnd()
+  return trimmed ? trimmed[trimmed.length - 1] : ''
+}
+
+function getFirstTextChar(text) {
+  const trimmed = String(text || '').trimStart()
+  return trimmed ? trimmed[0] : ''
+}
+
+function isCjkChar(char) {
+  return /[\u3400-\u9fff]/.test(String(char || ''))
+}
+
+function getSoftWrapJoiner(left, right) {
+  const prevChar = getLastTextChar(left)
+  const nextChar = getFirstTextChar(right)
+  if (!prevChar || !nextChar) return ''
+  if (/[([{（【《「『]$/.test(prevChar)) return ''
+  if (/^[,.;:!?，。；：！？、）)\]】》」』]/.test(nextChar)) return ''
+  if (isCjkChar(prevChar) || isCjkChar(nextChar)) return ''
+  return ' '
+}
+
+function shouldMergeProseSoftWrap(currentLine, nextLine) {
+  const current = String(currentLine || '').trimEnd()
+  const next = String(nextLine || '').trimStart()
+  if (!current || !next) return false
+  if (isMarkdownHardBreakLine(currentLine)) return false
+  if (isMarkdownBlockBoundaryLine(current) || isMarkdownBlockBoundaryLine(next)) return false
+  if (!/[\u3400-\u9fffA-Za-z0-9]/.test(current) || !/[\u3400-\u9fffA-Za-z0-9]/.test(next)) return false
+
+  if (/[。！？!?；;，,、：:]$/.test(current)) return true
+  if (current.length >= 24 && next.length >= 8) return true
+  return false
+}
+
 /**
  * 修复 LLM / 复制粘贴产生的「软换行」：GFM 会把 `4. 5-…` 当成新有序列表、
  * `10. 1007/…` 当成第 10 条列表、列表项后的 `+ …` 当成新无序列表，从而拆碎 DOI 与公式。
@@ -968,6 +1021,9 @@ function repairMarkdownSoftBreaksForRender(text) {
         merged = true
       } else if (listHead && /\+\s*$/.test(lastTrim) && /^\s*\+\s/.test(next)) {
         acc = `${acc} ${String(next).trimStart()}`
+        merged = true
+      } else if (shouldMergeProseSoftWrap(last, next)) {
+        acc = `${acc.trimEnd()}${getSoftWrapJoiner(last, next)}${String(next).trimStart()}`
         merged = true
       }
 

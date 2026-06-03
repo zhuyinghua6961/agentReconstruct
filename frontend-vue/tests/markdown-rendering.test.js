@@ -240,6 +240,35 @@ test('formatAnswer renders prefixed doi links inside markdown table cells', () =
   assert.match(html, /data-doi="10\.1039\/c2jm15273h"/i)
 })
 
+test('formatAnswer treats single newlines inside Chinese prose as soft wraps', () => {
+  installMinimalDom()
+  const input = [
+    '### 前驱体颗粒形貌控制与辅助烧结致密化',
+    '除了粒径级配，从源头上控制前驱体的球形度与致密性是提高压实密度的先决条件。',
+    '在制备磷酸铁时，通过控制成核与生长分区，可使纳米微晶紧密团聚形成微米级球形颗粒。',
+    '这种致密的球形结构在后续烧结过程中能够得到保留 (CN104229767B)。',
+  ].join('\n')
+
+  const html = formatAnswer(input)
+
+  assert.doesNotMatch(html, /<br\s*\/?>/i)
+  assert.match(html, /提高压实密度的先决条件。在制备磷酸铁时/)
+  assert.match(html, /data-patent-id="CN104229767B"/i)
+})
+
+test('formatStreamingAnswer treats single newlines inside Chinese prose as soft wraps', () => {
+  installMinimalDom()
+  const input = [
+    '除了粒径级配，从源头上控制前驱体的球形度与致密性是提高压实密度的先决条件。',
+    '在制备磷酸铁时，通过控制成核与生长分区，可使纳米微晶紧密团聚形成微米级球形颗粒。',
+  ].join('\n')
+
+  const html = formatStreamingAnswer(input)
+
+  assert.doesNotMatch(html, /<br\s*\/?>/i)
+  assert.match(html, /先决条件。在制备磷酸铁时/)
+})
+
 test('formatAnswer does not linkify ordinary numeric prose that only resembles an implicit DOI', () => {
   installMinimalDom()
   const input = '平台电压约为 10.2V，样品编号 10.20abc 也不应被识别为 DOI。'
