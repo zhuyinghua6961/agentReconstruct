@@ -41,8 +41,6 @@ required_vars=(
   QA_EMBEDDING_MODEL
   HIGHTHINKINGQA_EMBEDDING_BASE_URL
   HIGHTHINKINGQA_EMBEDDING_MODEL
-  RERANK_PROVIDER
-  RERANK_MODEL
   DATA_PACKAGE_VERSION
 )
 
@@ -127,14 +125,6 @@ for var_name in "${required_vars[@]}"; do
   fi
 done
 
-case "${RERANK_PROVIDER}" in
-  local|dashscope|none|off|disabled) ;;
-  *)
-    echo "invalid RERANK_PROVIDER: expected local, dashscope, none, off, or disabled; got ${RERANK_PROVIDER}" >&2
-    exit 1
-    ;;
-esac
-
 case "${INTENT_MODEL_ENABLED}" in
   0|1|true|false|yes|no|on|off) ;;
   *)
@@ -143,8 +133,13 @@ case "${INTENT_MODEL_ENABLED}" in
     ;;
 esac
 
-if [[ "${RERANK_PROVIDER}" != "none" && "${RERANK_PROVIDER}" != "off" && "${RERANK_PROVIDER}" != "disabled" && -z "${RERANK_BASE_URL:-}" ]]; then
-  echo "missing required variable in $ENV_FILE: RERANK_BASE_URL is required when RERANK_PROVIDER=${RERANK_PROVIDER}" >&2
+if [[ -n "${RERANK_BASE_URL:-}" && -z "${RERANK_MODEL:-}" ]]; then
+  echo "missing required variable in $ENV_FILE: RERANK_MODEL is required when RERANK_BASE_URL is set" >&2
+  exit 1
+fi
+
+if [[ -z "${RERANK_BASE_URL:-}" && -n "${RERANK_MODEL:-}" ]]; then
+  echo "missing required variable in $ENV_FILE: RERANK_BASE_URL is required when RERANK_MODEL is set" >&2
   exit 1
 fi
 

@@ -6,9 +6,7 @@
 
 import json
 import logging
-from typing import Optional
-
-from openai import OpenAI
+from typing import Any, Optional
 
 import config
 from agent_core.llm_client import chat_completion, get_llm_client, load_prompt_template
@@ -52,7 +50,7 @@ def revise_answer(
     question: str,
     answer: str,
     issues: list[dict],
-    client: Optional[OpenAI] = None,
+    client: Optional[Any] = None,
 ) -> str:
     """
     根据 Checker 指出的问题修改答案。

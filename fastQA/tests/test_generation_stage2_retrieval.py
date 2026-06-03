@@ -917,3 +917,79 @@ def test_stage2_targeted_retrieval_logs_claim_timing_breakdown(monkeypatch, capl
     assert "search_total_ms=" in claim_message
     assert "relevance_validation_ms=" in claim_message
     assert "claim_total_ms=" in claim_message
+
+
+def test_stage2_targeted_retrieval_logs_detailed_diagnostics(monkeypatch, caplog):
+    monkeypatch.setenv("QA_STAGE2_DIAGNOSTIC_LOG", "1")
+    monkeypatch.setenv("QA_STAGE2_LOG_QUERY_DETAILS", "1")
+    monkeypatch.setenv("QA_STAGE2_LOG_HIT_DETAILS", "1")
+    monkeypatch.setenv("QA_STAGE2_LOG_HIT_MAX", "3")
+    monkeypatch.setenv("QA_STAGE2_FORCE_KEYWORD_INJECTION", "false")
+    monkeypatch.setenv("QA_STAGE2_ENTITY_LOCK_ENABLED", "false")
+    expert = _Expert(
+        default_response={
+            "documents": ["PEG 聚乙二醇辅助碳包覆提升 LiFePO4 倍率性能。", "无关背景片段"],
+            "metadatas": [{"doi": "10.1/good", "title": "PEG LFP"}, {"doi": "10.1/noise"}],
+            "distances": [0.08, 0.42],
+        }
+    )
+
+    def _validate(results, query, claim):
+        return {
+            "documents": ["PEG 聚乙二醇辅助碳包覆提升 LiFePO4 倍率性能。"],
+            "metadatas": [{"doi": "10.1/good", "title": "PEG LFP"}],
+            "distances": [0.08],
+        }
+
+    logger = logging.getLogger("test.stage2.diagnostics")
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        result = run_stage2_targeted_retrieval(
+            retrieval_claims=[{"claim": "LiFePO4 PEG 倍率性能", "keywords": ["LiFePO4", "PEG"]}],
+            n_results_per_claim=1,
+            user_question="PEG 对 LiFePO4 倍率性能有什么影响？",
+            literature_expert=expert,
+            logger=logger,
+            client=None,
+            model=None,
+            preprocess_retrieval_query_fn=lambda query: query,
+            validate_retrieval_relevance_fn=_validate,
+        )
+
+    assert result["success"] is True
+    messages = [record.message for record in caplog.records if record.name == logger.name]
+    assert any("Stage2 diagnostic start" in message and "claim_count=1" in message for message in messages)
+    assert any(
+        "Stage2 query encoding diagnostic" in message
+        and "claim_index=1" in message
+        and "embedding_query_chars=" in message
+        and "utf8_bytes=" in message
+        and "chinese_chars=" in message
+        and "has_replacement_char=false" in message
+        and "has_mojibake_pattern=false" in message
+        for message in messages
+    )
+    assert any("Stage2 search request" in message and "claim_index=1" in message and "n_results=8" in message for message in messages)
+    assert any(
+        "Stage2 raw hit detail" in message
+        and "claim_index=1" in message
+        and "rank=1" in message
+        and "doi=10.1/good" in message
+        and "distance=0.08" in message
+        for message in messages
+    )
+    assert any(
+        "Stage2 relevance validation diagnostic" in message
+        and "claim_index=1" in message
+        and "before=2" in message
+        and "after=1" in message
+        and "filtered=1" in message
+        for message in messages
+    )
+    assert any(
+        "Stage2 diagnostic summary" in message
+        and "ok_claims=1" in message
+        and "total_docs=1" in message
+        and "unique_docs=1" in message
+        and "doi_sample=['10.1/good']" in message
+        for message in messages
+    )

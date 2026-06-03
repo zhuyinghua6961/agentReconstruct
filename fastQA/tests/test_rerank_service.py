@@ -25,7 +25,7 @@ class _Requests:
         return _Response(self.payload)
 
 
-def test_local_rerank_posts_openai_compatible_payload_without_auth():
+def test_rerank_posts_openai_compatible_payload_without_auth():
     req = _Requests({"results": [{"index": 1, "relevance_score": 0.92}, {"index": 0, "relevance_score": 0.51}]})
 
     result = rerank_documents(
@@ -33,10 +33,9 @@ def test_local_rerank_posts_openai_compatible_payload_without_auth():
         documents=["doc-a", "doc-b"],
         metadatas=[{"id": "a"}, {"id": "b"}],
         top_n=2,
-        provider="local",
         api_key="",
         model="qwen3-vl-rerank",
-        base_url="http://localhost:8084",
+        base_url="http://localhost:8084/v1",
         timeout_seconds=7.0,
         requests_module=req,
     )
@@ -60,31 +59,46 @@ def test_local_rerank_posts_openai_compatible_payload_without_auth():
         "rerank_scores": [0.92, 0.51],
         "fallback": False,
         "fallback_reason": "",
-        "provider": "local",
+        "provider": "openai_compatible",
     }
 
 
-def test_local_rerank_defaults_to_localhost_when_base_url_is_omitted():
+def test_rerank_is_disabled_when_base_url_is_omitted():
     req = _Requests({"results": [{"index": 0, "relevance_score": 0.8}]})
 
-    rerank_documents(
+    result = rerank_documents(
         query="q",
         documents=["doc"],
-        provider="local",
         model="m",
         requests_module=req,
     )
 
-    assert req.calls[0]["endpoint"] == "http://localhost:8084/v1/rerank"
+    assert req.calls == []
+    assert result["fallback"] is True
+    assert result["fallback_reason"] == "provider_disabled"
 
 
-def test_local_rerank_adds_auth_only_when_api_key_is_present():
+def test_rerank_is_disabled_when_model_is_omitted():
+    req = _Requests({"results": [{"index": 0, "relevance_score": 0.8}]})
+
+    result = rerank_documents(
+        query="q",
+        documents=["doc"],
+        base_url="http://reranker/v1",
+        requests_module=req,
+    )
+
+    assert req.calls == []
+    assert result["fallback"] is True
+    assert result["fallback_reason"] == "provider_disabled"
+
+
+def test_rerank_adds_auth_only_when_api_key_is_present():
     req = _Requests({"results": [{"index": 0, "relevance_score": 0.8}]})
 
     rerank_documents(
         query="q",
         documents=["doc"],
-        provider="local",
         api_key="local-key",
         model="m",
         base_url="http://reranker",
@@ -94,7 +108,38 @@ def test_local_rerank_adds_auth_only_when_api_key_is_present():
     assert req.calls[0]["headers"]["Authorization"] == "Bearer local-key"
 
 
-def test_local_rerank_caps_returned_rows_to_top_n_and_skips_invalid_indexes():
+def test_rerank_normalizes_bearer_api_key():
+    req = _Requests({"results": [{"index": 0, "relevance_score": 0.8}]})
+
+    rerank_documents(
+        query="q",
+        documents=["doc"],
+        api_key="Bearer local-key",
+        model="m",
+        base_url="http://reranker",
+        requests_module=req,
+    )
+
+    assert req.calls[0]["headers"]["Authorization"] == "Bearer local-key"
+
+
+def test_rerank_supports_authorization_auth_mode(monkeypatch):
+    req = _Requests({"results": [{"index": 0, "relevance_score": 0.8}]})
+    monkeypatch.setenv("RERANK_AUTH_MODE", "authorization")
+
+    rerank_documents(
+        query="q",
+        documents=["doc"],
+        api_key="Bearer local-key",
+        model="m",
+        base_url="http://reranker",
+        requests_module=req,
+    )
+
+    assert req.calls[0]["headers"]["Authorization"] == "local-key"
+
+
+def test_rerank_caps_returned_rows_to_top_n_and_skips_invalid_indexes():
     req = _Requests(
         {
             "results": [
@@ -110,7 +155,6 @@ def test_local_rerank_caps_returned_rows_to_top_n_and_skips_invalid_indexes():
         query="q",
         documents=["doc-a", "doc-b", "doc-c"],
         top_n=2,
-        provider="local",
         model="m",
         base_url="http://reranker",
         requests_module=req,
@@ -120,7 +164,7 @@ def test_local_rerank_caps_returned_rows_to_top_n_and_skips_invalid_indexes():
     assert result["rerank_scores"] == [0.9, 0.8]
 
 
-def test_local_rerank_skips_malformed_indexes_and_keeps_valid_rows():
+def test_rerank_skips_malformed_indexes_and_keeps_valid_rows():
     req = _Requests(
         {
             "results": [
@@ -135,7 +179,6 @@ def test_local_rerank_skips_malformed_indexes_and_keeps_valid_rows():
         query="q",
         documents=["doc-a", "doc-b"],
         top_n=1,
-        provider="local",
         model="m",
         base_url="http://reranker",
         requests_module=req,
@@ -146,7 +189,7 @@ def test_local_rerank_skips_malformed_indexes_and_keeps_valid_rows():
     assert result["fallback"] is False
 
 
-def test_local_rerank_falls_back_when_request_fails():
+def test_rerank_falls_back_when_request_fails():
     class _FailingRequests:
         def post(self, endpoint, headers, json, timeout):
             raise RuntimeError("boom")
@@ -155,7 +198,6 @@ def test_local_rerank_falls_back_when_request_fails():
         query="q",
         documents=["doc-a", "doc-b"],
         top_n=1,
-        provider="local",
         model="m",
         base_url="http://reranker",
         requests_module=_FailingRequests(),
@@ -164,17 +206,16 @@ def test_local_rerank_falls_back_when_request_fails():
     assert result["documents"] == ["doc-a"]
     assert result["fallback"] is True
     assert result["fallback_reason"] == "request_failed"
-    assert result["provider"] == "local"
+    assert result["provider"] == "openai_compatible"
 
 
-def test_local_rerank_falls_back_when_response_has_no_valid_rows():
+def test_rerank_falls_back_when_response_has_no_valid_rows():
     req = _Requests({"results": [{"index": 99, "relevance_score": 1.0}]})
 
     result = rerank_documents(
         query="q",
         documents=["doc-a"],
         top_n=1,
-        provider="local",
         model="m",
         base_url="http://reranker",
         requests_module=req,
@@ -185,7 +226,7 @@ def test_local_rerank_falls_back_when_response_has_no_valid_rows():
     assert result["fallback_reason"] == "empty_rerank_result"
 
 
-def test_local_rerank_falls_back_when_json_parsing_fails():
+def test_rerank_falls_back_when_json_parsing_fails():
     class _BadResponse:
         def raise_for_status(self) -> None:
             pass
@@ -201,7 +242,6 @@ def test_local_rerank_falls_back_when_json_parsing_fails():
         query="q",
         documents=["doc-a"],
         top_n=1,
-        provider="local",
         model="m",
         base_url="http://reranker",
         requests_module=_RequestsWithBadJson(),
@@ -211,57 +251,43 @@ def test_local_rerank_falls_back_when_json_parsing_fails():
     assert result["fallback_reason"] == "request_failed"
 
 
-def test_dashscope_rerank_request_shape_is_preserved():
-    req = _Requests({"output": {"results": [{"index": 0, "relevance_score": 0.77}]}})
+def test_rerank_tolerates_final_endpoint_url():
+    req = _Requests({"results": [{"index": 0, "relevance_score": 0.77}]})
 
     result = rerank_documents(
         query="q",
         documents=["doc"],
         top_n=1,
-        provider="dashscope",
         api_key="dash-key",
         model="dash-model",
-        base_url="https://dashscope.example",
+        base_url="https://rerank.example/v1/rerank",
         requests_module=req,
     )
 
-    assert req.calls[0]["endpoint"] == "https://dashscope.example/api/v1/services/rerank/text-rerank/text-rerank"
+    assert req.calls[0]["endpoint"] == "https://rerank.example/v1/rerank"
     assert req.calls[0]["headers"]["Authorization"] == "Bearer dash-key"
     assert req.calls[0]["json"] == {
         "model": "dash-model",
-        "input": {"query": "q", "documents": ["doc"]},
-        "parameters": {"return_documents": False, "top_n": 1},
+        "query": "q",
+        "documents": ["doc"],
+        "top_n": 1,
     }
     assert result["fallback"] is False
 
 
-def test_unknown_rerank_provider_falls_back_without_http_call():
-    req = _Requests({"results": []})
-
-    result = rerank_documents(
-        query="q",
-        documents=["doc"],
-        provider="bogus",
-        requests_module=req,
-    )
-
-    assert req.calls == []
-    assert result["fallback"] is True
-    assert result["fallback_reason"] == "provider_unsupported"
-    assert result["provider"] == "bogus"
-
-
-def test_disabled_rerank_provider_falls_back_without_http_call():
+def test_retired_provider_argument_is_ignored():
     req = _Requests({"results": []})
 
     result = rerank_documents(
         query="q",
         documents=["doc"],
         provider="disabled",
+        model="m",
+        base_url="http://reranker/v1",
         requests_module=req,
     )
 
-    assert req.calls == []
+    assert req.calls[0]["endpoint"] == "http://reranker/v1/rerank"
     assert result["fallback"] is True
-    assert result["fallback_reason"] == "provider_disabled"
-    assert result["provider"] == "disabled"
+    assert result["fallback_reason"] == "empty_rerank_result"
+    assert result["provider"] == "openai_compatible"

@@ -95,3 +95,80 @@ def test_stage3_load_pdf_chunks_returns_partial_result_on_cancel(monkeypatch, tm
     )
 
     assert result == {"10.1/a": [{"doi": "10.1/a", "text": "chunk"}]}
+
+
+def test_stage3_load_pdf_chunks_logs_diagnostic_source_and_chunk_details(monkeypatch, tmp_path, caplog):
+    monkeypatch.setenv("QA_STAGE3_DIAGNOSTIC_LOG", "1")
+    monkeypatch.setenv("QA_STAGE3_LOG_SOURCE_DETAILS", "1")
+    monkeypatch.setenv("QA_STAGE3_LOG_CHUNK_DETAILS", "1")
+    monkeypatch.setenv("QA_STAGE3_LOG_CHUNK_MAX", "2")
+    monkeypatch.setenv("QA_STAGE3_LOG_TEXT_MAX_CHARS", "80")
+
+    pdf_path = tmp_path / "10.1_a.pdf"
+    pdf_path.write_text("pdf", encoding="utf-8")
+    logger = logging.getLogger("test.fastqa.stage3")
+
+    def _find(**kwargs):
+        if kwargs["doi"] == "10.1/a":
+            return str(pdf_path)
+        return None
+
+    def _extract(**kwargs):
+        return [
+            {
+                "doi": kwargs["doi"],
+                "page": 2,
+                "chunk_id": "c1",
+                "chunk_type": "paragraph",
+                "text": "第一段证据：LMFP/LFP/三元复配改善低SOC功率。",
+            },
+            {
+                "doi": kwargs["doi"],
+                "page": 3,
+                "chunk_id": "c2",
+                "chunk_type": "paragraph",
+                "text": "第二段证据：高SOC快充窗口更稳定。",
+            },
+        ]
+
+    with caplog.at_level(logging.INFO, logger="test.fastqa.stage3"):
+        result = stage3_load_pdf_chunks(
+            dois=["10.1/a", "10.2/b"],
+            papers_dir=tmp_path,
+            max_chunks_per_doi=2,
+            logger=logger,
+            find_pdf_path_fn=_find,
+            extract_chunks_fn=_extract,
+        )
+
+    assert result["10.1/a"][0]["text"].startswith("第一段证据")
+    messages = [record.message for record in caplog.records if record.name == "test.fastqa.stage3"]
+    assert any("Stage3 diagnostic start" in message and "doi_count=2" in message for message in messages)
+    assert any(
+        "Stage3 source diagnostic" in message
+        and "doi=10.1/a" in message
+        and "pdf_found=True" in message
+        and "chunk_count=2" in message
+        for message in messages
+    )
+    assert any(
+        "Stage3 source diagnostic" in message
+        and "doi=10.2/b" in message
+        and "pdf_found=False" in message
+        for message in messages
+    )
+    assert any(
+        "Stage3 chunk diagnostic" in message
+        and "doi=10.1/a" in message
+        and "page=2" in message
+        and "第一段证据" in message
+        for message in messages
+    )
+    assert any(
+        "Stage3 diagnostic completed" in message
+        and "requested=2" in message
+        and "successful=1" in message
+        and "missing_pdf=1" in message
+        and "total_chunks=2" in message
+        for message in messages
+    )

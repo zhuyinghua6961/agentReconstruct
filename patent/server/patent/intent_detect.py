@@ -90,6 +90,17 @@ def _intent_model_base_url() -> str:
     )
 
 
+def _chat_completions_url(base_url: str) -> str:
+    value = str(base_url or "").strip().rstrip("/")
+    for suffix in ("/v1/chat/completions", "/chat/completions"):
+        if value.endswith(suffix):
+            value = value[: -len(suffix)].rstrip("/")
+            break
+    if not value.endswith("/v1"):
+        value = value.rstrip("/") + "/v1"
+    return value.rstrip("/") + "/chat/completions"
+
+
 def _intent_model_timeout_seconds() -> float:
     raw = _env_first("INTENT_MODEL_TIMEOUT_SECONDS", "LLM_READ_TIMEOUT_SECONDS", default="30")
     try:
@@ -99,7 +110,7 @@ def _intent_model_timeout_seconds() -> float:
 
 
 def _create_dedicated_intent_completion(*, model: str, messages: list[dict[str, Any]]) -> Any:
-    base_url = _intent_model_base_url().rstrip("/")
+    endpoint_url = _chat_completions_url(_intent_model_base_url())
     payload = {
         "model": model,
         "messages": messages,
@@ -109,8 +120,8 @@ def _create_dedicated_intent_completion(*, model: str, messages: list[dict[str, 
         "enable_thinking": False,
     }
     response = httpx.post(
-        f"{base_url}/chat/completions",
-        headers=auth_headers(_intent_model_api_key()),
+        endpoint_url,
+        headers=auth_headers(_intent_model_api_key(), auth_mode_env="INTENT_MODEL_AUTH_MODE"),
         json=payload,
         timeout=_intent_model_timeout_seconds(),
     )

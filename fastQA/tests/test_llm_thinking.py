@@ -6,6 +6,7 @@ from app.integrations.llm.thinking import (
     apply_openai_compatible_thinking,
     auth_headers,
     local_sdk_api_key,
+    resolve_auth_mode,
     resolve_thinking_controls,
 )
 
@@ -89,3 +90,14 @@ def test_blank_auth_and_sdk_placeholder():
     assert local_sdk_api_key("") == "local-openai-compatible"
     assert local_sdk_api_key("real") == "real"
     assert local_sdk_api_key("Bearer real") == "real"
+
+
+def test_auth_headers_supports_configurable_auth_modes(monkeypatch):
+    monkeypatch.setenv("LLM_AUTH_MODE", "authorization")
+    assert resolve_auth_mode() == "authorization"
+    assert auth_headers("Bearer token")["Authorization"] == "token"
+
+    assert auth_headers("Bearer token", auth_mode="bearer")["Authorization"] == "Bearer token"
+    assert auth_headers("Bearer token", auth_mode="x-api-key")["X-API-Key"] == "token"
+    assert "Authorization" not in auth_headers("Bearer token", auth_mode="none")
+    assert "X-API-Key" not in auth_headers("Bearer token", auth_mode="none")

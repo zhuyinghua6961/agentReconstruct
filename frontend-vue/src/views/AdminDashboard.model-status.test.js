@@ -15,6 +15,9 @@ test('AdminDashboard exposes model status tab and model test action', () => {
   assert.match(adminSource, /fetchModelStatus/)
   assert.match(adminSource, /testModelEndpoint/)
   assert.match(adminSource, /点击测试/)
+  assert.match(adminSource, /auth_mode/)
+  assert.match(adminSource, /模式/)
+  assert.doesNotMatch(adminSource, /item\.provider/)
 })
 
 test('adminApi exposes model status list and test endpoints', () => {

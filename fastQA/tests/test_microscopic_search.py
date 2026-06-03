@@ -156,3 +156,38 @@ def test_run_semantic_search_logs_timing_breakdown(caplog):
     assert "chroma_query_ms=" in timing_message
     assert "rerank_ms=" in timing_message
     assert "total_ms=" in timing_message
+
+
+def test_run_semantic_search_logs_embedding_and_chroma_diagnostics(caplog):
+    logger = logging.getLogger("test.microscopic_search.diagnostics")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        result = run_semantic_search(
+            user_question="lfp",
+            n_results=1,
+            embedding_model=_Embedding(),
+            collection=_Collection(),
+            translator=None,
+            translate=False,
+            logger=logger,
+            trace_label="claim_1",
+        )
+
+    assert result["documents"] == ["doc1"]
+    messages = [record.message for record in caplog.records if record.name == logger.name]
+    assert any(
+        "stage2 embedding diagnostic" in message
+        and "trace_label=claim_1" in message
+        and "input_chars=3" in message
+        and "embedding_dim=2" in message
+        and "empty_embedding=false" in message
+        for message in messages
+    )
+    assert any(
+        "stage2 chroma query diagnostic" in message
+        and "trace_label=claim_1" in message
+        and "requested_results=1" in message
+        and "raw_docs=2" in message
+        and "distance_min=0.1" in message
+        for message in messages
+    )

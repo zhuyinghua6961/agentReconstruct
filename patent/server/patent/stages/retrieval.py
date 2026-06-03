@@ -18,6 +18,13 @@ DEFAULT_PATENT_STAGE2_QUERY_SYSTEM_PROMPT = load_patent_prompt_template("stage2_
 _OUTER_JSON_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*(.*)\s*```\s*$", re.IGNORECASE | re.DOTALL)
 
 
+def _preview(value: Any, *, limit: int = 220) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return f"{text[: max(1, limit - 1)].rstrip()}…"
+
+
 class _NullLogger:
     def info(self, *args, **kwargs) -> None:
         return None
@@ -273,13 +280,16 @@ def run_stage2_targeted_retrieval(
         if log is not None:
             log.info(
                 "patent stage2 query guardrail claim_index=%s enabled=%s original_queries=%s final_queries=%s "
-                "injected_entities=%s injected_metrics=%s",
+                "injected_entities=%s injected_metrics=%s claim=%s final_query_preview=%s keywords=%s",
                 claim_index,
                 bool(guarded.diagnostics.get("enabled")),
                 len(claim_queries),
                 len(guarded.queries),
                 len(list(guarded.diagnostics.get("injected_entities") or [])),
                 len(list(guarded.diagnostics.get("injected_metrics") or [])),
+                _preview(getattr(claim, "claim", "")),
+                _preview(" | ".join(guarded.queries[:3])),
+                list(getattr(claim, "keywords", []) or [])[:10],
             )
     if log is not None:
         log.info(

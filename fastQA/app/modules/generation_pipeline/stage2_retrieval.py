@@ -515,6 +515,224 @@ def _extract_dois_from_metadatas(metadatas: Iterable[Any]) -> list[str]:
     return dois
 
 
+def _stage2_preview(value: Any, *, limit: int = 220) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return f"{text[: max(1, limit - 1)].rstrip()}…"
+
+
+def _stage2_diag_enabled() -> bool:
+    return env_bool("QA_STAGE2_DIAGNOSTIC_LOG", True)
+
+
+def _stage2_query_details_enabled() -> bool:
+    return _stage2_diag_enabled() and env_bool("QA_STAGE2_LOG_QUERY_DETAILS", True)
+
+
+def _stage2_hit_details_enabled() -> bool:
+    return _stage2_diag_enabled() and env_bool("QA_STAGE2_LOG_HIT_DETAILS", True)
+
+
+def _stage2_log_hit_max() -> int:
+    return env_int("QA_STAGE2_LOG_HIT_MAX", 5, minimum=0, maximum=50)
+
+
+def _stage2_log_query_max_chars() -> int:
+    return env_int("QA_STAGE2_LOG_QUERY_MAX_CHARS", 1000, minimum=80, maximum=12000)
+
+
+def _stage2_bool_text(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _stage2_numeric_distances(values: Iterable[Any]) -> list[float]:
+    out: list[float] = []
+    for value in values:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        out.append(number)
+    return out
+
+
+def _stage2_distance_summary(values: Iterable[Any]) -> dict[str, Any]:
+    nums = _stage2_numeric_distances(values)
+    if not nums:
+        return {"count": 0, "min": None, "max": None, "avg": None}
+    return {
+        "count": len(nums),
+        "min": min(nums),
+        "max": max(nums),
+        "avg": sum(nums) / len(nums),
+    }
+
+
+def _stage2_query_encoding_diagnostics(text: str) -> dict[str, Any]:
+    raw = str(text or "")
+    normalized = " ".join(raw.split())
+    lower = raw.lower()
+    mojibake_patterns = ("Ã", "Â", "ä¸", "å", "æ", "\\u00")
+    return {
+        "chars": len(raw),
+        "utf8_bytes": len(raw.encode("utf-8", errors="replace")),
+        "non_ascii": sum(1 for ch in raw if ord(ch) > 127),
+        "chinese_chars": sum(1 for ch in raw if "\u4e00" <= ch <= "\u9fff"),
+        "control_chars": sum(1 for ch in raw if ord(ch) < 32 and ch not in "\r\n\t"),
+        "has_replacement_char": "\ufffd" in raw,
+        "has_mojibake_pattern": any(pattern.lower() in lower for pattern in mojibake_patterns),
+        "normalized_changed": normalized != raw,
+        "repr_preview": repr(raw[: _stage2_log_query_max_chars()]),
+    }
+
+
+def _stage2_meta_source_id(meta: Any) -> str:
+    if not isinstance(meta, dict):
+        return ""
+    for key in ("doi", "DOI", "source_doi", "patent_id", "canonical_patent_id", "source_id", "id"):
+        value = str(meta.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _stage2_log_query_encoding(
+    *,
+    logger: Any,
+    claim_index: int,
+    claim_total: int,
+    combined_query: str,
+    embedding_query: str,
+    must_include: list[str],
+) -> None:
+    if not _stage2_query_details_enabled():
+        return
+    diag = _stage2_query_encoding_diagnostics(embedding_query)
+    logger.info(
+        "Stage2 query encoding diagnostic claim_index=%s claim_total=%s combined_query_chars=%s "
+        "embedding_query_chars=%s utf8_bytes=%s non_ascii=%s chinese_chars=%s control_chars=%s "
+        "has_replacement_char=%s has_mojibake_pattern=%s normalized_changed=%s must_include=%s "
+        "query_preview=%s repr_preview=%s",
+        claim_index,
+        claim_total,
+        len(str(combined_query or "")),
+        diag["chars"],
+        diag["utf8_bytes"],
+        diag["non_ascii"],
+        diag["chinese_chars"],
+        diag["control_chars"],
+        _stage2_bool_text(bool(diag["has_replacement_char"])),
+        _stage2_bool_text(bool(diag["has_mojibake_pattern"])),
+        _stage2_bool_text(bool(diag["normalized_changed"])),
+        must_include[:16],
+        _stage2_preview(embedding_query, limit=_stage2_log_query_max_chars()),
+        diag["repr_preview"],
+    )
+
+
+def _stage2_log_search_request(
+    *,
+    logger: Any,
+    claim_index: int,
+    claim_total: int,
+    embedding_query: str,
+    n_results: int,
+    toggles: Stage2RuntimeToggles,
+) -> None:
+    if not _stage2_query_details_enabled():
+        return
+    logger.info(
+        "Stage2 search request claim_index=%s claim_total=%s n_results=%s use_rerank=%s "
+        "rerank_candidates=%s embedding_query_chars=%s query_preview=%s",
+        claim_index,
+        claim_total,
+        n_results,
+        _stage2_bool_text(bool(toggles.use_rerank)),
+        int(toggles.rerank_candidates),
+        len(str(embedding_query or "")),
+        _stage2_preview(embedding_query, limit=_stage2_log_query_max_chars()),
+    )
+
+
+def _stage2_log_raw_hits(
+    *,
+    logger: Any,
+    claim_index: int,
+    claim_total: int,
+    documents: list[Any],
+    metadatas: list[Any],
+    distances: list[Any],
+    phase: str,
+) -> None:
+    if not _stage2_hit_details_enabled():
+        return
+    stats = _stage2_distance_summary(distances)
+    logger.info(
+        "Stage2 %s hits diagnostic claim_index=%s claim_total=%s hit_count=%s distance_count=%s "
+        "distance_min=%s distance_max=%s distance_avg=%s",
+        phase,
+        claim_index,
+        claim_total,
+        len(documents),
+        stats["count"],
+        stats["min"],
+        stats["max"],
+        stats["avg"],
+    )
+    for rank, document in enumerate(documents[: _stage2_log_hit_max()], start=1):
+        meta = metadatas[rank - 1] if rank - 1 < len(metadatas) else {}
+        distance = distances[rank - 1] if rank - 1 < len(distances) else None
+        source_id = _stage2_meta_source_id(meta)
+        title = str(meta.get("title") or meta.get("paper_title") or "") if isinstance(meta, dict) else ""
+        keys = sorted(meta.keys()) if isinstance(meta, dict) else []
+        logger.info(
+            "Stage2 raw hit detail claim_index=%s claim_total=%s phase=%s rank=%s doi=%s "
+            "distance=%s title=%s metadata_keys=%s doc_preview=%s",
+            claim_index,
+            claim_total,
+            phase,
+            rank,
+            source_id,
+            distance,
+            _stage2_preview(title, limit=120),
+            keys[:16],
+            _stage2_preview(document, limit=360),
+        )
+
+
+def _stage2_log_validation(
+    *,
+    logger: Any,
+    claim_index: int,
+    claim_total: int,
+    before_count: int,
+    after_count: int,
+    raw_distances: list[Any],
+    validated_distances: list[Any],
+) -> None:
+    if not _stage2_diag_enabled():
+        return
+    raw_stats = _stage2_distance_summary(raw_distances)
+    validated_stats = _stage2_distance_summary(validated_distances)
+    logger.info(
+        "Stage2 relevance validation diagnostic claim_index=%s claim_total=%s before=%s after=%s "
+        "filtered=%s raw_distance_min=%s raw_distance_max=%s raw_distance_avg=%s "
+        "validated_distance_min=%s validated_distance_max=%s validated_distance_avg=%s",
+        claim_index,
+        claim_total,
+        before_count,
+        after_count,
+        max(0, before_count - after_count),
+        raw_stats["min"],
+        raw_stats["max"],
+        raw_stats["avg"],
+        validated_stats["min"],
+        validated_stats["max"],
+        validated_stats["avg"],
+    )
+
+
 def _build_comparison_groups(
     *,
     comparison_plan: dict[str, Any] | None,
@@ -820,6 +1038,18 @@ def run_stage2_targeted_retrieval(
         int(toggles.use_rerank),
         toggles.rerank_candidates,
     )
+    if _stage2_diag_enabled():
+        expert_class = type(literature_expert).__name__ if literature_expert is not None else "None"
+        logger.info(
+            "Stage2 diagnostic start claim_count=%s n_results_per_claim=%s literature_expert_class=%s "
+            "query_details=%s hit_details=%s hit_max=%s",
+            len(retrieval_claims),
+            n_results_per_claim,
+            expert_class,
+            _stage2_bool_text(_stage2_query_details_enabled()),
+            _stage2_bool_text(_stage2_hit_details_enabled()),
+            _stage2_log_hit_max(),
+        )
 
     configured_parallel_workers = env_int("QA_STAGE2_PARALLEL_WORKERS", 5, minimum=1, maximum=16)
     parallel_workers, worker_policy = resolve_stage2_parallel_workers(
@@ -953,6 +1183,18 @@ def run_stage2_targeted_retrieval(
             negative_context_terms = []
 
         claim_key = claim_text or f"claim_{index}"
+        logger.info(
+            "[%s/%s] Stage2 claim input: claim=%s keywords=%s preferred_sections=%s filters_keys=%s "
+            "comparison_group=%s profile_query=%s",
+            index,
+            len(claims),
+            _stage2_preview(claim_text),
+            keywords[:12],
+            preferred_sections[:8],
+            sorted(filters.keys()),
+            int(comparison_group),
+            _stage2_preview(profile_query),
+        )
         query_guardrail_details = {
             "injected_keywords": [],
             "injected_entities": [],
@@ -1138,16 +1380,41 @@ def run_stage2_targeted_retrieval(
             max_injection_slots=max_inj if max_inj > 0 else None,
             logger=logger,
         )
+        logger.info(
+            "[%s/%s] Stage2 embedding query finalized: chars=%s preview=%s must_include=%s",
+            index,
+            len(claims),
+            len(embedding_query),
+            _stage2_preview(embedding_query),
+            must_include[:16],
+        )
+        _stage2_log_query_encoding(
+            logger=logger,
+            claim_index=index,
+            claim_total=len(claims),
+            combined_query=combined_query,
+            embedding_query=embedding_query,
+            must_include=must_include,
+        )
         if env_bool("QA_STAGE2_EMBEDDING_QUERY_LLM_REFINE_ENABLED", False):
             # Hook for optional LLM-based compression; disabled by default for determinism.
             pass
 
         try:
             search_started_at = time.monotonic()
+            requested_results = max(n_results_per_claim * 3, 8)
+            _stage2_log_search_request(
+                logger=logger,
+                claim_index=index,
+                claim_total=len(claims),
+                embedding_query=embedding_query,
+                n_results=requested_results,
+                toggles=toggles,
+            )
             raw_results = _search_with_optional_rerank(
                 literature_expert=literature_expert,
                 combined_query=embedding_query,
-                n_results=max(n_results_per_claim * 3, 8),
+                n_results=requested_results,
                 toggles=toggles,
                 logger=logger,
                 trace_label=f"claim_{index}",
@@ -1157,6 +1424,19 @@ def run_stage2_targeted_retrieval(
             )
             search_total_ms = (time.monotonic() - search_started_at) * 1000.0
             before_count = len(list(raw_results.get("documents") or []))
+            raw_documents = list(raw_results.get("documents") or [])
+            raw_metadatas = list(raw_results.get("metadatas") or [])
+            raw_distances = list(raw_results.get("distances") or [])
+            _stage2_log_raw_hits(
+                logger=logger,
+                claim_index=index,
+                claim_total=len(claims),
+                documents=raw_documents,
+                metadatas=raw_metadatas,
+                distances=raw_distances,
+                phase="raw",
+            )
+            raw_dois = _extract_dois_from_metadatas(raw_metadatas)
             rerank_meta = dict(raw_results.get("rerank") or {})
             relevance_started_at = time.monotonic()
             validated_results = (
@@ -1166,6 +1446,7 @@ def run_stage2_targeted_retrieval(
             documents = list(validated_results.get("documents") or [])
             metadatas = list(validated_results.get("metadatas") or [])
             distances = list(validated_results.get("distances") or [])
+            validated_dois = _extract_dois_from_metadatas(metadatas)
             noise_filter = {
                 "enabled": False,
                 "before": len(documents),
@@ -1174,6 +1455,24 @@ def run_stage2_targeted_retrieval(
             }
             after_count = len(documents)
             claim_total_ms = (time.monotonic() - claim_started_at) * 1000.0
+            _stage2_log_validation(
+                logger=logger,
+                claim_index=index,
+                claim_total=len(claims),
+                before_count=before_count,
+                after_count=after_count,
+                raw_distances=raw_distances,
+                validated_distances=distances,
+            )
+            _stage2_log_raw_hits(
+                logger=logger,
+                claim_index=index,
+                claim_total=len(claims),
+                documents=documents,
+                metadatas=metadatas,
+                distances=distances,
+                phase="validated",
+            )
             logger.info(
                 "[%s/%s] 检索完成: hits_before=%s hits_after=%s rerank_enabled=%s rerank_applied=%s rerank_fallback=%s rerank_reason=%s rerank_provider=%s",
                 index,
@@ -1185,6 +1484,17 @@ def run_stage2_targeted_retrieval(
                 int(bool(rerank_meta.get("fallback"))),
                 str(rerank_meta.get("reason") or ""),
                 str(rerank_meta.get("provider") or ""),
+            )
+            logger.info(
+                "[%s/%s] Stage2 DOI diagnostics: raw_meta=%s raw_dois=%s validated_meta=%s validated_dois=%s "
+                "doi_sample=%s",
+                index,
+                len(claims),
+                len(raw_metadatas),
+                len(raw_dois),
+                len(metadatas),
+                len(validated_dois),
+                validated_dois[:8],
             )
             logger.info(
                 "stage2 claim timing claim=%s trace_label=claim_%s ai_query_ms=%.2f query_expansion_ms=%.2f search_total_ms=%.2f relevance_validation_ms=%.2f claim_total_ms=%.2f query_chars=%s hits_before=%s hits_after=%s",
@@ -1416,6 +1726,25 @@ def run_stage2_targeted_retrieval(
         rerank_summary["applied_claims"],
         rerank_summary["fallback_claims"],
     )
+    if _stage2_diag_enabled():
+        stats = _stage2_distance_summary(unique_distances)
+        doi_sample = _extract_dois_from_metadatas(unique_metadatas)[:10]
+        ok_claims = sum(1 for output in claim_outputs if output.get("ok"))
+        empty_claims = sum(1 for output in claim_outputs if output.get("ok") and not list(output.get("documents") or []))
+        logger.info(
+            "Stage2 diagnostic summary claim_outputs=%s ok_claims=%s empty_claims=%s total_docs=%s "
+            "unique_docs=%s distance_count=%s distance_min=%s distance_max=%s distance_avg=%s doi_sample=%s",
+            len(claim_outputs),
+            ok_claims,
+            empty_claims,
+            len(all_documents),
+            len(unique_documents),
+            stats["count"],
+            stats["min"],
+            stats["max"],
+            stats["avg"],
+            doi_sample,
+        )
 
     result = {
         "success": True,

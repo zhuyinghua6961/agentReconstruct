@@ -4,12 +4,17 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Optional
+
+from app.integrations.llm.thinking import auth_headers
 
 try:
     import requests
 except Exception:  # pragma: no cover - covered by fallback tests via injected module
     requests = None
+
+RERANK_PROVIDER_NAME = "openai_compatible"
 
 
 def _fallback_result(
@@ -38,11 +43,27 @@ def _clamp_top_n(top_n: int, document_count: int) -> int:
     return min(max(int(top_n), 1), document_count)
 
 
+def _rerank_auth_mode() -> str:
+    return str(os.getenv("RERANK_AUTH_MODE") or "bearer").strip()
+
+
 def _build_headers(*, api_key: str, include_auth: bool) -> Dict[str, str]:
-    headers = {"Content-Type": "application/json"}
-    if include_auth and api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    return headers
+    if not include_auth:
+        return {"Content-Type": "application/json"}
+    return auth_headers(api_key, auth_mode=_rerank_auth_mode())
+
+
+def _normalize_rerank_endpoint(base_url: str) -> str:
+    value = str(base_url or "").strip().rstrip("/")
+    if not value:
+        return value
+    for suffix in ("/v1/rerank", "/rerank"):
+        if value.endswith(suffix):
+            value = value[: -len(suffix)].rstrip("/")
+            break
+    if not value.endswith("/v1"):
+        value = value.rstrip("/") + "/v1"
+    return value.rstrip("/") + "/rerank"
 
 
 def rerank_documents(
@@ -53,7 +74,7 @@ def rerank_documents(
     top_n: int = 20,
     provider: str = "dashscope",
     api_key: str = "",
-    model: str = "qwen3-vl-rerank",
+    model: str = "",
     base_url: str = "",
     timeout_seconds: float = 20.0,
     logger: Any = None,
@@ -61,23 +82,14 @@ def rerank_documents(
     session: Any = None,
 ) -> Dict[str, Any]:
     """Rerank candidate docs with graceful fallback."""
+    del provider
     if not documents:
         return _fallback_result(
             documents=[],
             metadatas=[],
             top_n=0,
             reason="empty_documents",
-            provider=provider,
-        )
-
-    provider_norm = str(provider or "none").strip().lower()
-    if provider_norm in {"none", "off", "disabled"}:
-        return _fallback_result(
-            documents=documents,
-            metadatas=metadatas,
-            top_n=top_n,
-            reason="provider_disabled",
-            provider=provider_norm,
+            provider=RERANK_PROVIDER_NAME,
         )
 
     req = session or requests_module or requests
@@ -87,62 +99,35 @@ def rerank_documents(
             metadatas=metadatas,
             top_n=top_n,
             reason="requests_unavailable",
-            provider=provider_norm,
+            provider=RERANK_PROVIDER_NAME,
         )
 
-    if provider_norm not in {"dashscope", "local"}:
+    endpoint = _normalize_rerank_endpoint(base_url)
+    if not endpoint or not str(model or "").strip():
         return _fallback_result(
             documents=documents,
             metadatas=metadatas,
             top_n=top_n,
-            reason="provider_unsupported",
-            provider=provider_norm,
-        )
-
-    if provider_norm == "dashscope" and not api_key:
-        return _fallback_result(
-            documents=documents,
-            metadatas=metadatas,
-            top_n=top_n,
-            reason="api_key_missing",
-            provider=provider_norm,
+            reason="provider_disabled",
+            provider=RERANK_PROVIDER_NAME,
         )
 
     docs_to_rerank = list(documents)
     metas_to_rerank = list(metadatas or [])
     requested_top_n = _clamp_top_n(top_n, len(docs_to_rerank))
-    if provider_norm == "local":
-        endpoint = str(base_url or "http://localhost:8084").rstrip("/") + "/v1/rerank"
-        payload = {
-            "model": model,
-            "query": query,
-            "documents": docs_to_rerank,
-            "top_n": requested_top_n,
-        }
-        headers = _build_headers(api_key=api_key, include_auth=bool(api_key))
-    else:
-        endpoint = (
-            str(base_url or "https://dashscope.aliyuncs.com").rstrip("/")
-            + "/api/v1/services/rerank/text-rerank/text-rerank"
-        )
-        payload = {
-            "model": model,
-            "input": {
-                "query": query,
-                "documents": docs_to_rerank,
-            },
-            "parameters": {
-                "return_documents": False,
-                "top_n": requested_top_n,
-            },
-        }
-        headers = _build_headers(api_key=api_key, include_auth=True)
+    payload = {
+        "model": model,
+        "query": query,
+        "documents": docs_to_rerank,
+        "top_n": requested_top_n,
+    }
+    headers = _build_headers(api_key=api_key, include_auth=bool(api_key))
 
     try:
         response = req.post(endpoint, headers=headers, json=payload, timeout=timeout_seconds)
         response.raise_for_status()
         data = response.json() if hasattr(response, "json") else {}
-        items = data.get("results", []) if provider_norm == "local" else data.get("output", {}).get("results", [])
+        items = data.get("results", [])
 
         ranked_docs: List[str] = []
         ranked_metas: List[Dict[str, Any]] = []
@@ -167,7 +152,7 @@ def rerank_documents(
                 metadatas=metadatas,
                 top_n=top_n,
                 reason="empty_rerank_result",
-                provider=provider_norm,
+                provider=RERANK_PROVIDER_NAME,
             )
 
         return {
@@ -176,12 +161,12 @@ def rerank_documents(
             "rerank_scores": ranked_scores,
             "fallback": False,
             "fallback_reason": "",
-            "provider": provider_norm,
+            "provider": RERANK_PROVIDER_NAME,
         }
     except Exception as exc:
         if logger is not None:
             try:
-                logger.warning(f"rerank failed ({provider_norm}), fallback to vector order: {exc}")
+                logger.warning(f"rerank failed ({RERANK_PROVIDER_NAME}), fallback to vector order: {exc}")
             except Exception:
                 pass
         return _fallback_result(
@@ -189,7 +174,7 @@ def rerank_documents(
             metadatas=metadatas,
             top_n=top_n,
             reason="request_failed",
-            provider=provider_norm,
+            provider=RERANK_PROVIDER_NAME,
         )
 
 

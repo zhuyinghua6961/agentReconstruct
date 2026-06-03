@@ -12,22 +12,16 @@ from pathlib import Path
 from typing import Any
 
 import config
+from agent_core.openai_compat import OpenAICompatibleChatClient
 from agent_core.thinking import (
     LLM_STAGE_DOCUMENT_SUMMARY,
     LLM_STAGE_TRANSLATION,
-    local_sdk_api_key,
     merge_extra_body,
     resolve_thinking_controls,
 )
 from ingest.vector_store import get_collection_count
 from server.services.pdf_extractor import extract_pdf_text as extract_pdf_text_impl
 from server.storage.paper_storage import build_paper_filename, ensure_local_paper_pdf, normalize_doi, paper_pdf_exists
-
-try:
-    from openai import OpenAI
-except Exception:  # pragma: no cover
-    OpenAI = None
-
 
 class DocumentsService:
     def __init__(self) -> None:
@@ -55,12 +49,14 @@ class DocumentsService:
         )
 
     def _openai_client(self):
-        if OpenAI is None:
-            return None
         api_key = self._llm_api_key()
         if not self._llm_base_url() or not self._llm_model():
             return None
-        return OpenAI(api_key=local_sdk_api_key(api_key), base_url=self._llm_base_url())
+        return OpenAICompatibleChatClient(
+            api_key=api_key,
+            base_url=str(self._llm_base_url() or ""),
+            auth_mode=getattr(config, "LLM_AUTH_MODE", None),
+        )
 
     @staticmethod
     def _disabled_llm_kwargs(*, stage: str, max_tokens: int | None = None) -> dict[str, Any]:

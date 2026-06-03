@@ -17,10 +17,10 @@ import time
 from typing import Optional
 
 import tiktoken
-from openai import OpenAI
 
 import config
-from agent_core.thinking import local_sdk_api_key
+from agent_core.openai_compat import OpenAICompatibleEmbeddingClient
+from agent_core.thinking import resolve_auth_mode
 from agent_core.upstream_auth_logging import (
     log_upstream_auth_failure,
     log_upstream_auth_success_once,
@@ -45,17 +45,25 @@ def _require_api_key(*, api_key: str, env_name: str) -> str:
     raise RuntimeError(f"{env_name} is not configured")
 
 
-def get_embedding_client() -> OpenAI:
+def _embedding_auth_mode() -> str:
+    return str(getattr(config, "HIGHTHINKINGQA_EMBEDDING_AUTH_MODE", "bearer") or "bearer").strip()
+
+
+def get_embedding_client() -> OpenAICompatibleEmbeddingClient:
     """
     获取 Embedding API 客户端。
     max_retries=0 禁用 SDK 内置重试（我们自己做重试控制）。
     """
-    api_key = _require_api_key(api_key=config.EMBEDDING_API_KEY, env_name="HIGHTHINKINGQA_EMBEDDING_API_KEY")
-    return OpenAI(
-        api_key=local_sdk_api_key(api_key),
+    auth_mode = _embedding_auth_mode()
+    api_key = str(config.EMBEDDING_API_KEY or "").strip()
+    if resolve_auth_mode(auth_mode) != "none":
+        api_key = _require_api_key(api_key=api_key, env_name="HIGHTHINKINGQA_EMBEDDING_API_KEY")
+    return OpenAICompatibleEmbeddingClient(
+        api_key=api_key,
+        auth_mode=auth_mode,
         base_url=config.EMBEDDING_BASE_URL,
         max_retries=0,
-        timeout=30.0,
+        timeout_seconds=30.0,
     )
 
 
@@ -77,7 +85,7 @@ def _truncate_text(text: str, max_tokens: int = None) -> str:
 
 def embed_texts(
     texts: list[str],
-    client: Optional[OpenAI] = None,
+    client: Optional[OpenAICompatibleEmbeddingClient] = None,
 ) -> list[list[float]]:
     """
     批量向量化文本。
@@ -148,6 +156,7 @@ def embed_texts(
                             model=config.EMBEDDING_MODEL,
                             base_url=config.EMBEDDING_BASE_URL,
                             api_key=config.EMBEDDING_API_KEY,
+                            auth_mode=_embedding_auth_mode(),
                             exc=e,
                         )
                         raise
@@ -158,6 +167,7 @@ def embed_texts(
                     model=config.EMBEDDING_MODEL,
                     base_url=config.EMBEDDING_BASE_URL,
                     api_key=config.EMBEDDING_API_KEY,
+                    auth_mode=_embedding_auth_mode(),
                 )
                 batch_embeddings = [item.embedding for item in response.data]
                 for orig_idx, emb in zip(batch_indices, batch_embeddings):
@@ -203,7 +213,7 @@ def embed_texts(
     return all_embeddings
 
 
-def embed_single(text: str, client: Optional[OpenAI] = None) -> list[float]:
+def embed_single(text: str, client: Optional[OpenAICompatibleEmbeddingClient] = None) -> list[float]:
     """
     向量化单个文本。
 

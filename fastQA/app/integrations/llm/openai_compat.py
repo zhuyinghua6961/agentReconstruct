@@ -10,7 +10,8 @@ from typing import Any, Iterable, Iterator, Mapping
 from app.core.logging import beijing_now_iso
 from app.integrations.llm.thinking import (
     LLM_STAGE_STAGE4_FINAL_ANSWER,
-    normalize_bearer_api_key,
+    auth_headers,
+    resolve_auth_mode,
     resolve_thinking_controls,
 )
 from app.integrations.llm.upstream_auth_logging import (
@@ -235,14 +236,10 @@ class _OpenAICompatBase(_TimingMixin):
         )
 
     def _headers(self) -> dict[str, str]:
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-        }
-        api_key = normalize_bearer_api_key(self._cfg.api_key)
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        return headers
+        return auth_headers(self._cfg.api_key, accept="application/json, text/event-stream")
+
+    def _auth_mode(self) -> str:
+        return resolve_auth_mode()
 
     def _stream_read_timeout_seconds(self, explicit: float | None) -> float | None:
         if explicit is not None:
@@ -290,6 +287,7 @@ class _OpenAICompatBase(_TimingMixin):
             base_url=self._cfg.endpoint,
             api_key=self._cfg.api_key,
             status_code=status_code,
+            auth_mode=self._auth_mode(),
         )
 
     def _log_auth_failure(self, *, model: str, status_code: Any = None, exc: Exception | None = None) -> None:
@@ -304,6 +302,7 @@ class _OpenAICompatBase(_TimingMixin):
             api_key=self._cfg.api_key,
             status_code=status_code,
             exc=exc,
+            auth_mode=self._auth_mode(),
         )
 
     def _is_pool_timeout(self, exc: Exception) -> bool:

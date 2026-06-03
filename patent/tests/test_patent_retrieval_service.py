@@ -16,7 +16,7 @@ from server.patent.retrieval_models import (
     PatentDescriptionSnippet,
 )
 from server.patent.retrieval_service import PatentRetrievalService
-from server.patent.runtime import PatentRuntime
+from server.patent.runtime import PatentEmbeddingClient, PatentRuntime
 from server.patent.stages.retrieval import run_stage2_targeted_retrieval
 from server.services.execution_cache import ExecutionCache
 
@@ -846,6 +846,126 @@ def test_targeted_retrieval_uses_oldcode_patent_dual_search_shape(monkeypatch):
     ]
 
 
+def test_targeted_retrieval_logs_detailed_stage2_diagnostics(monkeypatch, caplog):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "false")
+    monkeypatch.setenv("QA_STAGE2_DIAGNOSTIC_LOG", "1")
+    monkeypatch.setenv("QA_STAGE2_LOG_QUERY_DETAILS", "1")
+    monkeypatch.setenv("QA_STAGE2_LOG_HIT_DETAILS", "1")
+    monkeypatch.setenv("QA_STAGE2_LOG_HIT_MAX", "3")
+
+    service = PatentRetrievalService(
+        identity_registry={"CN123456789A": "CN123456789A"},
+        catalog_records=_catalog(),
+        retrieval_version="retrieval-v2",
+        catalog_index_version="catalog-v2",
+        abstract_vector_search=lambda question, top_k: [
+            {
+                "patent_id": "CN123456789A",
+                "distance": 0.08,
+                "document": "一种电池热管理系统摘要。",
+            }
+        ],
+        chunk_vector_search=lambda question, candidate_patent_ids, top_k: [
+            {
+                "patent_id": "CN123456789A",
+                "distance": 0.03,
+                "source_file": "说明书.json",
+                "json_stem": "CN123456789A",
+                "chunk_index": 7,
+                "document": "实施例显示该系统能够平衡电池温度。",
+            }
+        ],
+        query_expander=lambda query: query,
+    )
+
+    with caplog.at_level(logging.INFO, logger="patent.retrieval"):
+        payload = service.targeted_retrieve(
+            retrieval_claims=[PatentRetrievalClaim(claim="电池热管理 温度平衡", keywords=["电池", "热管理"])],
+            user_question="如何评估电池热管理系统的温度平衡效果？",
+            frozen_claim_queries=[["电池热管理 温度平衡"]],
+        )
+
+    assert payload["source_ids"] == ["CN123456789A"]
+    messages = [record.message for record in caplog.records if record.name == "patent.retrieval"]
+    assert any(
+        "Patent Stage2 query encoding diagnostic" in message
+        and "query_chars=" in message
+        and "utf8_bytes=" in message
+        and "chinese_chars=" in message
+        and "has_replacement_char=false" in message
+        and "has_mojibake_pattern=false" in message
+        for message in messages
+    )
+    assert any(
+        "Patent Stage2 vector search request" in message
+        and "channel=abstract" in message
+        and "top_k=" in message
+        for message in messages
+    )
+    assert any(
+        "Patent Stage2 raw hit detail" in message
+        and "channel=abstract" in message
+        and "rank=1" in message
+        and "patent_id=CN123456789A" in message
+        and "distance=0.08" in message
+        for message in messages
+    )
+    assert any(
+        "Patent Stage2 raw hit detail" in message
+        and "channel=chunk" in message
+        and "rank=1" in message
+        and "patent_id=CN123456789A" in message
+        and "distance=0.03" in message
+        for message in messages
+    )
+    assert any(
+        "Patent Stage2 diagnostic summary" in message
+        and "generated_queries=1" in message
+        and "selected_sources=1" in message
+        and "source_ids=['CN123456789A']" in message
+        for message in messages
+    )
+
+
+def test_patent_embedding_client_logs_embedding_diagnostics(monkeypatch, caplog):
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": [{"embedding": [0.1, 0.2, 0.3]}]}
+
+    class _HttpClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def post(self, *args, **kwargs):
+            return _Response()
+
+        def close(self):
+            return None
+
+    monkeypatch.setenv("EMBEDDING_MODEL_TYPE", "remote")
+    monkeypatch.setenv("EMBEDDING_API_URL", "http://embedding.example/v1/embeddings")
+    monkeypatch.setenv("EMBEDDING_API_MODEL", "bge-test")
+    monkeypatch.setattr("server.patent.runtime.httpx.Client", _HttpClient)
+
+    with caplog.at_level(logging.INFO, logger="patent.runtime"):
+        embeddings = PatentEmbeddingClient().encode(["电池热管理"])
+
+    assert embeddings == [[0.1, 0.2, 0.3]]
+    messages = [record.message for record in caplog.records if record.name == "patent.runtime"]
+    assert any(
+        "patent embedding diagnostic" in message
+        and "mode=remote" in message
+        and "model=bge-test" in message
+        and "input_count=1" in message
+        and "embedding_dim=3" in message
+        and "empty_embedding=false" in message
+        for message in messages
+    )
+
+
 def test_targeted_retrieval_global_chunk_when_abstract_has_no_patent_ids(monkeypatch):
     monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "false")
     chunk_calls: list[tuple[list[str] | None, int]] = []
@@ -1290,6 +1410,7 @@ def test_targeted_retrieval_parallel_worker_one_falls_back_to_serial():
             {"patent_id": "CN115132975B", "distance": 0.10, "document": "通过 LMFP/LFP/三元复配改善充电安全与低 SOC 放电功率。"},
         ],
         chunk_vector_search=lambda question, candidate_patent_ids, top_k: [],
+        query_expander=lambda query: query,
     )
 
     serial_payload = service.targeted_retrieve(
@@ -2291,6 +2412,8 @@ def test_targeted_retrieval_keeps_explicit_patent_ids_authoritative_even_when_ve
 def test_stage2_convergence_rerank_failure_falls_back_with_metadata(monkeypatch):
     monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "true")
     monkeypatch.setenv("PATENT_STAGE2_RERANK_ENABLED", "true")
+    monkeypatch.setenv("RERANK_BASE_URL", "https://rerank.example/v1")
+    monkeypatch.setenv("RERANK_MODEL", "rerank-model")
 
     service = PatentRetrievalService(
         catalog_records=_catalog(),
@@ -2319,6 +2442,8 @@ def test_stage2_convergence_rerank_failure_falls_back_with_metadata(monkeypatch)
 def test_stage2_convergence_rerank_adapter_fallback_is_not_reported_as_applied(monkeypatch):
     monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "true")
     monkeypatch.setenv("PATENT_STAGE2_RERANK_ENABLED", "true")
+    monkeypatch.setenv("RERANK_BASE_URL", "https://rerank.example/v1")
+    monkeypatch.setenv("RERANK_MODEL", "rerank-model")
 
     service = PatentRetrievalService(
         catalog_records=_catalog(),
@@ -2357,6 +2482,8 @@ def test_stage2_convergence_rerank_adapter_fallback_is_not_reported_as_applied(m
 def test_stage2_convergence_rerank_success_reorders_and_limits_patents(monkeypatch):
     monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "true")
     monkeypatch.setenv("PATENT_STAGE2_RERANK_ENABLED", "true")
+    monkeypatch.setenv("RERANK_BASE_URL", "https://rerank.example/v1")
+    monkeypatch.setenv("RERANK_MODEL", "rerank-model")
     monkeypatch.setenv("PATENT_STAGE2_RERANK_TOP_PATENTS", "1")
     monkeypatch.setenv("PATENT_STAGE2_MAX_GLOBAL_PATENTS", "1")
 
@@ -2444,6 +2571,7 @@ def test_build_default_runtime_wires_stage2_rerank_fn_from_env(monkeypatch, tmp_
 
     monkeypatch.setenv("RERANK_PROVIDER", "dashscope")
     monkeypatch.setenv("RERANK_API_KEY", "rerank-key")
+    monkeypatch.setenv("RERANK_BASE_URL", "https://rerank.example/v1")
     monkeypatch.setenv("RERANK_MODEL", "gte-rerank-v2")
     archive_root = tmp_path / "archive"
     archive_root.mkdir()

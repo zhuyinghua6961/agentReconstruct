@@ -73,6 +73,22 @@ def _should_cancelled(should_cancel: Callable[[], bool] | None) -> bool:
         return False
 
 
+def _short_preview(value: Any, *, limit: int = 160) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return f"{text[: max(1, limit - 1)].rstrip()}…"
+
+
+def _stage3_diag_enabled() -> bool:
+    return env_bool("QA_STAGE3_DIAGNOSTIC_LOG", True)
+
+
+def _evidence_counts(pdf_chunks: dict[str, list[dict[str, Any]]] | None) -> tuple[int, int]:
+    chunks_by_source = dict(pdf_chunks or {})
+    return len(chunks_by_source), sum(len(chunks or []) for chunks in chunks_by_source.values())
+
+
 
 
 def _final_query_mode(*, provided: Any, skip_pdf: bool) -> str:
@@ -790,7 +806,26 @@ class GenerationPipelineOrchestrator:
         if comparison_plan.get("enabled"):
             retrieval_claims = build_retrieval_claims_from_comparison_plan(comparison_plan) + build_retrieval_claims_from_answer_plan(answer_plan)
         stage1_query_focus_terms = effective_query_focus_terms_for_stage2(stage1_result)
+        logger.info(
+            "fastqa stage1 normalized deep_answer_chars=%s retrieval_claims=%s answer_plan_keys=%s "
+            "comparison_enabled=%s query_focus_terms=%s question=%s",
+            len(deep_answer),
+            len(retrieval_claims),
+            sorted(answer_plan.keys()) if isinstance(answer_plan, dict) else [],
+            bool(comparison_plan.get("enabled")),
+            stage1_query_focus_terms,
+            _short_preview(question),
+        )
         if not retrieval_claims:
+            logger.warning(
+                "fastqa pipeline short-circuit reason=stage1_no_retrieval_claims deep_answer_chars=%s "
+                "answer_plan_keys=%s comparison_enabled=%s fallback=%s question=%s",
+                len(deep_answer),
+                sorted(answer_plan.keys()) if isinstance(answer_plan, dict) else [],
+                bool(comparison_plan.get("enabled")),
+                str(stage1_result.get("fallback") or ""),
+                _short_preview(question),
+            )
             return self._fallback_result(
                 final_answer=deep_answer,
                 query_mode="生成驱动检索（仅预回答）",
@@ -804,6 +839,13 @@ class GenerationPipelineOrchestrator:
                 },
             )
 
+        logger.info(
+            "fastqa entering stage2.run retrieval_claims=%s query_focus_terms=%s comparison_enabled=%s question=%s",
+            len(retrieval_claims),
+            stage1_query_focus_terms,
+            bool(comparison_plan.get("enabled")),
+            _short_preview(question),
+        )
         stage2_result = self._timed(
             timings,
             "stage2",
@@ -820,7 +862,22 @@ class GenerationPipelineOrchestrator:
                 query_focus_terms=stage1_query_focus_terms,
             ),
         )
+        logger.info(
+            "fastqa stage2 returned success=%s unique_count=%s total_count=%s claim_groups=%s question=%s",
+            stage2_result.get("success"),
+            stage2_result.get("unique_count"),
+            stage2_result.get("total_count"),
+            len(dict(stage2_result.get("claim_to_results") or {})),
+            _short_preview(question),
+        )
         if not stage2_result.get("success"):
+            logger.warning(
+                "fastqa pipeline fallback reason=stage2_failed error=%s cancelled=%s retrieval_claims=%s question=%s",
+                str(stage2_result.get("error") or ""),
+                bool(stage2_result.get("cancelled")),
+                len(retrieval_claims),
+                _short_preview(question),
+            )
             return self._fallback_result(
                 final_answer=deep_answer,
                 query_mode="生成驱动检索（检索失败，仅预回答）",
@@ -863,6 +920,16 @@ class GenerationPipelineOrchestrator:
             dois = selected_dois
             apply_selected_dois_to_comparison_groups(retrieval_results=stage2_result, selected_dois=dois)
         if not dois:
+            logger.warning(
+                "fastqa pipeline fallback reason=stage2_no_doi unique_count=%s total_count=%s "
+                "all_stage2_dois=%s doi_source=%s query_focus_terms=%s question=%s",
+                stage2_result.get("unique_count"),
+                stage2_result.get("total_count"),
+                len(all_stage2_dois),
+                doi_source,
+                stage1_query_focus_terms,
+                _short_preview(question),
+            )
             return self._fallback_result(
                 final_answer=deep_answer,
                 query_mode="生成驱动检索（无DOI，仅预回答）",
@@ -876,6 +943,19 @@ class GenerationPipelineOrchestrator:
                     "doi_source": doi_source,
                     "comparison_plan": comparison_plan,
                 },
+            )
+
+        if _stage3_diag_enabled():
+            logger.info(
+                "fastqa stage3 handoff doi_count=%s all_stage2_dois=%s doi_source=%s doi_sample=%s "
+                "stage2_unique_count=%s stage2_total_count=%s query_focus_terms=%s",
+                len(dois),
+                len(all_stage2_dois),
+                doi_source,
+                list(dois or [])[:10],
+                stage2_result.get("unique_count"),
+                stage2_result.get("total_count"),
+                stage1_query_focus_terms,
             )
 
         md_expansion_result = {
@@ -903,6 +983,15 @@ class GenerationPipelineOrchestrator:
         skip_decision = self.evaluate_stage3_pdf_skip_fn(md_expansion_result=md_expansion_result)
         skip_pdf = bool(skip_decision.get("should_skip"))
         skip_reason = str(skip_decision.get("reason") or "")
+        if _stage3_diag_enabled():
+            logger.info(
+                "fastqa stage3 skip decision skip_pdf=%s skip_reason=%s decision=%s md_applied=%s md_stats=%s",
+                skip_pdf,
+                skip_reason,
+                dict(skip_decision or {}),
+                bool(md_expansion_result.get("applied")),
+                dict(md_expansion_result.get("stats") or {}),
+            )
 
         if skip_pdf:
             pdf_chunks = dict(md_expansion_result.get("md_chunks_by_doi") or {})
@@ -925,12 +1014,34 @@ class GenerationPipelineOrchestrator:
                     md_chunks=md_expansion_result.get("md_chunks_by_doi", {}),
                 )
 
+        if _stage3_diag_enabled():
+            raw_source_count, raw_chunk_count = _evidence_counts(pdf_chunks)
+            logger.info(
+                "fastqa stage3 raw completed skip_pdf=%s skip_reason=%s source_count=%s chunk_count=%s "
+                "stage25_applied=%s",
+                skip_pdf,
+                skip_reason,
+                raw_source_count,
+                raw_chunk_count,
+                bool(md_expansion_result.get("applied")),
+            )
+        merge_before_source_count, merge_before_chunk_count = _evidence_counts(pdf_chunks)
         pdf_chunks = self._merge_stage2_into_evidence(
             pdf_chunks=pdf_chunks,
             retrieval_results=stage2_result,
             dois=dois,
             logger=logger,
         )
+        if _stage3_diag_enabled():
+            merge_after_source_count, merge_after_chunk_count = _evidence_counts(pdf_chunks)
+            logger.info(
+                "fastqa stage3 evidence merge completed before_sources=%s before_chunks=%s "
+                "after_sources=%s after_chunks=%s",
+                merge_before_source_count,
+                merge_before_chunk_count,
+                merge_after_source_count,
+                merge_after_chunk_count,
+            )
 
         evidence_rerank_result = self._timed(
             timings,
@@ -944,6 +1055,14 @@ class GenerationPipelineOrchestrator:
             ),
         )
         pdf_chunks = dict(evidence_rerank_result.get("pdf_chunks") or pdf_chunks)
+        if _stage3_diag_enabled():
+            rerank_source_count, rerank_chunk_count = _evidence_counts(pdf_chunks)
+            logger.info(
+                "fastqa stage35 completed stats=%s source_count=%s chunk_count=%s",
+                dict(evidence_rerank_result.get("stats") or {}),
+                rerank_source_count,
+                rerank_chunk_count,
+            )
 
         return {
             "timings": timings,
@@ -1132,12 +1251,25 @@ class GenerationPipelineOrchestrator:
             retrieval_claims = build_retrieval_claims_from_comparison_plan(comparison_plan) + build_retrieval_claims_from_answer_plan(answer_plan)
         stage1_query_focus_terms = effective_query_focus_terms_for_stage2(stage1_result)
         logger.info(
-            "fastqa stream stage1 normalized deep_answer_chars=%s retrieval_claims=%s question=%s",
+            "fastqa stream stage1 normalized deep_answer_chars=%s retrieval_claims=%s answer_plan_keys=%s "
+            "comparison_enabled=%s query_focus_terms=%s question=%s",
             len(deep_answer),
             len(retrieval_claims),
-            question[:120],
+            sorted(answer_plan.keys()) if isinstance(answer_plan, dict) else [],
+            bool(comparison_plan.get("enabled")),
+            stage1_query_focus_terms,
+            _short_preview(question),
         )
         if not retrieval_claims:
+            logger.warning(
+                "fastqa stream short-circuit reason=stage1_no_retrieval_claims deep_answer_chars=%s "
+                "answer_plan_keys=%s comparison_enabled=%s fallback=%s question=%s",
+                len(deep_answer),
+                sorted(answer_plan.keys()) if isinstance(answer_plan, dict) else [],
+                bool(comparison_plan.get("enabled")),
+                str(stage1_result.get("fallback") or ""),
+                _short_preview(question),
+            )
             yield from iter_result_events(
                 result=self._fallback_result(
                     final_answer=deep_answer,
@@ -1183,6 +1315,13 @@ class GenerationPipelineOrchestrator:
             question[:120],
         )
         if not stage2_result.get("success"):
+            logger.warning(
+                "fastqa stream fallback reason=stage2_failed error=%s cancelled=%s retrieval_claims=%s question=%s",
+                str(stage2_result.get("error") or ""),
+                bool(stage2_result.get("cancelled")),
+                len(retrieval_claims),
+                _short_preview(question),
+            )
             yield from iter_result_events(
                 result=self._fallback_result(
                     final_answer=deep_answer,
@@ -1230,6 +1369,16 @@ class GenerationPipelineOrchestrator:
             dois = selected_dois
             apply_selected_dois_to_comparison_groups(retrieval_results=stage2_result, selected_dois=dois)
         if not dois:
+            logger.warning(
+                "fastqa stream fallback reason=stage2_no_doi unique_count=%s total_count=%s "
+                "all_stage2_dois=%s doi_source=%s query_focus_terms=%s question=%s",
+                stage2_result.get("unique_count"),
+                stage2_result.get("total_count"),
+                len(all_stage2_dois),
+                doi_source,
+                stage1_query_focus_terms,
+                _short_preview(question),
+            )
             yield from iter_result_events(
                 result=self._fallback_result(
                     final_answer=deep_answer,
@@ -1249,6 +1398,19 @@ class GenerationPipelineOrchestrator:
                 chunk_size=chunk_size,
             )
             return
+
+        if _stage3_diag_enabled():
+            logger.info(
+                "fastqa stream stage3 handoff doi_count=%s all_stage2_dois=%s doi_source=%s doi_sample=%s "
+                "stage2_unique_count=%s stage2_total_count=%s query_focus_terms=%s",
+                len(dois),
+                len(all_stage2_dois),
+                doi_source,
+                list(dois or [])[:10],
+                stage2_result.get("unique_count"),
+                stage2_result.get("total_count"),
+                stage1_query_focus_terms,
+            )
 
         md_expansion_result = {
             "enabled": False,
@@ -1293,6 +1455,15 @@ class GenerationPipelineOrchestrator:
         skip_decision = self.evaluate_stage3_pdf_skip_fn(md_expansion_result=md_expansion_result)
         skip_pdf = bool(skip_decision.get("should_skip"))
         skip_reason = str(skip_decision.get("reason") or "")
+        if _stage3_diag_enabled():
+            logger.info(
+                "fastqa stream stage3 skip decision skip_pdf=%s skip_reason=%s decision=%s md_applied=%s md_stats=%s",
+                skip_pdf,
+                skip_reason,
+                dict(skip_decision or {}),
+                bool(md_expansion_result.get("applied")),
+                dict(md_expansion_result.get("stats") or {}),
+            )
         if skip_pdf:
             pdf_chunks = dict(md_expansion_result.get("md_chunks_by_doi") or {})
             timings["stage3"] = 0.0
@@ -1330,12 +1501,34 @@ class GenerationPipelineOrchestrator:
                     md_chunks=md_expansion_result.get("md_chunks_by_doi", {}),
                 )
 
+        if _stage3_diag_enabled():
+            raw_source_count, raw_chunk_count = _evidence_counts(pdf_chunks)
+            logger.info(
+                "fastqa stream stage3 raw completed skip_pdf=%s skip_reason=%s source_count=%s chunk_count=%s "
+                "stage25_applied=%s",
+                skip_pdf,
+                skip_reason,
+                raw_source_count,
+                raw_chunk_count,
+                bool(md_expansion_result.get("applied")),
+            )
+        merge_before_source_count, merge_before_chunk_count = _evidence_counts(pdf_chunks)
         pdf_chunks = self._merge_stage2_into_evidence(
             pdf_chunks=pdf_chunks,
             retrieval_results=stage2_result,
             dois=dois,
             logger=logger,
         )
+        if _stage3_diag_enabled():
+            merge_after_source_count, merge_after_chunk_count = _evidence_counts(pdf_chunks)
+            logger.info(
+                "fastqa stream stage3 evidence merge completed before_sources=%s before_chunks=%s "
+                "after_sources=%s after_chunks=%s",
+                merge_before_source_count,
+                merge_before_chunk_count,
+                merge_after_source_count,
+                merge_after_chunk_count,
+            )
 
         logger.info(
             "fastqa stream stage3 completed skipped=%s skip_reason=%s pdf_source_count=%s pdf_chunk_count=%s",

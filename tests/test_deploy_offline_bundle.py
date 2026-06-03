@@ -252,7 +252,6 @@ def test_deploy_env_uses_simplified_model_connection_variables() -> None:
         "HIGHTHINKINGQA_EMBEDDING_API_KEY",
         "HIGHTHINKINGQA_EMBEDDING_BASE_URL",
         "HIGHTHINKINGQA_EMBEDDING_MODEL",
-        "RERANK_PROVIDER",
         "RERANK_BASE_URL",
         "RERANK_MODEL",
         "RERANK_API_KEY",
@@ -284,8 +283,8 @@ def test_deploy_env_uses_simplified_model_connection_variables() -> None:
         "EMBEDDING_MODEL_TYPE: remote",
         "EMBEDDING_API_URL: ${QA_EMBEDDING_BASE_URL}",
         "PATENT_EMBEDDING_API_URL: ${QA_EMBEDDING_BASE_URL}",
-        "QA_RETRIEVAL_RERANK_PROVIDER: ${RERANK_PROVIDER}",
-        "PATENT_STAGE2_RERANK_PROVIDER: ${RERANK_PROVIDER}",
+        "QA_RETRIEVAL_RERANK_BASE_URL: ${RERANK_BASE_URL:-}",
+        "PATENT_STAGE2_RERANK_BASE_URL: ${RERANK_BASE_URL:-}",
     ]:
         assert mapping in compose
 
@@ -301,10 +300,9 @@ def test_fastqa_and_patent_receive_runtime_rerank_variables() -> None:
     patent = _service_block(compose, "patent")
 
     for block in [fastqa, patent]:
-        assert _has_env_mapping(block, "RERANK_PROVIDER", "${RERANK_PROVIDER}")
-        assert _has_env_mapping(block, "RERANK_BASE_URL", "${RERANK_BASE_URL}")
-        assert _has_env_mapping(block, "RERANK_MODEL", "${RERANK_MODEL}")
-        assert _has_env_mapping(block, "RERANK_API_KEY", "${RERANK_API_KEY}")
+        assert _has_env_mapping(block, "RERANK_BASE_URL", "${RERANK_BASE_URL:-}")
+        assert _has_env_mapping(block, "RERANK_MODEL", "${RERANK_MODEL:-}")
+        assert _has_env_mapping(block, "RERANK_API_KEY", "${RERANK_API_KEY:-}")
 
 
 def test_patent_receives_minio_originals_configuration() -> None:
@@ -351,23 +349,45 @@ def test_deploy_env_exposes_only_customer_facing_configuration() -> None:
         "JWT_SECRET",
         "PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN",
         "LLM_API_KEY",
+        "LLM_AUTH_MODE",
         "LLM_BASE_URL",
         "LLM_MODEL",
+        "LLM_IS_THINKING_MODEL",
+        "LLM_THINKING_ENABLED",
         "INTENT_MODEL_ENABLED",
         "INTENT_MODEL_API_KEY",
+        "INTENT_MODEL_AUTH_MODE",
         "INTENT_MODEL_BASE_URL",
         "INTENT_MODEL",
         "INTENT_MODEL_TIMEOUT_SECONDS",
+        "QA_STAGE1_LOG_RESPONSE_MAX_CHARS",
+        "QA_STAGE1_LOG_FULL_RESPONSE",
+        "QA_STAGE2_DIAGNOSTIC_LOG",
+        "QA_STAGE2_LOG_QUERY_DETAILS",
+        "QA_STAGE2_LOG_HIT_DETAILS",
+        "QA_STAGE2_LOG_HIT_MAX",
+        "QA_STAGE2_LOG_QUERY_MAX_CHARS",
+        "QA_STAGE3_DIAGNOSTIC_LOG",
+        "QA_STAGE3_LOG_SOURCE_DETAILS",
+        "QA_STAGE3_LOG_CHUNK_DETAILS",
+        "QA_STAGE3_LOG_CHUNK_MAX",
+        "QA_STAGE3_LOG_TEXT_MAX_CHARS",
+        "FASTQA_STAGE2_CHAT_WARMUP_ENABLED",
+        "FASTQA_STAGE2_RERANK_WARMUP_ENABLED",
+        "PDF_QA_WARMUP_ENABLED",
+        "PATENT_PLANNING_HOT_POOL_WARMUP_ENABLED",
         "QA_EMBEDDING_API_KEY",
+        "QA_EMBEDDING_AUTH_MODE",
         "QA_EMBEDDING_BASE_URL",
         "QA_EMBEDDING_MODEL",
         "HIGHTHINKINGQA_EMBEDDING_API_KEY",
+        "HIGHTHINKINGQA_EMBEDDING_AUTH_MODE",
         "HIGHTHINKINGQA_EMBEDDING_BASE_URL",
         "HIGHTHINKINGQA_EMBEDDING_MODEL",
-        "RERANK_PROVIDER",
         "RERANK_BASE_URL",
         "RERANK_MODEL",
         "RERANK_API_KEY",
+        "RERANK_AUTH_MODE",
     }
 
     assert customer_keys == expected_customer_keys

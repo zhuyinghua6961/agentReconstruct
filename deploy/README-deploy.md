@@ -547,29 +547,29 @@ LLM_MODEL=你的模型名
 
 ```bash
 QA_EMBEDDING_API_KEY=
-QA_EMBEDDING_BASE_URL=http://host.docker.internal:8001/v1/embeddings
+QA_EMBEDDING_BASE_URL=http://host.docker.internal:8001/v1
 QA_EMBEDDING_MODEL=bge-local
 ```
 
 说明：
 
 - fastQA 和 patentQA 共用这组 embedding 配置。
-- `QA_EMBEDDING_BASE_URL` 当前按完整 embeddings 接口填写，常见形式是：
+- `QA_EMBEDDING_BASE_URL` 按 OpenAI 兼容 base URL 填到 `/v1`，代码会自动拼 `/embeddings`，常见形式是：
 
 ```text
-http://服务地址:端口/v1/embeddings
+http://服务地址:端口/v1
 ```
 
 如果 embedding 服务部署在宿主机：
 
 ```bash
-QA_EMBEDDING_BASE_URL=http://host.docker.internal:8001/v1/embeddings
+QA_EMBEDDING_BASE_URL=http://host.docker.internal:8001/v1
 ```
 
 如果 embedding 服务部署在另一台机器：
 
 ```bash
-QA_EMBEDDING_BASE_URL=http://192.168.1.20:8001/v1/embeddings
+QA_EMBEDDING_BASE_URL=http://192.168.1.20:8001/v1
 ```
 
 如果接口需要 key，就填：
@@ -617,36 +617,34 @@ https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken
 ### 6.7 rerank 配置
 
 ```bash
-RERANK_PROVIDER=local
-RERANK_BASE_URL=http://host.docker.internal:8084
+RERANK_BASE_URL=http://host.docker.internal:8084/v1
 RERANK_MODEL=qwen3-vl-rerank
 RERANK_API_KEY=
+RERANK_AUTH_MODE=bearer
 ```
 
 说明：
 
 - fastQA 和 patentQA 共用这组 rerank 配置。
-- 如果没有 rerank 服务，先关闭：
+- `RERANK_BASE_URL` 按 OpenAI 兼容 base URL 填到 `/v1`，代码会自动拼 `/rerank`。
+- 如果没有 rerank 服务，`RERANK_BASE_URL` 和 `RERANK_MODEL` 都留空：
 
 ```bash
-RERANK_PROVIDER=none
 RERANK_BASE_URL=
-RERANK_MODEL=qwen3-vl-rerank
+RERANK_MODEL=
 RERANK_API_KEY=
 ```
 
 - 如果 rerank 服务在宿主机：
 
 ```bash
-RERANK_PROVIDER=local
-RERANK_BASE_URL=http://host.docker.internal:8084
+RERANK_BASE_URL=http://host.docker.internal:8084/v1
 ```
 
 - 如果 rerank 服务在其他机器：
 
 ```bash
-RERANK_PROVIDER=local
-RERANK_BASE_URL=http://192.168.1.20:8084
+RERANK_BASE_URL=http://192.168.1.20:8084/v1
 ```
 
 ### 6.8 intent 意图识别模型配置
@@ -1213,7 +1211,7 @@ host.docker.internal
 例如：
 
 ```bash
-QA_EMBEDDING_BASE_URL=http://host.docker.internal:8001/v1/embeddings
+QA_EMBEDDING_BASE_URL=http://host.docker.internal:8001/v1
 ```
 
 如果 embedding 服务在其他服务器，使用那台服务器的 IP。
@@ -1223,15 +1221,15 @@ QA_EMBEDDING_BASE_URL=http://host.docker.internal:8001/v1/embeddings
 如果没有 rerank 服务，先关闭：
 
 ```bash
-RERANK_PROVIDER=none
 RERANK_BASE_URL=
+RERANK_MODEL=
 ```
 
-如果启用 rerank，就必须保证：
+如果启用 rerank，就必须保证 base URL 和模型名都已填写：
 
 ```bash
-RERANK_PROVIDER=local
-RERANK_BASE_URL=http://真实地址:端口
+RERANK_BASE_URL=http://真实地址:端口/v1
+RERANK_MODEL=真实模型名
 ```
 
 改完重启：

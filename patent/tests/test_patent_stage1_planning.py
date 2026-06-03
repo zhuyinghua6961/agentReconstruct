@@ -139,6 +139,69 @@ def test_stage1_planning_falls_back_to_safe_defaults_when_json_is_invalid():
     assert retrieval_plan.candidate_recall_queries == []
 
 
+def test_stage1_planning_logs_structured_quality_and_response_preview(monkeypatch):
+    monkeypatch.setenv("QA_STAGE1_LOG_RESPONSE_MAX_CHARS", "120")
+    monkeypatch.delenv("QA_STAGE1_LOG_FULL_RESPONSE", raising=False)
+    client = _FakeClient(
+        """{
+  "deep_answer": "patent answer body",
+  "retrieval_claims": [
+    {
+      "claim": "钠离子储能在目标窗口内可替代 LFP。",
+      "keywords": ["钠离子电池", "LFP"]
+    }
+  ]
+}"""
+    )
+    logger = _CaptureLogger()
+
+    result = run_stage1_pre_answer_and_planning(
+        user_question="对比钠离子储能替代 LFP 的时间窗口。",
+        client=client,
+        model="gpt-test",
+        logger=logger,
+    )
+
+    assert result["success"] is True
+    messages = [message for _level, message in logger.records]
+    assert any(
+        "patent stage1 structured quality" in message
+        and "json_parsed=true" in message
+        and "schema_valid=true" in message
+        and "retrieval_claims_count=1" in message
+        and "valid_claims_count=1" in message
+        and "stage2_eligible=true" in message
+        for message in messages
+    )
+    assert any("patent stage1 raw response preview" in message and "patent answer body" in message for message in messages)
+
+
+def test_stage1_planning_logs_json_parse_failure_quality_and_response_preview(monkeypatch):
+    monkeypatch.setenv("QA_STAGE1_LOG_RESPONSE_MAX_CHARS", "120")
+    client = _FakeClient("not-json-stage1-answer")
+    logger = _CaptureLogger()
+
+    result = run_stage1_pre_answer_and_planning(
+        user_question="请评估 CN115132975B 的风险与时间窗口。",
+        client=client,
+        model="gpt-test",
+        logger=logger,
+    )
+
+    assert result["success"] is True
+    assert result["fallback"] == "json_parse_failed"
+    messages = [message for _level, message in logger.records]
+    assert any(
+        "patent stage1 structured quality" in message
+        and "json_parsed=false" in message
+        and "schema_valid=false" in message
+        and "fallback=json_parse_failed" in message
+        and "stage2_eligible=false" in message
+        for message in messages
+    )
+    assert any("patent stage1 raw response preview" in message and "not-json-stage1-answer" in message for message in messages)
+
+
 def test_stage1_planning_includes_normalized_context_and_retries_without_response_format():
     client = _ResponseFormatRejectingClient('{"deep_answer":"answer","retrieval_plan":{}}')
 

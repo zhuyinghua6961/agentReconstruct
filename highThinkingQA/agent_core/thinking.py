@@ -11,6 +11,7 @@ LLM_STAGE_DOCUMENT_SUMMARY = "document_summary"
 LOCAL_OPENAI_COMPATIBLE_API_KEY = "local-openai-compatible"
 
 _SAMPLING_KEYS = ("temperature", "top_p", "presence_penalty", "frequency_penalty")
+_AUTH_MODES = {"bearer", "authorization", "x-api-key", "none"}
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,46 @@ def normalize_bearer_api_key(api_key: str | None) -> str:
 
 def local_sdk_api_key(api_key: str | None) -> str:
     return normalize_bearer_api_key(api_key) or LOCAL_OPENAI_COMPATIBLE_API_KEY
+
+
+def _normalize_auth_mode(auth_mode: str | None) -> str:
+    value = str(auth_mode or "").strip().lower().replace("_", "-")
+    if value in {"xapikey", "api-key", "apikey"}:
+        value = "x-api-key"
+    if value in _AUTH_MODES:
+        return value
+    return "bearer"
+
+
+def resolve_auth_mode(auth_mode: str | None = None, *, env_name: str = "LLM_AUTH_MODE", default: str = "bearer") -> str:
+    explicit = str(auth_mode or "").strip()
+    if explicit:
+        return _normalize_auth_mode(explicit)
+    raw = str(os.getenv(env_name, "") or "").strip()
+    if not raw and env_name != "LLM_AUTH_MODE":
+        raw = str(os.getenv("LLM_AUTH_MODE", "") or "").strip()
+    return _normalize_auth_mode(raw or default)
+
+
+def auth_headers(
+    api_key: str | None,
+    *,
+    accept: str | None = None,
+    auth_mode: str | None = None,
+    auth_mode_env: str = "LLM_AUTH_MODE",
+) -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if accept:
+        headers["Accept"] = accept
+    key = normalize_bearer_api_key(api_key)
+    mode = resolve_auth_mode(auth_mode, env_name=auth_mode_env)
+    if key and mode == "bearer":
+        headers["Authorization"] = f"Bearer {key}"
+    elif key and mode == "authorization":
+        headers["Authorization"] = key
+    elif key and mode == "x-api-key":
+        headers["X-API-Key"] = key
+    return headers
 
 
 def resolve_thinking_controls(

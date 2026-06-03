@@ -100,6 +100,7 @@ def test_intent_detect_uses_dedicated_endpoint_when_key_is_configured(monkeypatc
     monkeypatch.setenv("INTENT_MODEL_API_KEY", "intent-key")
     monkeypatch.setenv("INTENT_MODEL_BASE_URL", "https://intent.example/v1")
     monkeypatch.setenv("INTENT_MODEL", "intent-model")
+    monkeypatch.setenv("INTENT_MODEL_AUTH_MODE", "authorization")
     monkeypatch.setattr(idetect.httpx, "post", _post)
     primary_client = MagicMock()
     primary_client.chat.completions.create.side_effect = AssertionError("primary client should not be used")
@@ -109,10 +110,35 @@ def test_intent_detect_uses_dedicated_endpoint_when_key_is_configured(monkeypatc
     assert r["ok"] is True
     assert r["intent_tag"] == "characterization"
     assert calls[0]["url"] == "https://intent.example/v1/chat/completions"
-    assert calls[0]["headers"]["Authorization"] == "Bearer intent-key"
+    assert calls[0]["headers"]["Authorization"] == "intent-key"
     assert calls[0]["json"]["model"] == "intent-model"
     assert calls[0]["json"]["enable_thinking"] is False
     assert "thinking" not in calls[0]["json"]
+
+
+def test_intent_detect_normalizes_full_chat_completion_base_url(monkeypatch):
+    calls: list[dict] = []
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "generic"}}]}
+
+    def _post(url, **kwargs):
+        calls.append({"url": url, **kwargs})
+        return _Response()
+
+    monkeypatch.setenv("INTENT_MODEL_API_KEY", "intent-key")
+    monkeypatch.setenv("INTENT_MODEL_BASE_URL", "https://intent.example/v1/chat/completions")
+    monkeypatch.setenv("INTENT_MODEL", "intent-model")
+    monkeypatch.setattr(idetect.httpx, "post", _post)
+
+    r = run_intent_detect_quick_tag(client=MagicMock(), user_question="hello", logger=None)
+
+    assert r["ok"] is True
+    assert calls[0]["url"] == "https://intent.example/v1/chat/completions"
 
 
 def test_intent_detect_dedicated_endpoint_disables_deepseek_thinking(monkeypatch):

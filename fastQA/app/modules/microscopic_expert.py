@@ -38,6 +38,14 @@ from app.integrations.llm.upstream_gate import Stage2UpstreamGateCancelled
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
+def _first_env(*names: str, default: str = "") -> str:
+    for name in names:
+        raw = str(os.getenv(name, "") or "").strip()
+        if raw:
+            return raw
+    return str(default or "").strip()
+
+
 def _run_cancelable_upstream_call(
     *,
     call,
@@ -152,19 +160,12 @@ class MicroscopicSemanticExpert:
         logger: Any | None = None,
         should_cancel: Any | None = None,
     ) -> dict[str, Any]:
-        provider = str(os.getenv("RERANK_PROVIDER", "local") or "local").strip()
-        provider_norm = provider.lower()
-        raw_api_key = str(os.getenv("RERANK_API_KEY", "") or "").strip()
-        if provider_norm == "local":
-            api_key = raw_api_key
-            default_base_url = "http://localhost:8084"
-        else:
-            api_key = raw_api_key
-            default_base_url = "https://dashscope.aliyuncs.com"
-        base_url = str(os.getenv("RERANK_BASE_URL", default_base_url) or default_base_url).strip()
-        model = str(os.getenv("RERANK_MODEL", "qwen3-vl-rerank") or "qwen3-vl-rerank").strip()
+        provider = "openai_compatible"
+        api_key = _first_env("RERANK_API_KEY", "QA_RETRIEVAL_RERANK_API_KEY")
+        base_url = _first_env("RERANK_BASE_URL", "QA_RETRIEVAL_RERANK_BASE_URL")
+        model = _first_env("RERANK_MODEL", "QA_RETRIEVAL_RERANK_MODEL")
         try:
-            timeout_seconds = float(str(os.getenv("RERANK_TIMEOUT_SECONDS", "20") or "20").strip())
+            timeout_seconds = float(_first_env("RERANK_TIMEOUT_SECONDS", "QA_RETRIEVAL_RERANK_TIMEOUT", default="20"))
         except Exception:
             timeout_seconds = 20.0
 

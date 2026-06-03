@@ -338,6 +338,67 @@ def test_stage3_logs_parallel_workers_and_source_id_count(caplog):
         and "force_pdf=True" in message
         for message in messages
     )
+    assert any(
+        "patent stage3 diagnostic input" in message
+        and "documents=0" in message
+        and "metadatas=0" in message
+        and "source_ids=['CN115132975B', 'US20240001234A1']" in message
+        for message in messages
+    )
+    assert any(
+        "patent stage3 source diagnostic" in message
+        and "patent_id=CN115132975B" in message
+        and "retrieval_rows=0" in message
+        and "matched_evidence=0" in message
+        for message in messages
+    )
+    assert any(
+        "patent stage3 diagnostic completed" in message
+        and "requested=2" in message
+        and "successful=2" in message
+        and "failed=0" in message
+        and "total_matched_evidence=0" in message
+        for message in messages
+    )
+
+
+def test_stage3_logs_force_pdf_loading_diagnostics(monkeypatch, caplog):
+    monkeypatch.setenv("QA_STAGE3_DIAGNOSTIC_LOG", "1")
+    monkeypatch.setenv("QA_STAGE3_LOG_SOURCE_DETAILS", "1")
+    monkeypatch.setenv("QA_STAGE3_LOG_CHUNK_DETAILS", "1")
+    monkeypatch.setenv("QA_STAGE3_LOG_CHUNK_MAX", "2")
+    monkeypatch.setenv("QA_STAGE3_LOG_TEXT_MAX_CHARS", "80")
+
+    with caplog.at_level("INFO", logger="patent.stage3"):
+        bundle = run_stage3_load_patent_evidence(
+            retrieval_results={"documents": [], "metadatas": [], "reference_objects": []},
+            source_ids=["CN115132975B"],
+            pdf_loader=lambda patent_id: {
+                "path": f"/tmp/{patent_id}.pdf",
+                "filename": f"{patent_id}.pdf",
+                "size_bytes": 16,
+            },
+            pdf_text_extractor=lambda pdf_path: "PDF段落一：LMFP 复配提升功率。\n\nPDF段落二：高SOC快充更稳定。",
+            force_pdf=True,
+        )
+
+    assert bundle["source_ids"] == ["CN115132975B"]
+    messages = [record.message for record in caplog.records if record.name == "patent.stage3"]
+    assert any(
+        "patent stage3 pdf diagnostic" in message
+        and "patent_id=CN115132975B" in message
+        and "pdf_loaded=True" in message
+        and "text_chars=" in message
+        and "pdf_chunks=2" in message
+        for message in messages
+    )
+    assert any(
+        "patent stage3 evidence diagnostic" in message
+        and "patent_id=CN115132975B" in message
+        and "section=pdf_paragraph" in message
+        and "PDF段落一" in message
+        for message in messages
+    )
 
 
 def test_runtime_stage3_passes_parallel_workers_and_should_cancel(monkeypatch):

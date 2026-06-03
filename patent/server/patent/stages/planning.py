@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from typing import Any
@@ -21,6 +22,94 @@ DEFAULT_PATENT_STAGE1_PROMPT = load_patent_prompt_template("stage1_planning.txt"
 _OUTER_JSON_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*(.*)\s*```\s*$", re.IGNORECASE | re.DOTALL)
 _PATENT_ID_RE = re.compile(r"\b(?=[A-Z0-9/.,-]*\d)[A-Z]{2}[A-Z0-9][A-Z0-9/.,-]{4,}[A-Z0-9]\b")
 _PATENT_ID_NORMALIZE_RE = re.compile(r"[^A-Z0-9]")
+
+
+def _preview(value: Any, *, limit: int = 500) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return f"{text[: max(1, limit - 1)].rstrip()}…"
+
+
+def _env_bool_truthy(raw: str | None, *, default: bool = False) -> bool:
+    value = str(raw or "").strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _stage1_bool_text(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _stage1_response_log_max_chars() -> int:
+    try:
+        return max(0, min(int(str(os.getenv("QA_STAGE1_LOG_RESPONSE_MAX_CHARS", "4000")).strip()), 50000))
+    except ValueError:
+        return 4000
+
+
+def _stage1_response_log_text(raw_response: str) -> tuple[str, bool]:
+    text = str(raw_response or "")
+    if _env_bool_truthy(os.getenv("QA_STAGE1_LOG_FULL_RESPONSE")):
+        return text, False
+    max_chars = _stage1_response_log_max_chars()
+    if max_chars <= 0:
+        return "", len(text) > 0
+    if len(text) <= max_chars:
+        return text, False
+    return text[: max_chars - 1] + "…", True
+
+
+def _log_stage1_structured_quality(
+    *,
+    logger: Any,
+    raw_response: str,
+    json_parsed: bool,
+    schema_valid: bool,
+    deep_answer: str,
+    retrieval_claims_count: int,
+    valid_claims_count: int,
+    raw_claims_count: int,
+    fallback: str,
+) -> None:
+    stage2_eligible = valid_claims_count > 0
+    logger.info(
+        "patent stage1 structured quality: json_parsed=%s schema_valid=%s deep_answer_chars=%s "
+        "retrieval_claims_count=%s valid_claims_count=%s raw_claims_count=%s "
+        "query_focus_terms_count=0 question_focus_present=false answer_plan_present=false "
+        "fallback=%s stage2_eligible=%s raw_response_chars=%s",
+        _stage1_bool_text(json_parsed),
+        _stage1_bool_text(schema_valid),
+        len(str(deep_answer or "")),
+        retrieval_claims_count,
+        valid_claims_count,
+        raw_claims_count,
+        fallback or "none",
+        _stage1_bool_text(stage2_eligible),
+        len(str(raw_response or "")),
+    )
+    response_preview, truncated = _stage1_response_log_text(raw_response)
+    if response_preview:
+        logger.info(
+            "patent stage1 raw response preview: raw_response_chars=%s preview_chars=%s truncated=%s content=%s",
+            len(str(raw_response or "")),
+            len(response_preview),
+            _stage1_bool_text(truncated),
+            response_preview,
+        )
+
+
+def _count_raw_claims(value: Any) -> int:
+    if isinstance(value, dict):
+        return 1
+    if isinstance(value, str):
+        return 1 if value.strip() else 0
+    if isinstance(value, list):
+        return len(value)
+    return 0
 
 
 def _is_response_format_capability_error(exc: Exception) -> bool:
@@ -451,14 +540,26 @@ def run_stage1_pre_answer_and_planning(
     if client is None or not str(model or "").strip():
         retrieval_claims = _seed_retrieval_claims_from_graph(question=question, conversation_context=conversation_context)
         retrieval_plan = _retrieval_plan_from_claims(retrieval_claims, question=question) if retrieval_claims else _empty_retrieval_plan(question)
+        deep_answer = _fallback_deep_answer(question, retrieval_plan)
         logger.warning(
             "patent stage1 planning using fallback because planner is unavailable question_type=%s explicit_patent_ids=%s",
             retrieval_plan.question_type,
             list(retrieval_plan.explicit_patent_ids or []),
         )
+        _log_stage1_structured_quality(
+            logger=logger,
+            raw_response="",
+            json_parsed=False,
+            schema_valid=False,
+            deep_answer=deep_answer,
+            retrieval_claims_count=len(retrieval_claims),
+            valid_claims_count=len(retrieval_claims),
+            raw_claims_count=0,
+            fallback="planner_unavailable",
+        )
         return {
             "success": True,
-            "deep_answer": _fallback_deep_answer(question, retrieval_plan),
+            "deep_answer": deep_answer,
             "retrieval_claims": retrieval_claims,
             "retrieval_plan": retrieval_plan,
             "fallback": "planner_unavailable",
@@ -506,6 +607,17 @@ def run_stage1_pre_answer_and_planning(
                 len(result_text),
                 retrieval_plan.question_type,
             )
+            _log_stage1_structured_quality(
+                logger=logger,
+                raw_response=result_text,
+                json_parsed=False,
+                schema_valid=False,
+                deep_answer=result_text,
+                retrieval_claims_count=len(retrieval_claims),
+                valid_claims_count=len(retrieval_claims),
+                raw_claims_count=0,
+                fallback="json_parse_failed",
+            )
             out_json_fail: dict[str, Any] = {
                 "success": True,
                 "deep_answer": result_text,
@@ -520,7 +632,24 @@ def run_stage1_pre_answer_and_planning(
 
         retrieval_claims = _normalize_claims(payload.get("retrieval_claims"), question=question)
         if not retrieval_claims:
+            logger.warning(
+                "patent stage1 parsed empty retrieval_claims before legacy fallback raw_claims_type=%s "
+                "raw_claims_count=%s payload_keys=%s response_preview=%s",
+                type(payload.get("retrieval_claims")).__name__,
+                _count_raw_claims(payload.get("retrieval_claims")),
+                sorted(payload.keys()),
+                _preview(cleaned_text or result_text),
+            )
             retrieval_claims = _claims_from_legacy_retrieval_plan(payload.get("retrieval_plan"), question=question)
+        if not retrieval_claims:
+            logger.warning(
+                "patent stage1 retrieval_claims empty after legacy fallback retrieval_plan_type=%s "
+                "retrieval_plan_keys=%s question_type=%s response_preview=%s",
+                type(payload.get("retrieval_plan")).__name__,
+                sorted(payload.get("retrieval_plan").keys()) if isinstance(payload.get("retrieval_plan"), dict) else [],
+                _infer_question_type(question, _extract_patent_ids(question)),
+                _preview(cleaned_text or result_text),
+            )
         retrieval_plan = _retrieval_plan_from_claims(retrieval_claims, question=question) if retrieval_claims else _empty_retrieval_plan(question)
         deep_answer = " ".join(str(payload.get("deep_answer") or "").split()).strip()
         if not deep_answer:
@@ -529,6 +658,20 @@ def run_stage1_pre_answer_and_planning(
                 "patent stage1 planning missing deep_answer; using fallback question_type=%s",
                 retrieval_plan.question_type,
             )
+        raw_claims_field = payload.get("retrieval_claims")
+        valid_claims_count = len(retrieval_claims)
+        schema_valid = bool(deep_answer and isinstance(raw_claims_field, list) and valid_claims_count > 0)
+        _log_stage1_structured_quality(
+            logger=logger,
+            raw_response=result_text,
+            json_parsed=True,
+            schema_valid=schema_valid,
+            deep_answer=deep_answer,
+            retrieval_claims_count=len(retrieval_claims),
+            valid_claims_count=valid_claims_count,
+            raw_claims_count=_count_raw_claims(raw_claims_field),
+            fallback=str(payload.get("fallback") or "none"),
+        )
         logger.info(
             "patent stage1 planning parsed claims=%s explicit_patent_ids=%s preferred_sections=%s deep_answer_chars=%s",
             len(retrieval_claims),
@@ -552,9 +695,21 @@ def run_stage1_pre_answer_and_planning(
         logger.error("patent stage1 planning failed: %s", exc)
         retrieval_claims = _seed_retrieval_claims_from_graph(question=question, conversation_context=conversation_context)
         retrieval_plan = _retrieval_plan_from_claims(retrieval_claims, question=question) if retrieval_claims else _empty_retrieval_plan(question)
+        deep_answer = _fallback_deep_answer(question, retrieval_plan)
+        _log_stage1_structured_quality(
+            logger=logger,
+            raw_response="",
+            json_parsed=False,
+            schema_valid=False,
+            deep_answer=deep_answer,
+            retrieval_claims_count=len(retrieval_claims),
+            valid_claims_count=len(retrieval_claims),
+            raw_claims_count=0,
+            fallback="planner_error",
+        )
         err_out: dict[str, Any] = {
             "success": True,
-            "deep_answer": _fallback_deep_answer(question, retrieval_plan),
+            "deep_answer": deep_answer,
             "retrieval_claims": retrieval_claims,
             "retrieval_plan": retrieval_plan,
             "fallback": "planner_error",

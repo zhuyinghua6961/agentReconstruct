@@ -172,6 +172,7 @@ class RuntimeSettings:
     llm_base_url: str
     llm_model: str
     llm_api_key: str
+    llm_auth_mode: str
     llm_is_thinking_model: bool
     llm_thinking_enabled: bool
     main_llm_thinking_enabled: bool
@@ -180,6 +181,7 @@ class RuntimeSettings:
     embedding_base_url: str
     embedding_model: str
     embedding_api_key: str
+    embedding_auth_mode: str
     embedding_dimensions: int
     vlm_base_url: str
     vlm_model: str
@@ -265,6 +267,7 @@ def get_runtime_settings() -> RuntimeSettings:
         llm_base_url=str(os.getenv("LLM_BASE_URL") or "https://dashscope.aliyuncs.com/compatible-mode/v1").strip(),
         llm_model=llm_model,
         llm_api_key=llm_api_key,
+        llm_auth_mode=str(os.getenv("LLM_AUTH_MODE", "bearer") or "bearer").strip().lower(),
         llm_is_thinking_model=_get_bool("LLM_IS_THINKING_MODEL", False),
         llm_thinking_enabled=_get_bool("LLM_THINKING_ENABLED", False),
         main_llm_thinking_enabled=_get_bool("LLM_THINKING_ENABLED", False),
@@ -276,6 +279,10 @@ def get_runtime_settings() -> RuntimeSettings:
         ),
         embedding_model=_first_env("HIGHTHINKINGQA_EMBEDDING_MODEL", default="text-embedding-v4"),
         embedding_api_key=embedding_api_key,
+        embedding_auth_mode=_first_env(
+            "HIGHTHINKINGQA_EMBEDDING_AUTH_MODE",
+            default="bearer",
+        ).lower(),
         embedding_dimensions=_get_int_from_names(
             "HIGHTHINKINGQA_EMBEDDING_DIMENSIONS",
             default=2048,
@@ -386,6 +393,7 @@ GUNICORN_SETTINGS = get_gunicorn_settings()
 LLM_BASE_URL = SETTINGS.llm_base_url
 LLM_MODEL = SETTINGS.llm_model
 LLM_API_KEY = SETTINGS.llm_api_key
+LLM_AUTH_MODE = SETTINGS.llm_auth_mode
 LLM_IS_THINKING_MODEL = SETTINGS.llm_is_thinking_model
 LLM_THINKING_ENABLED = SETTINGS.llm_thinking_enabled
 MAIN_LLM_THINKING_ENABLED = SETTINGS.llm_thinking_enabled
@@ -394,6 +402,7 @@ DECOMPOSE_STAGE_THINKING_ENABLED = False
 EMBEDDING_BASE_URL = SETTINGS.embedding_base_url
 EMBEDDING_MODEL = SETTINGS.embedding_model
 EMBEDDING_API_KEY = SETTINGS.embedding_api_key
+HIGHTHINKINGQA_EMBEDDING_AUTH_MODE = SETTINGS.embedding_auth_mode
 EMBEDDING_DIMENSIONS = SETTINGS.embedding_dimensions
 VLM_BASE_URL = SETTINGS.vlm_base_url
 VLM_MODEL = SETTINGS.vlm_model

@@ -52,21 +52,27 @@ def count_tokens(text: str) -> int:
     return len(_encoder.encode(text))
 
 
-def split_into_sections(markdown_text: str) -> list[dict]:
+def split_into_sections(markdown_text: str, max_header_level: int = 3) -> list[dict]:
     """
-    按 Markdown 标题 (一级到三级) 切分为 section。
+    按 Markdown 标题切分为 section。
 
-    每遇到一个 #/##/### 标题就切出一个新 section。
+    仅在 level <= max_header_level 的标题处切分：
+      max_header_level=1 → 仅 # 一级标题
+      max_header_level=2 → # 与 ##
+      max_header_level=3 → #、##、###
+
+    更深级别的标题保留在当前 section 正文中，不作为切分点。
     标题前的内容（如果有）作为 "preamble"。
 
     Args:
         markdown_text: Markdown 格式的论文文本
+        max_header_level: 参与切分的最大标题级别 (1-3)
 
     Returns:
         section 列表，每项包含 {"title": str, "content": str, "level": int}
     """
-    # 匹配 1-3 级标题
-    pattern = re.compile(r"^(#{1,3})\s+(.+)$", re.MULTILINE)
+    max_header_level = max(1, min(3, int(max_header_level)))
+    pattern = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 
     sections = []
     last_end = 0
@@ -74,6 +80,10 @@ def split_into_sections(markdown_text: str) -> list[dict]:
     last_level = 0
 
     for match in pattern.finditer(markdown_text):
+        level = len(match.group(1))
+        if level > max_header_level:
+            continue
+
         # 当前标题之前的文本属于上一个 section
         content = markdown_text[last_end:match.start()].strip()
         if content:
@@ -84,7 +94,7 @@ def split_into_sections(markdown_text: str) -> list[dict]:
             })
 
         last_title = match.group(2).strip()
-        last_level = len(match.group(1))
+        last_level = level
         last_end = match.end()
 
     # 最后一个 section
@@ -219,6 +229,7 @@ def chunk_document(
     doi: str = "",
     title: str = "",
     embedding_func=None,
+    max_header_level: int = 3,
 ) -> list[Chunk]:
     """
     将解析后的 Markdown 论文文本切分为 chunks。
@@ -234,11 +245,12 @@ def chunk_document(
         doi: 论文 DOI
         title: 论文标题
         embedding_func: embedding 函数（用于语义分块兜底）
+        max_header_level: 结构分块使用的最大标题级别 (1-3)
 
     Returns:
         Chunk 列表
     """
-    sections = split_into_sections(markdown_text)
+    sections = split_into_sections(markdown_text, max_header_level=max_header_level)
 
     if not sections:
         # 如果没有识别到标题结构，整篇作为一个 section

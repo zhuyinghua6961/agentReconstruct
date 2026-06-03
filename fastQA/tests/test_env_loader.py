@@ -417,7 +417,6 @@ def test_fastqa_resource_config_surface_uses_shared_model_embedding_and_rerank_n
         "EMBEDDING_API_URL",
         "EMBEDDING_API_MODEL",
         "EMBEDDING_API_TIMEOUT_SECONDS",
-        "RERANK_PROVIDER",
         "RERANK_BASE_URL",
         "RERANK_MODEL",
         "RERANK_TIMEOUT_SECONDS",

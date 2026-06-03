@@ -46,6 +46,84 @@ def _stage1_claim_log_preview(text: str, *, max_chars: int) -> str:
     return t[: max_chars - 1] + "…"
 
 
+def _stage1_bool_text(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _stage1_response_log_max_chars() -> int:
+    try:
+        return max(0, min(int(str(os.getenv("QA_STAGE1_LOG_RESPONSE_MAX_CHARS", "4000")).strip()), 50000))
+    except ValueError:
+        return 4000
+
+
+def _stage1_response_log_text(raw_response: str) -> tuple[str, bool]:
+    text = str(raw_response or "")
+    if _env_bool_truthy(os.getenv("QA_STAGE1_LOG_FULL_RESPONSE")):
+        return text, False
+    max_chars = _stage1_response_log_max_chars()
+    if max_chars <= 0:
+        return "", len(text) > 0
+    if len(text) <= max_chars:
+        return text, False
+    return text[: max_chars - 1] + "…", True
+
+
+def _log_stage1_structured_quality(
+    *,
+    logger: Any,
+    raw_response: str,
+    json_parsed: bool,
+    schema_valid: bool,
+    deep_answer: str,
+    retrieval_claims_count: int,
+    valid_claims_count: int,
+    raw_claims_count: int,
+    query_focus_terms_count: int,
+    question_focus_present: bool,
+    answer_plan_present: bool,
+    fallback: str,
+) -> None:
+    stage2_eligible = valid_claims_count > 0
+    logger.info(
+        "阶段一结构化质量检查: json_parsed=%s schema_valid=%s deep_answer_chars=%s "
+        "retrieval_claims_count=%s valid_claims_count=%s raw_claims_count=%s "
+        "query_focus_terms_count=%s question_focus_present=%s answer_plan_present=%s "
+        "fallback=%s stage2_eligible=%s raw_response_chars=%s",
+        _stage1_bool_text(json_parsed),
+        _stage1_bool_text(schema_valid),
+        len(str(deep_answer or "")),
+        retrieval_claims_count,
+        valid_claims_count,
+        raw_claims_count,
+        query_focus_terms_count,
+        _stage1_bool_text(question_focus_present),
+        _stage1_bool_text(answer_plan_present),
+        fallback or "none",
+        _stage1_bool_text(stage2_eligible),
+        len(str(raw_response or "")),
+    )
+    response_preview, truncated = _stage1_response_log_text(raw_response)
+    if response_preview:
+        logger.info(
+            "阶段一原始回答预览: raw_response_chars=%s preview_chars=%s truncated=%s content=%s",
+            len(str(raw_response or "")),
+            len(response_preview),
+            _stage1_bool_text(truncated),
+            response_preview,
+        )
+
+
+def _stage1_count_raw_claims(raw_claims: Any) -> int:
+    if isinstance(raw_claims, dict):
+        return 1
+    if isinstance(raw_claims, str):
+        return 1 if raw_claims.strip() else 0
+    if isinstance(raw_claims, list):
+        return len(raw_claims)
+    return 0
+
+
 _DensityBucket = Literal["neutral", "tap_only", "compaction_only", "both", "ambiguous_dense"]
 
 
@@ -570,6 +648,20 @@ def run_stage1_pre_answer_and_planning(
             preview = result_text[:500].replace("\n", "\\n")
             logger.error("阶段一 JSON 解析失败，降级为仅预回答")
             logger.error("阶段一原始响应前500字符: %s", preview)
+            _log_stage1_structured_quality(
+                logger=logger,
+                raw_response=result_text,
+                json_parsed=False,
+                schema_valid=False,
+                deep_answer=result_text,
+                retrieval_claims_count=0,
+                valid_claims_count=0,
+                raw_claims_count=0,
+                query_focus_terms_count=0,
+                question_focus_present=False,
+                answer_plan_present=False,
+                fallback="json_parse_failed",
+            )
             return {
                 "success": True,
                 "deep_answer": result_text,
@@ -625,15 +717,53 @@ def run_stage1_pre_answer_and_planning(
                 "question_focus": question_focus,
             }
         )
+        raw_claims_field = stage1_result.get("retrieval_claims")
+        raw_query_focus_terms = stage1_result.get("query_focus_terms")
+        raw_question_focus = stage1_result.get("question_focus")
+        valid_claims_count = len(retrieval_claims)
+        schema_valid = bool(
+            deep_answer
+            and isinstance(raw_claims_field, list)
+            and valid_claims_count > 0
+            and isinstance(raw_query_focus_terms, list)
+            and isinstance(raw_question_focus, dict)
+        )
+        _log_stage1_structured_quality(
+            logger=logger,
+            raw_response=result_text,
+            json_parsed=True,
+            schema_valid=schema_valid,
+            deep_answer=deep_answer,
+            retrieval_claims_count=len(retrieval_claims),
+            valid_claims_count=valid_claims_count,
+            raw_claims_count=_stage1_count_raw_claims(raw_claims),
+            query_focus_terms_count=len(query_focus_terms),
+            question_focus_present=isinstance(raw_question_focus, dict),
+            answer_plan_present=isinstance(stage1_result.get("answer_plan"), dict),
+            fallback=str(stage1_result.get("fallback") or "none"),
+        )
         logger.info(
             "阶段一结果归一化完成: deep_answer_chars=%s retrieval_claims=%s query_focus_terms=%s "
-            "question_focus=%s effective_focus_terms=%s",
+            "question_focus=%s effective_focus_terms=%s raw_claims_type=%s raw_claims_count=%s answer_plan_keys=%s",
             len(deep_answer),
             len(retrieval_claims),
             query_focus_terms,
             {"type": question_focus.get("focus_type"), "axes": len(question_focus.get("evidence_axes") or [])},
             merged_focus,
+            type(raw_claims).__name__,
+            _stage1_count_raw_claims(raw_claims),
+            sorted(answer_plan.keys()) if isinstance(answer_plan, dict) else [],
         )
+        if not retrieval_claims:
+            logger.warning(
+                "阶段一 retrieval_claims 为空: raw_claims_type=%s raw_claims_count=%s answer_plan_keys=%s "
+                "fallback=%s raw_response_preview=%s",
+                type(raw_claims).__name__,
+                _stage1_count_raw_claims(raw_claims),
+                sorted(answer_plan.keys()) if isinstance(answer_plan, dict) else [],
+                str(stage1_result.get("fallback") or ""),
+                _stage1_claim_log_preview(result_text, max_chars=500),
+            )
 
         if _stage1_log_retrieval_claims_enabled() and retrieval_claims:
             cap = _stage1_claim_log_max_chars()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 import json
@@ -32,6 +33,7 @@ from server.patent.thinking import (
     LLM_STAGE_CONTROL,
     apply_openai_compatible_thinking,
     auth_headers,
+    resolve_auth_mode,
     resolve_thinking_controls,
 )
 from server.patent.upstream_transport import (
@@ -57,6 +59,54 @@ except Exception:  # pragma: no cover - dependency guard
 
 
 _LOGGER = logging.getLogger("patent.runtime")
+
+
+def _bool_text(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _preview(value: Any, *, limit: int = 220) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return f"{text[: max(1, limit - 1)].rstrip()}…"
+
+
+def _vector_diagnostics(vectors: list[list[Any]]) -> dict[str, Any]:
+    first = list(vectors[0]) if vectors else []
+    numeric: list[float] = []
+    has_nan = False
+    has_inf = False
+    for item in first:
+        try:
+            value = float(item)
+        except (TypeError, ValueError):
+            continue
+        has_nan = has_nan or math.isnan(value)
+        has_inf = has_inf or math.isinf(value)
+        if not math.isnan(value) and not math.isinf(value):
+            numeric.append(value)
+    norm = math.sqrt(sum(value * value for value in numeric)) if numeric else 0.0
+    return {
+        "count": len(vectors),
+        "dim": len(first),
+        "norm": norm,
+        "has_nan": has_nan,
+        "has_inf": has_inf,
+        "empty": not bool(first),
+    }
+
+
+def _distance_summary(values: list[Any]) -> dict[str, Any]:
+    nums: list[float] = []
+    for value in values:
+        try:
+            nums.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    if not nums:
+        return {"count": 0, "min": None, "max": None, "avg": None}
+    return {"count": len(nums), "min": min(nums), "max": max(nums), "avg": sum(nums) / len(nums)}
 
 
 def _first_env(*names: str, default: str = "") -> str:
@@ -269,6 +319,7 @@ class PatentPlanningClient:
                 api_key=self._api_key,
                 status_code=getattr(response, "status_code", None),
                 exc=exc,
+                auth_mode=resolve_auth_mode(),
             )
             raise
         log_upstream_auth_success_once(
@@ -279,6 +330,7 @@ class PatentPlanningClient:
             base_url=self._base_url,
             api_key=self._api_key,
             status_code=getattr(response, "status_code", None),
+            auth_mode=resolve_auth_mode(),
         )
         body = response.json()
         choices = list(body.get("choices") or [])
@@ -308,6 +360,19 @@ def _resolve_patent_planning_runtime_config() -> tuple[str, str, str, float]:
     model = str(os.getenv("LLM_MODEL") or "").strip()
     timeout_seconds = float(str(os.getenv("LLM_READ_TIMEOUT_SECONDS") or "30").strip())
     return api_key, base_url, model, timeout_seconds
+
+
+def _normalize_embedding_endpoint(api_url: str) -> str:
+    value = str(api_url or "").strip().rstrip("/")
+    if not value:
+        return value
+    for suffix in ("/v1/embeddings", "/embeddings"):
+        if value.endswith(suffix):
+            value = value[: -len(suffix)].rstrip("/")
+            break
+    if not value.endswith("/v1"):
+        value = value.rstrip("/") + "/v1"
+    return value.rstrip("/") + "/embeddings"
 
 
 def resolve_patent_planning_runtime_model() -> str:
@@ -352,8 +417,9 @@ class PatentEmbeddingClient:
         )
         self._api_url = _first_env(
             "EMBEDDING_API_URL",
-            default="http://127.0.0.1:8001/v1/embeddings",
+            default="http://127.0.0.1:8001/v1",
         )
+        self._api_url = _normalize_embedding_endpoint(self._api_url)
         self._api_model = _first_env("EMBEDDING_API_MODEL", default="bge-local")
         self._api_key = _first_env("EMBEDDING_API_KEY")
         self._local_model_path = _resolve_local_embedding_model_path(self._repo_root)
@@ -363,10 +429,33 @@ class PatentEmbeddingClient:
         self._http.close()
 
     def encode(self, texts: list[str]) -> list[list[float]]:
+        started_at = time.perf_counter()
+        input_texts = [str(item or "") for item in list(texts or [])]
+        input_chars = sum(len(item) for item in input_texts)
+        input_bytes = sum(len(item.encode("utf-8", errors="replace")) for item in input_texts)
         if self._mode == "local":
             self._prime_local_model()
             if self._local_model is not None:
-                return self._local_model.encode(texts).tolist()
+                embeddings = self._local_model.encode(texts).tolist()
+                diag = _vector_diagnostics([list(item or []) for item in list(embeddings or [])])
+                _LOGGER.info(
+                    "patent embedding diagnostic mode=local model=%s endpoint=local input_count=%s input_chars=%s "
+                    "input_utf8_bytes=%s embedding_count=%s embedding_dim=%s embedding_norm=%.6f has_nan=%s "
+                    "has_inf=%s empty_embedding=%s elapsed_ms=%.2f input_preview=%s",
+                    self._local_model_path,
+                    len(input_texts),
+                    input_chars,
+                    input_bytes,
+                    diag["count"],
+                    diag["dim"],
+                    float(diag["norm"]),
+                    _bool_text(bool(diag["has_nan"])),
+                    _bool_text(bool(diag["has_inf"])),
+                    _bool_text(bool(diag["empty"])),
+                    (time.perf_counter() - started_at) * 1000.0,
+                    _preview(" | ".join(input_texts[:3])),
+                )
+                return embeddings
         response = self._http.post(
             self._api_url,
             json={"input": texts, "model": self._api_model},
@@ -377,15 +466,54 @@ class PatentEmbeddingClient:
         data = list(payload.get("data") or [])
         embeddings = [list(item.get("embedding") or []) for item in data if isinstance(item, dict)]
         if embeddings:
+            diag = _vector_diagnostics(embeddings)
+            _LOGGER.info(
+                "patent embedding diagnostic mode=%s model=%s endpoint=%s input_count=%s input_chars=%s "
+                "input_utf8_bytes=%s embedding_count=%s embedding_dim=%s embedding_norm=%.6f has_nan=%s "
+                "has_inf=%s empty_embedding=%s elapsed_ms=%.2f input_preview=%s",
+                self._mode,
+                self._api_model,
+                self._api_url,
+                len(input_texts),
+                input_chars,
+                input_bytes,
+                diag["count"],
+                diag["dim"],
+                float(diag["norm"]),
+                _bool_text(bool(diag["has_nan"])),
+                _bool_text(bool(diag["has_inf"])),
+                _bool_text(bool(diag["empty"])),
+                (time.perf_counter() - started_at) * 1000.0,
+                _preview(" | ".join(input_texts[:3])),
+            )
             return embeddings
         single = list(payload.get("embedding") or [])
-        return [single] if single else []
+        out = [single] if single else []
+        diag = _vector_diagnostics(out)
+        _LOGGER.info(
+            "patent embedding diagnostic mode=%s model=%s endpoint=%s input_count=%s input_chars=%s "
+            "input_utf8_bytes=%s embedding_count=%s embedding_dim=%s embedding_norm=%.6f has_nan=%s "
+            "has_inf=%s empty_embedding=%s elapsed_ms=%.2f input_preview=%s",
+            self._mode,
+            self._api_model,
+            self._api_url,
+            len(input_texts),
+            input_chars,
+            input_bytes,
+            diag["count"],
+            diag["dim"],
+            float(diag["norm"]),
+            _bool_text(bool(diag["has_nan"])),
+            _bool_text(bool(diag["has_inf"])),
+            _bool_text(bool(diag["empty"])),
+            (time.perf_counter() - started_at) * 1000.0,
+            _preview(" | ".join(input_texts[:3])),
+        )
+        return out
 
     def _embedding_headers(self) -> dict[str, str]:
-        headers = {"Content-Type": "application/json"}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
-        return headers
+        auth_mode = _first_env("EMBEDDING_AUTH_MODE", "QA_EMBEDDING_AUTH_MODE", default="bearer")
+        return auth_headers(self._api_key, auth_mode=auth_mode)
 
     def _prime_local_model(self) -> None:
         if self._local_model is not None:
@@ -429,8 +557,16 @@ class ChromaPatentSearch:
             close()
 
     def search(self, *, question: str, top_k: int, patent_ids: list[str] | None = None) -> list[dict[str, Any]]:
+        started_at = time.perf_counter()
         embeddings = self._embedding_client.encode([question])
         if not embeddings:
+            _LOGGER.info(
+                "patent chroma search diagnostic status=empty_embedding collection=%s top_k=%s question_chars=%s patent_filter_count=%s",
+                str(getattr(self._collection, "name", "")),
+                int(top_k),
+                len(str(question or "")),
+                len(list(patent_ids or [])),
+            )
             return []
         where: dict[str, Any] | None = None
         normalized_patent_ids = [str(item).strip().upper() for item in list(patent_ids or []) if str(item).strip()]
@@ -448,6 +584,37 @@ class ChromaPatentSearch:
         metadatas = list((results.get("metadatas") or [[]])[0])
         distances = list((results.get("distances") or [[]])[0])
         ids = list((results.get("ids") or [[]])[0])
+        stats = _distance_summary(distances)
+        _LOGGER.info(
+            "patent chroma search diagnostic collection=%s top_k=%s where=%s question_chars=%s "
+            "question_utf8_bytes=%s hits=%s distance_count=%s distance_min=%s distance_max=%s distance_avg=%s "
+            "elapsed_ms=%.2f id_sample=%s question_preview=%s",
+            str(getattr(self._collection, "name", "")),
+            max(int(top_k), 1),
+            where or {},
+            len(str(question or "")),
+            len(str(question or "").encode("utf-8", errors="replace")),
+            len(documents),
+            stats["count"],
+            stats["min"],
+            stats["max"],
+            stats["avg"],
+            (time.perf_counter() - started_at) * 1000.0,
+            ids[:5],
+            _preview(question),
+        )
+        for rank, doc in enumerate(documents[:5], start=1):
+            meta = metadatas[rank - 1] if rank - 1 < len(metadatas) and isinstance(metadatas[rank - 1], dict) else {}
+            distance = distances[rank - 1] if rank - 1 < len(distances) else None
+            _LOGGER.info(
+                "patent chroma hit detail rank=%s patent_id=%s distance=%s id=%s metadata_keys=%s doc_preview=%s",
+                rank,
+                str(meta.get("patent_id") or meta.get("canonical_patent_id") or meta.get("json_stem") or ""),
+                distance,
+                ids[rank - 1] if rank - 1 < len(ids) else "",
+                sorted(meta.keys())[:16],
+                _preview(doc, limit=360),
+            )
         hits: list[dict[str, Any]] = []
         for index, metadata in enumerate(metadatas):
             item = dict(metadata or {})

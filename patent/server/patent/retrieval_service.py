@@ -32,6 +32,168 @@ _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _LOGGER = logging.getLogger("patent.retrieval")
 
 
+def _preview(value: Any, *, limit: int = 220) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return f"{text[: max(1, limit - 1)].rstrip()}…"
+
+
+def _env_bool(raw: str | None, *, default: bool = False) -> bool:
+    value = str(raw or "").strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        value = int(str(os.getenv(name, str(default))).strip())
+    except ValueError:
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def _bool_text(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _stage2_diag_enabled() -> bool:
+    return _env_bool(os.getenv("QA_STAGE2_DIAGNOSTIC_LOG"), default=True)
+
+
+def _stage2_query_details_enabled() -> bool:
+    return _stage2_diag_enabled() and _env_bool(os.getenv("QA_STAGE2_LOG_QUERY_DETAILS"), default=True)
+
+
+def _stage2_hit_details_enabled() -> bool:
+    return _stage2_diag_enabled() and _env_bool(os.getenv("QA_STAGE2_LOG_HIT_DETAILS"), default=True)
+
+
+def _stage2_log_hit_max() -> int:
+    return _env_int("QA_STAGE2_LOG_HIT_MAX", 5, minimum=0, maximum=50)
+
+
+def _stage2_log_query_max_chars() -> int:
+    return _env_int("QA_STAGE2_LOG_QUERY_MAX_CHARS", 1000, minimum=80, maximum=12000)
+
+
+def _numeric_distances(values: list[Any]) -> list[float]:
+    out: list[float] = []
+    for value in values:
+        try:
+            out.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _distance_summary(values: list[Any]) -> dict[str, Any]:
+    nums = _numeric_distances(values)
+    if not nums:
+        return {"count": 0, "min": None, "max": None, "avg": None}
+    return {"count": len(nums), "min": min(nums), "max": max(nums), "avg": sum(nums) / len(nums)}
+
+
+def _query_encoding_diagnostics(text: str) -> dict[str, Any]:
+    raw = str(text or "")
+    normalized = " ".join(raw.split())
+    lower = raw.lower()
+    mojibake_patterns = ("Ã", "Â", "ä¸", "å", "æ", "\\u00")
+    return {
+        "chars": len(raw),
+        "utf8_bytes": len(raw.encode("utf-8", errors="replace")),
+        "non_ascii": sum(1 for ch in raw if ord(ch) > 127),
+        "chinese_chars": sum(1 for ch in raw if "\u4e00" <= ch <= "\u9fff"),
+        "control_chars": sum(1 for ch in raw if ord(ch) < 32 and ch not in "\r\n\t"),
+        "has_replacement_char": "\ufffd" in raw,
+        "has_mojibake_pattern": any(pattern.lower() in lower for pattern in mojibake_patterns),
+        "normalized_changed": normalized != raw,
+        "repr_preview": repr(raw[: _stage2_log_query_max_chars()]),
+    }
+
+
+def _hit_patent_id(hit: dict[str, Any]) -> str:
+    return str(hit.get("patent_id") or hit.get("canonical_patent_id") or hit.get("json_stem") or "").strip()
+
+
+def _hit_distance(hit: dict[str, Any]) -> Any:
+    return hit.get("distance") if isinstance(hit, dict) else None
+
+
+def _log_stage2_query_encoding(*, query: str, claim_text: str) -> None:
+    if not _stage2_query_details_enabled():
+        return
+    diag = _query_encoding_diagnostics(query)
+    _LOGGER.info(
+        "Patent Stage2 query encoding diagnostic query_chars=%s utf8_bytes=%s non_ascii=%s chinese_chars=%s "
+        "control_chars=%s has_replacement_char=%s has_mojibake_pattern=%s normalized_changed=%s "
+        "claim=%s query_preview=%s repr_preview=%s",
+        diag["chars"],
+        diag["utf8_bytes"],
+        diag["non_ascii"],
+        diag["chinese_chars"],
+        diag["control_chars"],
+        _bool_text(bool(diag["has_replacement_char"])),
+        _bool_text(bool(diag["has_mojibake_pattern"])),
+        _bool_text(bool(diag["normalized_changed"])),
+        _preview(claim_text, limit=180),
+        _preview(query, limit=_stage2_log_query_max_chars()),
+        diag["repr_preview"],
+    )
+
+
+def _log_stage2_vector_request(
+    *,
+    channel: str,
+    query: str,
+    top_k: int,
+    candidate_patent_ids: list[str] | None = None,
+) -> None:
+    if not _stage2_query_details_enabled():
+        return
+    _LOGGER.info(
+        "Patent Stage2 vector search request channel=%s top_k=%s candidate_filter_count=%s "
+        "candidate_filter_sample=%s query_chars=%s query_preview=%s",
+        channel,
+        int(top_k),
+        len(list(candidate_patent_ids or [])),
+        list(candidate_patent_ids or [])[:8],
+        len(str(query or "")),
+        _preview(query, limit=_stage2_log_query_max_chars()),
+    )
+
+
+def _log_stage2_raw_hits(*, channel: str, query: str, hits: list[dict[str, Any]]) -> None:
+    if not _stage2_hit_details_enabled():
+        return
+    distances = [_hit_distance(hit) for hit in hits]
+    stats = _distance_summary(distances)
+    _LOGGER.info(
+        "Patent Stage2 %s hits diagnostic hit_count=%s distance_count=%s distance_min=%s "
+        "distance_max=%s distance_avg=%s query_preview=%s",
+        channel,
+        len(hits),
+        stats["count"],
+        stats["min"],
+        stats["max"],
+        stats["avg"],
+        _preview(query, limit=360),
+    )
+    for rank, hit in enumerate(hits[: _stage2_log_hit_max()], start=1):
+        _LOGGER.info(
+            "Patent Stage2 raw hit detail channel=%s rank=%s patent_id=%s distance=%s metadata_keys=%s doc_preview=%s",
+            channel,
+            rank,
+            _hit_patent_id(hit),
+            _hit_distance(hit),
+            sorted(hit.keys())[:16],
+            _preview(hit.get("document") or hit.get("snippet") or "", limit=360),
+        )
+
+
 def _normalize_question(question: str) -> str:
     return " ".join(str(question or "").strip().lower().split())
 
@@ -626,6 +788,24 @@ class PatentRetrievalService:
             str(metadata.get("graph_stage2_behavior") or "none"),
             list(payload.get("source_ids") or []),
         )
+        if _stage2_diag_enabled():
+            distances = list(payload.get("distances") or [])
+            stats = _distance_summary(distances)
+            _LOGGER.info(
+                "Patent Stage2 diagnostic summary mode=dual_search generated_queries=%s raw_candidates=%s "
+                "selected_sources=%s documents=%s distance_count=%s distance_min=%s distance_max=%s "
+                "distance_avg=%s source_ids=%s graph_behavior=%s",
+                len(generated_queries),
+                len(candidate_patent_ids),
+                len(list(payload.get("source_ids") or [])),
+                len(list(payload.get("documents") or [])),
+                stats["count"],
+                stats["min"],
+                stats["max"],
+                stats["avg"],
+                list(payload.get("source_ids") or []),
+                str(metadata.get("graph_stage2_behavior") or "none"),
+            )
         return payload
 
     def _targeted_retrieve_from_plan(
@@ -929,16 +1109,30 @@ class PatentRetrievalService:
                         )
                         if chunk_match is not None:
                             query_matches.append(chunk_match)
-                per_query_matches.append(self._dedupe_matches_by_prefix(query_matches))
+                deduped_query_matches = self._dedupe_matches_by_prefix(query_matches)
+                _LOGGER.info(
+                    "patent stage2 query retrieval diagnostics claim_index=%s query=%s abstract_hits=%s "
+                    "chunk_hits=%s query_candidate_ids=%s query_matches=%s deduped_matches=%s hard_graph_filter=%s",
+                    int(index) + 1,
+                    _preview(query),
+                    len(abstract_hits),
+                    len(chunk_hits),
+                    len(query_candidate_ids),
+                    len(query_matches),
+                    len(deduped_query_matches),
+                    bool(hard_graph_candidate_keys),
+                )
+                per_query_matches.append(deduped_query_matches)
             _LOGGER.info(
                 "patent stage2 claim retrieval completed claim_index=%s query_count=%s candidate_patents=%s match_groups=%s "
-                "graph_filter=%s global_chunk=%s",
+                "graph_filter=%s global_chunk=%s candidate_sample=%s",
                 int(index) + 1,
                 len(claim_queries),
                 len(claim_candidate_patent_ids),
                 len(per_query_matches),
                 bool(hard_graph_candidate_keys),
                 bool(c_enabled and toggles.c_global_chunk_recall_enabled),
+                claim_candidate_patent_ids[:8],
             )
             return {
                 "index": index,
@@ -994,7 +1188,25 @@ class PatentRetrievalService:
                 all_matches.extend(list(query_matches or []))
 
         merged_matches = self._dedupe_matches_by_prefix(all_matches)
+        _LOGGER.info(
+            "patent stage2 merged candidate diagnostics claim_outputs=%s generated_queries=%s candidate_patents=%s "
+            "all_matches=%s merged_matches=%s candidate_sample=%s",
+            len(claim_outputs),
+            len(generated_queries),
+            len(candidate_patent_ids),
+            len(all_matches),
+            len(merged_matches),
+            candidate_patent_ids[:10],
+        )
         if not merged_matches:
+            _LOGGER.warning(
+                "patent stage2 no merged matches; falling back to plan retrieval claim_count=%s generated_queries=%s "
+                "candidate_patents=%s user_question=%s",
+                len(retrieval_claims),
+                len(generated_queries),
+                len(candidate_patent_ids),
+                _preview(user_question),
+            )
             fallback_plan = self._retrieval_plan_from_claims(retrieval_claims, user_question=user_question)
             payload = self._targeted_retrieve_from_plan(
                 retrieval_plan=fallback_plan,
@@ -1179,6 +1391,26 @@ class PatentRetrievalService:
             bool(metadata.get("stage2_explicit_id_fallback")),
             list(payload.get("source_ids") or [])[:5],
         )
+        if _stage2_diag_enabled():
+            distances = list(payload.get("distances") or [])
+            stats = _distance_summary(distances)
+            _LOGGER.info(
+                "Patent Stage2 diagnostic summary mode=convergence generated_queries=%s raw_candidates=%s "
+                "selected_sources=%s documents=%s distance_count=%s distance_min=%s distance_max=%s "
+                "distance_avg=%s rerank_applied=%s validation_filtered=%s source_ids=%s graph_behavior=%s",
+                len(generated_queries),
+                len(raw_candidate_patent_ids),
+                len(list(payload.get("source_ids") or [])),
+                len(list(payload.get("documents") or [])),
+                stats["count"],
+                stats["min"],
+                stats["max"],
+                stats["avg"],
+                bool(stage2_rerank_metadata.get("applied")),
+                int((validation_metadata or {}).get("filtered_count") or 0),
+                list(payload.get("source_ids") or []),
+                str(metadata.get("graph_stage2_behavior") or "none"),
+            )
         return payload
 
     def _cancelled_stage2_payload(self) -> dict[str, Any]:
@@ -1386,7 +1618,10 @@ class PatentRetrievalService:
         abstract_candidate_top_k = self._dual_search_vector_candidate_top_k(abstract_top_k, rerank_fn)
         chunk_candidate_top_k = self._dual_search_vector_candidate_top_k(chunk_top_k, rerank_fn)
         max_where_ids = self._chunk_dual_search_where_max_ids()
+        _log_stage2_query_encoding(query=query, claim_text=str(retrieval_claim.claim or ""))
+        _log_stage2_vector_request(channel="abstract", query=query, top_k=abstract_candidate_top_k)
         abstract_hits = self._run_abstract_vector_search(query, abstract_candidate_top_k)
+        _log_stage2_raw_hits(channel="abstract", query=query, hits=abstract_hits)
         if graph_candidate_keys:
             abstract_hits = [
                 hit
@@ -1426,7 +1661,14 @@ class PatentRetrievalService:
         else:
             chunk_candidate_ids = list(query_candidate_ids[:max_where_ids]) if query_candidate_ids else None
 
+        _log_stage2_vector_request(
+            channel="chunk",
+            query=query,
+            top_k=chunk_candidate_top_k,
+            candidate_patent_ids=chunk_candidate_ids,
+        )
         chunk_hits = self._run_chunk_vector_search(query, chunk_candidate_ids, chunk_candidate_top_k)
+        _log_stage2_raw_hits(channel="chunk", query=query, hits=chunk_hits)
         if graph_candidate_keys:
             chunk_hits = [
                 hit

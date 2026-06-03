@@ -77,17 +77,18 @@ def test_microscopic_expert_leases_rerank_session_when_pool_available(monkeypatc
     assert calls["api_key"] == "rerank-key"
 
 
-def test_microscopic_expert_local_rerank_does_not_inherit_dashscope_key_or_url(monkeypatch):
+def test_microscopic_expert_rerank_does_not_inherit_dashscope_key_or_default_url(monkeypatch):
     calls = {}
 
     def _fake_rerank_documents(**kwargs):
         calls.update(kwargs)
-        return {"documents": ["doc"], "metadatas": [], "rerank_scores": [0.9], "fallback": False, "provider": "local"}
+        return {"documents": ["doc"], "metadatas": [], "rerank_scores": [0.9], "fallback": False, "provider": "openai_compatible"}
 
     monkeypatch.setattr("app.modules.microscopic_expert.rerank_documents_impl", _fake_rerank_documents)
     monkeypatch.setenv("RERANK_PROVIDER", "local")
     monkeypatch.delenv("RERANK_API_KEY", raising=False)
     monkeypatch.delenv("RERANK_BASE_URL", raising=False)
+    monkeypatch.delenv("RERANK_MODEL", raising=False)
     monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-key")
 
     expert = MicroscopicSemanticExpert.__new__(MicroscopicSemanticExpert)
@@ -95,10 +96,11 @@ def test_microscopic_expert_local_rerank_does_not_inherit_dashscope_key_or_url(m
 
     result = expert._rerank_documents(query="lfp", documents=["doc1"], metadatas=[], top_n=1)
 
-    assert result["provider"] == "local"
-    assert calls["provider"] == "local"
+    assert result["provider"] == "openai_compatible"
+    assert calls["provider"] == "openai_compatible"
     assert calls["api_key"] == ""
-    assert calls["base_url"] == "http://localhost:8084"
+    assert calls["base_url"] == ""
+    assert calls["model"] == ""
 
 
 def test_microscopic_expert_prefers_unified_rerank_namespace(monkeypatch):
@@ -126,19 +128,19 @@ def test_microscopic_expert_prefers_unified_rerank_namespace(monkeypatch):
     result = expert._rerank_documents(query="lfp", documents=["doc1"], metadatas=[], top_n=1)
 
     assert result["provider"] == "dashscope"
-    assert calls["provider"] == "dashscope"
+    assert calls["provider"] == "openai_compatible"
     assert calls["api_key"] == "rerank-key"
     assert calls["base_url"] == "https://rerank.example"
     assert calls["model"] == "rerank-model"
     assert calls["timeout_seconds"] == 11.0
 
 
-def test_microscopic_expert_ignores_retired_rerank_aliases(monkeypatch):
+def test_microscopic_expert_falls_back_to_legacy_rerank_aliases_for_one_version(monkeypatch):
     calls = {}
 
     def _fake_rerank_documents(**kwargs):
         calls.update(kwargs)
-        return {"documents": ["doc"], "metadatas": [], "rerank_scores": [0.9], "fallback": False, "provider": "local"}
+        return {"documents": ["doc"], "metadatas": [], "rerank_scores": [0.9], "fallback": False, "provider": "openai_compatible"}
 
     monkeypatch.setattr("app.modules.microscopic_expert.rerank_documents_impl", _fake_rerank_documents)
     monkeypatch.delenv("RERANK_PROVIDER", raising=False)
@@ -157,12 +159,12 @@ def test_microscopic_expert_ignores_retired_rerank_aliases(monkeypatch):
 
     result = expert._rerank_documents(query="lfp", documents=["doc1"], metadatas=[], top_n=1)
 
-    assert result["provider"] == "local"
-    assert calls["provider"] == "local"
-    assert calls["api_key"] == ""
-    assert calls["base_url"] == "http://localhost:8084"
-    assert calls["model"] == "qwen3-vl-rerank"
-    assert calls["timeout_seconds"] == 20.0
+    assert result["provider"] == "openai_compatible"
+    assert calls["provider"] == "openai_compatible"
+    assert calls["api_key"] == "legacy-key"
+    assert calls["base_url"] == "https://legacy.example"
+    assert calls["model"] == "legacy-model"
+    assert calls["timeout_seconds"] == 22.0
 
 
 def test_microscopic_expert_wraps_rerank_http_call_with_gate(monkeypatch):

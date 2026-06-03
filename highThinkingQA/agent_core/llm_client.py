@@ -4,15 +4,14 @@ import logging
 import time
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional, Generator
-
-from openai import AsyncOpenAI, OpenAI
+from typing import Any, Optional, Generator
 
 import config
+from agent_core.openai_compat import AsyncOpenAICompatibleChatClient, OpenAICompatibleChatClient
 from agent_core.thinking import (
     LLM_STAGE_CONTROL,
-    local_sdk_api_key,
     merge_extra_body,
+    resolve_auth_mode,
     resolve_thinking_controls,
 )
 from agent_core.upstream_auth_logging import (
@@ -23,26 +22,24 @@ from agent_core.upstream_auth_logging import (
 logger = logging.getLogger(__name__)
 
 
-def get_llm_client(*, max_retries: int | None = None) -> OpenAI:
+def get_llm_client(*, max_retries: int | None = None) -> OpenAICompatibleChatClient:
     """获取 LLM API 客户端"""
-    kwargs = {
-        "api_key": local_sdk_api_key(config.LLM_API_KEY),
-        "base_url": config.LLM_BASE_URL,
-    }
-    if max_retries is not None:
-        kwargs["max_retries"] = int(max_retries)
-    return OpenAI(**kwargs)
+    return OpenAICompatibleChatClient(
+        base_url=config.LLM_BASE_URL,
+        api_key=config.LLM_API_KEY,
+        auth_mode=getattr(config, "LLM_AUTH_MODE", None),
+        max_retries=max_retries,
+    )
 
 
-def get_async_llm_client(*, max_retries: int | None = None) -> AsyncOpenAI:
+def get_async_llm_client(*, max_retries: int | None = None) -> AsyncOpenAICompatibleChatClient:
     """获取异步 LLM API 客户端。"""
-    kwargs = {
-        "api_key": local_sdk_api_key(config.LLM_API_KEY),
-        "base_url": config.LLM_BASE_URL,
-    }
-    if max_retries is not None:
-        kwargs["max_retries"] = int(max_retries)
-    return AsyncOpenAI(**kwargs)
+    return AsyncOpenAICompatibleChatClient(
+        base_url=config.LLM_BASE_URL,
+        api_key=config.LLM_API_KEY,
+        auth_mode=getattr(config, "LLM_AUTH_MODE", None),
+        max_retries=max_retries,
+    )
 
 
 def _build_kwargs(
@@ -96,7 +93,7 @@ def _extract_reasoning(message) -> Optional[str]:
 def chat_completion(
     prompt: str,
     system_message: str = "",
-    client: Optional[OpenAI] = None,
+    client: Optional[Any] = None,
     temperature: float = 0.7,
     max_tokens: int = 4096,
     enable_thinking: Optional[bool] = None,
@@ -143,6 +140,7 @@ def chat_completion(
             base_url=config.LLM_BASE_URL,
             api_key=config.LLM_API_KEY,
             exc=exc,
+            auth_mode=resolve_auth_mode(getattr(config, "LLM_AUTH_MODE", None)),
         )
         raise
     log_upstream_auth_success_once(
@@ -152,6 +150,7 @@ def chat_completion(
         model=str(kwargs.get("model") or ""),
         base_url=config.LLM_BASE_URL,
         api_key=config.LLM_API_KEY,
+        auth_mode=resolve_auth_mode(getattr(config, "LLM_AUTH_MODE", None)),
     )
 
     reasoning = _extract_reasoning(response.choices[0].message)
@@ -164,7 +163,7 @@ def chat_completion(
 def chat_completion_stream(
     prompt: str,
     system_message: str = "",
-    client: Optional[OpenAI] = None,
+    client: Optional[Any] = None,
     temperature: float = 0.7,
     max_tokens: int = 8192,
     enable_thinking: Optional[bool] = None,
@@ -219,6 +218,7 @@ def chat_completion_stream(
             base_url=config.LLM_BASE_URL,
             api_key=config.LLM_API_KEY,
             exc=exc,
+            auth_mode=resolve_auth_mode(getattr(config, "LLM_AUTH_MODE", None)),
         )
         raise
     log_upstream_auth_success_once(
@@ -228,6 +228,7 @@ def chat_completion_stream(
         model=str(kwargs.get("model") or ""),
         base_url=config.LLM_BASE_URL,
         api_key=config.LLM_API_KEY,
+        auth_mode=resolve_auth_mode(getattr(config, "LLM_AUTH_MODE", None)),
     )
 
     reasoning_chars = 0

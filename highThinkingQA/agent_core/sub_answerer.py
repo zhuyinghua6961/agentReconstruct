@@ -6,9 +6,7 @@ LLM 并行预回答每个子问题（A1-A5），
 
 import asyncio
 import logging
-from typing import AsyncGenerator, Optional
-
-from openai import AsyncOpenAI, OpenAI
+from typing import Any, AsyncGenerator, Optional
 
 import config
 from agent_core.llm_client import get_async_llm_client, load_prompt_template
@@ -41,7 +39,7 @@ def _build_sub_answer_kwargs(prompt: str) -> dict:
 
 def pre_answer_sub_question(
     sub_question: str,
-    client: Optional[OpenAI] = None,
+    client: Optional[Any] = None,
     *,
     original_question: str | None = None,
 ) -> str:
@@ -72,7 +70,7 @@ def pre_answer_sub_question(
 
 async def _async_pre_answer(
     sub_question: str,
-    async_client: AsyncOpenAI,
+    async_client: Any,
     *,
     original_question: str | None = None,
 ) -> str:
@@ -89,7 +87,7 @@ async def _async_pre_answer(
 
 async def pre_answer_all_async(
     sub_questions: list[str],
-    async_client: Optional[AsyncOpenAI] = None,
+    async_client: Optional[Any] = None,
     *,
     original_question: str | None = None,
 ) -> list[str]:
@@ -127,7 +125,7 @@ async def pre_answer_all_async(
 
 async def iter_pre_answers_async(
     sub_questions: list[str],
-    async_client: Optional[AsyncOpenAI] = None,
+    async_client: Optional[Any] = None,
     *,
     original_question: str | None = None,
 ) -> AsyncGenerator[tuple[int, str], None]:
@@ -164,7 +162,7 @@ async def iter_pre_answers_async(
 
 def pre_answer_all(
     sub_questions: list[str],
-    async_client: Optional[AsyncOpenAI] = None,
+    async_client: Optional[Any] = None,
     *,
     original_question: str | None = None,
 ) -> list[str]:

@@ -3,10 +3,29 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from app.integrations.llm.thinking import auth_headers
+
+
+def _embedding_auth_mode() -> str:
+    return str(os.getenv("EMBEDDING_AUTH_MODE") or os.getenv("QA_EMBEDDING_AUTH_MODE") or "bearer").strip()
+
+
+def _normalize_embedding_endpoint(api_url: str) -> str:
+    value = str(api_url or "").strip().rstrip("/")
+    if not value:
+        return value
+    for suffix in ("/v1/embeddings", "/embeddings"):
+        if value.endswith(suffix):
+            value = value[: -len(suffix)].rstrip("/")
+            break
+    if not value.endswith("/v1"):
+        value = value.rstrip("/") + "/v1"
+    return value.rstrip("/") + "/embeddings"
+
 
 class RemoteEmbeddingClient:
     def __init__(self, api_url: str, requests_module: Any):
-        self.api_url = api_url
+        self.api_url = _normalize_embedding_endpoint(api_url)
         self.requests = requests_module
 
     def encode(self, texts: list[str]):
@@ -14,10 +33,8 @@ class RemoteEmbeddingClient:
         model_name = str(os.getenv("EMBEDDING_API_MODEL", "") or os.getenv("EMBEDDING_MODEL_NAME", "")).strip()
         if model_name:
             payload["model"] = model_name
-        headers: dict[str, str] = {}
         api_key = str(os.getenv("EMBEDDING_API_KEY", "") or "").strip()
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
+        headers = auth_headers(api_key, auth_mode=_embedding_auth_mode())
 
         try:
             timeout_seconds = float(str(os.getenv("EMBEDDING_API_TIMEOUT_SECONDS", "120") or "120").strip())

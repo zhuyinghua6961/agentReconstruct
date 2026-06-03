@@ -11,6 +11,7 @@ from app.integrations.llm import (
     SharedHttpPoolConfig,
     SharedStage2UpstreamGate,
 )
+from app.integrations.llm.thinking import auth_headers
 from app.integrations.redis import RedisService, build_redis_bindings
 
 try:
@@ -30,6 +31,31 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if raw in {"0", "false", "no", "off"}:
         return False
     return bool(default)
+
+
+def _rerank_auth_mode() -> str:
+    return str(os.getenv("RERANK_AUTH_MODE") or "bearer").strip()
+
+
+def _first_env(*names: str, default: str = "") -> str:
+    for name in names:
+        raw = str(os.getenv(name, "") or "").strip()
+        if raw:
+            return raw
+    return str(default or "").strip()
+
+
+def _normalize_rerank_endpoint(base_url: str) -> str:
+    value = str(base_url or "").strip().rstrip("/")
+    if not value:
+        return value
+    for suffix in ("/v1/rerank", "/rerank"):
+        if value.endswith(suffix):
+            value = value[: -len(suffix)].rstrip("/")
+            break
+    if not value.endswith("/v1"):
+        value = value.rstrip("/") + "/v1"
+    return value.rstrip("/") + "/rerank"
 
 
 def _set_component_status(
@@ -374,45 +400,20 @@ def _warm_stage2_rerank_lane(
     reason: str = "manual",
 ) -> None:
     _ = reason
-    provider_norm = str(provider or "dashscope").strip().lower()
+    del provider
     session = getattr(lane, "session", None)
     if session is None:
         raise RuntimeError("rerank lane session unavailable")
-    if provider_norm in {"none", "off", "disabled"}:
+    endpoint = _normalize_rerank_endpoint(base_url)
+    if not endpoint or not str(model or "").strip():
         return
-    if provider_norm not in {"dashscope", "local"}:
-        return
-    if provider_norm == "local":
-        endpoint = str(base_url or "http://localhost:8084").rstrip("/") + "/v1/rerank"
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        payload = {
-            "model": model,
-            "query": "warm",
-            "documents": ["warm doc one", "warm doc two"],
-            "top_n": 1,
-        }
-    else:
-        if not api_key:
-            return
-        endpoint = str(base_url or "https://dashscope.aliyuncs.com").rstrip("/")
-        endpoint = endpoint + "/api/v1/services/rerank/text-rerank/text-rerank"
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": model,
-            "input": {
-                "query": "warm",
-                "documents": ["warm doc one", "warm doc two"],
-            },
-            "parameters": {
-                "return_documents": False,
-                "top_n": 1,
-            },
-        }
+    headers = auth_headers(api_key, auth_mode=_rerank_auth_mode()) if api_key else {"Content-Type": "application/json"}
+    payload = {
+        "model": model,
+        "query": "warm",
+        "documents": ["warm doc one", "warm doc two"],
+        "top_n": 1,
+    }
     response = session.post(
         endpoint,
         headers=headers,
@@ -573,19 +574,11 @@ def bootstrap_generation_runtime(runtime: Any) -> None:
                 detail="stage2 chat hot pool disabled by config",
             )
 
-        if bool(getattr(settings, "stage2_rerank_hot_pool_enabled", False)):
+        rerank_base_url = _first_env("RERANK_BASE_URL", "QA_RETRIEVAL_RERANK_BASE_URL")
+        rerank_model = _first_env("RERANK_MODEL", "QA_RETRIEVAL_RERANK_MODEL")
+        if bool(getattr(settings, "stage2_rerank_hot_pool_enabled", False)) and rerank_base_url and rerank_model:
             try:
-                rerank_provider = str(os.getenv("RERANK_PROVIDER", "local") or "local").strip()
-                rerank_provider_norm = rerank_provider.lower()
-                raw_rerank_api_key = str(os.getenv("RERANK_API_KEY", "") or "").strip()
-                if rerank_provider_norm == "local":
-                    rerank_api_key = raw_rerank_api_key
-                    rerank_default_base_url = "http://localhost:8084"
-                else:
-                    rerank_api_key = raw_rerank_api_key
-                    rerank_default_base_url = "https://dashscope.aliyuncs.com"
-                rerank_base_url = str(os.getenv("RERANK_BASE_URL", rerank_default_base_url) or rerank_default_base_url).strip()
-                rerank_model = str(os.getenv("RERANK_MODEL", "qwen3-vl-rerank") or "qwen3-vl-rerank").strip()
+                rerank_api_key = _first_env("RERANK_API_KEY", "QA_RETRIEVAL_RERANK_API_KEY")
                 stage2_rerank_hot_pool = RerankSessionPool(
                     lane_count=int(getattr(settings, "stage2_rerank_hot_lane_count", 0) or 0),
                     logger=getattr(runtime, "logger", None),
@@ -606,7 +599,7 @@ def bootstrap_generation_runtime(runtime: Any) -> None:
                     ),
                     warm_lane_fn=lambda *, lane, timeout_seconds, reason="manual": _warm_stage2_rerank_lane(
                         lane=lane,
-                        provider=rerank_provider,
+                        provider="openai_compatible",
                         api_key=rerank_api_key,
                         model=rerank_model,
                         base_url=rerank_base_url,

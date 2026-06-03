@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from typing import Any, Callable
 
@@ -17,6 +18,55 @@ def normalize_chroma_query_result(results: dict[str, Any]) -> dict[str, list[Any
         "metadatas": raw_metadatas[0] if raw_metadatas else [],
         "ids": raw_ids[0] if raw_ids else [],
     }
+
+
+def _bool_text(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _vector_diagnostics(vectors: Any) -> dict[str, Any]:
+    first: list[Any] = []
+    if isinstance(vectors, list) and vectors:
+        candidate = vectors[0]
+        first = list(candidate) if isinstance(candidate, list) else []
+    numeric: list[float] = []
+    has_nan = False
+    has_inf = False
+    for item in first:
+        try:
+            value = float(item)
+        except (TypeError, ValueError):
+            continue
+        has_nan = has_nan or math.isnan(value)
+        has_inf = has_inf or math.isinf(value)
+        if not math.isnan(value) and not math.isinf(value):
+            numeric.append(value)
+    norm = math.sqrt(sum(value * value for value in numeric)) if numeric else 0.0
+    return {
+        "count": len(vectors) if isinstance(vectors, list) else 0,
+        "dim": len(first),
+        "norm": norm,
+        "has_nan": has_nan,
+        "has_inf": has_inf,
+        "empty": not bool(first),
+    }
+
+
+def _numeric_distances(values: list[Any]) -> list[float]:
+    out: list[float] = []
+    for value in values:
+        try:
+            out.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _distance_summary(values: list[Any]) -> dict[str, Any]:
+    nums = _numeric_distances(values)
+    if not nums:
+        return {"count": 0, "min": None, "max": None, "avg": None}
+    return {"count": len(nums), "min": min(nums), "max": max(nums), "avg": sum(nums) / len(nums)}
 
 
 def run_semantic_search(
@@ -41,7 +91,34 @@ def run_semantic_search(
         embedding_started_at = time.monotonic()
         query_embedding = embedding_model.encode([user_question]).tolist()
         embedding_ms = (time.monotonic() - embedding_started_at) * 1000.0
-    except Exception:
+        if logger is not None:
+            vector_diag = _vector_diagnostics(query_embedding)
+            logger.info(
+                "stage2 embedding diagnostic trace_label=%s model_class=%s input_count=1 input_chars=%s "
+                "input_utf8_bytes=%s embedding_count=%s embedding_dim=%s embedding_norm=%.6f "
+                "has_nan=%s has_inf=%s empty_embedding=%s embedding_ms=%.2f query_preview=%s",
+                str(trace_label or ""),
+                type(embedding_model).__name__,
+                len(str(user_question or "")),
+                len(str(user_question or "").encode("utf-8", errors="replace")),
+                vector_diag["count"],
+                vector_diag["dim"],
+                float(vector_diag["norm"]),
+                _bool_text(bool(vector_diag["has_nan"])),
+                _bool_text(bool(vector_diag["has_inf"])),
+                _bool_text(bool(vector_diag["empty"])),
+                embedding_ms,
+                str(user_question or "")[:220],
+            )
+    except Exception as exc:
+        if logger is not None:
+            logger.warning(
+                "stage2 embedding diagnostic trace_label=%s status=error model_class=%s input_count=1 input_chars=%s error=%s",
+                str(trace_label or ""),
+                type(embedding_model).__name__,
+                len(str(user_question or "")),
+                exc,
+            )
         return {"documents": [], "metadatas": [], "distances": [], "ids": []}
 
     candidate_count = int(n_results)
@@ -61,6 +138,22 @@ def run_semantic_search(
     metadatas = list(flattened["metadatas"])
     distances = list(flattened["distances"])
     ids = list(flattened["ids"])
+    if logger is not None:
+        stats = _distance_summary(distances)
+        logger.info(
+            "stage2 chroma query diagnostic trace_label=%s requested_results=%s raw_docs=%s raw_metadatas=%s raw_distances=%s "
+            "distance_min=%s distance_max=%s distance_avg=%s chroma_query_ms=%.2f id_sample=%s",
+            str(trace_label or ""),
+            candidate_count,
+            len(documents),
+            len(metadatas),
+            len(distances),
+            stats["min"],
+            stats["max"],
+            stats["avg"],
+            chroma_query_ms,
+            ids[:5],
+        )
 
     rerank_meta: dict[str, Any] = {
         "enabled": bool(use_rerank),

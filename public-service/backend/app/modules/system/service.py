@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 RequesterFn = Callable[..., dict[str, Any]]
 MODEL_STATUS_TEST_TEXT = "hello"
 MODEL_STATUS_TEST_TIMEOUT_SECONDS = 30.0
+_AUTH_MODES = {"bearer", "authorization", "x-api-key", "none"}
 
 
 def _first_env(*names: str, default: str = "") -> str:
@@ -60,6 +61,25 @@ def _normalize_bearer_api_key(api_key: str | None) -> str:
     return value
 
 
+def _normalize_auth_mode(auth_mode: str | None) -> str:
+    value = str(auth_mode or "").strip().lower().replace("_", "-")
+    if value in {"xapikey", "api-key", "apikey"}:
+        value = "x-api-key"
+    if value in _AUTH_MODES:
+        return value
+    return "bearer"
+
+
+def _resolve_auth_mode(auth_mode: str | None = None, *, env_name: str = "LLM_AUTH_MODE", default: str = "bearer") -> str:
+    explicit = str(auth_mode or "").strip()
+    if explicit:
+        return _normalize_auth_mode(explicit)
+    raw = str(os.getenv(env_name, "") or "").strip()
+    if not raw and env_name != "LLM_AUTH_MODE":
+        raw = str(os.getenv("LLM_AUTH_MODE", "") or "").strip()
+    return _normalize_auth_mode(raw or default)
+
+
 def _key_fingerprint(api_key: str | None) -> str:
     value = _normalize_bearer_api_key(api_key)
     if not value:
@@ -71,14 +91,19 @@ def _key_input_has_bearer(api_key: str | None) -> bool:
     return str(api_key or "").strip().lower().startswith("bearer ")
 
 
-def _auth_headers(api_key: str | None) -> dict[str, str]:
+def _auth_headers(api_key: str | None, *, auth_mode: str | None = None) -> dict[str, str]:
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
     key = _normalize_bearer_api_key(api_key)
-    if key:
+    mode = _resolve_auth_mode(auth_mode)
+    if key and mode == "bearer":
         headers["Authorization"] = f"Bearer {key}"
+    elif key and mode == "authorization":
+        headers["Authorization"] = key
+    elif key and mode == "x-api-key":
+        headers["X-API-Key"] = key
     return headers
 
 
@@ -103,18 +128,15 @@ def _normalize_embedding_endpoint(base_url: str) -> str:
     return value + "/v1/embeddings"
 
 
-def _normalize_rerank_endpoint(base_url: str, provider: str) -> str:
+def _normalize_rerank_endpoint(base_url: str) -> str:
     value = str(base_url or "").strip().rstrip("/")
-    provider_norm = str(provider or "").strip().lower()
-    if provider_norm == "dashscope":
-        suffix = "/api/v1/services/rerank/text-rerank/text-rerank"
-        if value.endswith(suffix):
-            return value
-        return value + suffix
     for suffix in ("/v1/rerank", "/rerank"):
         if value.endswith(suffix):
-            return value
-    return value + "/v1/rerank"
+            value = value[: -len(suffix)].rstrip("/")
+            break
+    if not value.endswith("/v1"):
+        value = value.rstrip("/") + "/v1"
+    return value.rstrip("/") + "/rerank"
 
 
 def _endpoint_url_for_spec(spec: dict[str, Any]) -> str:
@@ -127,7 +149,7 @@ def _endpoint_url_for_spec(spec: dict[str, Any]) -> str:
     if kind == "embedding":
         return _normalize_embedding_endpoint(base_url)
     if kind == "rerank":
-        return _normalize_rerank_endpoint(base_url, str(spec.get("provider") or "local"))
+        return _normalize_rerank_endpoint(base_url)
     return base_url
 
 
@@ -140,8 +162,8 @@ def _model_status_specs() -> list[dict[str, Any]]:
             "base_url": _first_env("LLM_BASE_URL", "OPENAI_BASE_URL", "DASHSCOPE_BASE_URL"),
             "model": _first_env("LLM_MODEL", "OPENAI_MODEL"),
             "api_key": _first_env("LLM_API_KEY", "OPENAI_API_KEY", "DASHSCOPE_API_KEY"),
+            "auth_mode": _resolve_auth_mode(env_name="LLM_AUTH_MODE"),
             "enabled": True,
-            "provider": "openai_compatible",
         },
         {
             "id": "intent_chat",
@@ -156,8 +178,8 @@ def _model_status_specs() -> list[dict[str, Any]]:
             ),
             "model": _first_env("INTENT_MODEL", "QA_INTENT_DETECT_MODEL", default="qwen3-8b"),
             "api_key": _first_env("INTENT_MODEL_API_KEY", "LLM_API_KEY", "OPENAI_API_KEY", "DASHSCOPE_API_KEY"),
+            "auth_mode": _resolve_auth_mode(env_name="INTENT_MODEL_AUTH_MODE"),
             "enabled": _env_bool("INTENT_MODEL_ENABLED", False),
-            "provider": "openai_compatible",
             "test_payload_overrides": {
                 "temperature": 0.0,
                 "max_tokens": 64,
@@ -171,8 +193,8 @@ def _model_status_specs() -> list[dict[str, Any]]:
             "base_url": _first_env("QA_EMBEDDING_BASE_URL", "EMBEDDING_API_URL"),
             "model": _first_env("QA_EMBEDDING_MODEL", "EMBEDDING_API_MODEL", "EMBEDDING_MODEL_NAME"),
             "api_key": _first_env("QA_EMBEDDING_API_KEY", "EMBEDDING_API_KEY"),
+            "auth_mode": _normalize_auth_mode(_first_env("QA_EMBEDDING_AUTH_MODE", "EMBEDDING_AUTH_MODE", default="bearer")),
             "enabled": True,
-            "provider": "openai_compatible",
         },
         {
             "id": "highthinkingqa_embedding",
@@ -181,8 +203,10 @@ def _model_status_specs() -> list[dict[str, Any]]:
             "base_url": _first_env("HIGHTHINKINGQA_EMBEDDING_BASE_URL"),
             "model": _first_env("HIGHTHINKINGQA_EMBEDDING_MODEL"),
             "api_key": _first_env("HIGHTHINKINGQA_EMBEDDING_API_KEY"),
+            "auth_mode": _normalize_auth_mode(
+                _first_env("HIGHTHINKINGQA_EMBEDDING_AUTH_MODE", "EMBEDDING_AUTH_MODE", default="bearer")
+            ),
             "enabled": True,
-            "provider": "openai_compatible",
         },
         {
             "id": "rerank",
@@ -191,8 +215,8 @@ def _model_status_specs() -> list[dict[str, Any]]:
             "base_url": _first_env("RERANK_BASE_URL"),
             "model": _first_env("RERANK_MODEL"),
             "api_key": _first_env("RERANK_API_KEY"),
-            "enabled": _first_env("RERANK_PROVIDER", default="none").lower() not in {"", "none", "disabled", "off"},
-            "provider": _first_env("RERANK_PROVIDER", default="none").lower(),
+            "auth_mode": _normalize_auth_mode(_first_env("RERANK_AUTH_MODE", default="bearer")),
+            "enabled": bool(_first_env("RERANK_BASE_URL") and _first_env("RERANK_MODEL")),
         },
     ]
 
@@ -204,12 +228,12 @@ def _public_endpoint_spec(spec: dict[str, Any]) -> dict[str, Any]:
     endpoint_url = _endpoint_url_for_spec(spec)
     configured = bool(enabled and base_url and model and endpoint_url)
     api_key = str(spec.get("api_key") or "")
+    auth_mode = _resolve_auth_mode(str(spec.get("auth_mode") or "")) if "auth_mode" in spec else "bearer"
     status = "configured" if configured else "disabled" if not enabled else "unconfigured"
     return {
         "id": str(spec.get("id") or ""),
         "label": str(spec.get("label") or ""),
         "kind": str(spec.get("kind") or ""),
-        "provider": str(spec.get("provider") or ""),
         "model": model,
         "base_url": base_url,
         "endpoint_url": endpoint_url,
@@ -217,6 +241,7 @@ def _public_endpoint_spec(spec: dict[str, Any]) -> dict[str, Any]:
         "enabled": enabled,
         "status": status,
         "test_supported": configured,
+        "auth_mode": auth_mode,
         "api_key_present": bool(_normalize_bearer_api_key(api_key)),
         "api_key_input_has_bearer": _key_input_has_bearer(api_key),
         "key_fingerprint": _key_fingerprint(api_key),
@@ -305,20 +330,7 @@ def _embedding_test_payload(model: str) -> dict[str, Any]:
     }
 
 
-def _rerank_test_payload(model: str, provider: str) -> dict[str, Any]:
-    provider_norm = str(provider or "").strip().lower()
-    if provider_norm == "dashscope":
-        return {
-            "model": model,
-            "input": {
-                "query": MODEL_STATUS_TEST_TEXT,
-                "documents": [MODEL_STATUS_TEST_TEXT, "hello world"],
-            },
-            "parameters": {
-                "return_documents": False,
-                "top_n": 1,
-            },
-        }
+def _rerank_test_payload(model: str) -> dict[str, Any]:
     return {
         "model": model,
         "query": MODEL_STATUS_TEST_TEXT,
@@ -336,7 +348,7 @@ def _test_payload_for_spec(spec: dict[str, Any]) -> dict[str, Any]:
     if kind == "embedding":
         return _embedding_test_payload(model)
     if kind == "rerank":
-        return _rerank_test_payload(model, str(spec.get("provider") or "local"))
+        return _rerank_test_payload(model)
     return {"model": model, "input": MODEL_STATUS_TEST_TEXT}
 
 
@@ -527,7 +539,7 @@ class SystemService:
 
         endpoint_url = str(public_spec["endpoint_url"] or "")
         api_key = str(spec.get("api_key") or "")
-        headers = _auth_headers(api_key)
+        headers = _auth_headers(api_key, auth_mode=str(public_spec.get("auth_mode") or ""))
         payload = _test_payload_for_spec(spec)
         post_json = requester or _http_post_json
         started_at = time.monotonic()
@@ -558,6 +570,7 @@ class SystemService:
                 base_url=str(spec.get("base_url") or ""),
                 api_key=api_key,
                 status_code=status_code_int,
+                auth_mode=str(public_spec.get("auth_mode") or ""),
             )
         else:
             log_upstream_auth_failure(
@@ -568,6 +581,7 @@ class SystemService:
                 base_url=str(spec.get("base_url") or ""),
                 api_key=api_key,
                 status_code=status_code_int,
+                auth_mode=str(public_spec.get("auth_mode") or ""),
             )
 
         if result_ok:

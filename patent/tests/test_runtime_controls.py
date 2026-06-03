@@ -191,6 +191,31 @@ def test_build_default_patent_runtime_degrades_to_no_vector_when_vector_bootstra
     assert runtime.retrieval_service._vector_search_enabled() is False
 
 
+def test_patent_embedding_headers_normalize_bearer_api_key(monkeypatch):
+    from server.patent.runtime import PatentEmbeddingClient
+
+    monkeypatch.setenv("EMBEDDING_API_KEY", "Bearer embedding-key")
+    client = PatentEmbeddingClient()
+    try:
+        assert client._embedding_headers()["Authorization"] == "Bearer embedding-key"
+    finally:
+        client.close()
+
+
+def test_patent_embedding_headers_support_auth_mode(monkeypatch):
+    from server.patent.runtime import PatentEmbeddingClient
+
+    monkeypatch.setenv("EMBEDDING_API_KEY", "Bearer embedding-key")
+    monkeypatch.setenv("EMBEDDING_AUTH_MODE", "x-api-key")
+    client = PatentEmbeddingClient()
+    try:
+        headers = client._embedding_headers()
+        assert headers["X-API-Key"] == "embedding-key"
+        assert "Authorization" not in headers
+    finally:
+        client.close()
+
+
 def test_build_default_patent_runtime_wires_stage1_planner_from_env(monkeypatch, tmp_path: Path):
     from server.patent.resource_registry import PatentResourceRegistry
     from server.patent.runtime import build_default_patent_runtime
@@ -313,7 +338,7 @@ def test_patent_embedding_client_prefers_unified_embedding_namespace(monkeypatch
 
     monkeypatch.setenv("EMBEDDING_MODEL_TYPE", "remote")
     monkeypatch.setenv("EMBEDDING_API_TIMEOUT_SECONDS", "33")
-    monkeypatch.setenv("EMBEDDING_API_URL", "https://embedding.example/v1/embeddings")
+    monkeypatch.setenv("EMBEDDING_API_URL", "https://embedding.example/v1")
     monkeypatch.setenv("EMBEDDING_API_MODEL", "embedding-target")
     monkeypatch.setenv("PATENT_EMBEDDING_MODEL_TYPE", "local")
     monkeypatch.setenv("PATENT_EMBEDDING_API_TIMEOUT_SECONDS", "44")
@@ -353,6 +378,25 @@ def test_patent_embedding_client_ignores_retired_embedding_aliases(monkeypatch):
     assert client._http.timeout == 120.0
     assert client._api_url == "http://127.0.0.1:8001/v1/embeddings"
     assert client._api_model == "bge-local"
+
+
+def test_patent_embedding_client_tolerates_embedding_endpoint_url(monkeypatch):
+    from server.patent.runtime import PatentEmbeddingClient
+
+    class _FakeHttpClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        def close(self):
+            return None
+
+    monkeypatch.setenv("EMBEDDING_MODEL_TYPE", "remote")
+    monkeypatch.setenv("EMBEDDING_API_URL", "https://embedding.example/v1/embeddings")
+    monkeypatch.setattr("server.patent.runtime.httpx.Client", _FakeHttpClient)
+
+    client = PatentEmbeddingClient()
+
+    assert client._api_url == "https://embedding.example/v1/embeddings"
 
 
 def test_patent_embedding_client_adds_authorization_header_when_embedding_api_key_is_set(monkeypatch):

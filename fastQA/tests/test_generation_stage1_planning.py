@@ -458,6 +458,77 @@ def test_stage1_planning_logs_prompt_and_llm_boundaries():
     assert any("阶段一 LLM 响应已接收" in message and "response_chars=" in message for message in messages)
 
 
+def test_stage1_planning_logs_structured_quality_and_response_preview(monkeypatch):
+    monkeypatch.setenv("QA_STAGE1_LOG_RESPONSE_MAX_CHARS", "120")
+    monkeypatch.delenv("QA_STAGE1_LOG_FULL_RESPONSE", raising=False)
+    client = _FakeClient(
+        """{
+          "deep_answer": "answer body",
+          "query_focus_terms": ["LFP"],
+          "question_focus": {
+            "focus_type": "generic",
+            "evidence_axes": ["材料证据"],
+            "secondary_axes": [],
+            "confidence": "high"
+          },
+          "retrieval_claims": [{"claim": "c1", "keywords": ["k1"]}]
+        }"""
+    )
+    logger = _CaptureLogger()
+
+    result = run_stage1_pre_answer_and_planning(
+        user_question="what is lfp?",
+        stage1_prompt="prompt",
+        vector_db_context="context",
+        client=client,
+        model="gpt-test",
+        logger=logger,
+    )
+
+    assert result["success"] is True
+    messages = [message for _level, message in logger.records]
+    assert any(
+        "阶段一结构化质量检查" in message
+        and "json_parsed=true" in message
+        and "schema_valid=true" in message
+        and "retrieval_claims_count=1" in message
+        and "valid_claims_count=1" in message
+        and "query_focus_terms_count=1" in message
+        and "question_focus_present=true" in message
+        and "stage2_eligible=true" in message
+        for message in messages
+    )
+    assert any("阶段一原始回答预览" in message and "answer body" in message for message in messages)
+
+
+def test_stage1_planning_logs_json_parse_failure_quality_and_response_preview(monkeypatch):
+    monkeypatch.setenv("QA_STAGE1_LOG_RESPONSE_MAX_CHARS", "120")
+    client = _FakeClient("not-json-stage1-answer")
+    logger = _CaptureLogger()
+
+    result = run_stage1_pre_answer_and_planning(
+        user_question="what is lfp?",
+        stage1_prompt="prompt",
+        vector_db_context="context",
+        client=client,
+        model="gpt-test",
+        logger=logger,
+    )
+
+    assert result["success"] is True
+    assert result["fallback"] == "json_parse_failed"
+    messages = [message for _level, message in logger.records]
+    assert any(
+        "阶段一结构化质量检查" in message
+        and "json_parsed=false" in message
+        and "schema_valid=false" in message
+        and "fallback=json_parse_failed" in message
+        and "stage2_eligible=false" in message
+        for message in messages
+    )
+    assert any("阶段一原始回答预览" in message and "not-json-stage1-answer" in message for message in messages)
+
+
 def test_effective_query_focus_terms_merges_axes_with_order_and_dedup():
     merged = effective_query_focus_terms_for_stage2(
         {

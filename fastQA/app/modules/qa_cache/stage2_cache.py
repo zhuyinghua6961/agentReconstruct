@@ -79,14 +79,23 @@ def _runtime_model_name(runtime: Any) -> str:
     return raw or "unknown"
 
 
+def _first_env(*names: str, default: str = "") -> str:
+    for name in names:
+        raw = str(os.getenv(name, "") or "").strip()
+        if raw:
+            return raw
+    return str(default or "").strip()
+
+
 def _flags_hash() -> str:
+    rerank_base_url = _first_env("RERANK_BASE_URL", "QA_RETRIEVAL_RERANK_BASE_URL")
+    rerank_model = _first_env("RERANK_MODEL", "QA_RETRIEVAL_RERANK_MODEL")
     payload = {
         "force_keyword_injection": str(os.getenv("QA_STAGE2_FORCE_KEYWORD_INJECTION", "1") or "1").strip(),
         "entity_lock_enabled": str(os.getenv("QA_STAGE2_ENTITY_LOCK_ENABLED", "1") or "1").strip(),
-        "rerank": "enabled",
+        "rerank": "enabled" if rerank_base_url and rerank_model else "disabled",
         "rerank_candidates": str(os.getenv("QA_RETRIEVAL_RERANK_CANDIDATES", "50") or "50").strip(),
-        "rerank_provider": str(os.getenv("RERANK_PROVIDER", "local") or "local").strip(),
-        "rerank_model": str(os.getenv("RERANK_MODEL", "qwen3-vl-rerank") or "qwen3-vl-rerank").strip(),
+        "rerank_model": rerank_model,
         "query_expansion_enabled": str(os.getenv("QA_STAGE2_QUERY_EXPANSION_ENABLED", "0") or "0").strip(),
         "query_expansion_model": str(os.getenv("LLM_MODEL", "qwen-plus") or "qwen-plus").strip(),
     }

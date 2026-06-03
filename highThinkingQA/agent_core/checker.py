@@ -9,9 +9,7 @@ import json
 import logging
 import re
 import time
-from typing import Optional
-
-from openai import OpenAI
+from typing import Any, Optional
 
 import config
 from agent_core.llm_client import chat_completion, get_llm_client, load_prompt_template
@@ -295,7 +293,7 @@ def _run_checker_slice(
     question: str,
     answer_block: str,
     filtered_chunks: list[list[RetrievedChunk]],
-    client: OpenAI,
+    client: Any,
 ) -> tuple[bool, list[dict], dict[str, int]]:
     retrieved_passages = format_retrieved_passages(filtered_chunks)
     template = load_prompt_template("check.txt")
@@ -345,7 +343,7 @@ def check_answer(
     question: str,
     answer: str,
     all_retrieved_chunks: list[list[RetrievedChunk]],
-    client: Optional[OpenAI] = None,
+    client: Optional[Any] = None,
 ) -> tuple[bool, list[dict]]:
     """检查答案中的文献引用是否准确。"""
     if client is None:

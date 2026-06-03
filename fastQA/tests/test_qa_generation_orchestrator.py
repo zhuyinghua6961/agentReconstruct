@@ -168,6 +168,83 @@ def test_orchestrator_run_returns_final_result_when_stage4_succeeds():
     assert result.metadata.source_count == 1
 
 
+def test_orchestrator_logs_stage3_handoff_merge_and_rerank_counts(monkeypatch, caplog):
+    monkeypatch.setenv("QA_STAGE3_DIAGNOSTIC_LOG", "1")
+    runtime = _Runtime(
+        stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]},
+        stage2_payload={
+            "success": True,
+            "documents": ["doc"],
+            "metadatas": [{"doi": "10.1/a"}],
+            "distances": [0.1],
+            "unique_count": 1,
+            "total_count": 1,
+        },
+        doi_payload=["10.1/a"],
+        stage25_payload={"enabled": False, "applied": False, "md_chunks_by_doi": {}, "stats": {}},
+        stage3_payload={"10.1/a": [{"text": "stage3 evidence"}]},
+        stage4_payload=[{"success": True, "final_answer": "final", "references": [{"doi": "10.1/a"}]}],
+    )
+
+    def _merge(**kwargs):
+        chunks = dict(kwargs.get("pdf_chunks") or {})
+        chunks.setdefault("10.1/a", []).append({"text": "stage2 evidence", "source": "stage2_retrieval"})
+        return chunks
+
+    def _rerank(**kwargs):
+        return {
+            "pdf_chunks": dict(kwargs["pdf_chunks"]),
+            "stats": {"enabled": True, "before_chunk_count": 2, "after_chunk_count": 2},
+        }
+
+    logger = logging.getLogger("test.fastqa.orchestrator.stage3")
+    orchestrator = GenerationPipelineOrchestrator(
+        merge_stage2_retrieval_evidence_fn=_merge,
+        evidence_rerank_fn=_rerank,
+    )
+
+    with caplog.at_level(logging.INFO, logger="test.fastqa.orchestrator.stage3"):
+        result = orchestrator.run(
+            question="hello",
+            runtime=runtime,
+            redis_service=None,
+            n_results_per_claim=5,
+            should_cancel=None,
+            active_stream_count=None,
+            logger=logger,
+        )
+
+    assert result.success is True
+    messages = [record.message for record in caplog.records if record.name == "test.fastqa.orchestrator.stage3"]
+    assert any(
+        "fastqa stage3 handoff" in message
+        and "doi_count=1" in message
+        and "all_stage2_dois=1" in message
+        and "doi_source=retrieval" in message
+        for message in messages
+    )
+    assert any(
+        "fastqa stage3 raw completed" in message
+        and "skip_pdf=False" in message
+        and "source_count=1" in message
+        and "chunk_count=1" in message
+        for message in messages
+    )
+    assert any(
+        "fastqa stage3 evidence merge completed" in message
+        and "before_chunks=1" in message
+        and "after_chunks=2" in message
+        for message in messages
+    )
+    assert any(
+        "fastqa stage35 completed" in message
+        and "before_chunk_count" in message
+        and "source_count=1" in message
+        and "chunk_count=2" in message
+        for message in messages
+    )
+
+
 def test_orchestrator_passes_reranked_evidence_chunks_to_stage4(monkeypatch):
     monkeypatch.setenv("QA_STAGE35_EVIDENCE_RERANK_ENABLED", "true")
     seen_stage4_chunks: dict[str, list[dict]] = {}
@@ -782,6 +859,77 @@ def test_orchestrator_stream_emits_content_and_done():
     assert events[-1]["final_answer"] == "hello"
 
 
+def test_orchestrator_stream_logs_stage3_handoff_merge_and_rerank_counts(monkeypatch, caplog):
+    monkeypatch.setenv("QA_STAGE3_DIAGNOSTIC_LOG", "1")
+    runtime = _Runtime(
+        stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]},
+        stage2_payload={
+            "success": True,
+            "documents": ["doc"],
+            "metadatas": [{"doi": "10.1/a"}],
+            "distances": [0.1],
+            "unique_count": 1,
+            "total_count": 1,
+        },
+        doi_payload=["10.1/a"],
+        stage25_payload={"enabled": False, "applied": False, "md_chunks_by_doi": {}, "stats": {}},
+        stage3_payload={"10.1/a": [{"text": "stage3 evidence"}]},
+        stage4_payload=[{"success": True, "final_answer": "final", "references": [{"doi": "10.1/a"}]}],
+    )
+
+    def _merge(**kwargs):
+        chunks = dict(kwargs.get("pdf_chunks") or {})
+        chunks.setdefault("10.1/a", []).append({"text": "stage2 evidence", "source": "stage2_retrieval"})
+        return chunks
+
+    def _rerank(**kwargs):
+        return {
+            "pdf_chunks": dict(kwargs["pdf_chunks"]),
+            "stats": {"enabled": True, "before_chunk_count": 2, "after_chunk_count": 2},
+        }
+
+    logger = logging.getLogger("test.fastqa.orchestrator.stream.stage3")
+    orchestrator = GenerationPipelineOrchestrator(
+        merge_stage2_retrieval_evidence_fn=_merge,
+        evidence_rerank_fn=_rerank,
+    )
+
+    with caplog.at_level(logging.INFO, logger="test.fastqa.orchestrator.stream.stage3"):
+        events = list(
+            orchestrator.stream(
+                question="hello",
+                runtime=runtime,
+                redis_service=None,
+                n_results_per_claim=5,
+                should_cancel=None,
+                active_stream_count=None,
+                logger=logger,
+                sse_event=lambda payload: payload,
+            )
+        )
+
+    assert events[-1]["type"] == "done"
+    messages = [record.message for record in caplog.records if record.name == "test.fastqa.orchestrator.stream.stage3"]
+    assert any(
+        "fastqa stream stage3 handoff" in message
+        and "doi_count=1" in message
+        and "doi_source=retrieval" in message
+        for message in messages
+    )
+    assert any(
+        "fastqa stream stage3 evidence merge completed" in message
+        and "before_chunks=1" in message
+        and "after_chunks=2" in message
+        for message in messages
+    )
+    assert any(
+        "fastqa stream stage35 completed" in message
+        and "before_chunk_count" in message
+        and "pdf_chunk_count=2" in message
+        for message in messages
+    )
+
+
 def test_orchestrator_passes_graph_evidence_to_stage1_and_stage4():
     runtime = _Runtime(
         stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]},
@@ -995,7 +1143,8 @@ def test_orchestrator_stream_emits_md_hit_and_pdf_skip_copy():
     assert "📄 阶段三：MD证据命中阈值，跳过PDF溯源...（hit_doi=1, md_chunks=1）" in thinking_events
 
 
-def test_orchestrator_run_reuses_cached_stage25_and_stage3_results():
+def test_orchestrator_run_reuses_cached_stage25_and_stage3_results(monkeypatch):
+    monkeypatch.setenv("QA_PIPELINE_CACHE_ENABLED", "1")
     reset_cache_metrics()
     redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
     runtime = _Runtime(
@@ -1047,7 +1196,8 @@ def test_orchestrator_run_reuses_cached_stage25_and_stage3_results():
     assert metrics["stage3"]["cache_hit"] == 1
 
 
-def test_orchestrator_stream_reuses_cached_stage25_and_stage3_results():
+def test_orchestrator_stream_reuses_cached_stage25_and_stage3_results(monkeypatch):
+    monkeypatch.setenv("QA_PIPELINE_CACHE_ENABLED", "1")
     reset_cache_metrics()
     redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
     runtime = _Runtime(

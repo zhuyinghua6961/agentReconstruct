@@ -21,6 +21,7 @@ from app.integrations.llm.thinking import (
     auth_headers,
     local_sdk_api_key,
     merge_extra_body,
+    resolve_auth_mode,
     resolve_thinking_controls,
 )
 
@@ -79,6 +80,7 @@ __all__ = [
     "auth_headers",
     "local_sdk_api_key",
     "merge_extra_body",
+    "resolve_auth_mode",
     "resolve_thinking_controls",
     "is_upstream_pool_timeout",
     "raise_if_upstream_pool_timeout",

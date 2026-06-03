@@ -6,9 +6,7 @@ LLM 将用户问题拆分为 5 个独立子问题。
 import json
 import logging
 import re
-from typing import Optional
-
-from openai import OpenAI
+from typing import Any, Optional
 
 import config
 from agent_core.llm_client import chat_completion, load_prompt_template
@@ -19,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 def decompose_question(
     question: str,
-    client: Optional[OpenAI] = None,
+    client: Optional[Any] = None,
     num_sub_questions: Optional[int] = None,
     enable_thinking: Optional[bool] = None,
 ) -> list[str]:

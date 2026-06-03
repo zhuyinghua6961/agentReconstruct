@@ -7,7 +7,7 @@ import logging
 from threading import Lock
 from typing import Any
 
-_SUCCESS_KEYS: set[tuple[str, str, str, str, str]] = set()
+_SUCCESS_KEYS: set[tuple[str, str, str, str, str, str]] = set()
 _LOCK = Lock()
 
 
@@ -63,20 +63,23 @@ def log_upstream_auth_success_once(
     base_url: str,
     api_key: str | None,
     status_code: Any = None,
+    auth_mode: str | None = None,
 ) -> None:
     fingerprint = _key_fingerprint(api_key)
-    key = (str(service), str(endpoint), str(model), str(base_url), fingerprint)
+    auth_mode_value = str(auth_mode or "").strip().lower() or "-"
+    key = (str(service), str(endpoint), str(model), str(base_url), fingerprint, auth_mode_value)
     with _LOCK:
         if key in _SUCCESS_KEYS:
             return
         _SUCCESS_KEYS.add(key)
     logger.info(
-        "LLM upstream auth ok service=%s endpoint=%s model=%s base_url=%s status_code=%s key_present=%s key_input_has_bearer=%s key_fingerprint=%s",
+        "LLM upstream auth ok service=%s endpoint=%s model=%s base_url=%s status_code=%s auth_mode=%s key_present=%s key_input_has_bearer=%s key_fingerprint=%s",
         service,
         endpoint,
         model,
         base_url,
         _status_code_value(status_code),
+        auth_mode_value,
         bool(_normalize_api_key(api_key)),
         _key_input_has_bearer(api_key),
         fingerprint or "-",
@@ -93,17 +96,20 @@ def log_upstream_auth_failure(
     api_key: str | None,
     status_code: Any = None,
     exc: Exception | None = None,
+    auth_mode: str | None = None,
 ) -> None:
     resolved_status = _status_code_value(status_code, exc)
     if resolved_status not in {401, 403}:
         return
+    auth_mode_value = str(auth_mode or "").strip().lower() or "-"
     logger.warning(
-        "LLM upstream auth failed service=%s endpoint=%s model=%s base_url=%s status_code=%s key_present=%s key_input_has_bearer=%s key_fingerprint=%s",
+        "LLM upstream auth failed service=%s endpoint=%s model=%s base_url=%s status_code=%s auth_mode=%s key_present=%s key_input_has_bearer=%s key_fingerprint=%s",
         service,
         endpoint,
         model,
         base_url,
         resolved_status,
+        auth_mode_value,
         bool(_normalize_api_key(api_key)),
         _key_input_has_bearer(api_key),
         _key_fingerprint(api_key) or "-",

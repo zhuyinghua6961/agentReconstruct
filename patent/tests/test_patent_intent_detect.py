@@ -119,6 +119,7 @@ def test_run_intent_detect_uses_dedicated_endpoint_when_key_is_configured(monkey
     monkeypatch.setenv("INTENT_MODEL_API_KEY", "intent-key")
     monkeypatch.setenv("INTENT_MODEL_BASE_URL", "https://intent.example/v1")
     monkeypatch.setenv("INTENT_MODEL", "intent-model")
+    monkeypatch.setenv("INTENT_MODEL_AUTH_MODE", "x-api-key")
     monkeypatch.setattr(idetect.httpx, "post", _post)
 
     class _PrimaryClient:
@@ -133,10 +134,35 @@ def test_run_intent_detect_uses_dedicated_endpoint_when_key_is_configured(monkey
     assert got["ok"] is True
     assert got["intent_tag"] == "comparative_tradeoff"
     assert calls[0]["url"] == "https://intent.example/v1/chat/completions"
-    assert calls[0]["headers"]["Authorization"] == "Bearer intent-key"
+    assert calls[0]["headers"]["X-API-Key"] == "intent-key"
     assert calls[0]["json"]["model"] == "intent-model"
     assert calls[0]["json"]["enable_thinking"] is False
     assert "thinking" not in calls[0]["json"]
+
+
+def test_run_intent_detect_normalizes_full_chat_completion_base_url(monkeypatch):
+    calls: list[dict] = []
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "generic"}}]}
+
+    def _post(url, **kwargs):
+        calls.append({"url": url, **kwargs})
+        return _Response()
+
+    monkeypatch.setenv("INTENT_MODEL_API_KEY", "intent-key")
+    monkeypatch.setenv("INTENT_MODEL_BASE_URL", "https://intent.example/v1/chat/completions")
+    monkeypatch.setenv("INTENT_MODEL", "intent-model")
+    monkeypatch.setattr(idetect.httpx, "post", _post)
+
+    got = run_intent_detect_quick_tag(client=object(), user_question="hello", logger=_Logger())
+
+    assert got["ok"] is True
+    assert calls[0]["url"] == "https://intent.example/v1/chat/completions"
 
 
 def test_run_intent_detect_disables_thinking_for_thinking_model(monkeypatch):

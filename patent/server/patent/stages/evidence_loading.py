@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import logging
+import os
 import re
 from dataclasses import asdict
 from typing import Any, Callable
@@ -17,6 +18,49 @@ from server.patent.retrieval_models import (
 
 _WHITESPACE_RE = re.compile(r"\s+")
 _LOGGER = logging.getLogger("patent.stage3")
+_TRUE_VALUES = {"1", "true", "yes", "y", "on"}
+_FALSE_VALUES = {"0", "false", "no", "n", "off"}
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = str(raw).strip().lower()
+    if normalized in _TRUE_VALUES:
+        return True
+    if normalized in _FALSE_VALUES:
+        return False
+    return default
+
+
+def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = os.getenv(name)
+    try:
+        parsed = int(str(raw).strip()) if raw is not None else int(default)
+    except Exception:
+        parsed = int(default)
+    return max(minimum, min(parsed, maximum))
+
+
+def _stage3_diag_enabled() -> bool:
+    return _env_bool("QA_STAGE3_DIAGNOSTIC_LOG", True)
+
+
+def _stage3_source_details_enabled() -> bool:
+    return _stage3_diag_enabled() and _env_bool("QA_STAGE3_LOG_SOURCE_DETAILS", True)
+
+
+def _stage3_chunk_details_enabled() -> bool:
+    return _stage3_diag_enabled() and _env_bool("QA_STAGE3_LOG_CHUNK_DETAILS", True)
+
+
+def _stage3_log_chunk_max() -> int:
+    return _env_int("QA_STAGE3_LOG_CHUNK_MAX", 5, minimum=0, maximum=50)
+
+
+def _stage3_log_text_max_chars() -> int:
+    return _env_int("QA_STAGE3_LOG_TEXT_MAX_CHARS", 1000, minimum=80, maximum=12000)
 
 
 def _normalize_patent_id(value: Any) -> str:
@@ -25,6 +69,14 @@ def _normalize_patent_id(value: Any) -> str:
 
 def _normalize_text(value: Any) -> str:
     return _WHITESPACE_RE.sub(" ", str(value or "")).strip()
+
+
+def _preview_text(value: Any, *, max_chars: int | None = None) -> str:
+    text = _normalize_text(value)
+    limit = _stage3_log_text_max_chars() if max_chars is None else max(0, int(max_chars))
+    if limit and len(text) > limit:
+        return text[:limit] + "..."
+    return text
 
 
 def _document_prefix_key(value: Any, limit: int = 32) -> str:
@@ -246,9 +298,21 @@ def _load_pdf_matched_evidence(
     metadata: dict[str, object] = {}
     matched: list[PatentMatchedEvidence] = []
     if not callable(pdf_loader):
+        if _stage3_source_details_enabled():
+            _LOGGER.info(
+                "patent stage3 pdf diagnostic patent_id=%s pdf_loader=False pdf_loaded=False reason=no_pdf_loader "
+                "text_chars=0 pdf_chunks=0",
+                patent_id,
+            )
         return metadata, matched
     pdf_document = pdf_loader(patent_id)
     if not isinstance(pdf_document, dict):
+        if _stage3_source_details_enabled():
+            _LOGGER.info(
+                "patent stage3 pdf diagnostic patent_id=%s pdf_loader=True pdf_loaded=False reason=no_pdf_document "
+                "text_chars=0 pdf_chunks=0",
+                patent_id,
+            )
         return metadata, matched
 
     metadata["pdf_document"] = {
@@ -258,10 +322,22 @@ def _load_pdf_matched_evidence(
     }
     pdf_path = str(pdf_document.get("path") or "").strip()
     if not pdf_path or not callable(pdf_text_extractor):
+        if _stage3_source_details_enabled():
+            _LOGGER.info(
+                "patent stage3 pdf diagnostic patent_id=%s pdf_loader=True pdf_loaded=True path=%s filename=%s "
+                "size_bytes=%s extractor=%s text_chars=0 pdf_chunks=0 reason=%s",
+                patent_id,
+                pdf_path,
+                metadata["pdf_document"]["filename"],
+                metadata["pdf_document"]["size_bytes"],
+                callable(pdf_text_extractor),
+                "missing_pdf_path" if not pdf_path else "missing_pdf_text_extractor",
+            )
         return metadata, matched
 
     pdf_text = str(pdf_text_extractor(pdf_path) or "").strip()
-    for index, paragraph in enumerate(_split_pdf_text_into_paragraphs(pdf_text, max_chunks=max_chunks_per_patent), start=1):
+    paragraphs = _split_pdf_text_into_paragraphs(pdf_text, max_chunks=max_chunks_per_patent)
+    for index, paragraph in enumerate(paragraphs, start=1):
         matched.append(
             PatentMatchedEvidence(
                 section_type="pdf_paragraph",
@@ -270,6 +346,17 @@ def _load_pdf_matched_evidence(
                 anchor={"pdf_chunk_index": index},
                 scores={},
             )
+        )
+    if _stage3_source_details_enabled():
+        _LOGGER.info(
+            "patent stage3 pdf diagnostic patent_id=%s pdf_loader=True pdf_loaded=True path=%s filename=%s "
+            "size_bytes=%s text_chars=%s pdf_chunks=%s",
+            patent_id,
+            pdf_path,
+            metadata["pdf_document"]["filename"],
+            metadata["pdf_document"]["size_bytes"],
+            len(pdf_text),
+            len(matched),
         )
     return metadata, matched
 
@@ -318,6 +405,19 @@ def run_stage3_load_patent_evidence(
         len(list(retrieval_results.get("documents") or [])),
         len(list(retrieval_results.get("reference_objects") or [])),
     )
+    if _stage3_diag_enabled():
+        _LOGGER.info(
+            "patent stage3 diagnostic input source_ids=%s documents=%s metadatas=%s distances=%s "
+            "reference_objects=%s reference_links=%s original_links=%s max_snippets_per_patent=%s",
+            normalized_source_ids,
+            len(list(retrieval_results.get("documents") or [])),
+            len(list(retrieval_results.get("metadatas") or [])),
+            len(list(retrieval_results.get("distances") or [])),
+            len(list(retrieval_results.get("reference_objects") or [])),
+            len(list(retrieval_results.get("reference_links") or [])),
+            len(list(retrieval_results.get("original_links") or [])),
+            max_snippets_per_patent,
+        )
     if callable(should_cancel) and should_cancel():
         return _cancelled_stage3_payload(force_pdf=force_pdf)
 
@@ -426,6 +526,38 @@ def run_stage3_load_patent_evidence(
             len(table_supplements),
             "pdf_document" in metadata,
         )
+        if _stage3_source_details_enabled():
+            _LOGGER.info(
+                "patent stage3 source diagnostic patent_id=%s source_index=%s retrieval_rows=%s "
+                "reference_object=%s reference_link=%s original_links=%s catalog_loaded=%s tables=%s "
+                "force_pdf=%s pdf_loaded=%s matched_evidence=%s",
+                patent_id,
+                int(index) + 1,
+                len(retrieval_rows),
+                bool(reference_object),
+                bool(reference_link),
+                len(original_links),
+                isinstance(catalog_record, PatentCatalogRecord),
+                len(table_supplements),
+                bool(force_pdf),
+                "pdf_document" in metadata,
+                len(matched_evidence),
+            )
+        if matched_evidence and _stage3_chunk_details_enabled():
+            for evidence_index, evidence in enumerate(matched_evidence[: _stage3_log_chunk_max()], start=1):
+                if not isinstance(evidence, PatentMatchedEvidence):
+                    continue
+                _LOGGER.info(
+                    "patent stage3 evidence diagnostic patent_id=%s evidence_index=%s section=%s label=%s "
+                    "text_chars=%s scores=%s preview=%s",
+                    patent_id,
+                    evidence_index,
+                    evidence.section_type,
+                    evidence.section_label,
+                    len(str(evidence.text or "")),
+                    dict(evidence.scores or {}),
+                    _preview_text(evidence.text),
+                )
 
         publication_number = ""
         title = patent_id
@@ -529,4 +661,14 @@ def run_stage3_load_patent_evidence(
         len(evidences),
         failed_patent_count,
     )
+    if _stage3_diag_enabled():
+        _LOGGER.info(
+            "patent stage3 diagnostic completed requested=%s successful=%s failed=%s total_matched_evidence=%s "
+            "source_ids=%s",
+            len(normalized_source_ids),
+            len(successful_source_ids),
+            failed_patent_count,
+            sum(len(item.matched_evidence) for item in evidences),
+            successful_source_ids[:10],
+        )
     return asdict(bundle)

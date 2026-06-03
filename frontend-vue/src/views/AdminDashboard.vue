@@ -783,7 +783,6 @@ onMounted(async () => {
                 <td>
                   <div class="model-name-cell">
                     <span>{{ item.label }}</span>
-                    <small v-if="item.provider">{{ item.provider }}</small>
                   </div>
                 </td>
                 <td>{{ getModelKindText(item.kind) }}</td>
@@ -792,6 +791,7 @@ onMounted(async () => {
                 <td class="model-url">{{ item.endpoint_url || '-' }}</td>
                 <td>
                   <div class="model-auth-cell">
+                    <span>模式 {{ item.auth_mode || 'bearer' }}</span>
                     <span>{{ item.api_key_present ? '已配置 key' : '未配置 key' }}</span>
                     <small v-if="item.api_key_input_has_bearer">配置含 Bearer</small>
                     <small v-if="item.key_fingerprint">fp {{ item.key_fingerprint }}</small>

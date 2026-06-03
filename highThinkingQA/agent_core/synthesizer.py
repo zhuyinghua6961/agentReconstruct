@@ -6,9 +6,7 @@
 """
 
 import logging
-from typing import Optional, Generator
-
-from openai import OpenAI
+from typing import Any, Optional, Generator
 
 from agent_core.answer_summary import build_summary_instruction
 from agent_core.llm_client import (
@@ -86,7 +84,7 @@ def synthesize_answer(
     direct_answer: str,
     all_retrieved_chunks: list[list[RetrievedChunk]],
     sub_questions: list[str] = None,
-    client: Optional[OpenAI] = None,
+    client: Optional[Any] = None,
     enable_thinking: Optional[bool] = None,
     summary_enabled: bool | None = None,
 ) -> str:
@@ -119,7 +117,7 @@ def synthesize_answer_stream(
     direct_answer: str,
     all_retrieved_chunks: list[list[RetrievedChunk]],
     sub_questions: list[str] = None,
-    client: Optional[OpenAI] = None,
+    client: Optional[Any] = None,
     enable_thinking: Optional[bool] = None,
     summary_enabled: bool | None = None,
 ) -> Generator[str, None, None]:

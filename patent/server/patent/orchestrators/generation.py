@@ -529,6 +529,8 @@ class PatentGenerationOrchestrator:
             )
             if not retrieval_claims:
                 success = bool(deep_answer.strip())
+                retrieval_plan_payload = dict(stage1_result or {}).get("retrieval_plan")
+                raw_claims_payload = dict(stage1_result or {}).get("retrieval_claims")
                 steps = _build_stage_steps(
                     timings=timings,
                     stage25_result={},
@@ -539,10 +541,18 @@ class PatentGenerationOrchestrator:
                     "stage1": _payload_cache_hit(dict(stage1_result or {})),
                 }
                 _LOGGER.info(
-                    "patent pipeline short-circuit trace=%s success=%s reason=stage1_no_retrieval_claims deep_answer_chars=%s timings=%s",
+                    "patent pipeline short-circuit trace=%s success=%s reason=stage1_no_retrieval_claims "
+                    "deep_answer_chars=%s raw_claims_type=%s raw_claims_count=%s retrieval_plan_type=%s "
+                    "retrieval_plan_queries=%s fallback=%s question=%s timings=%s",
                     normalized_trace_id,
                     success,
                     len(deep_answer),
+                    type(raw_claims_payload).__name__,
+                    len(raw_claims_payload) if isinstance(raw_claims_payload, list) else int(bool(raw_claims_payload)),
+                    type(retrieval_plan_payload).__name__,
+                    list(getattr(retrieval_plan, "candidate_recall_queries", []) or [])[:5],
+                    dict(stage1_result or {}).get("fallback"),
+                    _question_preview(question),
                     timings,
                 )
                 return PatentQaExecutionResult(
@@ -609,12 +619,17 @@ class PatentGenerationOrchestrator:
                 ),
             )
             _LOGGER.info(
-                "patent stage2 completed trace=%s success=%s document_count=%s metadata_count=%s reference_count=%s timing_ms=%s",
+                "patent stage2 completed trace=%s success=%s document_count=%s metadata_count=%s reference_count=%s "
+                "raw_candidates=%s selected_sources=%s rerank=%s validation=%s timing_ms=%s",
                 normalized_trace_id,
                 dict(stage2_result or {}).get("success", True),
                 _count_list_items(dict(stage2_result or {}).get("documents")),
                 _count_list_items(dict(stage2_result or {}).get("metadatas")),
                 _count_list_items(dict(stage2_result or {}).get("references")),
+                dict(dict(stage2_result or {}).get("metadata") or {}).get("stage2_raw_candidate_count"),
+                len(list(dict(stage2_result or {}).get("source_ids") or [])),
+                dict(dict(stage2_result or {}).get("metadata") or {}).get("stage2_rerank"),
+                dict(dict(stage2_result or {}).get("metadata") or {}).get("stage2_validation"),
                 timings.get("stage2"),
             )
             source_ids = list(runtime._extract_patent_ids_from_results(stage2_result) or [])
@@ -624,6 +639,20 @@ class PatentGenerationOrchestrator:
                 len(source_ids),
                 source_ids[:10],
             )
+            if not source_ids:
+                metadata = dict(dict(stage2_result or {}).get("metadata") or {})
+                _LOGGER.warning(
+                    "patent stage2 produced no source_ids trace=%s raw_candidates=%s references=%s metadatas=%s "
+                    "rerank=%s validation=%s graph_behavior=%s question=%s",
+                    normalized_trace_id,
+                    metadata.get("stage2_raw_candidate_count"),
+                    _count_list_items(dict(stage2_result or {}).get("references")),
+                    _count_list_items(dict(stage2_result or {}).get("metadatas")),
+                    metadata.get("stage2_rerank"),
+                    metadata.get("stage2_validation"),
+                    metadata.get("graph_stage2_behavior"),
+                    _question_preview(question),
+                )
             _emit_progress_step(
                 progress_callback,
                 step="stage25",

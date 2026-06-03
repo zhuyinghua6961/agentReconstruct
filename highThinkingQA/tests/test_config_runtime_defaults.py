@@ -46,6 +46,7 @@ def test_config_hardcodes_chat_persistence_enabled(monkeypatch):
 def test_config_prefers_highthinkingqa_embedding_namespace(monkeypatch, tmp_path):
     _isolate_config_root(monkeypatch, tmp_path)
     monkeypatch.setenv("HIGHTHINKINGQA_EMBEDDING_API_KEY", "ht-key")
+    monkeypatch.setenv("HIGHTHINKINGQA_EMBEDDING_AUTH_MODE", "x-api-key")
     monkeypatch.setenv("HIGHTHINKINGQA_EMBEDDING_BASE_URL", "https://ht.example/v1")
     monkeypatch.setenv("HIGHTHINKINGQA_EMBEDDING_MODEL", "ht-embedding")
     monkeypatch.setenv("HIGHTHINKINGQA_EMBEDDING_DIMENSIONS", "3072")
@@ -58,6 +59,7 @@ def test_config_prefers_highthinkingqa_embedding_namespace(monkeypatch, tmp_path
     monkeypatch.setenv("HIGHTHINKINGQA_EMBEDDING_MAX_RETRIES", "6")
     monkeypatch.setenv("HIGHTHINKINGQA_EMBEDDING_QUEUE_SIZE", "111")
     monkeypatch.setenv("EMBEDDING_API_KEY", "shared-key")
+    monkeypatch.setenv("EMBEDDING_AUTH_MODE", "authorization")
     monkeypatch.setenv("EMBEDDING_BASE_URL", "https://shared.example/v1")
     monkeypatch.setenv("EMBEDDING_MODEL", "shared-embedding")
     monkeypatch.setenv("EMBEDDING_DIMENSIONS", "2048")
@@ -75,6 +77,7 @@ def test_config_prefers_highthinkingqa_embedding_namespace(monkeypatch, tmp_path
     reloaded = importlib.reload(config)
 
     assert reloaded.EMBEDDING_API_KEY == "ht-key"
+    assert reloaded.HIGHTHINKINGQA_EMBEDDING_AUTH_MODE == "x-api-key"
     assert reloaded.EMBEDDING_BASE_URL == "https://ht.example/v1"
     assert reloaded.EMBEDDING_MODEL == "ht-embedding"
     assert reloaded.EMBEDDING_DIMENSIONS == 3072
@@ -93,7 +96,10 @@ def test_config_ignores_legacy_embedding_and_llm_aliases(monkeypatch, tmp_path):
     monkeypatch.delenv("LLM_API_KEY", raising=False)
     monkeypatch.delenv("LLM_BASE_URL", raising=False)
     monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("LLM_IS_THINKING_MODEL", raising=False)
+    monkeypatch.delenv("LLM_THINKING_ENABLED", raising=False)
     monkeypatch.delenv("HIGHTHINKINGQA_EMBEDDING_API_KEY", raising=False)
+    monkeypatch.delenv("HIGHTHINKINGQA_EMBEDDING_AUTH_MODE", raising=False)
     monkeypatch.delenv("HIGHTHINKINGQA_EMBEDDING_BASE_URL", raising=False)
     monkeypatch.delenv("HIGHTHINKINGQA_EMBEDDING_MODEL", raising=False)
     monkeypatch.delenv("HIGHTHINKINGQA_EMBEDDING_DIMENSIONS", raising=False)
@@ -112,6 +118,7 @@ def test_config_ignores_legacy_embedding_and_llm_aliases(monkeypatch, tmp_path):
     monkeypatch.setenv("DASHSCOPE_BASE_URL", "https://dash.example/v1")
     monkeypatch.setenv("DASHSCOPE_MODEL", "dash-model")
     monkeypatch.setenv("EMBEDDING_API_KEY", "shared-key")
+    monkeypatch.setenv("EMBEDDING_AUTH_MODE", "authorization")
     monkeypatch.setenv("EMBEDDING_BASE_URL", "https://shared.example/v1")
     monkeypatch.setenv("EMBEDDING_MODEL", "shared-embedding")
     monkeypatch.setenv("EMBEDDING_DIMENSIONS", "999")
@@ -140,6 +147,7 @@ def test_config_ignores_legacy_embedding_and_llm_aliases(monkeypatch, tmp_path):
     assert reloaded.LLM_BASE_URL == "https://dashscope.aliyuncs.com/compatible-mode/v1"
     assert reloaded.LLM_MODEL == "qwen3-max"
     assert reloaded.EMBEDDING_API_KEY == ""
+    assert reloaded.HIGHTHINKINGQA_EMBEDDING_AUTH_MODE == "bearer"
     assert reloaded.EMBEDDING_BASE_URL == "https://dashscope.aliyuncs.com/compatible-mode/v1"
     assert reloaded.EMBEDDING_MODEL == "text-embedding-v4"
     assert reloaded.EMBEDDING_DIMENSIONS == 2048

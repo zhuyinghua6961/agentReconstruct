@@ -4,9 +4,7 @@ LLM 直接根据自身知识回答用户原始问题。
 """
 
 import logging
-from typing import Optional
-
-from openai import OpenAI
+from typing import Any, Optional
 
 import config
 from agent_core.llm_client import chat_completion_stream, load_prompt_template
@@ -17,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 def direct_answer(
     question: str,
-    client: Optional[OpenAI] = None,
+    client: Optional[Any] = None,
     enable_thinking: Optional[bool] = None,
 ) -> str:
     """
