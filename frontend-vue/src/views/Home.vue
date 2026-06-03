@@ -2,8 +2,7 @@
 import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
 import { useChatStore } from '../stores/chatStore'
 import { api } from '../services/api'
-import { formatTime, formatAnswer } from '../utils'
-import { createStreamingHtmlRenderer } from '../utils/streamingRender'
+import { formatTime } from '../utils'
 import { buildMessageRenderMemoKey } from '../utils/messageRenderMemo'
 import { buildVisibleMessageWindow, resolveHiddenHistoryReveal } from '../utils/messageWindowing'
 import { resolveStreamingTarget } from '../utils/streamingTarget'
@@ -26,6 +25,7 @@ import {
 } from '../utils/patentStreaming'
 import PdfReader from '../components/PdfReader.vue'
 import QuotaLimitCard from '../components/QuotaLimitCard.vue'
+import MarkdownRenderer from '../features/markdown/MarkdownRenderer.vue'
 import { buildCitationLocationsForDoi } from '../utils/citationEvidence'
 import { buildRoutingErrorMarkdown, buildRoutingErrorPresentation, getRouteModeLabel, mergeRoutingMetadata } from '../utils/routingStatus'
 
@@ -69,7 +69,6 @@ const userMessageElements = new Map()
 const isPanelResizing = ref(false)
 let questionHighlightTimer = null
 let activeResizePanel = null
-let documentClickHandler = null
 let switchChatRequestSeq = 0
 
 const LEFT_SIDEBAR_MIN_WIDTH = 220
@@ -136,8 +135,6 @@ const questionOutlineSignature = computed(() => buildQuestionOutlineSignature(st
 const isNearBottomRef = ref(true)
 const pendingAutoScroll = ref(false)
 
-const renderedMessageCache = new WeakMap()
-const renderStreamingMessageHtml = createStreamingHtmlRenderer({ terminalFormatter: (text, message) => formatAnswer(text, Array.isArray(message?.referenceLinks) ? message.referenceLinks : []) })
 const taskRecoveryDebug = createTaskRecoveryDebugLogger()
 
 function normalizeAskMode(mode) {
@@ -1227,44 +1224,10 @@ function applyGatewayEvent(chatId, data, runtime = getStreamRuntime(chatId)) {
   return { terminal: false }
 }
 
-function getRenderedMessageHtml(msg) {
-  const content = String(msg?.content || '')
-  const referenceLinks = Array.isArray(msg?.referenceLinks) ? msg.referenceLinks : null
-  const isComplete = msg?.isComplete === true
-  const doneSeen = Boolean(msg?.doneSeen ?? msg?.done_seen ?? msg?.metadata?.done_seen)
-  const terminalStatus = String(
-    msg?.terminalStatus
-    ?? msg?.terminal_status
-    ?? msg?.status
-    ?? msg?.metadata?.terminal_status
-    ?? msg?.metadata?.status
-    ?? msg?.metadata?.streaming_terminal_event
-    ?? ''
-  ).trim().toLowerCase()
-  const cached = renderedMessageCache.get(msg)
-  if (
-    cached
-    && cached.content === content
-    && cached.referenceLinks === referenceLinks
-    && cached.isComplete === isComplete
-    && cached.doneSeen === doneSeen
-    && cached.terminalStatus === terminalStatus
-  ) {
-    return cached.html
-  }
-  const html = formatAnswer(content, referenceLinks || [])
-  renderedMessageCache.set(msg, { content, referenceLinks, isComplete, doneSeen, terminalStatus, html })
-  return html
-}
-
 function isStreamingTextMessage(msg) {
   if (!msg) return false
   if (!(msg.role === 'bot' || msg.role === 'assistant')) return false
   return isCurrentChatBusy.value && msg.isComplete !== true
-}
-
-function getStreamingMessageHtml(msg) {
-  return renderStreamingMessageHtml(msg)
 }
 
 function getPatentPreviewSourceLabel(stream) {
@@ -1276,12 +1239,30 @@ function getPatentPreviewSourceLabel(stream) {
   return '处理中证据'
 }
 
-function getPatentPreviewHtml(stream) {
-  return formatAnswer(String(stream?.content || ''), [])
-}
-
 function getMessageRenderMemoKey(msg) {
   return buildMessageRenderMemoKey(msg)
+}
+
+function handleMarkdownPatentOpen(patentId) {
+  const normalizedPatentId = String(patentId || '').trim()
+  if (!normalizedPatentId || !pdfReader.value) return
+  pdfReader.value.openUrlReader(
+    normalizedPatentId,
+    `/api/patent/original/${encodeURIComponent(normalizedPatentId)}`,
+    []
+  )
+}
+
+function handleMarkdownDoiOpen(doi, messageIndex = -1) {
+  const normalizedDoi = String(doi || '').trim()
+  if (!normalizedDoi || !pdfReader.value) return
+  const currentMsg = getMessageByAbsoluteIndex(Number(messageIndex))
+  const locations = buildCitationLocationsForDoi({
+    doi: normalizedDoi,
+    doiLocations: currentMsg?.doiLocations || {},
+    references: currentMsg?.references || [],
+  })
+  pdfReader.value.openReader(normalizedDoi, locations)
 }
 
 function getFallbackQueryModeLabel(data, existingMeta = {}) {
@@ -1588,40 +1569,6 @@ onMounted(async () => {
     await focusLastQuestionInView({ behavior: 'auto' })
   }
 
-  documentClickHandler = (e) => {
-    const target = e.target
-    if (target.classList && target.classList.contains('patent-link')) {
-      e.preventDefault()
-      const patentId = String(target.getAttribute('data-patent-id') || '').trim()
-      if (patentId && pdfReader.value) {
-        pdfReader.value.openUrlReader(
-          patentId,
-          `/api/patent/original/${encodeURIComponent(patentId)}`,
-          []
-        )
-      }
-      return
-    }
-    if (target.classList && target.classList.contains('doi-link')) {
-      e.preventDefault()
-      const doi = target.getAttribute('data-doi')
-
-      const messageElement = target.closest('.message[data-message-index]')
-      const messageIndex = Number(messageElement?.dataset?.messageIndex || -1)
-      const currentMsg = getMessageByAbsoluteIndex(messageIndex)
-      const locations = buildCitationLocationsForDoi({
-        doi,
-        doiLocations: currentMsg?.doiLocations || {},
-        references: currentMsg?.references || []
-      })
-
-      if (doi && pdfReader.value) {
-        pdfReader.value.openReader(doi, locations)
-      }
-    }
-  }
-  document.addEventListener('click', documentClickHandler)
-
   if (hasPendingFileProcessing()) {
     startFileStatusPolling()
   }
@@ -1640,10 +1587,6 @@ onUnmounted(() => {
     scrollFrame = null
   }
   window.removeEventListener('resize', clampPanelWidths)
-  if (documentClickHandler) {
-    document.removeEventListener('click', documentClickHandler)
-    documentClickHandler = null
-  }
 })
 
 async function fetchKbInfo() {
@@ -2622,8 +2565,14 @@ watch(
                     <div
                       v-if="stream.content"
                       class="patent-preview-stream-body"
-                      v-html="getPatentPreviewHtml(stream)"
-                    ></div>
+                    >
+                      <MarkdownRenderer
+                        :content="String(stream.content || '')"
+                        variant="compact"
+                        @open-doi="(doi) => handleMarkdownDoiOpen(doi, entry.absoluteMessageIndex)"
+                        @open-patent="handleMarkdownPatentOpen"
+                      />
+                    </div>
                     <div v-else class="patent-preview-stream-empty">处理中...</div>
                   </div>
                 </div>
@@ -2632,14 +2581,27 @@ watch(
                   v-else-if="entry.message.content && isStreamingTextMessage(entry.message)"
                   class="message-markdown-content"
                   :class="{ 'graph-kb-markdown': isGraphKbMessage(entry.message) }"
-                  v-html="getStreamingMessageHtml(entry.message)"
-                ></div>
+                >
+                  <MarkdownRenderer
+                    :content="String(entry.message.content || '')"
+                    :streaming="true"
+                    :variant="isGraphKbMessage(entry.message) ? 'graph-kb' : 'message'"
+                    @open-doi="(doi) => handleMarkdownDoiOpen(doi, entry.absoluteMessageIndex)"
+                    @open-patent="handleMarkdownPatentOpen"
+                  />
+                </div>
                 <template v-else-if="entry.message.content">
                   <div
                     class="message-markdown-content"
                     :class="{ 'graph-kb-markdown': isGraphKbMessage(entry.message) }"
-                    v-html="getRenderedMessageHtml(entry.message)"
-                  ></div>
+                  >
+                    <MarkdownRenderer
+                      :content="String(entry.message.content || '')"
+                      :variant="isGraphKbMessage(entry.message) ? 'graph-kb' : 'message'"
+                      @open-doi="(doi) => handleMarkdownDoiOpen(doi, entry.absoluteMessageIndex)"
+                      @open-patent="handleMarkdownPatentOpen"
+                    />
+                  </div>
                   <div v-if="getTerminalMessageState(entry.message)" class="terminal-message-inline" :class="'terminal-message-' + getTerminalMessageState(entry.message)">
                     <div class="terminal-message-title">{{ getTerminalMessageTitle(entry.message) }}</div>
                     <div v-if="getTerminalMessageDetail(entry.message)" class="terminal-message-detail">{{ getTerminalMessageDetail(entry.message) }}</div>

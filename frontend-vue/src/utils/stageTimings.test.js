@@ -14,15 +14,17 @@ test('normalizes patent and fastQA stage timings as milliseconds', () => {
     stage2: 16210,
     stage25: 8.9,
     stage3: 24.5,
+    stage35: 230.5,
     stage4: 50524,
   })
 
   assert.equal(model.hasTimings, true)
   assert.equal(model.family, 'generation-stage')
-  assert.equal(model.totalLabel, '1m18.8s')
+  assert.equal(model.totalLabel, '1m19.1s')
   assert.equal(model.slowest.key, 'stage4')
   assert.equal(model.slowest.durationLabel, '50.5s')
-  assert.deepEqual(model.entries.map((entry) => entry.key), ['stage1', 'stage2', 'stage25', 'stage3', 'stage4'])
+  assert.deepEqual(model.entries.map((entry) => entry.key), ['stage1', 'stage2', 'stage25', 'stage3', 'stage35', 'stage4'])
+  assert.equal(model.entries[4].label, '阶段3.5')
   assert.equal(model.entries[1].description, '向量检索与重排')
 })
 
@@ -129,12 +131,15 @@ test('maps generation stage titles and keys to stage timing labels', () => {
       timings: {
         stage1: 1000,
         stage25: 2500,
+        stage35: 3500,
       },
     },
   }
 
   assert.equal(getStepTimingDurationLabel(message, { step: 'stage1', title: '阶段一' }), '1.0s')
   assert.equal(getStepTimingDurationLabel(message, { step: 'stage25', title: '阶段二点五' }), '2.5s')
+  assert.equal(getStepTimingDurationLabel(message, { step: 'stage35', title: '阶段3.5' }), '3.5s')
+  assert.equal(getStepTimingDurationLabel(message, { step: 'thinking_5', title: '阶段3.5' }), '3.5s')
 })
 
 test('uses step data elapsed_ms for intent substep without adding it to total timings', () => {

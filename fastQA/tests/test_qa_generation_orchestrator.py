@@ -1098,6 +1098,7 @@ def test_orchestrator_stream_emits_legacy_stage_copy_for_pdf_path():
         "🔍 阶段二：检索高匹配度DOI...",
         "🧩 阶段二点五：尝试MD原文扩展检索...",
         "📄 阶段三：加载 1 个文献的原文（提取 top 3 个最相关chunk）...",
+        "🔎 阶段3.5：重排候选证据chunk...",
         "✍️ 阶段四：综合预回答与原文chunk生成答案...",
     ]
 

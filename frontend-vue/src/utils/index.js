@@ -1,14 +1,9 @@
 // 工具函数
 
 import { marked } from 'marked'
+import { createMarkedOptions } from './markdownMarkedOptions.js'
 
-marked.setOptions({
-  breaks: false,
-  gfm: true,
-  tables: true,
-  mangle: false,
-  headerIds: false,
-})
+marked.setOptions(createMarkedOptions())
 
 /** 避免将公式 / 方程中的 “-” 误判为 Markdown 列表切分 */
 function looksInlineMathOrParamBlock(text) {
@@ -1216,6 +1211,11 @@ function splitHeadingInlineBody(line) {
   if (!match) return [source]
 
   const content = String(match[2] || '').trim()
+  const colonSplit = splitHeadingBodyAtColon(content)
+  if (colonSplit) {
+    return [`${match[1]}${colonSplit.title}`, colonSplit.body]
+  }
+
   for (const boundary of content.matchAll(/\s+/g)) {
     const rawTitle = content.slice(0, boundary.index).trim()
     const rawBody = content.slice(Number(boundary.index) + boundary[0].length).trim()
@@ -1225,6 +1225,20 @@ function splitHeadingInlineBody(line) {
   }
 
   return [source]
+}
+
+function splitHeadingBodyAtColon(content) {
+  const source = String(content || '').trim()
+  for (const match of source.matchAll(/[：:]/g)) {
+    const colonIndex = Number(match.index)
+    if (!Number.isFinite(colonIndex) || colonIndex < 0) continue
+    const title = source.slice(0, colonIndex + 1).trim()
+    const body = source.slice(colonIndex + 1).trim()
+    if (/\s[-–—－]\s/.test(title)) continue
+    if (!isHeadingTitleCandidate(title) || !looksLikeInlineHeadingBody(body)) continue
+    return { title, body }
+  }
+  return null
 }
 
 function normalizeInlineHeadingSplit(title, body) {
@@ -1484,7 +1498,7 @@ function formatStreamingFallback(text) {
     .replace(/\n/g, '<br>')
 }
 
-function normalizeAnswerMarkdown(text, options = {}) {
+export function normalizeAnswerMarkdown(text, options = {}) {
   const { renderMath = true } = options
   const prot = maskMarkdownProtections(text)
   let normalizedText = normalizeMarkdownForRender(prot.text)
@@ -1585,20 +1599,20 @@ function fixTableFormat(text) {
   while (i < lines.length) {
     const line = lines[i]
     
-    if (line.includes('|') && !line.trim().startsWith('```')) {
+    if (isRepairableTableLine(line)) {
       const tableLines = []
       let j = i
-      while (j < lines.length && lines[j].includes('|')) {
+      while (j < lines.length && isRepairableTableLine(lines[j])) {
         tableLines.push(lines[j])
         j++
       }
       
-      if (tableLines.length >= 2) {
+      if (isRepairableTableBlock(tableLines)) {
         const hasSeparator = tableLines[1].match(/^\s*\|[\s\-:|]+\|\s*$/)
         
         if (!hasSeparator) {
-          const headerCols = (tableLines[0].match(/\|/g) || []).length - 1
-          const separator = '|' + Array(headerCols).fill('------').join('|') + '|'
+          const headerCols = getMarkdownTableColumnCount(tableLines[0])
+          const separator = `| ${Array(headerCols).fill('---').join(' | ')} |`
           tableLines.splice(1, 0, separator)
         }
         
@@ -1613,6 +1627,31 @@ function fixTableFormat(text) {
   }
   
   return result.join('\n')
+}
+
+function isRepairableTableLine(line) {
+  const trimmed = String(line || '').trim()
+  if (!trimmed || trimmed.startsWith('```')) return false
+  if (!trimmed.includes('|')) return false
+  if (!trimmed.startsWith('|') || !trimmed.endsWith('|')) return false
+  return getMarkdownTableColumnCount(trimmed) >= 2
+}
+
+function getMarkdownTableColumnCount(line) {
+  const trimmed = String(line || '').trim()
+  if (!trimmed.startsWith('|') || !trimmed.endsWith('|')) return 0
+  return trimmed
+    .slice(1, -1)
+    .split('|')
+    .map((part) => part.trim())
+    .length
+}
+
+function isRepairableTableBlock(lines) {
+  if (!Array.isArray(lines) || lines.length < 2) return false
+  const columnCount = getMarkdownTableColumnCount(lines[0])
+  if (columnCount < 2) return false
+  return lines.every((line) => getMarkdownTableColumnCount(line) === columnCount)
 }
 
 function renderMathMarkup(text) {

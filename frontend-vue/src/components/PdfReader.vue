@@ -238,7 +238,13 @@
                     <p v-if="getFullDocumentTranslationStatusLabel()" class="translation-document-status">
                       全文翻译状态：{{ getFullDocumentTranslationStatusLabel() }}
                     </p>
-                    <div v-if="fullDocumentTranslation" class="translation-document-text translation-document-rendered" v-html="getFullDocumentTranslationHtml()"></div>
+                    <div v-if="fullDocumentTranslation" class="translation-document-text translation-document-rendered">
+                      <MarkdownRenderer
+                        :content="fullDocumentTranslation"
+                        :streaming="isDocumentTranslating"
+                        variant="document"
+                      />
+                    </div>
                     <p v-else class="summary-placeholder">正在等待首段译文...</p>
                   </template>
                   <p v-else class="summary-placeholder">点击“翻译全文”可生成当前文档的整篇中文译文。</p>
@@ -258,7 +264,7 @@ import QuotaLimitCard from './QuotaLimitCard.vue'
 import { fetchPdfDocument, fetchPdfDocumentByUrl } from '../api/literature'
 import { api } from '../services/api'
 import { buildQuotaErrorCardModel } from '../services/quota-error-formatting.js'
-import { formatAnswer } from '../utils'
+import MarkdownRenderer from '../features/markdown/MarkdownRenderer.vue'
 import {
   buildTranslatePayload,
   classifyClipboardFailure,
@@ -267,7 +273,6 @@ import {
 } from '../utils/pdfReaderClipboardTranslate.js'
 import { resolvePdfReaderInitialPanelMode, isPdfReaderPanelActive } from '../utils/pdfReaderPanelMode'
 import { buildPdfReaderOpenState, releasePdfBlobUrl } from '../utils/pdfReaderOpenFlow'
-import { createStreamingHtmlRenderer } from '../utils/streamingRender'
 
 // Props & Emits
 const emit = defineEmits(['close'])
@@ -307,10 +312,8 @@ const fullDocumentTranslationError = ref('')
 const fullDocumentTranslationQuotaCard = ref(null)
 const isDocumentTranslating = ref(false)
 const fullDocumentTranslationCacheStatus = ref('')
-const fullDocumentTranslationMessage = ref({ content: '' })
 const documentTranslationSessionId = ref(0)
 const documentTranslationAbortController = ref(null)
-const renderFullDocumentTranslationHtml = createStreamingHtmlRenderer()
 
 const MIN_SIDEBAR_WIDTH = 260
 const MIN_LEFT_WIDTH = 420
@@ -353,7 +356,6 @@ function resetDocumentTranslationState() {
   fullDocumentTranslationQuotaCard.value = null
   isDocumentTranslating.value = false
   fullDocumentTranslationCacheStatus.value = ''
-  fullDocumentTranslationMessage.value.content = ''
 }
 
 function resolvePatentId(label, documentUrl) {
@@ -398,14 +400,6 @@ function getFullDocumentTranslationStatusLabel() {
 
 function isActiveDocumentTranslationSession(sessionId) {
   return sessionId === documentTranslationSessionId.value
-}
-
-function getFullDocumentTranslationHtml() {
-  if (!fullDocumentTranslation.value) return ''
-  if (isDocumentTranslating.value) {
-    return renderFullDocumentTranslationHtml(fullDocumentTranslationMessage.value)
-  }
-  return formatAnswer(fullDocumentTranslation.value)
 }
 
 // Methods
@@ -876,10 +870,6 @@ watch(manualText, () => {
   if (clipboardFeedback.value) {
     clipboardFeedback.value = ''
   }
-})
-
-watch(fullDocumentTranslation, () => {
-  fullDocumentTranslationMessage.value.content = fullDocumentTranslation.value
 })
 
 // Expose methods

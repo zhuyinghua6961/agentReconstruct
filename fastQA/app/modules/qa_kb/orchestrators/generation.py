@@ -1537,6 +1537,7 @@ class GenerationPipelineOrchestrator:
             len(pdf_chunks),
             sum(len(chunks) for chunks in pdf_chunks.values()),
         )
+        yield sse_event({"type": "thinking", "content": "🔎 阶段3.5：重排候选证据chunk..."})
         evidence_rerank_result = self._timed(
             timings,
             "stage35",

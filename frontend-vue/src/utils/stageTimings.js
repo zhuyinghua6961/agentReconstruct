@@ -12,6 +12,7 @@ const GENERATION_STAGE_META = {
   stage2: { label: '阶段二', description: '向量检索与重排', order: 20, unit: 'ms' },
   stage25: { label: '阶段二点五', description: '证据筛选与上下文压缩', order: 25, unit: 'ms' },
   stage3: { label: '阶段三', description: '提示词构建', order: 30, unit: 'ms' },
+  stage35: { label: '阶段3.5', description: '候选证据重排', order: 35, unit: 'ms' },
   stage4: { label: '阶段四', description: '答案生成', order: 40, unit: 'ms' },
 }
 
@@ -38,6 +39,9 @@ const GENERATION_STEP_KEY_BY_TITLE = {
   阶段2点5: 'stage25',
   '阶段2.5': 'stage25',
   阶段三: 'stage3',
+  阶段三点五: 'stage35',
+  阶段3点5: 'stage35',
+  '阶段3.5': 'stage35',
   阶段四: 'stage4',
 }
 

@@ -759,66 +759,71 @@ onMounted(async () => {
 
         <div v-else class="model-status-panel">
           <div class="model-status-summary">
-            <span>总计 {{ modelStatusSummary.total || 0 }}</span>
-            <span>已配置 {{ modelStatusSummary.configured || 0 }}</span>
-            <span>未配置 {{ modelStatusSummary.unconfigured || 0 }}</span>
-            <span>已停用 {{ modelStatusSummary.disabled || 0 }}</span>
+            <span><strong>{{ modelStatusSummary.total || 0 }}</strong> 总计</span>
+            <span><strong>{{ modelStatusSummary.configured || 0 }}</strong> 已配置</span>
+            <span><strong>{{ modelStatusSummary.unconfigured || 0 }}</strong> 未配置</span>
+            <span><strong>{{ modelStatusSummary.disabled || 0 }}</strong> 已停用</span>
           </div>
 
-          <table class="model-status-table">
-            <thead>
-              <tr>
-                <th>名称</th>
-                <th>类型</th>
-                <th>模型</th>
-                <th>Base URL</th>
-                <th>请求地址</th>
-                <th>鉴权</th>
-                <th>状态</th>
-                <th>测试</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="item in modelStatusEndpoints" :key="item.id">
-                <td>
+          <div v-if="modelStatusEndpoints.length === 0" class="model-status-empty">
+            暂无模型配置
+          </div>
+
+          <div v-else class="model-endpoint-list">
+            <article
+              v-for="item in modelStatusEndpoints"
+              :key="item.id"
+              class="model-endpoint-card"
+              :class="'model-endpoint-' + item.status"
+            >
+              <div class="model-card-main">
+                <div class="model-card-head">
                   <div class="model-name-cell">
-                    <span>{{ item.label }}</span>
+                    <h3>{{ item.label }}</h3>
+                    <div class="model-card-meta">
+                      <span>{{ getModelKindText(item.kind) }}</span>
+                      <span>{{ item.model || '未填写模型' }}</span>
+                    </div>
                   </div>
-                </td>
-                <td>{{ getModelKindText(item.kind) }}</td>
-                <td>{{ item.model || '未填写' }}</td>
-                <td class="model-url">{{ item.base_url || '未配置' }}</td>
-                <td class="model-url">{{ item.endpoint_url || '-' }}</td>
-                <td>
-                  <div class="model-auth-cell">
-                    <span>模式 {{ item.auth_mode || 'bearer' }}</span>
-                    <span>{{ item.api_key_present ? '已配置 key' : '未配置 key' }}</span>
-                    <small v-if="item.api_key_input_has_bearer">配置含 Bearer</small>
-                    <small v-if="item.key_fingerprint">fp {{ item.key_fingerprint }}</small>
-                  </div>
-                </td>
-                <td>
                   <span class="model-status-badge" :class="'model-status-' + item.status">
                     {{ getModelStatusText(item.status) }}
                   </span>
-                </td>
-                <td>
-                  <div class="model-test-cell">
-                    <button
-                      class="action-btn"
-                      :disabled="!item.test_supported || getModelTestState(item.id).loading"
-                      @click="testModelEndpoint(item)"
-                    >
-                      {{ getModelTestText(item) }}
-                    </button>
-                    <span class="model-test-result" :class="'model-test-' + getModelTestResultClass(item)">
-                      {{ getModelTestResultText(item) }}
-                    </span>
+                </div>
+
+                <div class="model-route-grid">
+                  <div class="model-route-item">
+                    <span>Base URL</span>
+                    <code>{{ item.base_url || '未配置' }}</code>
                   </div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+                  <div class="model-route-item">
+                    <span>请求地址</span>
+                    <code>{{ item.endpoint_url || '-' }}</code>
+                  </div>
+                </div>
+              </div>
+
+              <aside class="model-card-side">
+                <div class="model-auth-cell">
+                  <span>鉴权模式：{{ item.auth_mode || 'bearer' }}</span>
+                  <span>{{ item.api_key_present ? '已配置 key' : '未配置 key' }}</span>
+                  <small v-if="item.api_key_input_has_bearer">配置含 Bearer</small>
+                  <small v-if="item.key_fingerprint">fp {{ item.key_fingerprint }}</small>
+                </div>
+                <div class="model-test-cell">
+                  <button
+                    class="action-btn"
+                    :disabled="!item.test_supported || getModelTestState(item.id).loading"
+                    @click="testModelEndpoint(item)"
+                  >
+                    {{ getModelTestText(item) }}
+                  </button>
+                  <span class="model-test-result" :class="'model-test-' + getModelTestResultClass(item)">
+                    {{ getModelTestResultText(item) }}
+                  </span>
+                </div>
+              </aside>
+            </article>
+          </div>
           <p v-if="modelStatus?.checked_at" class="model-status-checked">检查时间：{{ modelStatus.checked_at }}</p>
         </div>
       </section>
@@ -1197,28 +1202,34 @@ onMounted(async () => {
 .batch-action-btn { background: #eff6ff; border-color: #bfdbfe; color: #1d4ed8; }
 .action-btn.btn-success { background: #dcfce7; border-color: #86efac; color: #166534; }
 .action-btn.btn-danger { background: #fee2e2; border-color: #fca5a5; color: #dc2626; }
-.model-status-shell { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+.model-status-shell { background: white; border-radius: 8px; padding: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
 .model-status-note { margin: 6px 0 0; color: #6b7280; font-size: 13px; }
-.model-status-panel { overflow-x: auto; }
-.model-status-summary { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
-.model-status-summary span { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; color: #374151; font-size: 13px; padding: 6px 10px; }
-.model-status-table { width: 100%; min-width: 1080px; border-collapse: collapse; table-layout: fixed; }
-.model-status-table th, .model-status-table td { padding: 12px; text-align: left; border-bottom: 1px solid #e5e7eb; vertical-align: top; color: #1f2937; font-size: 13px; }
-.model-status-table th { background: #f9fafb; color: #374151; font-weight: 600; }
-.model-status-table th:nth-child(1) { width: 145px; }
-.model-status-table th:nth-child(2) { width: 70px; }
-.model-status-table th:nth-child(3) { width: 150px; }
-.model-status-table th:nth-child(4), .model-status-table th:nth-child(5) { width: 220px; }
-.model-status-table th:nth-child(6) { width: 130px; }
-.model-status-table th:nth-child(7) { width: 90px; }
-.model-status-table th:nth-child(8) { width: 160px; }
-.model-name-cell, .model-auth-cell, .model-test-cell { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
-.model-name-cell small, .model-auth-cell small { color: #6b7280; font-size: 11px; word-break: break-all; }
-.model-url { word-break: break-all; overflow-wrap: anywhere; color: #374151; }
-.model-status-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 56px; border-radius: 999px; padding: 4px 8px; font-size: 12px; font-weight: 600; }
+.model-status-panel { display: flex; flex-direction: column; gap: 14px; }
+.model-status-summary { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 10px; }
+.model-status-summary span { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; color: #4b5563; font-size: 13px; padding: 10px 12px; }
+.model-status-summary strong { display: block; color: #111827; font-size: 18px; line-height: 1.2; margin-bottom: 2px; }
+.model-status-empty { border: 1px dashed #d1d5db; border-radius: 8px; color: #6b7280; padding: 28px; text-align: center; }
+.model-endpoint-list { display: flex; flex-direction: column; gap: 12px; }
+.model-endpoint-card { display: grid; grid-template-columns: minmax(0, 1fr) 220px; gap: 18px; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; background: #fff; }
+.model-endpoint-card:hover { border-color: #cbd5e1; box-shadow: 0 1px 2px rgba(15,23,42,0.06); }
+.model-card-main { min-width: 0; }
+.model-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
+.model-name-cell { min-width: 0; }
+.model-name-cell h3 { margin: 0; color: #111827; font-size: 15px; line-height: 1.35; }
+.model-card-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; color: #6b7280; font-size: 12px; }
+.model-card-meta span { background: #f3f4f6; border-radius: 999px; padding: 3px 8px; max-width: 100%; overflow-wrap: anywhere; }
+.model-route-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.model-route-item { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.model-route-item span { color: #6b7280; font-size: 12px; }
+.model-route-item code { display: block; min-height: 42px; border: 1px solid #e5e7eb; border-radius: 6px; background: #f8fafc; color: #111827; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; line-height: 1.45; padding: 8px 10px; overflow-wrap: anywhere; white-space: normal; }
+.model-card-side { display: flex; flex-direction: column; justify-content: space-between; gap: 14px; border-left: 1px solid #e5e7eb; padding-left: 18px; min-width: 0; }
+.model-auth-cell, .model-test-cell { display: flex; flex-direction: column; gap: 6px; min-width: 0; color: #374151; font-size: 13px; }
+.model-auth-cell small { color: #6b7280; font-size: 11px; overflow-wrap: anywhere; }
+.model-status-badge { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; min-width: 56px; border-radius: 999px; padding: 4px 8px; font-size: 12px; font-weight: 600; }
 .model-status-configured { background: #dcfce7; color: #166534; }
 .model-status-unconfigured { background: #fef3c7; color: #92400e; }
 .model-status-disabled { background: #f3f4f6; color: #6b7280; }
+.model-test-cell .action-btn { align-self: flex-start; min-width: 72px; }
 .model-test-result { font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
 .model-test-idle { color: #6b7280; }
 .model-test-pending { color: #1d4ed8; }
@@ -1259,5 +1270,9 @@ onMounted(async () => {
 @media (max-width: 900px) {
   .admin-header { flex-direction: column; align-items: stretch; gap: 16px; }
   .header-actions { justify-content: space-between; flex-wrap: wrap; }
+  .model-status-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .model-endpoint-card { grid-template-columns: 1fr; }
+  .model-card-side { border-left: none; border-top: 1px solid #e5e7eb; padding-left: 0; padding-top: 14px; }
+  .model-route-grid { grid-template-columns: 1fr; }
 }
 </style>

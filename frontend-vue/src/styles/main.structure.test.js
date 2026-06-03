@@ -20,3 +20,12 @@ test('assistant message strong text keeps normal prose color instead of heading 
   assert.doesNotMatch(strongRule, /color:\s*#667eea\s*;/i)
   assert.match(strongRule, /color:\s*inherit\s*;/i)
 })
+
+test('token markdown renderer has explicit styles for links, code blocks, tables, and math', () => {
+  assert.ok(getCssRule('.markdown-link-button'), 'expected markdown link buttons to be styled')
+  assert.ok(getCssRule('.markdown-code-block'), 'expected markdown code block shell to be styled')
+  assert.ok(getCssRule('.markdown-code-toolbar'), 'expected markdown code toolbar to be styled')
+  assert.ok(getCssRule('.markdown-table-scroll'), 'expected markdown table scroll wrapper to be styled')
+  assert.ok(getCssRule('.math-block'), 'expected block math to be styled')
+  assert.ok(getCssRule('.math-inline'), 'expected inline math to be styled')
+})

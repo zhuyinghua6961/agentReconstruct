@@ -71,6 +71,7 @@ test('Home renders QA stage timing summary and details in the processing panel',
   assert.match(source, /getMessageStageTimingModel/)
   assert.match(source, /getStepTimingDurationLabel\s+as\s+getStepTimingDurationLabelFromModel/)
   assert.match(source, /hasProcessPanel/)
+  assert.match(source, /阶段\[0-9一二三四五六七八九十百千万点\\\.]\+/)
   assert.match(source, /getStepTimingDurationLabel/)
   assert.match(source, /return 'skipped'/)
   assert.match(source, /step-icon-skipped/)
@@ -126,8 +127,8 @@ test('Home routes outline jumps through reveal-first flow while preserving stabl
   assert.match(source, /behavior:\s*'smooth'/)
   assert.match(source, /highlight:\s*true/)
   assert.match(source, /function getMessageByAbsoluteIndex\(messageIndex\)/)
-  assert.match(source, /const messageElement = target\.closest\('\.message\[data-message-index\]'\)/)
-  assert.match(source, /const currentMsg = getMessageByAbsoluteIndex\(messageIndex\)/)
+  assert.match(source, /@open-doi="\(doi\) => handleMarkdownDoiOpen\(doi, entry\.absoluteMessageIndex\)"/)
+  assert.match(source, /const currentMsg = getMessageByAbsoluteIndex\(Number\(messageIndex\)\)/)
   assert.match(source, /function toggleSteps\(index\) \{\s*const msg = getMessageByAbsoluteIndex\(index\)/s)
   assert.match(source, /:class="\{ active: activeQuestionMessageIndex === item\.messageIndex \}"/)
 })
@@ -150,22 +151,26 @@ test('Home restores the current conversation to the newest question when enterin
 
 test('Home renders quota limit cards inline for quota failures while keeping markdown fallback', () => {
   assert.match(source, /import QuotaLimitCard from '\.\.\/components\/QuotaLimitCard\.vue'/)
+  assert.match(source, /import MarkdownRenderer from '\.\.\/features\/markdown\/MarkdownRenderer\.vue'/)
   assert.match(source, /import \{ buildRoutingErrorMarkdown, buildRoutingErrorPresentation, getRouteModeLabel, mergeRoutingMetadata \} from '\.\.\/utils\/routingStatus'/)
   assert.match(source, /function getQuotaCard\(message\)/)
   assert.match(source, /mergedMeta\.quota_card = presentation\.card/)
   assert.match(source, /<QuotaLimitCard v-if="getQuotaCard\(entry\.message\)" :card="getQuotaCard\(entry\.message\)" \/>/)
   assert.match(source, /<QuotaLimitCard v-if="getQuotaCard\(entry\.message\)" :card="getQuotaCard\(entry\.message\)" \/>\s*<div\s+v-else-if="entry\.message\.content && isStreamingTextMessage\(entry\.message\)"[\s\S]*class="message-markdown-content"/s)
   assert.match(source, /<template v-else-if="entry\.message\.content">/)
-  assert.match(source, /<div\s+class="message-markdown-content"[\s\S]*v-html="getRenderedMessageHtml\(entry\.message\)"[\s\S]*><\/div>/s)
+  assert.match(source, /<MarkdownRenderer[\s\S]*:content="String\(entry\.message\.content \|\| ''\)"[\s\S]*@open-doi="\(doi\) => handleMarkdownDoiOpen\(doi, entry\.absoluteMessageIndex\)"[\s\S]*@open-patent="handleMarkdownPatentOpen"/s)
+  assert.doesNotMatch(source, /v-html="getRenderedMessageHtml\(entry\.message\)"/)
 })
 
-test('Home preserves DOI click routing from rendered markdown into the PDF reader', () => {
-  assert.match(source, /if \(target\.classList && target\.classList\.contains\('doi-link'\)\)/)
-  assert.match(source, /const doi = target\.getAttribute\('data-doi'\)/)
-  assert.match(source, /const messageElement = target\.closest\('\.message\[data-message-index\]'\)/)
-  assert.match(source, /const currentMsg = getMessageByAbsoluteIndex\(messageIndex\)/)
+test('Home preserves DOI click routing from MarkdownRenderer events into the PDF reader', () => {
+  assert.match(source, /function handleMarkdownDoiOpen\(doi, messageIndex = -1\)/)
+  assert.match(source, /const normalizedDoi = String\(doi \|\| ''\)\.trim\(\)/)
+  assert.match(source, /const currentMsg = getMessageByAbsoluteIndex\(Number\(messageIndex\)\)/)
   assert.match(source, /const locations = buildCitationLocationsForDoi\(\{/)
-  assert.match(source, /pdfReader\.value\.openReader\(doi, locations\)/)
+  assert.match(source, /pdfReader\.value\.openReader\(normalizedDoi, locations\)/)
+  assert.match(source, /function handleMarkdownPatentOpen\(patentId\)/)
+  assert.match(source, /pdfReader\.value\.openUrlReader\(/)
+  assert.doesNotMatch(source, /document\.addEventListener\('click'/)
 })
 
 test('Home renders failed terminal assistant messages as terminal cards instead of loading placeholders', () => {
@@ -302,21 +307,14 @@ test('Home flushes buffered recoverable content before settling canceled or expi
   assert.match(source, /finalizeRecoverableTaskLocally\(chatId, \{ lastSeq: data\.seq \}\)/)
 })
 
-test('Home invalidates streaming and final render caches when a message flips into terminal markdown rendering', () => {
-  assert.match(
-    source,
-    /const renderStreamingMessageHtml = createStreamingHtmlRenderer\(\{\s*terminalFormatter:\s*\(text,\s*message\)\s*=>\s*formatAnswer\(text,\s*Array\.isArray\(message\?\.referenceLinks\) \? message\.referenceLinks : \[\]\)\s*\}\)/s
-  )
-  assert.match(source, /const isComplete = msg\?\.isComplete === true/)
-  assert.match(source, /const doneSeen = Boolean\(msg\?\.doneSeen \?\? msg\?\.done_seen \?\? msg\?\.metadata\?\.done_seen\)/)
-  assert.match(
-    source,
-    /const terminalStatus = String\(\s*msg\?\.terminalStatus\s*\?\?\s*msg\?\.terminal_status\s*\?\?\s*msg\?\.status\s*\?\?\s*msg\?\.metadata\?\.terminal_status\s*\?\?\s*msg\?\.metadata\?\.status\s*\?\?\s*msg\?\.metadata\?\.streaming_terminal_event\s*\?\?\s*''\s*\)\.trim\(\)\.toLowerCase\(\)/s
-  )
-  assert.match(source, /cached\.isComplete === isComplete/)
-  assert.match(source, /cached\.doneSeen === doneSeen/)
-  assert.match(source, /cached\.terminalStatus === terminalStatus/)
-  assert.match(source, /renderedMessageCache\.set\(msg, \{ content, referenceLinks, isComplete, doneSeen, terminalStatus, html \}\)/)
+test('Home renders streaming and terminal markdown through the shared token renderer', () => {
+  assert.match(source, /import MarkdownRenderer from '\.\.\/features\/markdown\/MarkdownRenderer\.vue'/)
+  assert.match(source, /:streaming="true"/)
+  assert.match(source, /:variant="isGraphKbMessage\(entry\.message\) \? 'graph-kb' : 'message'"/)
+  assert.doesNotMatch(source, /createStreamingHtmlRenderer/)
+  assert.doesNotMatch(source, /renderedMessageCache/)
+  assert.doesNotMatch(source, /getStreamingMessageHtml/)
+  assert.doesNotMatch(source, /getRenderedMessageHtml/)
 })
 
 test('Home header no longer renders knowledge-base summary status text', () => {
@@ -328,8 +326,8 @@ test('Home header no longer renders knowledge-base summary status text', () => {
 
 test('Home scopes graph kb markdown styles through deep selectors instead of global markdown rules', () => {
   assert.match(source, /class="message-markdown-content"[^>]*:class="\{ 'graph-kb-markdown': isGraphKbMessage\(entry\.message\) \}"/)
-  assert.match(source, /class="message-markdown-content"[^>]*:class="\{ 'graph-kb-markdown': isGraphKbMessage\(entry\.message\) \}"[^>]*v-html="getStreamingMessageHtml\(entry\.message\)"/)
-  assert.match(source, /class="message-markdown-content"[^>]*:class="\{ 'graph-kb-markdown': isGraphKbMessage\(entry\.message\) \}"[^>]*v-html="getRenderedMessageHtml\(entry\.message\)"/)
+  assert.match(source, /<MarkdownRenderer[\s\S]*:streaming="true"[\s\S]*:variant="isGraphKbMessage\(entry\.message\) \? 'graph-kb' : 'message'"/s)
+  assert.match(source, /<MarkdownRenderer[\s\S]*:variant="isGraphKbMessage\(entry\.message\) \? 'graph-kb' : 'message'"/s)
   assertGraphScopedSelector('h2')
   assertGraphScopedSelector('h3')
   assertGraphScopedSelector('ul')

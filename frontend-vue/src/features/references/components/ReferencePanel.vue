@@ -1,4 +1,6 @@
 <script setup>
+import MarkdownRenderer from '../../markdown/MarkdownRenderer.vue';
+
 const props = defineProps({
   references: { type: Array, default: () => [] },
   selectedDoi: { type: String, default: '' },
@@ -15,7 +17,7 @@ const props = defineProps({
   getPdfUrl: { type: Function, required: true },
 });
 
-const emit = defineEmits(['select', 'refresh']);
+const emit = defineEmits(['select', 'refresh', 'open-doi', 'open-patent']);
 
 function openPdf(doi) {
   return props.getPdfUrl(doi);
@@ -76,7 +78,14 @@ function getPreview(doi) {
           <p class="meta-line">期刊: {{ detail.journal || '-' }}</p>
           <p class="meta-line">日期: {{ detail.publication_date || '-' }}</p>
           <p class="abstract">{{ detail.abstract || '无摘要信息' }}</p>
-          <div v-if="detail.content" class="content-box" v-html="detail.content"></div>
+          <div v-if="detail.content" class="content-box">
+            <MarkdownRenderer
+              :content="detail.content"
+              variant="document"
+              @open-doi="emit('open-doi', $event)"
+              @open-patent="emit('open-patent', $event)"
+            />
+          </div>
         </div>
       </section>
     </template>

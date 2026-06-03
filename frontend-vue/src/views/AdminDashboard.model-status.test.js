@@ -17,6 +17,10 @@ test('AdminDashboard exposes model status tab and model test action', () => {
   assert.match(adminSource, /点击测试/)
   assert.match(adminSource, /auth_mode/)
   assert.match(adminSource, /模式/)
+  assert.match(adminSource, /model-endpoint-list/)
+  assert.match(adminSource, /model-endpoint-card/)
+  assert.match(adminSource, /model-route-grid/)
+  assert.doesNotMatch(adminSource, /<table class="model-status-table"/)
   assert.doesNotMatch(adminSource, /item\.provider/)
 })
 

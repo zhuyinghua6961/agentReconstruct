@@ -1,6 +1,6 @@
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue';
-import { formatAnswer } from '../../../utils';
+import { nextTick, ref, watch } from 'vue';
+import MarkdownRenderer from '../../markdown/MarkdownRenderer.vue';
 
 const props = defineProps({
   session: { type: Object, required: true },
@@ -11,13 +11,6 @@ const emit = defineEmits(['send', 'stop']);
 
 const draft = ref('');
 const messagesRef = ref(null);
-
-const renderedMessages = computed(() => {
-  return (props.session?.messages || []).map((msg) => ({
-    ...msg,
-    html: formatAnswer(msg.content || ''),
-  }));
-});
 
 function trySend() {
   const value = draft.value.trim();
@@ -55,12 +48,19 @@ watch(() => props.streaming, scrollToBottom);
 
     <div ref="messagesRef" class="messages">
       <article
-        v-for="(msg, idx) in renderedMessages"
+        v-for="(msg, idx) in (session?.messages || [])"
         :key="`${msg.ts}-${idx}`"
         :class="['msg', msg.role]"
       >
         <div class="role">{{ msg.role === 'user' ? '你' : '助手' }}</div>
-        <div class="bubble markdown-body" v-html="msg.html"></div>
+        <div class="bubble markdown-body">
+          <MarkdownRenderer
+            v-if="msg.role !== 'user'"
+            :content="msg.content || ''"
+            variant="compact"
+          />
+          <template v-else>{{ msg.content || '' }}</template>
+        </div>
       </article>
     </div>
 
