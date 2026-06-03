@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue';
-import { marked } from 'marked';
+import { formatAnswer } from '../../../utils';
 
 const props = defineProps({
   session: { type: Object, required: true },
@@ -12,12 +12,10 @@ const emit = defineEmits(['send', 'stop']);
 const draft = ref('');
 const messagesRef = ref(null);
 
-marked.setOptions({ breaks: true, gfm: true });
-
 const renderedMessages = computed(() => {
   return (props.session?.messages || []).map((msg) => ({
     ...msg,
-    html: marked.parse(msg.content || ''),
+    html: formatAnswer(msg.content || ''),
   }));
 });
 
