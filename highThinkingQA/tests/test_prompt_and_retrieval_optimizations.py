@@ -85,12 +85,17 @@ def test_iter_pre_answers_async_yields_completion_order(monkeypatch):
 
 def test_vector_store_default_client_and_collection_are_cached(monkeypatch):
     created_clients = []
+    create_calls = {"n": 0}
 
     class DummyClient:
         def __init__(self, path):
             self.path = path
 
+        def get_collection(self, name):
+            return {"path": self.path, "name": name}
+
         def get_or_create_collection(self, name, metadata):
+            create_calls["n"] += 1
             return {"path": self.path, "name": name, "metadata": metadata}
 
     def fake_client(path):
@@ -111,10 +116,14 @@ def test_vector_store_default_client_and_collection_are_cached(monkeypatch):
     assert client_a is client_b
     assert collection_a is collection_b
     assert created_clients == ["/tmp/chroma-a"]
+    assert create_calls["n"] == 0
 
 
 def test_get_or_create_collection_logs_runtime_resource_status(monkeypatch, caplog, tmp_path):
     class DummyClient:
+        def get_collection(self, name):
+            return {"name": name}
+
         def get_or_create_collection(self, name, metadata):
             return {"name": name, "metadata": metadata}
 
@@ -131,3 +140,46 @@ def test_get_or_create_collection_logs_runtime_resource_status(monkeypatch, capl
     assert "demo" in joined
     assert str(tmp_path / "vectordb") in joined
     assert collection["name"] == "demo"
+
+
+def test_get_or_create_collection_rejects_missing_runtime_collection(monkeypatch, tmp_path):
+    class DummyClient:
+        def get_collection(self, name):
+            raise ValueError(f"collection not found: {name}")
+
+        def get_or_create_collection(self, name, metadata):
+            raise AssertionError("runtime retrieval must not create missing collections")
+
+    monkeypatch.setattr("ingest.vector_store._get_chroma_client_cached", lambda path: DummyClient())
+    monkeypatch.setattr("ingest.vector_store.config.CHROMA_PERSIST_DIR", str(tmp_path / "vectordb"))
+    monkeypatch.setattr("ingest.vector_store.config.CHROMA_COLLECTION_NAME", "lfp_markdown_qwen3_4096")
+    get_or_create_collection.__globals__["_get_default_collection_cached"].cache_clear()
+
+    try:
+        get_or_create_collection()
+    except RuntimeError as exc:
+        assert "lfp_markdown_qwen3_4096" in str(exc)
+    else:
+        raise AssertionError("expected missing collection to fail")
+
+
+def test_get_or_create_collection_rejects_dimension_mismatch(monkeypatch, tmp_path):
+    class DummyClient:
+        def get_collection(self, name):
+            return {"name": name}
+
+    monkeypatch.setattr("ingest.vector_store._get_chroma_client_cached", lambda path: DummyClient())
+    monkeypatch.setattr("ingest.vector_store.config.CHROMA_PERSIST_DIR", str(tmp_path / "vectordb"))
+    monkeypatch.setattr("ingest.vector_store.config.CHROMA_COLLECTION_NAME", "lfp_markdown_qwen3_4096")
+    monkeypatch.setattr("ingest.vector_store.config.EMBEDDING_DIMENSIONS", 4096)
+    monkeypatch.setattr("ingest.vector_store._read_collection_dimension", lambda path, name: 2048)
+    get_or_create_collection.__globals__["_get_default_collection_cached"].cache_clear()
+
+    try:
+        get_or_create_collection()
+    except RuntimeError as exc:
+        assert "dimension mismatch" in str(exc)
+        assert "4096" in str(exc)
+        assert "2048" in str(exc)
+    else:
+        raise AssertionError("expected dimension mismatch to fail")

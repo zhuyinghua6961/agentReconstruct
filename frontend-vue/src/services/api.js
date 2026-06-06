@@ -2,6 +2,7 @@
 // This adapter normalizes current backend contracts to the shape expected by the UI.
 
 import { getRouteModeLabel } from '../utils/routingStatus.js'
+import { resolveActualQueryModeLabel, resolveActualQueryModeRaw } from '../utils/queryMode.js'
 import { buildPatentStreamingCapability } from '../utils/patentStreaming.js'
 import { streamSseJson } from '../utils/sse.js'
 
@@ -97,12 +98,26 @@ function unwrapData(payload) {
 }
 
 function normalizeConversationSummary(item) {
+  const metadata = item?.metadata && typeof item.metadata === 'object' ? item.metadata : {};
+  const rawMode = String(
+    item?.lastQueryMode
+    || item?.last_query_mode
+    || item?.queryMode
+    || item?.query_mode
+    || metadata.lastQueryMode
+    || metadata.last_query_mode
+    || metadata.queryMode
+    || metadata.query_mode
+    || ''
+  ).trim();
   return {
     conversation_id: Number(item?.conversation_id || 0),
     title: String(item?.title || '新对话'),
     message_count: Number(item?.message_count || 0),
     created_at: item?.created_at || new Date().toISOString(),
     updated_at: item?.updated_at || new Date().toISOString(),
+    query_mode: rawMode,
+    last_query_mode: rawMode,
     active_task: item?.active_task && typeof item.active_task === 'object' ? { ...item.active_task } : null,
   };
 }
@@ -214,21 +229,8 @@ function normalizeMessage(item) {
     })
     .filter((ref) => ref?.doi);
 
-  const rawMode = String(item?.queryMode || item?.query_mode || metadata.query_mode || metadata.queryMode || '').trim();
-  const queryModeMap = {
-    fast: '快速模式',
-    thinking: '深度模式',
-    patent: '专利模式',
-    neo4j: '知识图谱',
-    graph_kb: '知识图谱',
-    community: '社区分析',
-    literature: '文献检索',
-    tabular_qa: '表格问答',
-    hybrid_qa: '混合文件问答',
-    tabular: '表格问答',
-  };
-  const fallbackRouteMode = getRouteModeLabel(metadata?.route || item?.route || '');
-  const queryMode = rawMode ? (queryModeMap[rawMode] || rawMode) : fallbackRouteMode;
+  const rawMode = resolveActualQueryModeRaw(item, metadata);
+  const queryMode = resolveActualQueryModeLabel(item, metadata, { allowRouteFallback: false });
   const referenceLinks = normalizeReferenceLinks(
     item?.referenceLinks
     || item?.reference_links
@@ -270,6 +272,7 @@ function normalizeMessage(item) {
   }
   if (rawMode) {
     metadata.query_mode = rawMode;
+    metadata.queryMode = rawMode;
   }
   if (Object.keys(doiLocations).length > 0) {
     metadata.doi_locations = doiLocations;
@@ -445,6 +448,8 @@ export const api = {
       created_at: data?.created_at || new Date().toISOString(),
       updated_at: data?.updated_at || new Date().toISOString(),
       message_count: Number(data?.message_count || 0),
+      query_mode: String(data?.last_query_mode || data?.query_mode || '').trim(),
+      last_query_mode: String(data?.last_query_mode || data?.query_mode || '').trim(),
       messages: (data?.messages || []).map(normalizeMessage),
       uploaded_files: files,
       pdf_list: asPdfList(files),

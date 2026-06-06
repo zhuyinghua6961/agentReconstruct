@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 RequesterFn = Callable[..., dict[str, Any]]
 MODEL_STATUS_TEST_TEXT = "hello"
 MODEL_STATUS_TEST_TIMEOUT_SECONDS = 30.0
+MODEL_STATUS_RESPONSE_MAX_BYTES = 2 * 1024 * 1024
 _AUTH_MODES = {"bearer", "authorization", "x-api-key", "none"}
 
 
@@ -51,6 +52,20 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if raw in {"0", "false", "no", "off"}:
         return False
     return bool(default)
+
+
+def _first_env_int(*names: str, default: int | None = None, minimum: int = 1) -> int | None:
+    for name in names:
+        raw = str(os.getenv(name, "") or "").strip()
+        if not raw:
+            continue
+        try:
+            value = int(raw)
+        except Exception:
+            continue
+        if value >= int(minimum):
+            return value
+    return default
 
 
 def _normalize_bearer_api_key(api_key: str | None) -> str:
@@ -109,34 +124,52 @@ def _auth_headers(api_key: str | None, *, auth_mode: str | None = None) -> dict[
 
 def _normalize_chat_endpoint(base_url: str) -> str:
     value = str(base_url or "").strip().rstrip("/")
+    if not value:
+        return ""
     for suffix in ("/v1/chat/completions", "/chat/completions"):
         if value.endswith(suffix):
             value = value[: -len(suffix)].rstrip("/")
             break
-    if not value.endswith("/v1"):
-        value = value.rstrip("/") + "/v1"
-    return value.rstrip("/") + "/chat/completions"
+    return _ensure_single_v1_base(value) + "/chat/completions"
 
 
 def _normalize_embedding_endpoint(base_url: str) -> str:
     value = str(base_url or "").strip().rstrip("/")
-    for suffix in ("/v1/embeddings", "/embeddings"):
-        if value.endswith(suffix):
-            return value
-    if value.endswith("/v1"):
-        return value + "/embeddings"
-    return value + "/v1/embeddings"
+    if not value:
+        return ""
+    if value.endswith("/v1/embeddings"):
+        value = value[: -len("/embeddings")].rstrip("/")
+        return _ensure_single_v1_base(value) + "/embeddings"
+    if value.endswith("/embeddings"):
+        return value
+    return _ensure_single_v1_base(value) + "/embeddings"
 
 
 def _normalize_rerank_endpoint(base_url: str) -> str:
     value = str(base_url or "").strip().rstrip("/")
+    if not value:
+        return ""
     for suffix in ("/v1/rerank", "/rerank"):
         if value.endswith(suffix):
             value = value[: -len(suffix)].rstrip("/")
             break
-    if not value.endswith("/v1"):
+    return _ensure_single_v1_base(value) + "/rerank"
+
+
+def _ensure_single_v1_base(base_url: str) -> str:
+    value = _collapse_trailing_duplicate_v1(str(base_url or "").strip().rstrip("/"))
+    if not value:
+        return ""
+    if not value.lower().endswith("/v1"):
         value = value.rstrip("/") + "/v1"
-    return value.rstrip("/") + "/rerank"
+    return _collapse_trailing_duplicate_v1(value).rstrip("/")
+
+
+def _collapse_trailing_duplicate_v1(base_url: str) -> str:
+    value = str(base_url or "").strip().rstrip("/")
+    while value.lower().endswith("/v1/v1"):
+        value = value[: -len("/v1")].rstrip("/")
+    return value
 
 
 def _endpoint_url_for_spec(spec: dict[str, Any]) -> str:
@@ -206,6 +239,7 @@ def _model_status_specs() -> list[dict[str, Any]]:
             "auth_mode": _normalize_auth_mode(
                 _first_env("HIGHTHINKINGQA_EMBEDDING_AUTH_MODE", "EMBEDDING_AUTH_MODE", default="bearer")
             ),
+            "expected_dimension": _first_env_int("HIGHTHINKINGQA_EMBEDDING_DIMENSIONS"),
             "enabled": True,
         },
         {
@@ -230,6 +264,7 @@ def _public_endpoint_spec(spec: dict[str, Any]) -> dict[str, Any]:
     api_key = str(spec.get("api_key") or "")
     auth_mode = _resolve_auth_mode(str(spec.get("auth_mode") or "")) if "auth_mode" in spec else "bearer"
     status = "configured" if configured else "disabled" if not enabled else "unconfigured"
+    expected_dimension = _expected_embedding_dimension(spec)
     return {
         "id": str(spec.get("id") or ""),
         "label": str(spec.get("label") or ""),
@@ -245,6 +280,7 @@ def _public_endpoint_spec(spec: dict[str, Any]) -> dict[str, Any]:
         "api_key_present": bool(_normalize_bearer_api_key(api_key)),
         "api_key_input_has_bearer": _key_input_has_bearer(api_key),
         "key_fingerprint": _key_fingerprint(api_key),
+        "expected_dimension": expected_dimension,
     }
 
 
@@ -253,15 +289,22 @@ def _http_post_json(*, url: str, headers: dict[str, str], payload: dict[str, Any
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=float(timeout_seconds)) as response:
-            raw_body = response.read(65536)
+            raw_body = response.read(MODEL_STATUS_RESPONSE_MAX_BYTES + 1)
+            truncated = len(raw_body) > MODEL_STATUS_RESPONSE_MAX_BYTES
+            if truncated:
+                raw_body = raw_body[:MODEL_STATUS_RESPONSE_MAX_BYTES]
             status_code = int(response.getcode() or 0)
     except urllib.error.HTTPError as exc:
-        raw_body = exc.read(65536)
+        raw_body = exc.read(MODEL_STATUS_RESPONSE_MAX_BYTES + 1)
+        truncated = len(raw_body) > MODEL_STATUS_RESPONSE_MAX_BYTES
+        if truncated:
+            raw_body = raw_body[:MODEL_STATUS_RESPONSE_MAX_BYTES]
         return {
             "status_code": int(exc.code or 0),
             "json": _safe_json_loads(raw_body),
             "text": _decode_body(raw_body),
             "error": str(exc),
+            "truncated": truncated,
         }
     except Exception as exc:
         return {
@@ -269,12 +312,14 @@ def _http_post_json(*, url: str, headers: dict[str, str], payload: dict[str, Any
             "json": None,
             "text": "",
             "error": str(exc),
+            "truncated": False,
         }
     return {
         "status_code": status_code,
         "json": _safe_json_loads(raw_body),
         "text": _decode_body(raw_body),
         "error": "",
+        "truncated": truncated,
     }
 
 
@@ -353,22 +398,125 @@ def _test_payload_for_spec(spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def _response_has_model_result(kind: str, data: Any) -> bool:
+    return bool(_response_result_diagnostics(kind, data).get("ok"))
+
+
+def _response_result_diagnostics(
+    kind: str,
+    data: Any,
+    *,
+    expected_dimension: int | None = None,
+) -> dict[str, Any]:
     if not isinstance(data, dict):
-        return False
+        return {
+            "ok": False,
+            "message": "响应不是 JSON 对象",
+            "detected_dimension": None,
+            "expected_dimension": expected_dimension,
+        }
     kind_norm = str(kind or "").strip().lower()
     if kind_norm == "chat":
         choices = data.get("choices")
-        return isinstance(choices, list) and len(choices) > 0
+        return {
+            "ok": isinstance(choices, list) and len(choices) > 0,
+            "message": "" if isinstance(choices, list) and len(choices) > 0 else "响应缺少 choices",
+            "detected_dimension": None,
+            "expected_dimension": None,
+        }
     if kind_norm == "embedding":
-        if isinstance(data.get("data"), list) and len(data["data"]) > 0:
-            return True
-        return isinstance(data.get("embeddings"), list) or isinstance(data.get("embedding"), list)
+        detected_dimension = _detect_embedding_dimension(data)
+        if detected_dimension is None:
+            return {
+                "ok": False,
+                "message": "响应缺少可识别的 embedding 向量",
+                "detected_dimension": None,
+                "expected_dimension": expected_dimension,
+            }
+        if isinstance(expected_dimension, int) and expected_dimension > 0 and detected_dimension != expected_dimension:
+            return {
+                "ok": False,
+                "message": f"向量维度不匹配，期望 {expected_dimension}，实际 {detected_dimension}",
+                "detected_dimension": detected_dimension,
+                "expected_dimension": expected_dimension,
+            }
+        return {
+            "ok": True,
+            "message": f"向量维度 {detected_dimension}",
+            "detected_dimension": detected_dimension,
+            "expected_dimension": expected_dimension,
+        }
     if kind_norm == "rerank":
         if isinstance(data.get("results"), list):
-            return True
+            return {
+                "ok": True,
+                "message": "",
+                "detected_dimension": None,
+                "expected_dimension": None,
+            }
         output = data.get("output")
-        return isinstance(output, dict) and isinstance(output.get("results"), list)
-    return True
+        ok = isinstance(output, dict) and isinstance(output.get("results"), list)
+        return {
+            "ok": ok,
+            "message": "" if ok else "响应缺少 results",
+            "detected_dimension": None,
+            "expected_dimension": None,
+        }
+    return {
+        "ok": True,
+        "message": "",
+        "detected_dimension": None,
+        "expected_dimension": None,
+    }
+
+
+def _expected_embedding_dimension(spec: dict[str, Any]) -> int | None:
+    raw = spec.get("expected_dimension")
+    if raw is None:
+        raw = spec.get("expected_dimensions")
+    try:
+        value = int(raw)
+    except Exception:
+        return None
+    return value if value > 0 else None
+
+
+def _detect_embedding_dimension(data: dict[str, Any]) -> int | None:
+    vector = _first_embedding_vector(data)
+    if vector is None:
+        return None
+    return len(vector)
+
+
+def _first_embedding_vector(data: dict[str, Any]) -> list[Any] | None:
+    items = data.get("data")
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict):
+                vector = item.get("embedding")
+            else:
+                vector = item
+            if _looks_like_embedding_vector(vector):
+                return list(vector)
+
+    embeddings = data.get("embeddings")
+    if _looks_like_embedding_vector(embeddings):
+        return list(embeddings)
+    if isinstance(embeddings, list):
+        for item in embeddings:
+            if _looks_like_embedding_vector(item):
+                return list(item)
+
+    embedding = data.get("embedding")
+    if _looks_like_embedding_vector(embedding):
+        return list(embedding)
+    return None
+
+
+def _looks_like_embedding_vector(value: Any) -> bool:
+    if not isinstance(value, list) or len(value) == 0:
+        return False
+    first = value[0]
+    return isinstance(first, (int, float)) and not isinstance(first, bool)
 
 
 class SystemService:
@@ -558,8 +706,14 @@ class SystemService:
         data = response.get("json")
         text = str(response.get("text") or "")
         transport_error = str(response.get("error") or "")
+        response_truncated = bool(response.get("truncated"))
         status_ok = 200 <= status_code_int < 300
-        result_ok = bool(status_ok and _response_has_model_result(str(spec.get("kind") or ""), data))
+        result_diagnostics = _response_result_diagnostics(
+            str(spec.get("kind") or ""),
+            data,
+            expected_dimension=_expected_embedding_dimension(spec),
+        )
+        result_ok = bool(status_ok and result_diagnostics.get("ok"))
 
         if status_ok:
             log_upstream_auth_success_once(
@@ -585,8 +739,15 @@ class SystemService:
             )
 
         if result_ok:
-            message = "模型响应正常"
+            detail = str(result_diagnostics.get("message") or "").strip()
+            message = f"模型响应正常（{detail}）" if detail else "模型响应正常"
             test_status = "ok"
+        elif status_ok and str(result_diagnostics.get("message") or "").strip():
+            message = f"模型测试失败：{result_diagnostics['message']}"
+            test_status = "failed"
+        elif status_ok and response_truncated:
+            message = "模型测试失败：响应体过大，未能完整解析"
+            test_status = "failed"
         elif status_code_int:
             message = f"模型测试失败，HTTP {status_code_int}"
             test_status = "failed"
@@ -606,6 +767,9 @@ class SystemService:
                 "status_code": status_code_int or None,
                 "elapsed_ms": elapsed_ms,
                 "message": message,
+                "detected_dimension": result_diagnostics.get("detected_dimension"),
+                "expected_dimension": result_diagnostics.get("expected_dimension"),
+                "response_truncated": response_truncated,
                 "response_preview": _response_preview(data, text or transport_error),
             },
         }, 200

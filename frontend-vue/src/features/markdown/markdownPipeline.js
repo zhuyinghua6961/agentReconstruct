@@ -93,11 +93,27 @@ function decorateBlockToken(token, diagnostics, options = {}) {
 }
 
 function decorateInlineOrBlockTokens(tokens, diagnostics, options = {}) {
-  return (Array.isArray(tokens) ? tokens : []).flatMap((token) => {
-    if (!token || typeof token !== 'object') return []
-    if (isInlineToken(token)) return decorateInlineToken(token, diagnostics, options)
-    return [decorateBlockToken(token, diagnostics, options)]
-  })
+  const sourceTokens = Array.isArray(tokens) ? tokens : []
+  const decorated = []
+
+  for (let index = 0; index < sourceTokens.length; index += 1) {
+    const token = sourceTokens[index]
+    if (!token || typeof token !== 'object') continue
+    const escapedMath = readEscapedMathTokenSpan(sourceTokens, index)
+    if (escapedMath) {
+      diagnostics.mathTokenCount += 1
+      decorated.push(escapedMath.token)
+      index = escapedMath.endIndex
+      continue
+    }
+    if (isInlineToken(token)) {
+      decorated.push(...decorateInlineToken(token, diagnostics, options))
+    } else {
+      decorated.push(decorateBlockToken(token, diagnostics, options))
+    }
+  }
+
+  return decorated
 }
 
 function decorateInlineToken(token, diagnostics, options = {}) {
@@ -151,6 +167,45 @@ function isInlineToken(token) {
   ].includes(token?.type)
 }
 
+function readEscapedMathTokenSpan(tokens, startIndex) {
+  const opener = tokens[startIndex]
+  if (opener?.type !== 'escape') return null
+  const openerRaw = String(opener.raw || '')
+  const closerRaw = openerRaw === '\\(' ? '\\)' : openerRaw === '\\[' ? '\\]' : ''
+  if (!closerRaw) return null
+
+  let raw = ''
+  for (let index = startIndex + 1; index < tokens.length; index += 1) {
+    const token = tokens[index]
+    if (!token || typeof token !== 'object') return null
+    if (token.type === 'escape' && token.raw === closerRaw) {
+      const text = raw.trim()
+      if (!isExplicitMathContent(text)) return null
+      return {
+        token: {
+          type: 'inlineMath',
+          raw: `${openerRaw}${raw}${closerRaw}`,
+          text,
+          display: false,
+        },
+        endIndex: index,
+      }
+    }
+    if (token.type === 'codespan' || token.type === 'link' || token.type === 'image') return null
+    raw += getTokenRawForMath(token)
+  }
+
+  return null
+}
+
+function getTokenRawForMath(token) {
+  if (!token || typeof token !== 'object') return ''
+  if (typeof token.raw === 'string') return token.raw
+  if (typeof token.text === 'string') return token.text
+  if (Array.isArray(token.tokens)) return token.tokens.map((child) => getTokenRawForMath(child)).join('')
+  return ''
+}
+
 function splitTextToInlineTokens(text, diagnostics) {
   const source = repairMergedDoiIdentifiers(String(text || ''))
   const tokens = []
@@ -195,6 +250,26 @@ function splitTextToInlineTokens(text, diagnostics) {
       continue
     }
 
+    const implicitMath = readImplicitMathSegment(source, i)
+    if (implicitMath) {
+      flush()
+      if (implicitMath.prefixText) {
+        tokens.push({ type: 'text', raw: implicitMath.prefixText, text: implicitMath.prefixText })
+      }
+      diagnostics.mathTokenCount += 1
+      tokens.push({
+        type: 'inlineMath',
+        raw: implicitMath.raw,
+        text: implicitMath.text,
+        display: false,
+      })
+      if (implicitMath.suffixText) {
+        tokens.push({ type: 'text', raw: implicitMath.suffixText, text: implicitMath.suffixText })
+      }
+      i = implicitMath.end
+      continue
+    }
+
     buffer += source[i]
     i += 1
   }
@@ -220,7 +295,7 @@ function readInlineMathSegment(text, startIndex) {
     const end = source.indexOf('$$', startIndex + 2)
     if (end < 0) return null
     const inner = source.slice(startIndex + 2, end)
-    if (!isProbablyInlineMathContent(inner)) return null
+    if (!isExplicitMathContent(inner)) return null
     return {
       type: 'inlineMath',
       raw: source.slice(startIndex, end + 2),
@@ -233,7 +308,20 @@ function readInlineMathSegment(text, startIndex) {
     const end = source.indexOf('\\)', startIndex + 2)
     if (end < 0) return null
     const inner = source.slice(startIndex + 2, end)
-    if (!isProbablyInlineMathContent(inner)) return null
+    if (!isExplicitMathContent(inner)) return null
+    return {
+      type: 'inlineMath',
+      raw: source.slice(startIndex, end + 2),
+      text: inner.trim(),
+      display: false,
+      end: end + 2,
+    }
+  }
+  if (source.startsWith('\\[', startIndex)) {
+    const end = source.indexOf('\\]', startIndex + 2)
+    if (end < 0) return null
+    const inner = source.slice(startIndex + 2, end)
+    if (!isExplicitMathContent(inner)) return null
     return {
       type: 'inlineMath',
       raw: source.slice(startIndex, end + 2),
@@ -246,7 +334,7 @@ function readInlineMathSegment(text, startIndex) {
   const end = findClosingDollar(source, startIndex + 1)
   if (end < 0) return null
   const inner = source.slice(startIndex + 1, end)
-  if (!isProbablyInlineMathContent(inner)) return null
+  if (!isExplicitMathContent(inner)) return null
   return {
     type: 'inlineMath',
     raw: source.slice(startIndex, end + 1),
@@ -254,6 +342,297 @@ function readInlineMathSegment(text, startIndex) {
     display: false,
     end: end + 1,
   }
+}
+
+function readImplicitMathSegment(text, startIndex) {
+  return readImplicitParenthesizedMathSegment(text, startIndex)
+    || readBareLatexMathSegment(text, startIndex)
+}
+
+function readImplicitParenthesizedMathSegment(text, startIndex) {
+  const source = String(text || '')
+  const openChar = source[startIndex]
+  const closeChar = openChar === '（' ? '）' : openChar === '(' ? ')' : ''
+  if (!closeChar) return null
+
+  const span = readEnclosedSpan(source, startIndex, openChar, closeChar)
+  if (!span) return null
+
+  let mathText = String(span.inner || '').trim()
+  if (openChar === '(') {
+    const innerSpan = readEnclosedSpan(mathText, 0, '(', ')')
+    if (innerSpan && innerSpan.end === mathText.length && isImplicitMathContent(innerSpan.inner)) {
+      mathText = String(innerSpan.inner || '').trim()
+    }
+  }
+
+  if (!isImplicitMathContent(mathText)) return null
+  return {
+    type: 'inlineMath',
+    raw: span.raw,
+    text: mathText,
+    display: false,
+    prefixText: openChar,
+    suffixText: closeChar,
+    end: span.end,
+  }
+}
+
+function readBareLatexMathSegment(text, startIndex) {
+  const source = String(text || '')
+  const before = startIndex > 0 ? source[startIndex - 1] : ''
+  if (before && isBareMathContinuationChar(before)) return null
+
+  const command = readTeXCommandExpression(source, startIndex)
+  if (command && isImplicitMathContent(command.text)) {
+    return {
+      type: 'inlineMath',
+      raw: command.raw,
+      text: command.text,
+      display: false,
+      end: command.end,
+    }
+  }
+
+  const compact = readCompactLatexExpression(source, startIndex)
+  if (compact && isImplicitMathContent(compact.text)) {
+    return {
+      type: 'inlineMath',
+      raw: compact.raw,
+      text: compact.text,
+      display: false,
+      end: compact.end,
+    }
+  }
+  return null
+}
+
+function readTeXCommandExpression(source, startIndex) {
+  if (source[startIndex] !== '\\' || !isAsciiLetter(source[startIndex + 1])) return null
+  let i = startIndex + 2
+  while (i < source.length && isAsciiLetter(source[i])) i += 1
+  const commandName = source.slice(startIndex + 1, i)
+  i = readTeXArgumentsAndScripts(source, i)
+  if (isFunctionLikeTexCommand(commandName) && source[i] === '(') {
+    const span = readEnclosedSpan(source, i, '(', ')')
+    if (span && isExplicitMathContent(span.inner)) {
+      i = span.end
+    }
+  }
+  return {
+    raw: source.slice(startIndex, i),
+    text: source.slice(startIndex, i),
+    start: startIndex,
+    end: i,
+  }
+}
+
+function readCompactLatexExpression(source, startIndex) {
+  if (!/[A-Za-z0-9]/.test(source[startIndex] || '')) return null
+
+  let i = startIndex
+  let depth = 0
+  while (i < source.length) {
+    const char = source[i]
+    if (char === '\\' && isAsciiLetter(source[i + 1])) {
+      const command = readTeXCommandExpression(source, i)
+      if (!command) break
+      i = command.end
+      continue
+    }
+    if (char === '{') {
+      depth += 1
+      i += 1
+      continue
+    }
+    if (char === '}') {
+      if (depth <= 0) break
+      depth -= 1
+      i += 1
+      continue
+    }
+    if (depth > 0) {
+      if (char === '\n') break
+      i += 1
+      continue
+    }
+    if (isBareMathContinuationChar(char)) {
+      i += 1
+      continue
+    }
+    break
+  }
+
+  if (depth !== 0 || i <= startIndex) return null
+  let raw = source.slice(startIndex, i)
+  while (/[.,;:，。；：、]$/.test(raw)) {
+    raw = raw.slice(0, -1)
+    i -= 1
+  }
+  if (!hasCompactLatexSignal(raw)) return null
+  return {
+    raw,
+    text: raw,
+    start: startIndex,
+    end: i,
+  }
+}
+
+function readTeXArgumentsAndScripts(source, startIndex) {
+  let i = startIndex
+  let moved = true
+  while (moved && i < source.length) {
+    moved = false
+    if (source[i] === '{') {
+      const span = readBalancedBraceSpan(source, i)
+      if (!span) return i
+      i = span.end
+      moved = true
+      continue
+    }
+    if (source[i] === '_' || source[i] === '^') {
+      const scriptEnd = readTeXScriptEnd(source, i + 1)
+      if (scriptEnd <= i + 1) return i
+      i = scriptEnd
+      moved = true
+    }
+  }
+  return i
+}
+
+function readTeXScriptEnd(source, startIndex) {
+  if (source[startIndex] === '{') {
+    const span = readBalancedBraceSpan(source, startIndex)
+    return span ? span.end : startIndex
+  }
+  if (source[startIndex] === '\\' && isAsciiLetter(source[startIndex + 1])) {
+    const command = readTeXCommandExpression(source, startIndex)
+    return command ? command.end : startIndex
+  }
+  let i = startIndex
+  if (source[i] === '+' || source[i] === '-') i += 1
+  while (i < source.length && /[A-Za-z0-9]/.test(source[i])) i += 1
+  return i
+}
+
+function readBalancedBraceSpan(source, startIndex) {
+  if (source[startIndex] !== '{') return null
+  let depth = 0
+  for (let i = startIndex; i < source.length; i += 1) {
+    const char = source[i]
+    if (char === '{') {
+      depth += 1
+      continue
+    }
+    if (char === '}') {
+      depth -= 1
+      if (depth === 0) {
+        return {
+          raw: source.slice(startIndex, i + 1),
+          inner: source.slice(startIndex + 1, i),
+          start: startIndex,
+          end: i + 1,
+        }
+      }
+    }
+  }
+  return null
+}
+
+function isImplicitMathContent(inner) {
+  const source = String(inner || '').trim()
+  if (!source || source.length > 240) return false
+  if (looksLikeApproximateNumericUnit(source)) return false
+  if (!hasLatexSignal(source)) return false
+  if (!hasStrongImplicitMathSignal(source)) return false
+  return isProbablyInlineMathContent(source)
+}
+
+function isExplicitMathContent(inner) {
+  return String(inner || '').trim().length > 0
+}
+
+function hasLatexSignal(source) {
+  const value = String(source || '')
+  return /\\[a-zA-Z]+|(?:_|\^)\{|[A-Za-z0-9]\^[+\-]?\d|[∝Δ∑∫±≤≥×·=]/.test(value)
+    || hasUnbracedMathScript(value)
+}
+
+function hasStrongImplicitMathSignal(source) {
+  const value = String(source || '')
+  if (/\\[a-zA-Z]+/.test(value)) return true
+  if (/(?:_|\^)\{[^{}\n]{1,120}\}/.test(value)) return true
+  if (hasUnbracedMathScript(value)) return true
+  if (/[∝Δ∑∫±≤≥×·]/.test(value)) return true
+  if (/[A-Za-z]\^[+\-]?\d/.test(value) && !looksLikeUnitPower(value)) return true
+  return false
+}
+
+function hasCompactLatexSignal(source) {
+  const value = String(source || '')
+  return /(?:_|\^)\{|\\[a-zA-Z]+|[A-Za-z0-9]\^[+\-]?\d/.test(value)
+    || hasUnbracedMathScript(value)
+}
+
+function hasUnbracedMathScript(source) {
+  const value = String(source || '')
+  const pattern = /(?:^|[^A-Za-z0-9])([A-Za-zα-ωΑ-Ω](?:_[A-Za-z0-9+\-]{1,16}|\^[A-Za-z0-9+\-]{1,16}))(?=$|[^A-Za-z0-9])/g
+  for (const match of value.matchAll(pattern)) {
+    if (!looksLikeUnitPower(match[1])) return true
+  }
+  return false
+}
+
+function isFunctionLikeTexCommand(commandName) {
+  return [
+    'arccos',
+    'arcsin',
+    'arctan',
+    'cos',
+    'cosh',
+    'cot',
+    'coth',
+    'csc',
+    'deg',
+    'det',
+    'dim',
+    'exp',
+    'gcd',
+    'hom',
+    'inf',
+    'ker',
+    'lg',
+    'lim',
+    'ln',
+    'log',
+    'max',
+    'min',
+    'Pr',
+    'sec',
+    'sin',
+    'sinh',
+    'sup',
+    'tan',
+    'tanh',
+  ].includes(commandName)
+}
+
+function looksLikeApproximateNumericUnit(source) {
+  const value = String(source || '').trim()
+  if (!/^[<>≤≥~≈\s+\-−]*\d/.test(value)) return false
+  if (!/[A-Za-zμµΩ]/.test(value)) return false
+  if (/(?:_|\^)\{[^{}\n]{1,120}\}|\\[a-zA-Z]+/.test(value)) return false
+  return /\b[A-Za-zμµΩ]{1,4}\^[+\-]?\d\b/.test(value) || /[A-Za-zμµΩ]+(?:\/|\s+)[A-Za-zμµΩ]/.test(value)
+}
+
+function looksLikeUnitPower(source) {
+  const value = String(source || '').trim()
+  return /^(?:g|kg|mg|m|cm|mm|nm|s|ms|h|min|mol|K|J|V|A|Pa|W|Wh|S)\^[+\-]?\d$/i.test(value)
+    || /\b(?:g|kg|mg|m|cm|mm|nm|s|ms|h|min|mol|K|J|V|A|Pa|W|Wh|S)\^[+\-]?\d\b/i.test(value)
+}
+
+function isBareMathContinuationChar(char) {
+  return /[A-Za-z0-9_{}^+\-./]/.test(String(char || ''))
 }
 
 function findClosingDollar(source, fromIndex) {

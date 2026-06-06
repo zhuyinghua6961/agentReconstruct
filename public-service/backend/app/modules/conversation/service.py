@@ -495,6 +495,57 @@ class ConversationService:
         data = cached.get("data")
         return data if isinstance(data, dict) else None
 
+    @staticmethod
+    def _query_mode_summary_from_message(message: dict[str, Any]) -> str:
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        for candidate in (
+            metadata.get("actual_mode"),
+            metadata.get("query_mode"),
+            metadata.get("queryMode"),
+            message.get("query_mode"),
+            message.get("queryMode"),
+            metadata.get("requested_mode"),
+            metadata.get("mode"),
+            message.get("mode"),
+        ):
+            value = str(candidate or "").strip()
+            if value:
+                return value
+        return ""
+
+    def _last_query_mode_from_document(self, document: dict[str, Any]) -> str:
+        messages = document.get("messages") if isinstance(document.get("messages"), list) else []
+        for item in reversed(messages):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("role") or "").strip().lower() != "assistant":
+                continue
+            mode = self._query_mode_summary_from_message(item)
+            if mode:
+                return mode
+        meta = document.get("meta") if isinstance(document.get("meta"), dict) else {}
+        return str(meta.get("last_query_mode") or meta.get("query_mode") or "").strip()
+
+    def _sync_document_query_mode_summary(self, document: dict[str, Any]) -> str:
+        last_query_mode = self._last_query_mode_from_document(document)
+        if not last_query_mode:
+            return ""
+        meta = document.get("meta") if isinstance(document.get("meta"), dict) else {}
+        if meta.get("last_query_mode") != last_query_mode:
+            meta["last_query_mode"] = last_query_mode
+            document["meta"] = meta
+        return last_query_mode
+
+    def _conversation_list_query_mode(self, *, user_id: int, conversation_id: int) -> str:
+        try:
+            meta = self._json_store.load_document_meta_local(
+                user_id=user_id,
+                conversation_id=conversation_id,
+            )
+        except Exception:
+            return ""
+        return str(meta.get("last_query_mode") or meta.get("query_mode") or "").strip()
+
     def _is_detail_cache_payload_fresh(self, *, row: dict[str, Any], payload: dict[str, Any] | None) -> bool:
         if not isinstance(payload, dict) or payload.get("success") is not True:
             return False
@@ -565,6 +616,7 @@ class ConversationService:
         title = str(row.get("title") or meta.get("title") or "New Conversation")
         created_at = self._to_iso(meta.get("created_at") or row.get("created_at"), fallback=self._now_iso())
         updated_at = self._to_iso(meta.get("updated_at") or row.get("updated_at"), fallback=created_at)
+        last_query_mode = str(self._last_query_mode_from_document(document)).strip()
         pdf_files = [item for item in uploaded_files if str(item.get("file_type")) == "pdf"]
         excel_files = [item for item in uploaded_files if str(item.get("file_type")) == "excel"]
         message_count = len(messages)
@@ -578,6 +630,7 @@ class ConversationService:
                 "message_count": int(message_count),
                 "created_at": created_at,
                 "updated_at": updated_at,
+                **({"query_mode": last_query_mode, "last_query_mode": last_query_mode} if last_query_mode else {}),
                 "messages": messages,
                 "uploaded_files": uploaded_files,
                 "uploaded_files_all": files_all,
@@ -592,23 +645,31 @@ class ConversationService:
         offset = (page - 1) * page_size
         items = self._repo.list_conversations(user_id=user_id, offset=offset, limit=page_size)
         total = self._repo.count_conversations(user_id=user_id)
+        conversations: list[dict[str, Any]] = []
+        for item in items:
+            conversation_id = int(item["id"])
+            last_query_mode = self._conversation_list_query_mode(
+                user_id=user_id,
+                conversation_id=conversation_id,
+            )
+            conversations.append(
+                {
+                    "conversation_id": conversation_id,
+                    "user_id": int(item["user_id"]),
+                    "title": item["title"],
+                    "message_count": int(item.get("message_count", 0)),
+                    "created_at": self._to_iso(item.get("created_at"), fallback=self._now_iso()),
+                    "updated_at": self._to_iso(
+                        item.get("updated_at"),
+                        fallback=self._to_iso(item.get("created_at"), fallback=self._now_iso()),
+                    ),
+                    **({"query_mode": last_query_mode, "last_query_mode": last_query_mode} if last_query_mode else {}),
+                }
+            )
         return {
             "success": True,
             "data": {
-                "conversations": [
-                    {
-                        "conversation_id": int(item["id"]),
-                        "user_id": int(item["user_id"]),
-                        "title": item["title"],
-                        "message_count": int(item.get("message_count", 0)),
-                        "created_at": self._to_iso(item.get("created_at"), fallback=self._now_iso()),
-                        "updated_at": self._to_iso(
-                            item.get("updated_at"),
-                            fallback=self._to_iso(item.get("created_at"), fallback=self._now_iso()),
-                        ),
-                    }
-                    for item in items
-                ],
+                "conversations": conversations,
                 "total_count": total,
                 "page": page,
                 "page_size": page_size,
@@ -1198,6 +1259,7 @@ class ConversationService:
         document: dict[str, Any],
     ) -> dict[str, Any]:
         current_row = self._repo.get_conversation(conversation_id=conversation_id, user_id=user_id) or row
+        self._sync_document_query_mode_summary(document)
         storage_ref_hint = str(current_row.get("chat_json_storage_ref") or row.get("chat_json_storage_ref") or "")
         write_result = self._json_store.write_document(
             user_id=user_id,

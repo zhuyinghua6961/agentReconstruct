@@ -1034,6 +1034,44 @@ def test_conversation_service_round_trip():
         assert deleted["success"] is True
 
 
+def test_conversation_list_returns_actual_last_query_mode_from_message_summary():
+    with TemporaryDirectory() as tempdir:
+        repo = _MemoryConversationRepo()
+        storage_backend = LocalStorageBackend(root_dir=tempdir)
+        json_store = ConversationJsonStore(
+            project_root=tempdir,
+            storage_backend=storage_backend,
+        )
+        service = ConversationService(repo=repo, json_store=json_store, workspace_root=tempdir)
+
+        created = service.create_conversation(user_id=7, title="Mode Check")
+        assert created["success"] is True
+        conversation_id = int(created["data"]["conversation_id"])
+
+        added = service.add_message(
+            user_id=7,
+            conversation_id=conversation_id,
+            role="assistant",
+            content="answer",
+            metadata={
+                "requested_mode": "thinking",
+                "actual_mode": "fast",
+                "query_mode": "生成驱动检索（PDF溯源）",
+                "done_seen": True,
+            },
+        )
+        assert added["success"] is True
+
+        listed = service.list_conversations(user_id=7, page=1, page_size=20)
+        assert listed["success"] is True
+        summary = listed["data"]["conversations"][0]
+        assert summary["query_mode"] == "fast"
+        assert summary["last_query_mode"] == "fast"
+
+        stored_doc = json_store.load_document(user_id=7, conversation_id=conversation_id)
+        assert stored_doc["meta"]["last_query_mode"] == "fast"
+
+
 def test_conversation_service_add_message_and_detail_hide_raw_patent_id_citation_markers():
     repo = _MemoryConversationRepo()
     outbox = _OutboxRecorder()
@@ -2339,7 +2377,8 @@ def test_conversation_service_list_payload_uses_beijing_time_for_naive_rows():
     conversation_id = repo.create_conversation(user_id=7, title="Beijing")
     repo.conversations[conversation_id]["created_at"] = datetime(2026, 3, 21, 9, 30, 45)
     repo.conversations[conversation_id]["updated_at"] = datetime(2026, 3, 21, 11, 5, 6)
-    service = ConversationService(repo=repo)
+    redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="isolated-time")
+    service = ConversationService(repo=repo, redis_service=redis_service)
 
     payload = service.list_conversations(user_id=7, page=1, page_size=20)
 

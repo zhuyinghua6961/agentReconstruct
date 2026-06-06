@@ -94,6 +94,10 @@ def _cache_epoch() -> str:
     return str(os.getenv("HT_QA_CACHE_EPOCH", "0") or "0").strip() or "0"
 
 
+def stage_cache_enabled() -> bool:
+    return _env_bool("HT_QA_STAGE_CACHE_ENABLED", False)
+
+
 def _normalized_text(value: Any) -> str:
     return " ".join(str(value or "").split()).casefold()
 
@@ -217,7 +221,7 @@ def _retrieve_query_lock_key(*, redis_service: RedisService, query: str, top_k: 
 
 
 def get_cached_direct_answer(*, redis_service: RedisService | None, question: str, model: str, enable_thinking: bool | None) -> str | None:
-    if redis_service is None or not redis_service.available:
+    if not stage_cache_enabled() or redis_service is None or not redis_service.available:
         return None
     payload = redis_service.get_json(_direct_answer_key(redis_service=redis_service, question=question, model=model, enable_thinking=enable_thinking), default=None)
     if not isinstance(payload, dict):
@@ -227,7 +231,7 @@ def get_cached_direct_answer(*, redis_service: RedisService | None, question: st
 
 
 def cache_direct_answer(*, redis_service: RedisService | None, question: str, model: str, enable_thinking: bool | None, answer: str) -> bool:
-    if redis_service is None or not redis_service.available or not str(answer or "").strip():
+    if not stage_cache_enabled() or redis_service is None or not redis_service.available or not str(answer or "").strip():
         return False
     return bool(
         redis_service.set_json(
@@ -239,7 +243,7 @@ def cache_direct_answer(*, redis_service: RedisService | None, question: str, mo
 
 
 def get_cached_decompose(*, redis_service: RedisService | None, question: str, model: str, enable_thinking: bool | None, num_sub_questions: int) -> list[str] | None:
-    if redis_service is None or not redis_service.available:
+    if not stage_cache_enabled() or redis_service is None or not redis_service.available:
         return None
     payload = redis_service.get_json(
         _decompose_key(
@@ -261,7 +265,7 @@ def get_cached_decompose(*, redis_service: RedisService | None, question: str, m
 
 def cache_decompose(*, redis_service: RedisService | None, question: str, model: str, enable_thinking: bool | None, num_sub_questions: int, sub_questions: list[str]) -> bool:
     normalized = [str(item) for item in list(sub_questions or []) if str(item or "").strip()]
-    if redis_service is None or not redis_service.available or not normalized:
+    if not stage_cache_enabled() or redis_service is None or not redis_service.available or not normalized:
         return False
     return bool(
         redis_service.set_json(
@@ -279,7 +283,7 @@ def cache_decompose(*, redis_service: RedisService | None, question: str, model:
 
 
 def get_cached_retrieve_query(*, redis_service: RedisService | None, query: str, top_k: int | None) -> list[dict[str, Any]] | None:
-    if redis_service is None or not redis_service.available or not str(query or "").strip():
+    if not stage_cache_enabled() or redis_service is None or not redis_service.available or not str(query or "").strip():
         return None
     payload = redis_service.get_json(_retrieve_query_key(redis_service=redis_service, query=query, top_k=top_k), default=None)
     if not isinstance(payload, dict):
@@ -291,7 +295,7 @@ def get_cached_retrieve_query(*, redis_service: RedisService | None, query: str,
 
 
 def cache_retrieve_query(*, redis_service: RedisService | None, query: str, top_k: int | None, results: list[dict[str, Any]]) -> bool:
-    if redis_service is None or not redis_service.available or not str(query or "").strip():
+    if not stage_cache_enabled() or redis_service is None or not redis_service.available or not str(query or "").strip():
         return False
     normalized = [dict(chunk) for chunk in results if isinstance(chunk, dict)]
     return bool(
@@ -304,6 +308,9 @@ def cache_retrieve_query(*, redis_service: RedisService | None, query: str, top_
 
 
 def get_or_compute_direct_answer(*, question: str, model: str, enable_thinking: bool | None, compute_fn: Callable[[], str]) -> str:
+    if not stage_cache_enabled():
+        increment_cache_metric("direct_answer", "cache_disabled")
+        return str(compute_fn() or "")
     redis_service = get_redis_service()
     cached = get_cached_direct_answer(redis_service=redis_service, question=question, model=model, enable_thinking=enable_thinking)
     if cached is not None:
@@ -326,6 +333,9 @@ def get_or_compute_direct_answer(*, question: str, model: str, enable_thinking: 
 
 
 def get_or_compute_decompose(*, question: str, model: str, enable_thinking: bool | None, num_sub_questions: int, compute_fn: Callable[[], list[str]]) -> list[str]:
+    if not stage_cache_enabled():
+        increment_cache_metric("decompose", "cache_disabled")
+        return [str(item) for item in list(compute_fn() or []) if str(item or "").strip()]
     redis_service = get_redis_service()
     cached = get_cached_decompose(
         redis_service=redis_service,
@@ -367,6 +377,9 @@ def get_or_compute_decompose(*, question: str, model: str, enable_thinking: bool
 
 
 def get_or_compute_retrieve_query(*, query: str, top_k: int | None, compute_fn: Callable[[], list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    if not stage_cache_enabled():
+        increment_cache_metric("retrieve", "cache_disabled")
+        return [dict(item) for item in list(compute_fn() or []) if isinstance(item, dict)]
     redis_service = get_redis_service()
     cached = get_cached_retrieve_query(redis_service=redis_service, query=query, top_k=top_k)
     if cached is not None:

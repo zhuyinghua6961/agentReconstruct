@@ -10,7 +10,12 @@ from typing import Optional
 import config
 from ingest.embedder import embed_single, embed_texts, get_embedding_client
 from ingest.vector_store import batch_query_collection, get_or_create_collection, query_collection
-from server.services.stage_cache import cache_retrieve_query, get_cached_retrieve_query, get_or_compute_retrieve_query
+from server.services.stage_cache import (
+    cache_retrieve_query,
+    get_cached_retrieve_query,
+    get_or_compute_retrieve_query,
+    stage_cache_enabled,
+)
 from server.services.redis_client import get_redis_service
 
 logger = logging.getLogger(__name__)
@@ -237,7 +242,7 @@ def batch_retrieve(
 
     normalized_queries = [str(item or "") for item in queries]
     redis_service = get_redis_service()
-    if redis_service is not None and redis_service.available:
+    if redis_service is not None and redis_service.available and stage_cache_enabled():
         return _batch_retrieve_with_stage_cache(
             normalized_queries=normalized_queries,
             top_k=top_k,

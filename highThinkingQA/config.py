@@ -275,9 +275,9 @@ def get_runtime_settings() -> RuntimeSettings:
         decompose_stage_thinking_enabled=False,
         embedding_base_url=_first_env(
             "HIGHTHINKINGQA_EMBEDDING_BASE_URL",
-            default="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            default="http://127.0.0.1:8014/v1",
         ),
-        embedding_model=_first_env("HIGHTHINKINGQA_EMBEDDING_MODEL", default="text-embedding-v4"),
+        embedding_model=_first_env("HIGHTHINKINGQA_EMBEDDING_MODEL", default="qwen3-embedding-8b"),
         embedding_api_key=embedding_api_key,
         embedding_auth_mode=_first_env(
             "HIGHTHINKINGQA_EMBEDDING_AUTH_MODE",
@@ -285,7 +285,7 @@ def get_runtime_settings() -> RuntimeSettings:
         ).lower(),
         embedding_dimensions=_get_int_from_names(
             "HIGHTHINKINGQA_EMBEDDING_DIMENSIONS",
-            default=2048,
+            default=4096,
             minimum=1,
         ),
         vlm_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -296,7 +296,9 @@ def get_runtime_settings() -> RuntimeSettings:
         semantic_chunk_max_tokens=_get_int("SEMANTIC_CHUNK_MAX_TOKENS", 4000, minimum=1),
         tiktoken_encoding=str(os.getenv("TIKTOKEN_ENCODING", "cl100k_base") or "cl100k_base").strip(),
         chroma_persist_dir=_resolve_state_path("CHROMA_PERSIST_DIR", "vectordb"),
-        chroma_collection_name=str(os.getenv("CHROMA_COLLECTION_NAME", "lfp_papers") or "lfp_papers").strip(),
+        chroma_collection_name=str(
+            os.getenv("CHROMA_COLLECTION_NAME", "lfp_markdown_qwen3_4096") or "lfp_markdown_qwen3_4096"
+        ).strip(),
         vlm_concurrency=40,
         vlm_max_concurrent_requests=40,
         vlm_pages_per_batch=3,

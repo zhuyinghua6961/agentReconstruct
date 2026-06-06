@@ -46,6 +46,7 @@ required_vars=(
 
 required_packages=(
   minio-originals.tar.zst
+  highthinking-pdf-backfill-2026-06-05.tar.zst
   fastqa-ref.tar.zst
   highthinking-ref.tar.zst
   patentqa-ref.tar.zst

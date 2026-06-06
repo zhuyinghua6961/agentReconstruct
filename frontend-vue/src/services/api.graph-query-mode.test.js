@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url'
 const currentDir = dirname(fileURLToPath(import.meta.url))
 const source = readFileSync(join(currentDir, 'api.js'), 'utf8')
 
-test('api maps graph_kb query mode to a human-readable knowledge-graph badge', () => {
-  assert.match(source, /graph_kb:\s*'知识图谱'/)
+test('api normalizes message query modes through the shared query mode helper', () => {
+  assert.match(source, /import \{ resolveActualQueryModeLabel, resolveActualQueryModeRaw \} from '\.\.\/utils\/queryMode\.js'/)
+  assert.match(source, /const rawMode = resolveActualQueryModeRaw\(item, metadata\)/)
+  assert.match(source, /const queryMode = resolveActualQueryModeLabel\(item, metadata, \{ allowRouteFallback: false \}\)/)
 })

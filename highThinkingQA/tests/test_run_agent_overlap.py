@@ -5,6 +5,7 @@ import threading
 import time
 
 from agent_core.graph import _call_with_wall_clock_timeout, _run_pre_answer_retrieval_pipeline, run_agent
+from retriever.vector_retriever import RetrievedChunk
 
 
 def test_run_agent_starts_pipeline_after_decompose_without_waiting_for_direct(monkeypatch):
@@ -233,6 +234,61 @@ def test_run_agent_emits_step3_retrieval_progress(monkeypatch):
     assert step3_events
     assert any(item["data"]["submitted_batches"] == 1 for item in step3_events if "submitted_batches" in item.get("data", {}))
     assert any(item["data"]["completed_batches"] == 2 for item in step3_events if "completed_batches" in item.get("data", {}))
+
+
+def test_run_agent_emits_detailed_stage_diagnostic_logs(monkeypatch, caplog):
+    monkeypatch.setattr("agent_core.graph.get_llm_client", lambda *args, **kwargs: object())
+    monkeypatch.setattr("agent_core.graph.get_async_llm_client", lambda: object())
+    monkeypatch.setattr("agent_core.graph.get_embedding_client", lambda: object())
+    monkeypatch.setattr("agent_core.graph.get_or_create_collection", lambda: object())
+    monkeypatch.setattr("agent_core.graph.direct_answer", lambda *args, **kwargs: "direct answer")
+    monkeypatch.setattr("agent_core.graph.decompose_question", lambda *args, **kwargs: ["q1", "q2"])
+    monkeypatch.setattr("agent_core.graph.synthesize_answer", lambda **kwargs: "draft answer")
+    monkeypatch.setattr("agent_core.graph.check_answer", lambda **kwargs: (True, []))
+
+    def fake_pipeline(**kwargs):
+        return (
+            ["a1", "a2"],
+            [
+                [
+                    RetrievedChunk(
+                        text="first retrieved text",
+                        doi="10.1000/one",
+                        title="Title One",
+                        section_name="Intro",
+                        chunk_index=7,
+                        distance=0.11,
+                    )
+                ],
+                [
+                    RetrievedChunk(
+                        text="second retrieved text",
+                        doi="10.1000/two",
+                        title="Title Two",
+                        section_name="Methods",
+                        chunk_index=8,
+                        distance=0.22,
+                    )
+                ],
+            ],
+            {"pre_answer_completed_at": 0.1, "retrieval_completed_at": 0.2, "retrieval_total_batches": 1},
+        )
+
+    monkeypatch.setattr("agent_core.graph._run_pre_answer_retrieval_pipeline", fake_pipeline)
+    caplog.set_level("INFO", logger="agent_core.graph")
+
+    state = run_agent("demo", max_check_loops=1, trace_id="diag-trace")
+
+    joined = "\n".join(record.getMessage() for record in caplog.records)
+    assert state.error == ""
+    assert "run_agent config" in joined
+    assert "step1 sub_question detail index=1" in joined
+    assert "step2 pre_answer detail index=1" in joined
+    assert "step3 retrieval_query detail index=1" in joined
+    assert "step3 chunk detail query_index=1 chunk_index=1" in joined
+    assert "step4 synthesis input" in joined
+    assert "step5 checker input loop=1" in joined
+    assert "run_agent timing summary" in joined
 
 
 def test_pre_answer_pipeline_flushes_partial_batch_after_wait(monkeypatch):

@@ -6,6 +6,7 @@ from app.core.deps import AuthContext
 from app.main import app
 from app.modules.auth.deps import require_admin_context
 from app.modules.system import api as system_api_module
+from app.modules.system import service as system_service_module
 from app.modules.system.service import system_service
 
 
@@ -63,6 +64,18 @@ def test_model_status_lists_configured_models_without_network_probe(monkeypatch)
     assert endpoints["fastqa_embedding"]["api_key_present"] is False
     assert endpoints["rerank"]["endpoint_url"] == "http://host.docker.internal:8084/v1/rerank"
     assert "provider" not in endpoints["rerank"]
+
+
+def test_model_status_normalizes_rerank_base_url_without_duplicate_v1(monkeypatch):
+    monkeypatch.setenv("RERANK_BASE_URL", "http://host.docker.internal:8084/v1/v1")
+    monkeypatch.setenv("RERANK_MODEL", "qwen3-vl-rerank")
+
+    payload, status_code = system_service.build_model_status()
+
+    assert status_code == 200
+    endpoints = {item["id"]: item for item in payload["data"]["endpoints"]}
+    assert endpoints["rerank"]["base_url"] == "http://host.docker.internal:8084/v1/v1"
+    assert endpoints["rerank"]["endpoint_url"] == "http://host.docker.internal:8084/v1/rerank"
 
 
 def test_model_status_test_sends_chat_hello_with_normalized_bearer(monkeypatch):
@@ -213,6 +226,104 @@ def test_model_status_test_uses_embedding_and_local_rerank_protocols(monkeypatch
         "documents": ["hello", "hello world"],
         "top_n": 1,
     }
+
+
+def test_model_status_embedding_probe_handles_4096_dimension_response(monkeypatch):
+    monkeypatch.setenv("HIGHTHINKINGQA_EMBEDDING_BASE_URL", "http://embedding.example/v1")
+    monkeypatch.setenv("HIGHTHINKINGQA_EMBEDDING_MODEL", "qwen3-embedding-8b")
+    monkeypatch.setenv("HIGHTHINKINGQA_EMBEDDING_AUTH_MODE", "none")
+    monkeypatch.setenv("HIGHTHINKINGQA_EMBEDDING_DIMENSIONS", "4096")
+    calls: list[dict] = []
+
+    def fake_requester(*, url: str, headers: dict, payload: dict, timeout_seconds: float) -> dict:
+        calls.append({"url": url, "headers": headers, "payload": payload, "timeout_seconds": timeout_seconds})
+        return {
+            "status_code": 200,
+            "json": {"data": [{"embedding": [0.1] * 4096}]},
+            "text": "",
+        }
+
+    payload, status_code = system_service.test_model_status_endpoint(
+        "highthinkingqa_embedding",
+        requester=fake_requester,
+    )
+
+    assert status_code == 200
+    assert payload["data"]["ok"] is True
+    assert payload["data"]["auth_mode"] == "none"
+    assert payload["data"]["detected_dimension"] == 4096
+    assert payload["data"]["expected_dimension"] == 4096
+    assert calls == [
+        {
+            "url": "http://embedding.example/v1/embeddings",
+            "headers": {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            "payload": {
+                "model": "qwen3-embedding-8b",
+                "input": ["hello"],
+            },
+            "timeout_seconds": 30.0,
+        }
+    ]
+
+
+def test_model_status_embedding_probe_reports_dimension_mismatch(monkeypatch):
+    monkeypatch.setenv("HIGHTHINKINGQA_EMBEDDING_BASE_URL", "http://embedding.example/v1")
+    monkeypatch.setenv("HIGHTHINKINGQA_EMBEDDING_MODEL", "qwen3-embedding-8b")
+    monkeypatch.setenv("HIGHTHINKINGQA_EMBEDDING_DIMENSIONS", "4096")
+
+    def fake_requester(*, url: str, headers: dict, payload: dict, timeout_seconds: float) -> dict:
+        return {
+            "status_code": 200,
+            "json": {"data": [{"embedding": [0.1] * 2048}]},
+            "text": "",
+        }
+
+    payload, status_code = system_service.test_model_status_endpoint(
+        "highthinkingqa_embedding",
+        requester=fake_requester,
+    )
+
+    assert status_code == 200
+    assert payload["data"]["ok"] is False
+    assert payload["data"]["test_status"] == "failed"
+    assert payload["data"]["detected_dimension"] == 2048
+    assert payload["data"]["expected_dimension"] == 4096
+    assert "维度不匹配" in payload["data"]["message"]
+
+
+def test_http_post_json_reads_large_embedding_response_without_truncation(monkeypatch):
+    body = json.dumps({"data": [{"embedding": [0.1] * 4096}]}).encode("utf-8")
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self, size: int = -1):
+            return body if size == -1 else body[:size]
+
+        def getcode(self):
+            return 200
+
+    def fake_urlopen(request, timeout):
+        return FakeResponse()
+
+    monkeypatch.setattr(system_service_module.urllib.request, "urlopen", fake_urlopen)
+
+    result = system_service_module._http_post_json(
+        url="http://embedding.example/v1/embeddings",
+        headers={"Content-Type": "application/json"},
+        payload={"model": "m", "input": ["hello"]},
+        timeout_seconds=1,
+    )
+
+    assert result["status_code"] == 200
+    assert len(result["json"]["data"][0]["embedding"]) == 4096
 
 
 def test_admin_model_status_endpoint_returns_payload(monkeypatch):

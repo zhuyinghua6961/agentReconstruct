@@ -5,6 +5,7 @@
 
 import logging
 import os
+import sqlite3
 from functools import lru_cache
 from typing import Optional
 
@@ -14,6 +15,57 @@ import config
 from ingest.chunker import Chunk
 
 logger = logging.getLogger(__name__)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name, "1" if default else "0") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
+def _read_collection_dimension(path: str, name: str) -> int | None:
+    sqlite_path = os.path.join(str(path or ""), "chroma.sqlite3")
+    if not os.path.isfile(sqlite_path):
+        return None
+    try:
+        with sqlite3.connect(sqlite_path) as conn:
+            row = conn.execute(
+                "select dimension from collections where name = ?",
+                (str(name or ""),),
+            ).fetchone()
+    except Exception as exc:
+        logger.warning(
+            "vector_store collection dimension check failed persist_dir=%s collection=%s error=%s",
+            path,
+            name,
+            exc,
+        )
+        return None
+    if row is None or row[0] is None:
+        return None
+    try:
+        return int(row[0])
+    except Exception:
+        return None
+
+
+def _validate_collection_dimension(*, path: str, name: str) -> None:
+    expected = int(getattr(config, "EMBEDDING_DIMENSIONS", 0) or 0)
+    actual = _read_collection_dimension(path, name)
+    if actual is None or expected <= 0:
+        return
+    if actual != expected:
+        raise RuntimeError(
+            f"Chroma collection dimension mismatch: collection={name} "
+            f"persist_dir={path} expected={expected} actual={actual}"
+        )
+
+
+def _collection_create_if_missing() -> bool:
+    return _env_bool("CHROMA_CREATE_IF_MISSING", False)
 
 
 def _log_collection_ready(*, path: str, name: str, collection: chromadb.Collection) -> None:
@@ -56,9 +108,10 @@ def get_or_create_collection(
     """获取或创建 Chroma Collection"""
     if client is None:
         return _get_default_collection_cached(config.CHROMA_PERSIST_DIR, config.CHROMA_COLLECTION_NAME)
-    collection = client.get_or_create_collection(
+    collection = _get_runtime_collection(
+        client=client,
+        path=config.CHROMA_PERSIST_DIR,
         name=config.CHROMA_COLLECTION_NAME,
-        metadata={"hnsw:space": "cosine"},  # 使用余弦相似度
     )
     _log_collection_ready(
         path=config.CHROMA_PERSIST_DIR,
@@ -71,11 +124,32 @@ def get_or_create_collection(
 @lru_cache(maxsize=8)
 def _get_default_collection_cached(path: str, name: str) -> chromadb.Collection:
     client = _get_chroma_client_cached(path)
-    collection = client.get_or_create_collection(
-        name=name,
-        metadata={"hnsw:space": "cosine"},
-    )
+    collection = _get_runtime_collection(client=client, path=path, name=name)
     _log_collection_ready(path=path, name=name, collection=collection)
+    return collection
+
+
+def _get_runtime_collection(
+    *,
+    client: chromadb.PersistentClient,
+    path: str,
+    name: str,
+) -> chromadb.Collection:
+    if _collection_create_if_missing():
+        collection = client.get_or_create_collection(
+            name=name,
+            metadata={"hnsw:space": "cosine"},
+        )
+    else:
+        try:
+            collection = client.get_collection(name=name)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Chroma collection is not available: collection={name} persist_dir={path}. "
+                "Set CHROMA_COLLECTION_NAME to an existing collection or set "
+                "CHROMA_CREATE_IF_MISSING=1 for ingestion jobs."
+            ) from exc
+    _validate_collection_dimension(path=path, name=name)
     return collection
 
 

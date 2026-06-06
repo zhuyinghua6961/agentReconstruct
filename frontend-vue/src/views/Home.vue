@@ -17,6 +17,7 @@ import { normalizeTaskReplayCursor } from '../utils/taskReplayCursor'
 import { consumePendingStreamContent, shouldClearRecoveredActiveTask } from '../utils/taskRecoveryRuntime'
 import { createTaskRecoveryDebugLogger, summarizeTaskRecoveryDetail } from '../utils/taskRecoveryDebug'
 import { createRecoverableTaskController } from '../utils/recoverableTaskController'
+import { formatQueryModeLabel, resolveActualQueryModeLabel } from '../utils/queryMode'
 import {
   buildPatentStreamingMessagePatch,
   getPatentPreviewStreams,
@@ -27,13 +28,12 @@ import PdfReader from '../components/PdfReader.vue'
 import QuotaLimitCard from '../components/QuotaLimitCard.vue'
 import MarkdownRenderer from '../features/markdown/MarkdownRenderer.vue'
 import { buildCitationLocationsForDoi } from '../utils/citationEvidence'
-import { buildRoutingErrorMarkdown, buildRoutingErrorPresentation, getRouteModeLabel, mergeRoutingMetadata } from '../utils/routingStatus'
+import { buildRoutingErrorPresentation, mergeRoutingMetadata } from '../utils/routingStatus'
 
 const PINNED_CHATS_COLLAPSED_KEY = 'lfp.sidebar.pinned-collapsed.v1'
 const RECENT_CHATS_COLLAPSED_KEY = 'lfp.sidebar.recent-collapsed.v1'
 const FILE_LIST_COLLAPSED_KEY = 'lfp.file-list.collapsed.v1'
 const ASK_MODE_STORAGE_KEY = 'gateway.ask.mode.v1'
-const ASK_MODE_LABELS = { fast: '快速模式', thinking: '深度模式', patent: '专利模式', graph_kb: '知识图谱', neo4j: '知识图谱' }
 
 const store = useChatStore()
 const pdfReader = ref(null)
@@ -398,9 +398,8 @@ function setAskMode(mode) {
   localStorage.setItem(ASK_MODE_STORAGE_KEY, selectedAskMode.value)
 }
 
-function formatQueryModeLabel(mode) {
-  const key = String(mode || '').trim().toLowerCase()
-  return ASK_MODE_LABELS[key] || String(mode || '').trim()
+function getActualQueryModeLabel(data = {}, metadata = {}, options = {}) {
+  return resolveActualQueryModeLabel(data, metadata, options)
 }
 
 function isGraphKbMessage(message) {
@@ -1046,16 +1045,10 @@ function applyGatewayEvent(chatId, data, runtime = getStreamRuntime(chatId)) {
     const mergedTimings = (mergedMeta.timings && typeof mergedMeta.timings === 'object' && !Array.isArray(mergedMeta.timings))
       ? { ...mergedMeta.timings }
       : null
-    const modeFromExpert = data.expert === 'neo4j'
-      ? '知识图谱'
-      : data.expert === 'community'
-        ? '社区分析'
-        : data.expert === 'tabular'
-          ? '表格问答'
-          : '文献检索'
+    const actualQueryMode = getActualQueryModeLabel(data, mergedMeta, { allowRouteFallback: false })
     updateStreamingTargetMessage(chatId, {
       expert: data.expert,
-      queryMode: getFallbackQueryModeLabel(data, mergedMeta) || modeFromExpert,
+      ...(actualQueryMode ? { queryMode: actualQueryMode } : {}),
       metadata: mergedMeta,
       ...(mergedTimings ? { timings: mergedTimings } : {}),
     })
@@ -1146,9 +1139,7 @@ function applyGatewayEvent(chatId, data, runtime = getStreamRuntime(chatId)) {
     if (updates.metadata.timings && typeof updates.metadata.timings === 'object' && !Array.isArray(updates.metadata.timings)) {
       updates.timings = { ...updates.metadata.timings }
     }
-    if (!targetMessage.queryMode) {
-      updates.queryMode = getFallbackQueryModeLabel(data, mergedMeta)
-    }
+    updates.queryMode = getActualQueryModeLabel(data, mergedMeta, { allowRouteFallback: false }) || targetMessage.queryMode || ''
 
     updateStreamingTargetMessage(chatId, updates)
     taskRecoveryDebug.log('home:event-done', {
@@ -1203,7 +1194,7 @@ function applyGatewayEvent(chatId, data, runtime = getStreamRuntime(chatId)) {
     const existingContent = String(targetMessage.content || '').trim()
     updateStreamingTargetMessage(chatId, {
       content: existingContent ? `${existingContent}\n\n${renderedError}` : renderedError,
-      queryMode: getFallbackQueryModeLabel(data, mergedMeta) || targetMessage.queryMode || '',
+      queryMode: getActualQueryModeLabel(data, mergedMeta, { allowRouteFallback: false }) || targetMessage.queryMode || '',
       metadata: {
         ...mergedMeta,
         streaming_terminal_event: 'error',
@@ -1263,12 +1254,6 @@ function handleMarkdownDoiOpen(doi, messageIndex = -1) {
     references: currentMsg?.references || [],
   })
   pdfReader.value.openReader(normalizedDoi, locations)
-}
-
-function getFallbackQueryModeLabel(data, existingMeta = {}) {
-  const modeRaw = String(data?.query_mode || data?.queryMode || '').trim()
-  if (modeRaw) return formatQueryModeLabel(modeRaw)
-  return getRouteModeLabel(data?.route || existingMeta?.route || '')
 }
 
 function flushPendingStreamContent(chatId) {
@@ -1840,7 +1825,7 @@ async function sendLegacyMessage() {
       : errorMessage
     updateStreamingTargetMessage(streamChatId, {
       content: renderedError,
-      queryMode: getFallbackQueryModeLabel(payload, mergedMeta) || targetMessage.queryMode || '',
+      queryMode: getActualQueryModeLabel(payload, mergedMeta, { allowRouteFallback: false }) || targetMessage.queryMode || '',
       metadata: {
         ...mergedMeta,
         streaming_terminal_event: 'error',

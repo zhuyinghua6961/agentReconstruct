@@ -5,6 +5,7 @@ import { ref, computed } from 'vue'
 import { api } from '../services/api.js'
 import { isRecoverableTaskStatus, normalizeTaskReplayCursor } from '../utils/taskReplayCursor.js'
 import { createTaskRecoveryDebugLogger, summarizeTaskRecoveryDetail } from '../utils/taskRecoveryDebug.js'
+import { resolveActualQueryModeLabel, resolveActualQueryModeRaw } from '../utils/queryMode.js'
 
 export const useChatStore = defineStore('chat', () => {
   const DEFAULT_CHAT_TITLE = '新对话'
@@ -412,9 +413,7 @@ export const useChatStore = defineStore('chat', () => {
 
   function normalizeMessage(message = {}) {
     const metadata = message?.metadata && typeof message.metadata === 'object' ? { ...message.metadata } : {}
-    const rawMode = String(
-      message?.queryMode || message?.query_mode || metadata?.queryMode || metadata?.query_mode || ''
-    ).trim()
+    const rawMode = resolveActualQueryModeRaw(message, metadata)
     const references = normalizeReferences(
       message?.references ?? metadata?.references
     )
@@ -510,7 +509,7 @@ export const useChatStore = defineStore('chat', () => {
       content: String(message?.content || ''),
       timestamp: message?.timestamp || message?.created_at || new Date().toISOString(),
       metadata,
-      queryMode: rawMode,
+      queryMode: resolveActualQueryModeLabel(message, metadata, { allowRouteFallback: false }),
       references,
       referenceLinks,
       doiLocations,
@@ -531,10 +530,52 @@ export const useChatStore = defineStore('chat', () => {
     return messages.map((message) => normalizeMessage(message))
   }
 
+  function resolveChatQueryMode(item = {}, fallback = {}) {
+    const itemMetadata = item?.metadata && typeof item.metadata === 'object' ? item.metadata : {}
+    const fallbackMetadata = fallback?.metadata && typeof fallback.metadata === 'object' ? fallback.metadata : {}
+    const fromChat = String(
+      item?.lastQueryMode
+      ?? item?.last_query_mode
+      ?? item?.queryMode
+      ?? item?.query_mode
+      ?? itemMetadata?.lastQueryMode
+      ?? itemMetadata?.last_query_mode
+      ?? itemMetadata?.queryMode
+      ?? itemMetadata?.query_mode
+      ?? fallback?.lastQueryMode
+      ?? fallback?.last_query_mode
+      ?? fallback?.queryMode
+      ?? fallback?.query_mode
+      ?? fallbackMetadata?.lastQueryMode
+      ?? fallbackMetadata?.last_query_mode
+      ?? fallbackMetadata?.queryMode
+      ?? fallbackMetadata?.query_mode
+      ?? ''
+    ).trim()
+    if (fromChat) return fromChat
+
+    const messages = Array.isArray(item?.messages) && item.messages.length > 0
+      ? item.messages
+      : (Array.isArray(fallback?.messages) ? fallback.messages : [])
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]
+      if (normalizeComparableRole(message?.role || '') !== 'assistant') continue
+      const metadata = message?.metadata && typeof message.metadata === 'object' ? message.metadata : {}
+      const mode = String(
+        resolveActualQueryModeRaw(message, metadata)
+        || metadata?.requested_mode
+        || ''
+      ).trim()
+      if (mode) return mode
+    }
+    return ''
+  }
+
   function normalizeChat(item = {}, fallback = {}) {
     const itemMessages = Array.isArray(item?.messages) ? item.messages : null
     const fallbackMessages = Array.isArray(fallback?.messages) ? fallback.messages : []
     const synced = Boolean(item?.synced ?? fallback?.synced)
+    const chatQueryMode = resolveChatQueryMode(item, fallback)
     const fallbackLastTaskSeq = Number(
       item?.lastTaskSeq
       ?? item?.last_task_seq
@@ -567,6 +608,10 @@ export const useChatStore = defineStore('chat', () => {
         item?.syncStatus ?? fallback?.syncStatus,
         synced ? 'synced' : 'local'
       ),
+      queryMode: chatQueryMode,
+      query_mode: chatQueryMode,
+      lastQueryMode: chatQueryMode,
+      last_query_mode: chatQueryMode,
       activeTask: taskMetadata.activeTask,
       lastTaskSeq: taskMetadata.lastTaskSeq,
     }
@@ -859,6 +904,10 @@ export const useChatStore = defineStore('chat', () => {
               createdAt: conv.created_at,
               updatedAt: conv.updated_at,
               messageCount: conv.message_count,
+              queryMode: conv.queryMode || conv.query_mode || '',
+              query_mode: conv.query_mode || conv.queryMode || '',
+              lastQueryMode: conv.lastQueryMode || conv.last_query_mode || conv.queryMode || conv.query_mode || '',
+              last_query_mode: conv.last_query_mode || conv.lastQueryMode || conv.query_mode || conv.queryMode || '',
               synced: true,
               syncStatus: 'synced',
               isPinned: cached?.isPinned,
@@ -1072,6 +1121,13 @@ export const useChatStore = defineStore('chat', () => {
             }
             chat.updatedAt = response.updated_at || chat.updatedAt
             chat.syncStatus = 'synced'
+            const detailQueryMode = String(response.last_query_mode || response.query_mode || '').trim()
+            if (detailQueryMode) {
+              chat.queryMode = detailQueryMode
+              chat.query_mode = detailQueryMode
+              chat.lastQueryMode = detailQueryMode
+              chat.last_query_mode = detailQueryMode
+            }
             const taskMetadata = normalizeTaskMetadata(response.active_task, chat.lastTaskSeq)
             chat.activeTask = taskMetadata.activeTask
             chat.lastTaskSeq = taskMetadata.lastTaskSeq

@@ -145,7 +145,6 @@ def embed_texts(
                         response = client.embeddings.create(
                             model=config.EMBEDDING_MODEL,
                             input=batch_texts,
-                            dimensions=dims,
                             encoding_format="float",
                         )
                     except Exception as e:
@@ -171,22 +170,25 @@ def embed_texts(
                 )
                 batch_embeddings = [item.embedding for item in response.data]
                 for orig_idx, emb in zip(batch_indices, batch_embeddings):
+                    if len(emb) != dims:
+                        raise RuntimeError(
+                            f"Embedding dimension mismatch: model={config.EMBEDDING_MODEL} "
+                            f"expected={dims} actual={len(emb)}"
+                        )
                     result_map[orig_idx] = emb
                 break
 
             except Exception as e:
                 error_str = str(e)
 
-                # 400 InvalidParameter（文本过长/过短等）：不可恢复，不重试
-                if "400" in error_str or "InvalidParameter" in error_str:
+                # 400 InvalidParameter usually means an endpoint/model/dimension
+                # mismatch. Do not substitute zero vectors for runtime retrieval.
+                if "400" in error_str or "InvalidParameter" in error_str or "dimension mismatch" in error_str:
                     logger.error(
                         f"Embedding 参数错误 (batch {batch_start // BATCH_SIZE}), "
-                        f"跳过该 batch ({len(batch_texts)} 条): {e}"
+                        f"停止向量化 ({len(batch_texts)} 条): {e}"
                     )
-                    # 用零向量填充
-                    for orig_idx in batch_indices:
-                        result_map[orig_idx] = zero_vec
-                    break
+                    raise
 
                 retry_count += 1
                 if retry_count >= max_retries:

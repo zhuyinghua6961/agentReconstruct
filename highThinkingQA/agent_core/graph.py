@@ -45,6 +45,9 @@ _PARTIAL_RETRIEVAL_FLUSH_WAIT_SECONDS = 0.8
 _CHECKER_WALL_CLOCK_TIMEOUT_SECONDS = 60.0
 _REVISER_WALL_CLOCK_TIMEOUT_SECONDS = 60.0
 _CANCEL_WAIT_INTERVAL_SECONDS = 0.05
+_DIAGNOSTIC_TEXT_PREVIEW_CHARS = 500
+_DIAGNOSTIC_MAX_ITEMS = 20
+_DIAGNOSTIC_MAX_CHUNKS_PER_QUERY = 5
 
 
 def _trace_prefix(trace_id: str | None) -> str:
@@ -57,6 +60,184 @@ def _short_text(value: str, *, limit: int = 120) -> str:
     if len(text) <= limit:
         return text
     return f"{text[:limit]}..."
+
+
+def _safe_chunk_field(chunk: Any, field_name: str, default: Any = "") -> Any:
+    if isinstance(chunk, dict):
+        return chunk.get(field_name, default)
+    return getattr(chunk, field_name, default)
+
+
+def _chunk_text(chunk: Any) -> str:
+    return str(_safe_chunk_field(chunk, "text", "") or "")
+
+
+def _unique_doi_sample(groups: list[list[Any]], *, limit: int = 12) -> list[str]:
+    seen: list[str] = []
+    for chunks in groups or []:
+        for chunk in chunks or []:
+            doi = str(_safe_chunk_field(chunk, "doi", "") or "").strip()
+            if not doi or doi in seen:
+                continue
+            seen.append(doi)
+            if len(seen) >= limit:
+                return seen
+    return seen
+
+
+def _issue_type_summary(issues: list[dict]) -> dict[str, int]:
+    summary: dict[str, int] = {}
+    for issue in issues or []:
+        if not isinstance(issue, dict):
+            key = "unknown"
+        else:
+            key = str(issue.get("type") or issue.get("category") or issue.get("problem_type") or "unknown").strip() or "unknown"
+            problem = str(issue.get("problem") or "").strip().lower()
+            if key == "unknown":
+                for candidate in ("fabrication", "data_mismatch", "wrong_citation", "unsupported", "missing_citation"):
+                    if candidate in problem:
+                        key = candidate
+                        break
+        summary[key] = summary.get(key, 0) + 1
+    return summary
+
+
+def _format_timing_summary(timings: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in sorted(timings):
+        try:
+            value = float(timings[key])
+        except Exception:
+            continue
+        parts.append(f"{key}={value:.3f}s")
+    return " ".join(parts)
+
+
+def _log_sub_question_details(*, trace_id: str | None, sub_questions: list[str]) -> None:
+    for index, question in enumerate((sub_questions or [])[:_DIAGNOSTIC_MAX_ITEMS], start=1):
+        logger.info(
+            "%sstep1 sub_question detail index=%s total=%s chars=%s text=%s",
+            _trace_prefix(trace_id),
+            index,
+            len(sub_questions or []),
+            len(question or ""),
+            _short_text(question, limit=_DIAGNOSTIC_TEXT_PREVIEW_CHARS),
+        )
+    if len(sub_questions or []) > _DIAGNOSTIC_MAX_ITEMS:
+        logger.info(
+            "%sstep1 sub_question detail truncated logged=%s total=%s",
+            _trace_prefix(trace_id),
+            _DIAGNOSTIC_MAX_ITEMS,
+            len(sub_questions or []),
+        )
+
+
+def _log_pre_answer_details(*, trace_id: str | None, sub_questions: list[str], sub_answers: list[str]) -> None:
+    total = len(sub_answers or [])
+    for index, answer in enumerate((sub_answers or [])[:_DIAGNOSTIC_MAX_ITEMS], start=1):
+        question = sub_questions[index - 1] if index - 1 < len(sub_questions or []) else ""
+        logger.info(
+            "%sstep2 pre_answer detail index=%s total=%s question_chars=%s answer_chars=%s question=%s answer_preview=%s",
+            _trace_prefix(trace_id),
+            index,
+            total,
+            len(question or ""),
+            len(answer or ""),
+            _short_text(question, limit=240),
+            _short_text(answer, limit=_DIAGNOSTIC_TEXT_PREVIEW_CHARS),
+        )
+    if total > _DIAGNOSTIC_MAX_ITEMS:
+        logger.info(
+            "%sstep2 pre_answer detail truncated logged=%s total=%s",
+            _trace_prefix(trace_id),
+            _DIAGNOSTIC_MAX_ITEMS,
+            total,
+        )
+
+
+def _log_retrieval_diagnostics(
+    *,
+    trace_id: str | None,
+    retrieval_queries: list[str],
+    retrieved_chunks: list[list[Any]],
+) -> None:
+    total_chunks = sum(len(chunks or []) for chunks in retrieved_chunks or [])
+    logger.info(
+        "%sstep3 retrieval summary queries=%s groups=%s total_chunks=%s unique_dois=%s",
+        _trace_prefix(trace_id),
+        len(retrieval_queries or []),
+        len(retrieved_chunks or []),
+        total_chunks,
+        _unique_doi_sample(retrieved_chunks or []),
+    )
+    for index, query in enumerate((retrieval_queries or [])[:_DIAGNOSTIC_MAX_ITEMS], start=1):
+        logger.info(
+            "%sstep3 retrieval_query detail index=%s total=%s query_chars=%s query_preview=%s",
+            _trace_prefix(trace_id),
+            index,
+            len(retrieval_queries or []),
+            len(query or ""),
+            _short_text(query, limit=_DIAGNOSTIC_TEXT_PREVIEW_CHARS),
+        )
+    if len(retrieval_queries or []) > _DIAGNOSTIC_MAX_ITEMS:
+        logger.info(
+            "%sstep3 retrieval_query detail truncated logged=%s total=%s",
+            _trace_prefix(trace_id),
+            _DIAGNOSTIC_MAX_ITEMS,
+            len(retrieval_queries or []),
+        )
+
+    for query_index, chunks in enumerate((retrieved_chunks or [])[:_DIAGNOSTIC_MAX_ITEMS], start=1):
+        for chunk_index, chunk in enumerate((chunks or [])[:_DIAGNOSTIC_MAX_CHUNKS_PER_QUERY], start=1):
+            text = _chunk_text(chunk)
+            logger.info(
+                "%sstep3 chunk detail query_index=%s chunk_index=%s query_chunk_count=%s doi=%s section=%s source_chunk_index=%s distance=%s title=%s text_chars=%s text_preview=%s",
+                _trace_prefix(trace_id),
+                query_index,
+                chunk_index,
+                len(chunks or []),
+                _safe_chunk_field(chunk, "doi", ""),
+                _safe_chunk_field(chunk, "section_name", ""),
+                _safe_chunk_field(chunk, "chunk_index", ""),
+                _safe_chunk_field(chunk, "distance", ""),
+                _short_text(str(_safe_chunk_field(chunk, "title", "") or ""), limit=160),
+                len(text),
+                _short_text(text, limit=_DIAGNOSTIC_TEXT_PREVIEW_CHARS),
+            )
+        if len(chunks or []) > _DIAGNOSTIC_MAX_CHUNKS_PER_QUERY:
+            logger.info(
+                "%sstep3 chunk detail truncated query_index=%s logged=%s total=%s",
+                _trace_prefix(trace_id),
+                query_index,
+                _DIAGNOSTIC_MAX_CHUNKS_PER_QUERY,
+                len(chunks or []),
+            )
+
+
+def _log_synthesis_input(
+    *,
+    trace_id: str | None,
+    llm_question: str,
+    direct_answer: str,
+    sub_questions: list[str],
+    sub_answers: list[str],
+    retrieved_chunks: list[list[Any]],
+    stream_enabled: bool,
+    summary_enabled: bool,
+) -> None:
+    logger.info(
+        "%sstep4 synthesis input question_chars=%s direct_answer_chars=%s sub_questions=%s sub_answers=%s retrieved_groups=%s retrieved_chunks_total=%s unique_dois=%s stream=%s summary_enabled=%s",
+        _trace_prefix(trace_id),
+        len(llm_question or ""),
+        len(direct_answer or ""),
+        len(sub_questions or []),
+        len(sub_answers or []),
+        len(retrieved_chunks or []),
+        sum(len(chunks or []) for chunks in retrieved_chunks or []),
+        _unique_doi_sample(retrieved_chunks or []),
+        bool(stream_enabled),
+        bool(summary_enabled),
+    )
 
 
 def _call_with_wall_clock_timeout(
@@ -461,6 +642,24 @@ def run_agent(
             _short_text(state.raw_question),
             _short_text(state.effective_question),
         )
+        logger.info(
+            "%srun_agent config llm_model=%s embedding_model=%s embedding_dimensions=%s chroma_collection=%s num_sub_questions=%s retrieval_top_k=%s retrieval_batch_size=%s max_check_loops=%s stream=%s thinking_main=%s thinking_direct=%s thinking_decompose=%s summary_experiment=%s conversation_context_keys=%s",
+            _trace_prefix(trace_id),
+            config.LLM_MODEL,
+            config.EMBEDDING_MODEL,
+            config.EMBEDDING_DIMENSIONS,
+            config.CHROMA_COLLECTION_NAME,
+            resolved_num_sub_questions,
+            resolved_retrieval_top_k,
+            resolved_retrieval_pipeline_batch_size,
+            resolved_max_check_loops,
+            bool(stream_callback),
+            bool(resolved_enable_thinking),
+            bool(resolved_direct_answer_enable_thinking),
+            bool(resolved_decompose_enable_thinking),
+            bool(resolved_summary_experiment),
+            sorted(state.conversation_context.keys()),
+        )
         direct_llm_client = get_llm_client()
         pipeline_llm_client = get_llm_client()
         verification_llm_client = get_llm_client(max_retries=0)
@@ -569,6 +768,7 @@ def run_agent(
                 sub_questions=len(state.sub_questions),
                 decompose_elapsed_seconds=round(float(decompose_elapsed), 3),
             )
+            _log_sub_question_details(trace_id=trace_id, sub_questions=state.sub_questions)
 
             # ============================================================
             # Step 2: 子问题预回答与检索
@@ -600,6 +800,16 @@ def run_agent(
                 f"{q}\n{a}" if a else q
                 for q, a in zip(state.sub_questions, state.sub_answers)
             ]
+            _log_pre_answer_details(
+                trace_id=trace_id,
+                sub_questions=state.sub_questions,
+                sub_answers=state.sub_answers,
+            )
+            _log_retrieval_diagnostics(
+                trace_id=trace_id,
+                retrieval_queries=state.retrieval_queries,
+                retrieved_chunks=state.retrieved_chunks,
+            )
 
             if not future_direct.done():
                 logger.info("%sstep1 waiting for direct answer after retrieval pipeline", _trace_prefix(trace_id))
@@ -690,6 +900,16 @@ def run_agent(
         logger.info("Step 4: 综合生成草稿答案")
         _emit_progress("step4", "started", "开始综合生成草稿答案")
         t0 = time.time()
+        _log_synthesis_input(
+            trace_id=trace_id,
+            llm_question=llm_question,
+            direct_answer=state.direct_answer,
+            sub_questions=state.sub_questions,
+            sub_answers=state.sub_answers,
+            retrieved_chunks=state.retrieved_chunks,
+            stream_enabled=bool(stream_callback),
+            summary_enabled=resolved_summary_experiment,
+        )
 
         if stream_callback:
             draft_chunks: list[str] = []
@@ -794,6 +1014,16 @@ def run_agent(
                 )
 
                 check_started_at = time.time()
+                logger.info(
+                    "%sstep5 checker input loop=%s answer_chars=%s retrieved_groups=%s retrieved_chunks_total=%s unique_dois=%s timeout_seconds=%.1f",
+                    _trace_prefix(trace_id),
+                    loop_i + 1,
+                    len(current_answer or ""),
+                    len(state.retrieved_chunks or []),
+                    sum(len(chunks or []) for chunks in state.retrieved_chunks or []),
+                    _unique_doi_sample(state.retrieved_chunks or []),
+                    _CHECKER_WALL_CLOCK_TIMEOUT_SECONDS,
+                )
                 try:
                     passed, issues = _call_with_wall_clock_timeout(
                         func=check_answer,
@@ -836,6 +1066,15 @@ def run_agent(
                 state.check_loops = loop_i + 1
                 step5_issue_total += len(issues)
                 state.timings[f"step5_check_loop_{loop_i + 1}"] = check_elapsed
+                logger.info(
+                    "%sstep5 checker output loop=%s passed=%s issues=%s issue_types=%s elapsed=%.3fs",
+                    _trace_prefix(trace_id),
+                    loop_i + 1,
+                    passed,
+                    len(issues),
+                    _issue_type_summary(issues),
+                    check_elapsed,
+                )
 
                 if passed:
                     logger.info(f"Step 5 - 第 {loop_i + 1} 轮检查通过")
@@ -881,6 +1120,16 @@ def run_agent(
                 )
 
                 revise_started_at = time.time()
+                before_revise_chars = len(current_answer or "")
+                logger.info(
+                    "%sstep5 reviser input loop=%s answer_chars=%s issues=%s issue_types=%s timeout_seconds=%.1f",
+                    _trace_prefix(trace_id),
+                    loop_i + 1,
+                    before_revise_chars,
+                    len(issues),
+                    _issue_type_summary(issues),
+                    _REVISER_WALL_CLOCK_TIMEOUT_SECONDS,
+                )
                 try:
                     current_answer = _call_with_wall_clock_timeout(
                         func=revise_answer,
@@ -918,6 +1167,14 @@ def run_agent(
                 step5_revise_rounds += 1
                 state.timings[f"step5_revise_loop_{loop_i + 1}"] = revise_elapsed
                 _raise_if_cancelled()
+                logger.info(
+                    "%sstep5 reviser output loop=%s revised_chars=%s delta_chars=%s elapsed=%.3fs",
+                    _trace_prefix(trace_id),
+                    loop_i + 1,
+                    len(current_answer or ""),
+                    len(current_answer or "") - before_revise_chars,
+                    revise_elapsed,
+                )
                 _emit_progress(
                     "step5_revise",
                     "success",
@@ -979,6 +1236,7 @@ def run_agent(
         state.error = str(e)
 
     state.timings["total"] = time.time() - total_start
+    logger.info("%srun_agent timing summary %s", _trace_prefix(trace_id), _format_timing_summary(state.timings))
     logger.info("%sAgent 总耗时: %.1fs", _trace_prefix(trace_id), state.timings["total"])
 
     return state

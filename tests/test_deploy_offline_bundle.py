@@ -78,6 +78,106 @@ def test_offline_compose_includes_https_edge_service() -> None:
         assert f"{variable}=" in env_template
 
 
+def test_minio_seed_compose_registers_highthinking_pdf_patch() -> None:
+    compose = _read(DEPLOY / "docker-compose.yml")
+    block = _service_block(compose, "minio-seed")
+
+    assert "DATA_PACKAGE_VERSION: ${MINIO_ORIGINALS_DATA_VERSION:-2026-05-19}" in block
+    assert "MINIO_PATCH_DATA_VERSION: ${MINIO_PATCH_DATA_VERSION:-${DATA_PACKAGE_VERSION:-2026-06-04}}" in block
+    assert "MINIO_PATCH_PACKAGE_FILES:" in block
+    assert "highthinking-pdf-backfill-2026-06-05.tar.zst" in block
+
+
+def test_minio_seed_imports_patch_when_base_marker_exists(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    base_root = tmp_path / "base"
+    patch_root = tmp_path / "patch"
+    fake_bin = tmp_path / "bin"
+    work_dir = tmp_path / "work"
+    log_path = tmp_path / "mc.log"
+
+    (base_root / "papers").mkdir(parents=True)
+    (base_root / "patent" / "originals" / "CN1" / "structured").mkdir(parents=True)
+    (base_root / "papers" / "base.pdf").write_bytes(b"%PDF-1.4\n")
+    (base_root / "patent" / "originals" / "CN1" / "structured" / "tables.json").write_text("[]")
+
+    (patch_root / "papers").mkdir(parents=True)
+    (patch_root / "papers" / "patch.pdf").write_bytes(b"%PDF-1.4\n")
+    data_dir.mkdir()
+    subprocess.run(
+        ["tar", "--zstd", "-cf", str(data_dir / "minio-originals.tar.zst"), "-C", str(base_root), "."],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "tar",
+            "--zstd",
+            "-cf",
+            str(data_dir / "highthinking-pdf-backfill-2026-06-05.tar.zst"),
+            "-C",
+            str(patch_root),
+            ".",
+        ],
+        check=True,
+    )
+
+    fake_bin.mkdir()
+    fake_mc = fake_bin / "mc"
+    fake_mc.write_text(
+        """#!/bin/sh
+set -eu
+echo "$*" >> "$MC_LOG"
+case "$1" in
+  alias|mb)
+    exit 0
+    ;;
+  stat)
+    case "$2" in
+      */_deploy/data-seed/minio-originals/2026-06-05.done)
+        exit 0
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+    ;;
+  pipe)
+    cat >/dev/null
+    exit 0
+    ;;
+  cp)
+    exit 0
+    ;;
+esac
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_mc.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "MC_LOG": str(log_path),
+            "DATA_DIR": str(data_dir),
+            "WORK_DIR": str(work_dir),
+            "MINIO_ROOT_USER": "admin",
+            "MINIO_ROOT_PASSWORD": "12345678",
+            "MINIO_BUCKET": "agentcode",
+            "DATA_PACKAGE_VERSION": "2026-06-05",
+            "MINIO_PATCH_DATA_VERSION": "2026-06-06",
+            "MINIO_PATCH_PACKAGE_FILES": "highthinking-pdf-backfill-2026-06-05.tar.zst",
+        }
+    )
+
+    subprocess.run([str(DEPLOY / "seed-tools" / "seed_minio_originals.sh")], check=True, env=env)
+
+    log = log_path.read_text(encoding="utf-8")
+    assert "pipe --quiet local/agentcode/papers/patch.pdf" in log
+    assert "_deploy/data-seed/minio-originals-patches/2026-06-06/highthinking-pdf-backfill-2026-06-05.tar.zst.done" in log
+
+
 def test_neo4j_runtime_services_do_not_export_invalid_password_setting() -> None:
     compose = _read(DEPLOY / "docker-compose.yml")
 
@@ -242,6 +342,7 @@ def test_minio_seed_collection_includes_patent_originals() -> None:
 def test_deploy_env_uses_simplified_model_connection_variables() -> None:
     compose = _read(DEPLOY / "docker-compose.yml")
     env_template = _read(DEPLOY / ".env.production.example")
+    public_service = _service_block(compose, "public-service")
 
     for variable in [
         "LLM_API_KEY",
@@ -252,6 +353,7 @@ def test_deploy_env_uses_simplified_model_connection_variables() -> None:
         "HIGHTHINKINGQA_EMBEDDING_API_KEY",
         "HIGHTHINKINGQA_EMBEDDING_BASE_URL",
         "HIGHTHINKINGQA_EMBEDDING_MODEL",
+        "HIGHTHINKINGQA_EMBEDDING_DIMENSIONS",
         "RERANK_BASE_URL",
         "RERANK_MODEL",
         "RERANK_API_KEY",
@@ -280,6 +382,7 @@ def test_deploy_env_uses_simplified_model_connection_variables() -> None:
         "HIGHTHINKINGQA_EMBEDDING_API_KEY: ${HIGHTHINKINGQA_EMBEDDING_API_KEY}",
         "HIGHTHINKINGQA_EMBEDDING_BASE_URL: ${HIGHTHINKINGQA_EMBEDDING_BASE_URL}",
         "HIGHTHINKINGQA_EMBEDDING_MODEL: ${HIGHTHINKINGQA_EMBEDDING_MODEL}",
+        "HIGHTHINKINGQA_EMBEDDING_DIMENSIONS: ${HIGHTHINKINGQA_EMBEDDING_DIMENSIONS:-4096}",
         "EMBEDDING_MODEL_TYPE: remote",
         "EMBEDDING_API_URL: ${QA_EMBEDDING_BASE_URL}",
         "PATENT_EMBEDDING_API_URL: ${QA_EMBEDDING_BASE_URL}",
@@ -287,6 +390,8 @@ def test_deploy_env_uses_simplified_model_connection_variables() -> None:
         "PATENT_STAGE2_RERANK_BASE_URL: ${RERANK_BASE_URL:-}",
     ]:
         assert mapping in compose
+
+    assert "HIGHTHINKINGQA_EMBEDDING_DIMENSIONS: ${HIGHTHINKINGQA_EMBEDDING_DIMENSIONS:-4096}" in public_service
 
     assert "OCR_API_KEY:" not in compose
     assert "OCR_BASE_URL:" not in compose
@@ -360,6 +465,24 @@ def test_deploy_env_exposes_only_customer_facing_configuration() -> None:
         "INTENT_MODEL_BASE_URL",
         "INTENT_MODEL",
         "INTENT_MODEL_TIMEOUT_SECONDS",
+        "QA_EMBEDDING_API_KEY",
+        "QA_EMBEDDING_AUTH_MODE",
+        "QA_EMBEDDING_BASE_URL",
+        "QA_EMBEDDING_MODEL",
+        "HIGHTHINKINGQA_EMBEDDING_API_KEY",
+        "HIGHTHINKINGQA_EMBEDDING_AUTH_MODE",
+        "HIGHTHINKINGQA_EMBEDDING_BASE_URL",
+        "HIGHTHINKINGQA_EMBEDDING_MODEL",
+        "HIGHTHINKINGQA_EMBEDDING_DIMENSIONS",
+        "RERANK_BASE_URL",
+        "RERANK_MODEL",
+        "RERANK_API_KEY",
+        "RERANK_AUTH_MODE",
+    }
+
+    assert customer_keys == expected_customer_keys
+
+    compose_default_only_keys = {
         "QA_STAGE1_LOG_RESPONSE_MAX_CHARS",
         "QA_STAGE1_LOG_FULL_RESPONSE",
         "QA_STAGE2_DIAGNOSTIC_LOG",
@@ -376,21 +499,32 @@ def test_deploy_env_exposes_only_customer_facing_configuration() -> None:
         "FASTQA_STAGE2_RERANK_WARMUP_ENABLED",
         "PDF_QA_WARMUP_ENABLED",
         "PATENT_PLANNING_HOT_POOL_WARMUP_ENABLED",
-        "QA_EMBEDDING_API_KEY",
-        "QA_EMBEDDING_AUTH_MODE",
-        "QA_EMBEDDING_BASE_URL",
-        "QA_EMBEDDING_MODEL",
-        "HIGHTHINKINGQA_EMBEDDING_API_KEY",
-        "HIGHTHINKINGQA_EMBEDDING_AUTH_MODE",
-        "HIGHTHINKINGQA_EMBEDDING_BASE_URL",
-        "HIGHTHINKINGQA_EMBEDDING_MODEL",
-        "RERANK_BASE_URL",
-        "RERANK_MODEL",
-        "RERANK_API_KEY",
-        "RERANK_AUTH_MODE",
     }
+    for key in compose_default_only_keys:
+        assert f"{key}=" not in env_template
 
-    assert customer_keys == expected_customer_keys
+    fastqa = _service_block(compose, "fastqa")
+    patent = _service_block(compose, "patent")
+    for key, default in {
+        "QA_STAGE1_LOG_RESPONSE_MAX_CHARS": "${QA_STAGE1_LOG_RESPONSE_MAX_CHARS:-4000}",
+        "QA_STAGE1_LOG_FULL_RESPONSE": "${QA_STAGE1_LOG_FULL_RESPONSE:-0}",
+        "QA_STAGE2_DIAGNOSTIC_LOG": "${QA_STAGE2_DIAGNOSTIC_LOG:-1}",
+        "QA_STAGE2_LOG_QUERY_DETAILS": "${QA_STAGE2_LOG_QUERY_DETAILS:-1}",
+        "QA_STAGE2_LOG_HIT_DETAILS": "${QA_STAGE2_LOG_HIT_DETAILS:-1}",
+        "QA_STAGE2_LOG_HIT_MAX": "${QA_STAGE2_LOG_HIT_MAX:-5}",
+        "QA_STAGE2_LOG_QUERY_MAX_CHARS": "${QA_STAGE2_LOG_QUERY_MAX_CHARS:-1000}",
+        "QA_STAGE3_DIAGNOSTIC_LOG": "${QA_STAGE3_DIAGNOSTIC_LOG:-1}",
+        "QA_STAGE3_LOG_SOURCE_DETAILS": "${QA_STAGE3_LOG_SOURCE_DETAILS:-1}",
+        "QA_STAGE3_LOG_CHUNK_DETAILS": "${QA_STAGE3_LOG_CHUNK_DETAILS:-1}",
+        "QA_STAGE3_LOG_CHUNK_MAX": "${QA_STAGE3_LOG_CHUNK_MAX:-5}",
+        "QA_STAGE3_LOG_TEXT_MAX_CHARS": "${QA_STAGE3_LOG_TEXT_MAX_CHARS:-1000}",
+    }.items():
+        assert _has_env_mapping(fastqa, key, default)
+        assert _has_env_mapping(patent, key, default)
+    assert _has_env_mapping(fastqa, "FASTQA_STAGE2_CHAT_WARMUP_ENABLED", "${FASTQA_STAGE2_CHAT_WARMUP_ENABLED:-false}")
+    assert _has_env_mapping(fastqa, "FASTQA_STAGE2_RERANK_WARMUP_ENABLED", "${FASTQA_STAGE2_RERANK_WARMUP_ENABLED:-false}")
+    assert _has_env_mapping(fastqa, "PDF_QA_WARMUP_ENABLED", "${PDF_QA_WARMUP_ENABLED:-0}")
+    assert _has_env_mapping(patent, "PATENT_PLANNING_HOT_POOL_WARMUP_ENABLED", "${PATENT_PLANNING_HOT_POOL_WARMUP_ENABLED:-false}")
 
     hidden_internal_keys = {
         "QA_EMBEDDING_MODEL_TYPE",

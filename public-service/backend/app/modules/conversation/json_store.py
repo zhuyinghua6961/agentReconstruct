@@ -179,6 +179,12 @@ class ConversationJsonStore:
                 return remote_doc
         return None
 
+    def load_document_meta_local(self, *, user_id: int, conversation_id: int) -> dict[str, Any]:
+        local_path = self.conversation_local_path(user_id=user_id, conversation_id=conversation_id)
+        local_doc = self._load_document_from_local(local_path)
+        meta = local_doc.get("meta") if isinstance(local_doc, dict) and isinstance(local_doc.get("meta"), dict) else {}
+        return dict(meta)
+
     def write_document(
         self,
         *,

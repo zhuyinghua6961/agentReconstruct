@@ -101,6 +101,113 @@ test('parseMarkdownContent emits math tokens and does not treat DOI underscores 
   assert.doesNotMatch(html, /364327<\/sub>/)
 })
 
+test('parseMarkdownContent renders bracket-delimited math inside prose', () => {
+  const input = '由 \\[D = D_0 \\exp(-E_a/kT)\\] 可知温度升高会加快扩散。'
+  const model = parseMarkdownContent(input)
+  const html = renderMarkdownContentToHtml(input)
+  const mathTokens = collectInlineTokens(model.tokens, 'inlineMath')
+
+  assert.equal(model.diagnostics.mathTokenCount, 1)
+  assert.equal(mathTokens.length, 1)
+  assert.equal(mathTokens[0].text, 'D = D_0 \\exp(-E_a/kT)')
+  assert.match(html, /class="katex"/)
+  assert.doesNotMatch(html, /\\\[/)
+  assert.doesNotMatch(html, /\\\]/)
+})
+
+test('parseMarkdownContent renders parenthesis-delimited math after marked escape tokenization', () => {
+  const input = '变量 \\(x\\) 与扩散长度 \\(L^2 = 2Dt\\) 相关。'
+  const model = parseMarkdownContent(input)
+  const html = renderMarkdownContentToHtml(input)
+  const mathTokens = collectInlineTokens(model.tokens, 'inlineMath')
+
+  assert.equal(model.diagnostics.mathTokenCount, 2)
+  assert.equal(mathTokens.length, 2)
+  assert.deepEqual(
+    mathTokens.map((token) => token.text),
+    ['x', 'L^2 = 2Dt'],
+  )
+  assert.match(html, /class="katex"/)
+  assert.doesNotMatch(html, /\\\(/)
+  assert.doesNotMatch(html, /\\\)/)
+})
+
+test('parseMarkdownContent renders model-style parenthesized LaTeX math', () => {
+  const input = [
+    '扩散系数 ((D_{\\text{Li}})) 存在差异。',
+    '关系（L^2 \\propto \\kappa t），驱动力(\\Delta \\mu_{\\text{Li}})相关。',
+    '速度(\\nu_{\\text{Li}} = \\text{d}L/\\text{d}t)增加。',
+  ].join('\n')
+  const model = parseMarkdownContent(input)
+  const html = renderMarkdownContentToHtml(input)
+  const mathTokens = collectInlineTokens(model.tokens, 'inlineMath')
+
+  assert.equal(mathTokens.length, 4)
+  assert.deepEqual(
+    mathTokens.map((token) => token.text),
+    [
+      'D_{\\text{Li}}',
+      'L^2 \\propto \\kappa t',
+      '\\Delta \\mu_{\\text{Li}}',
+      '\\nu_{\\text{Li}} = \\text{d}L/\\text{d}t',
+    ],
+  )
+  assert.equal(model.diagnostics.mathTokenCount, 4)
+  assert.equal((html.match(/class="katex"/g) || []).length, 4)
+  assert.match(html, /<msub>/)
+  assert.match(html, /∝/)
+  assert.match(html, /Δ/)
+  assert.doesNotMatch(html, /\(\(/)
+  assert.doesNotMatch(html, /\)\)/)
+})
+
+test('parseMarkdownContent renders bare compact LaTeX formulas without touching prose identifiers', () => {
+  const input = 'LiFePO_{4}/FePO_{4} 相界面中，电导率约为 10^{-4} \\text{ S/cm}，普通变量 file_name 保持文本，DOI 10.1155/2014_364327 可点击。'
+  const model = parseMarkdownContent(input)
+  const html = renderMarkdownContentToHtml(input)
+  const mathTokens = collectInlineTokens(model.tokens, 'inlineMath')
+
+  assert.equal(model.diagnostics.doiLinkCount, 1)
+  assert.equal(mathTokens.length, 3)
+  assert.deepEqual(
+    mathTokens.map((token) => token.text),
+    ['LiFePO_{4}/FePO_{4}', '10^{-4}', '\\text{ S/cm}'],
+  )
+  assert.match(html, /class="katex"/)
+  assert.match(html, /file_name/)
+  assert.match(html, /data-doi="10\.1155\/2014_364327"/)
+  assert.doesNotMatch(html, /2014<\/sub>/)
+})
+
+test('parseMarkdownContent renders unbraced TeX scripts without touching prose identifiers', () => {
+  const input = '扩散项 x_i 与 D_0、\\exp(-E_a/kT) 有关，普通变量 file_name 保持文本。'
+  const model = parseMarkdownContent(input)
+  const html = renderMarkdownContentToHtml(input)
+  const mathTokens = collectInlineTokens(model.tokens, 'inlineMath')
+
+  assert.deepEqual(
+    mathTokens.map((token) => token.text),
+    ['x_i', 'D_0', '\\exp(-E_a/kT)'],
+  )
+  assert.equal(model.diagnostics.mathTokenCount, 3)
+  assert.match(html, /class="katex"/)
+  assert.match(html, /file_name/)
+  assert.doesNotMatch(html, /file<sub>name<\/sub>/)
+})
+
+test('parseMarkdownContent avoids implicit math in ordinary parentheses and code spans', () => {
+  const input = '循环伏安（CV）和粒径（203 nm）不是公式，`D_{\\text{Li}}` 也保持代码。'
+  const model = parseMarkdownContent(input)
+  const html = renderMarkdownContentToHtml(input)
+
+  assert.equal(model.diagnostics.mathTokenCount, 0)
+  assert.equal(collectInlineTokens(model.tokens, 'inlineMath').length, 0)
+  assert.match(html, /循环伏安（CV）/)
+  assert.match(html, /粒径（203 nm）/)
+  assert.match(html, /<code>D_\{\\text\{Li\}\}<\/code>/)
+  assert.doesNotMatch(html, /class="katex"/)
+})
+
 test('parseMarkdownContent linkifies patent IDs after patent ID labels', () => {
   const input = '专利证据显示其热力学稳定性较强（专利 ID=CN114906831B）。'
   const model = parseMarkdownContent(input)

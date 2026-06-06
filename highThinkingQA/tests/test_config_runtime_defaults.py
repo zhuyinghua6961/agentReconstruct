@@ -148,9 +148,9 @@ def test_config_ignores_legacy_embedding_and_llm_aliases(monkeypatch, tmp_path):
     assert reloaded.LLM_MODEL == "qwen3-max"
     assert reloaded.EMBEDDING_API_KEY == ""
     assert reloaded.HIGHTHINKINGQA_EMBEDDING_AUTH_MODE == "bearer"
-    assert reloaded.EMBEDDING_BASE_URL == "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    assert reloaded.EMBEDDING_MODEL == "text-embedding-v4"
-    assert reloaded.EMBEDDING_DIMENSIONS == 2048
+    assert reloaded.EMBEDDING_BASE_URL == "http://127.0.0.1:8014/v1"
+    assert reloaded.EMBEDDING_MODEL == "qwen3-embedding-8b"
+    assert reloaded.EMBEDDING_DIMENSIONS == 4096
     assert reloaded.HIGHTHINKINGQA_EMBEDDING_BATCH_SIZE == 10
     assert reloaded.HIGHTHINKINGQA_EMBEDDING_API_RPM == 1800
     assert reloaded.HIGHTHINKINGQA_EMBEDDING_API_TPM == 1_200_000

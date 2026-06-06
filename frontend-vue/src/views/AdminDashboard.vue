@@ -263,15 +263,33 @@ function getModelTestText(item) {
   return '测试'
 }
 
+function formatModelDimensionSummary(result) {
+  const detected = Number(result?.detected_dimension)
+  const expected = Number(result?.expected_dimension)
+  const hasDetected = Number.isFinite(detected) && detected > 0
+  const hasExpected = Number.isFinite(expected) && expected > 0
+  if (hasDetected && hasExpected) {
+    return detected === expected ? `维度 ${detected}` : `维度 ${detected} / 期望 ${expected}`
+  }
+  if (hasDetected) return `维度 ${detected}`
+  if (hasExpected) return `期望维度 ${expected}`
+  return ''
+}
+
 function getModelTestResultText(item) {
   const state = getModelTestState(item.id)
   if (state.loading) return '测试中'
   if (state.error) return state.error
   const result = state.result
   if (!result) return '未测试'
+  const dimensionSummary = formatModelDimensionSummary(result)
   if (result.ok) {
     const elapsed = result.elapsed_ms !== null && result.elapsed_ms !== undefined ? `，${result.elapsed_ms} ms` : ''
-    return `响应正常${elapsed}`
+    const detail = dimensionSummary ? `，${dimensionSummary}` : ''
+    return `响应正常${detail}${elapsed}`
+  }
+  if (dimensionSummary && result.message && !String(result.message).includes(dimensionSummary)) {
+    return `${result.message}（${dimensionSummary}）`
   }
   return result.message || '测试失败'
 }

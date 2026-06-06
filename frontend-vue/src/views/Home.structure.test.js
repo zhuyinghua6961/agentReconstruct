@@ -32,7 +32,20 @@ function assertNoGlobalMessageContentSelector(selector) {
 }
 
 test('Home formats graph_kb query mode as a knowledge-graph badge during streaming', () => {
-  assert.match(source, /const ASK_MODE_LABELS = \{ fast: '快速模式', thinking: '深度模式', patent: '专利模式', graph_kb: '知识图谱', neo4j: '知识图谱' \}/)
+  assert.match(source, /import \{ formatQueryModeLabel, resolveActualQueryModeLabel \} from '\.\.\/utils\/queryMode'/)
+})
+
+test('Home does not render query mode badges on conversation history items', () => {
+  assert.doesNotMatch(scriptSource, /function getHistoryQueryModeLabel\(chat\)/)
+  assert.doesNotMatch(source, /class="history-query-mode-badge"/)
+  assert.doesNotMatch(source, /getHistoryQueryModeLabel\(chat\)/)
+})
+
+test('Home renders assistant query mode badges from the actual executed mode', () => {
+  assert.match(scriptSource, /function getActualQueryModeLabel\(/)
+  assert.match(scriptSource, /resolveActualQueryModeLabel\(data, metadata, options\)/)
+  assert.match(scriptSource, /updates\.queryMode = getActualQueryModeLabel\(data, mergedMeta, \{ allowRouteFallback: false \}\)/)
+  assert.match(source, /<div v-if="entry\.message\.queryMode" class="query-mode-badge">{{ entry\.message\.queryMode }}<\/div>/)
 })
 
 test('Home marks graph kb assistant messages with a graph-only class for labeled and raw graph modes', () => {
@@ -152,7 +165,7 @@ test('Home restores the current conversation to the newest question when enterin
 test('Home renders quota limit cards inline for quota failures while keeping markdown fallback', () => {
   assert.match(source, /import QuotaLimitCard from '\.\.\/components\/QuotaLimitCard\.vue'/)
   assert.match(source, /import MarkdownRenderer from '\.\.\/features\/markdown\/MarkdownRenderer\.vue'/)
-  assert.match(source, /import \{ buildRoutingErrorMarkdown, buildRoutingErrorPresentation, getRouteModeLabel, mergeRoutingMetadata \} from '\.\.\/utils\/routingStatus'/)
+  assert.match(source, /import \{ buildRoutingErrorPresentation, mergeRoutingMetadata \} from '\.\.\/utils\/routingStatus'/)
   assert.match(source, /function getQuotaCard\(message\)/)
   assert.match(source, /mergedMeta\.quota_card = presentation\.card/)
   assert.match(source, /<QuotaLimitCard v-if="getQuotaCard\(entry\.message\)" :card="getQuotaCard\(entry\.message\)" \/>/)

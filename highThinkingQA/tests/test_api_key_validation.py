@@ -32,3 +32,66 @@ def test_get_embedding_client_allows_blank_key_when_auth_mode_none(monkeypatch):
     client = embedder.get_embedding_client()
 
     assert "Authorization" not in client._headers()
+
+
+def test_embed_texts_raises_on_embedding_parameter_error(monkeypatch):
+    class _FailingEmbeddings:
+        def create(self, **kwargs):
+            raise RuntimeError("400 InvalidParameter: unsupported dimensions")
+
+    class _FailingClient:
+        embeddings = _FailingEmbeddings()
+
+    monkeypatch.setattr(embedder.config, "EMBEDDING_DIMENSIONS", 4096, raising=False)
+    monkeypatch.setattr(embedder.config, "HIGHTHINKINGQA_EMBEDDING_MAX_RETRIES", 1, raising=False)
+
+    with pytest.raises(RuntimeError, match="unsupported dimensions"):
+        embedder.embed_texts(["non-empty query"], client=_FailingClient())
+
+
+def test_embed_texts_omits_dimensions_parameter_for_remote_api(monkeypatch):
+    calls = []
+
+    class _EmbeddingItem:
+        embedding = [0.1, 0.2, 0.3]
+
+    class _Response:
+        data = [_EmbeddingItem()]
+
+    class _Embeddings:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return _Response()
+
+    class _Client:
+        embeddings = _Embeddings()
+
+    monkeypatch.setattr(embedder.config, "EMBEDDING_DIMENSIONS", 3, raising=False)
+
+    result = embedder.embed_texts(["query"], client=_Client())
+
+    assert result == [[0.1, 0.2, 0.3]]
+    assert calls
+    assert "dimensions" not in calls[0]
+    assert calls[0]["model"] == embedder.config.EMBEDDING_MODEL
+    assert calls[0]["encoding_format"] == "float"
+
+
+def test_embed_texts_rejects_response_dimension_mismatch(monkeypatch):
+    class _EmbeddingItem:
+        embedding = [0.1, 0.2]
+
+    class _Response:
+        data = [_EmbeddingItem()]
+
+    class _Embeddings:
+        def create(self, **kwargs):
+            return _Response()
+
+    class _Client:
+        embeddings = _Embeddings()
+
+    monkeypatch.setattr(embedder.config, "EMBEDDING_DIMENSIONS", 4096, raising=False)
+
+    with pytest.raises(RuntimeError, match="dimension mismatch"):
+        embedder.embed_texts(["query"], client=_Client())
