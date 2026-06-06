@@ -12,6 +12,26 @@ const assistantMessageSection = source.slice(
   source.indexOf(`<div v-else-if="getTaskPhaseLabel(store.currentChatId)" class="loading-animation">`)
 )
 
+function extractFunctionBody(name) {
+  const signature = `function ${name}(`
+  const start = source.indexOf(signature)
+  assert.notEqual(start, -1, `missing ${name} function`)
+  const bodyStart = source.indexOf('{', start)
+  assert.notEqual(bodyStart, -1, `missing ${name} body`)
+  let depth = 0
+  for (let index = bodyStart; index < source.length; index += 1) {
+    const char = source[index]
+    if (char === '{') depth += 1
+    if (char === '}') {
+      depth -= 1
+      if (depth === 0) {
+        return source.slice(bodyStart + 1, index)
+      }
+    }
+  }
+  assert.fail(`unterminated ${name} function`)
+}
+
 function assertGraphScopedSelector(selector) {
   assert.match(
     source,
@@ -240,6 +260,30 @@ test('Home scopes busy controls to the current chat instead of globally locking 
   assert.doesNotMatch(source, /async function switchChat\(chatId\) \{[\s\S]*if \(store\.isStreaming\) return/)
 })
 
+test('Home keeps empty chat state as a draft until the user sends a question', () => {
+  const createNewChatBody = extractFunctionBody('createNewChat')
+  assert.doesNotMatch(source, /if \(store\.chats\.length === 0\) \{\s*store\.createChat\(\)\s*\}/)
+  assert.match(source, /function enterDraftChatState\(\)/)
+  assert.match(source, /store\.currentChatId = null/)
+  assert.match(source, /function ensureChatForSend\(\)/)
+  assert.match(source, /const requestedChatId = ensureChatForSend\(\)/)
+  assert.doesNotMatch(createNewChatBody, /store\.createChat\(\)/)
+})
+
+test('Home queues files in draft state and uploads them only during question send', () => {
+  assert.match(source, /import \{[\s\S]*buildPendingDraftFile[\s\S]*defaultPromptForDraftFileType[\s\S]*resolveDraftFileType[\s\S]*\} from '\.\.\/utils\/draftFiles'/)
+  assert.match(source, /const pendingDraftFiles = ref\(\[\]\)/)
+  assert.match(source, /function queuePendingDraftFile\(file, fileType\)/)
+  assert.match(source, /if \(!store\.currentChat\) \{\s*queuePendingDraftFile\(file, fileType\)\s*return\s*\}/)
+  assert.match(source, /async function uploadPendingDraftFilesForSend\(chatId, titleHint\)/)
+  assert.match(source, /prepareConversation: async \(\{ chatId \}\) => uploadPendingDraftFilesForSend\(chatId, titleHint\)/)
+  assert.match(source, /const visibleConversationFiles = computed\(\(\) => \{[\s\S]*buildPendingDraftFileItem\(draft, uploadedFiles\.length \+ index\)/)
+  assert.match(source, /v-if="hasVisibleConversationFiles"/)
+  assert.match(source, /v-for="file in visibleConversationFiles"/)
+  assert.match(source, /v-if="isDraftFileItem\(file\)"[\s\S]*@click\.stop="removePendingDraftFile\(file\.draftId\)"/)
+  assert.doesNotMatch(source, /if \(!store\.currentChat\.synced\) \{[\s\S]*api\.createConversation/)
+})
+
 test('Home renders per-chat busy badges with sidebar stop and delete guards', () => {
   assert.match(source, /<span v-if="getTaskPhaseLabel\(chat\.id\)" class="history-status-badge">{{ getTaskPhaseLabel\(chat\.id\) }}<\/span>/)
   assert.match(source, /<button\s+v-if="isChatBusy\(chat\.id\)"\s+class="history-stop-btn"/)
@@ -250,7 +294,7 @@ test('Home renders per-chat busy badges with sidebar stop and delete guards', ()
 })
 
 test('Home keeps current-chat file deletion disabled while that chat is busy', () => {
-  assert.match(source, /<button class="pdf-remove-btn" @click\.stop="file\.type === 'pdf' \? handleRemovePdf\(file\.file_id\) : handleRemoveExcel\(file\.file_id\)" :disabled="isCurrentChatBusy" :title="isCurrentChatBusy \? '生成中不可删除文件' : '删除'">×<\/button>/)
+  assert.match(source, /<button\s+v-else\s+class="pdf-remove-btn"[\s\S]*@click\.stop="file\.type === 'pdf' \? handleRemovePdf\(file\.file_id\) : handleRemoveExcel\(file\.file_id\)"[\s\S]*:disabled="isCurrentChatBusy"[\s\S]*:title="isCurrentChatBusy \? '生成中不可删除文件' : '删除'"/)
 })
 
 test('Home stop flow can cancel a chat during dispatch before streaming runtime fully starts', () => {
@@ -263,8 +307,10 @@ test('Home stop flow can cancel a chat during dispatch before streaming runtime 
 
 test('Home snapshots per-chat request context before async chat promotion and reuses it for askStream', () => {
   assert.match(source, /import \{ buildChatRequestContext \} from '\.\.\/utils\/chatRequestContext'/)
-  assert.match(source, /const requestChatContext = buildChatRequestContext\(\{\s*chat: requestContextChat,\s*sessionState: store\.sessionState,\s*selectedFileIds: selectedFileIds\.value,\s*\}\)/s)
+  assert.match(source, /function buildRequestContextForChat\(chatId\) \{\s*return buildChatRequestContext\(\{\s*chat: getChatById\(chatId\),\s*sessionState: store\.sessionState,\s*selectedFileIds: selectedFileIds\.value,\s*\}\)\s*\}/s)
+  assert.match(source, /let requestChatContext = buildRequestContextForChat\(requestedChatId\)/)
   assert.match(source, /const messageChat = await store\.addUserMessage\(message, \{ chatId: requestedChatId \}\)/)
+  assert.match(source, /requestChatContext = prepared\.requestChatContext \|\| buildRequestContextForChat\(streamChatId\)/)
   assert.match(source, /const pdfContext = requestChatContext/)
   assert.doesNotMatch(source, /const pdfContext = \{\s*newly_uploaded_ids: store\.getNewlyUploadedFileIds\(\),\s*all_available_ids: store\.getAllUploadedFileIds\(\),\s*selected_ids: \[\.\.\.selectedFileIds\.value\],\s*last_focus_ids: getLastFocusFileIds\(\),\s*last_turn_route: getLastTurnRoute\(\)\s*\}/s)
 })
@@ -272,8 +318,8 @@ test('Home snapshots per-chat request context before async chat promotion and re
 test('Home routes refresh-survivable sends through task create and recovery instead of legacy ask_stream', () => {
   assert.match(source, /import \{ createRecoverableTaskController \} from '\.\.\/utils\/recoverableTaskController'/)
   assert.match(source, /const recoverableTaskController = createRecoverableTaskController\(\{/)
-  assert.match(source, /if \(store\.refreshSurvivableQATasksEnabled\) \{\s*return sendTaskMessage\(\)\s*\}/)
-  assert.match(source, /async function sendTaskMessage\(\)/)
+  assert.match(source, /if \(store\.refreshSurvivableQATasksEnabled\) \{\s*const result = await sendTaskMessage\(requestedChatId\)/)
+  assert.match(source, /async function sendTaskMessage\(requestedChatId\)/)
   assert.match(source, /const result = await recoverableTaskController\.sendTaskMessage\(\{/)
   assert.doesNotMatch(source, /for await \(const data of api\.askStream\(/)
 })

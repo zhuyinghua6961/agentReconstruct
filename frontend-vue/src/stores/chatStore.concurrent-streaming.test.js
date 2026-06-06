@@ -313,6 +313,60 @@ test('first-send temp chat promotion stays bound to the originating chat when cu
   }
 })
 
+test('uploaded files can be attached to a target chat without relying on currentChat', async () => {
+  installLocalStorageMock()
+  const { createPinia, setActivePinia } = await import('pinia')
+  const { useChatStore } = await import('./chatStore.js')
+
+  setActivePinia(createPinia())
+  const store = useChatStore()
+  store.chats.splice(0, store.chats.length, {
+    id: 'chat-a',
+    title: 'A',
+    messages: [],
+    createdAt: '2026-04-04T00:00:00.000Z',
+    updatedAt: '2026-04-04T00:00:00.000Z',
+    synced: true,
+    syncStatus: 'synced',
+    pdf_list: [],
+    excel_list: [],
+    uploaded_files: [],
+    isPinned: false,
+  }, {
+    id: 'chat-b',
+    title: 'B',
+    messages: [],
+    createdAt: '2026-04-04T00:00:01.000Z',
+    updatedAt: '2026-04-04T00:00:01.000Z',
+    synced: true,
+    syncStatus: 'synced',
+    pdf_list: [],
+    excel_list: [],
+    uploaded_files: [],
+    isPinned: false,
+  })
+  store.currentChatId = 'chat-b'
+
+  store.addUploadedPdfToChat('chat-a', {
+    file_id: 501,
+    pdf_title: 'draft.pdf',
+    pdf_path: '/tmp/draft.pdf',
+  })
+  store.addUploadedExcelToChat('chat-a', {
+    file_id: 502,
+    excel_title: 'draft.csv',
+    excel_path: '/tmp/draft.csv',
+  })
+
+  const chatA = store.chats.find((chat) => chat.id === 'chat-a')
+  const chatB = store.chats.find((chat) => chat.id === 'chat-b')
+
+  assert.deepEqual(chatA.pdf_list.map((file) => file.file_id), [501])
+  assert.deepEqual(chatA.excel_list.map((file) => file.file_id), [502])
+  assert.equal(chatB.pdf_list.length, 0)
+  assert.equal(chatB.excel_list.length, 0)
+})
+
 test('switchChat refreshes synced idle chats from the server but preserves busy synced chats local in-flight messages', async () => {
   installLocalStorageMock()
   const { createPinia, setActivePinia } = await import('pinia')

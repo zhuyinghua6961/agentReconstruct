@@ -523,6 +523,7 @@ export function createRecoverableTaskController(deps = {}) {
     conversationId = null,
     requestChatContext = null,
     requestAskMode = 'thinking',
+    prepareConversation = null,
   }) {
     const targetRequestedChatId = normalizeChatId(requestedChatId)
     if (!targetRequestedChatId || !String(message || '').trim()) {
@@ -545,25 +546,51 @@ export function createRecoverableTaskController(deps = {}) {
     try {
       const promotedChat = await store.ensureChatConversation(targetRequestedChatId, titleHint)
       streamChatId = normalizeChatId(promotedChat?.id || targetRequestedChatId)
+      let effectiveChatHistoryInput = chatHistory
+      let effectiveConversationIdInput = conversationId
+      let effectiveRequestChatContext = requestChatContext
+      if (typeof prepareConversation === 'function') {
+        const prepared = await prepareConversation({
+          chatId: streamChatId,
+          chat: getChatById(streamChatId),
+          message,
+          titleHint,
+          requestChatContext,
+          requestAskMode,
+          clientRequestId,
+        })
+        if (prepared?.chatId) {
+          streamChatId = normalizeChatId(prepared.chatId) || streamChatId
+        }
+        if (prepared?.chatHistory !== undefined) {
+          effectiveChatHistoryInput = prepared.chatHistory
+        }
+        if (prepared?.conversationId !== undefined) {
+          effectiveConversationIdInput = prepared.conversationId
+        }
+        if (prepared?.requestChatContext !== undefined) {
+          effectiveRequestChatContext = prepared.requestChatContext
+        }
+      }
       clearInput()
       if (normalizeChatId(getCurrentChatId()) === streamChatId) {
         scrollToBottom({ force: true })
       }
 
       const targetChat = getChatById(streamChatId)
-      const effectiveChatHistory = Array.isArray(chatHistory) && chatHistory.length > 0
-        ? chatHistory
+      const effectiveChatHistory = Array.isArray(effectiveChatHistoryInput) && effectiveChatHistoryInput.length > 0
+        ? effectiveChatHistoryInput
         : (targetChat?.messages || [])
           .filter((messageItem) => String(messageItem?.content || '').trim().length > 0)
           .slice(-10)
           .map((messageItem) => ({ role: messageItem.role, content: messageItem.content }))
-      const effectiveConversationId = conversationId ?? (targetChat?.synced ? parseInt(targetChat.id, 10) : null)
+      const effectiveConversationId = effectiveConversationIdInput ?? (targetChat?.synced ? parseInt(targetChat.id, 10) : null)
 
       const taskSummary = await api.createTask(
         message,
         effectiveChatHistory,
         effectiveConversationId,
-        requestChatContext,
+        effectiveRequestChatContext,
         requestAskMode,
         clientRequestId,
       )
@@ -581,7 +608,7 @@ export function createRecoverableTaskController(deps = {}) {
         taskSummary,
         replaceMessagesFromServer: false,
       })
-      return { ok: true, taskId: String(taskSummary?.task_id || '') }
+      return { ok: true, taskId: String(taskSummary?.task_id || ''), chatId: streamChatId }
     } catch (error) {
       store.finishChatBusyRuntime(streamChatId)
       debugLog('send:error', {
@@ -594,6 +621,7 @@ export function createRecoverableTaskController(deps = {}) {
         ok: false,
         reason: 'task_create_failed',
         error,
+        chatId: streamChatId,
       }
     }
   }

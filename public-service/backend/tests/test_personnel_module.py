@@ -301,6 +301,31 @@ def test_personnel_repository_maps_binding_user_rows():
     ]
 
 
+def test_personnel_repository_deletes_personnel_record():
+    module_spec = find_module_spec("app.modules.personnel.repository")
+    assert module_spec is not None
+
+    from app.modules.personnel.repository import PersonnelRepository
+
+    captured: dict[str, object] = {}
+    repo = PersonnelRepository(database=object())
+
+    def fake_update(query: str, params: tuple[object, ...] = ()):
+        captured["query"] = " ".join(query.split())
+        captured["params"] = params
+        return 1
+
+    repo._execute_update = fake_update
+
+    assert repo.delete_personnel(personnel_id=9) == 1
+    assert "DELETE FROM personnel_records" in captured["query"]
+    assert "WHERE id = %s" in captured["query"]
+    assert "NOT EXISTS" in captured["query"]
+    assert "FROM users" in captured["query"]
+    assert "u.personnel_id = personnel_records.id" in captured["query"]
+    assert captured["params"] == (9,)
+
+
 def test_personnel_repository_lists_bound_department_triplets_for_backfill():
     module_spec = find_module_spec("app.modules.personnel.repository")
     assert module_spec is not None
@@ -725,6 +750,73 @@ def test_personnel_service_list_bindings_returns_all_bound_accounts():
     assert result["data"]["items"][1]["username"] == "alice_lab"
 
 
+def test_personnel_service_delete_rejects_bound_personnel():
+    module_spec = find_module_spec("app.modules.personnel.service")
+    assert module_spec is not None
+
+    from app.modules.personnel.service import PersonnelService
+
+    class FakeRepository:
+        def __init__(self) -> None:
+            self.delete_called = False
+
+        def get_by_id(self, personnel_id: int):
+            assert personnel_id == 9
+            return {
+                "id": 9,
+                "employee_no": "T2024001",
+                "full_name": "张三",
+                "status": "active",
+                "binding_count": 2,
+            }
+
+        def delete_personnel(self, *, personnel_id: int):
+            self.delete_called = True
+            return 1
+
+    repository = FakeRepository()
+    service = PersonnelService(repository=repository)
+    result = service.delete_personnel(personnel_id=9)
+
+    assert result["success"] is False
+    assert result["code"] == "PERSONNEL_HAS_BINDINGS"
+    assert service.status_code_for(result, ok_status=200) == 409
+    assert repository.delete_called is False
+
+
+def test_personnel_service_delete_removes_unbound_personnel():
+    module_spec = find_module_spec("app.modules.personnel.service")
+    assert module_spec is not None
+
+    from app.modules.personnel.service import PersonnelService
+
+    class FakeRepository:
+        def __init__(self) -> None:
+            self.deleted_id = None
+
+        def get_by_id(self, personnel_id: int):
+            assert personnel_id == 9
+            return {
+                "id": 9,
+                "employee_no": "T2024001",
+                "full_name": "张三",
+                "status": "disabled",
+                "binding_count": 0,
+            }
+
+        def delete_personnel(self, *, personnel_id: int):
+            self.deleted_id = personnel_id
+            return 1
+
+    repository = FakeRepository()
+    service = PersonnelService(repository=repository)
+    result = service.delete_personnel(personnel_id=9)
+
+    assert result["success"] is True
+    assert result["data"]["id"] == 9
+    assert repository.deleted_id == 9
+
+
 def test_personnel_import_rejects_duplicate_employee_no_inside_file():
     module_spec = find_module_spec("app.modules.personnel.import_service")
     assert module_spec is not None
@@ -1038,6 +1130,19 @@ def test_personnel_admin_routes_registered(monkeypatch):
     assert captured_calls[0]["remarks"] is REMARKS_UNSET
     assert captured_calls[1]["remarks"] is None
     assert captured_calls[2]["status"] == "disabled"
+
+    def fake_delete_personnel(**kwargs):
+        return {"success": True, "data": {"id": kwargs["personnel_id"]}}
+
+    monkeypatch.setattr(personnel_service_module.personnel_service, "delete_personnel", fake_delete_personnel)
+
+    delete_response = personnel_api_module.delete_personnel(
+        personnel_id=9,
+        _context=AuthContext(user_id=1, role="admin", username="admin"),
+    )
+
+    assert delete_response.status_code == 200
+    assert _decode(delete_response)["data"]["id"] == 9
 
 
 def test_create_personnel_requires_complete_three_level_department():

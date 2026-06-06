@@ -290,6 +290,14 @@ export const adminApi = {
     })
   },
 
+  async deletePersonnel(personnelId) {
+    const token = readStoredToken()
+    return fetchWithErrorHandling(`${API_BASE}/personnel/${personnelId}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+  },
+
   async getPersonnelBindings(personnelId) {
     const token = readStoredToken()
     return fetchWithErrorHandling(`${API_BASE}/personnel/${personnelId}/bindings`, {

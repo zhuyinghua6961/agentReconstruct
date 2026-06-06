@@ -139,6 +139,17 @@ def update_personnel_status(
     )
 
 
+@router.delete("/{personnel_id}")
+def delete_personnel(
+    personnel_id: int,
+    _context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(
+        personnel_service.delete_personnel(personnel_id=personnel_id),
+        ok_status=200,
+    )
+
+
 @router.get("/{personnel_id}/bindings")
 def get_personnel_bindings(
     personnel_id: int,

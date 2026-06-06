@@ -515,6 +515,69 @@ test('recoverable task controller marks the chat busy before awaiting conversati
   await pending
 })
 
+test('recoverable task controller prepares promoted conversation before task creation', async () => {
+  const prepareCalls = []
+  const harness = createHarness({
+    ensureChatConversation: async (_chatId, _titleHint, helpers) => {
+      helpers.chat.id = '84'
+      helpers.chat.synced = true
+      return helpers.chat
+    },
+  })
+
+  const result = await harness.controller.sendTaskMessage({
+    requestedChatId: '42',
+    message: 'question with draft file',
+    titleHint: 'question with draft file',
+    requestChatContext: { selected_ids: [] },
+    requestAskMode: 'fast',
+    prepareConversation: async ({ chatId, chat }) => {
+      prepareCalls.push({ chatId, synced: chat?.synced })
+      return {
+        chatHistory: [{ role: 'user', content: 'prepared history' }],
+        conversationId: 84,
+        requestChatContext: { selected_ids: [501], all_available_ids: [501], newly_uploaded_ids: [501] },
+      }
+    },
+  })
+
+  assert.equal(result.ok, true)
+  assert.deepEqual(prepareCalls, [{ chatId: '84', synced: true }])
+  assert.equal(harness.apiCalls.createTask.length, 1)
+  assert.deepEqual(harness.apiCalls.createTask[0][1], [{ role: 'user', content: 'prepared history' }])
+  assert.equal(harness.apiCalls.createTask[0][2], 84)
+  assert.deepEqual(harness.apiCalls.createTask[0][3], {
+    selected_ids: [501],
+    all_available_ids: [501],
+    newly_uploaded_ids: [501],
+  })
+})
+
+test('recoverable task controller returns the promoted chat id when task creation fails', async () => {
+  const harness = createHarness({
+    ensureChatConversation: async (_chatId, _titleHint, helpers) => {
+      helpers.chat.id = '84'
+      helpers.chat.synced = true
+      return helpers.chat
+    },
+    createTask: async () => {
+      throw new Error('task create failed')
+    },
+  })
+
+  const result = await harness.controller.sendTaskMessage({
+    requestedChatId: '42',
+    message: 'question that fails after promotion',
+    titleHint: 'question that fails after promotion',
+    requestChatContext: { selected_ids: [] },
+    requestAskMode: 'fast',
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'task_create_failed')
+  assert.equal(result.chatId, '84')
+})
+
 test('recoverable task controller starts fresh task replay from the created task cursor instead of blocking on a server truth sync', async () => {
   const harness = createHarness({
     createTask: async () => ({

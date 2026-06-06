@@ -204,6 +204,26 @@ async function handleTogglePersonnelStatus(item) {
   error.value = result.error || `人员${actionText}失败`
 }
 
+async function handleDeletePersonnel(item) {
+  const bindingCount = Number(item.binding_count || 0)
+  if (bindingCount > 0) {
+    error.value = '该人员仍有绑定账号，请先解绑后再删除'
+    return
+  }
+  if (!window.confirm(`确定要删除人员 ${item.employee_no} / ${item.full_name} 吗？此操作不可恢复。`)) {
+    return
+  }
+  const result = await adminApi.deletePersonnel(item.id)
+  if (result.success) {
+    setSuccess('人员已删除')
+    expandedPersonnelIds.value = expandedPersonnelIds.value.filter(id => id !== Number(item.id))
+    await fetchPersonnel()
+    emit('updated')
+    return
+  }
+  error.value = result.error || '删除人员失败'
+}
+
 async function downloadPersonnelImportTemplate(format = 'xlsx') {
   try {
     await adminApi.downloadPersonnelImportTemplate(format)
@@ -308,6 +328,7 @@ onMounted(() => {
                   {{ item.personnel_record_status === 'active' ? '停用' : '启用' }}
                 </button>
                 <button class="action-btn" @click="toggleBindings(item.id)">查看绑定</button>
+                <button class="action-btn btn-danger" @click="handleDeletePersonnel(item)">删除</button>
               </td>
             </tr>
             <tr v-if="isBindingsExpanded(item.id)" class="bindings-row">
@@ -489,6 +510,15 @@ onMounted(() => {
 
 .action-btn:hover {
   background: #f9fafb;
+}
+
+.action-btn.btn-danger {
+  border-color: #fecaca;
+  color: #b91c1c;
+}
+
+.action-btn.btn-danger:hover {
+  background: #fef2f2;
 }
 
 .btn-primary,

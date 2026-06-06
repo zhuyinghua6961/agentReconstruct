@@ -43,8 +43,10 @@ test('PersonnelManagementPanel exposes create edit status and bindings actions',
   assert.match(panelSource, /openCreateDialog/)
   assert.match(panelSource, /openEditDialog/)
   assert.match(panelSource, /handleTogglePersonnelStatus/)
+  assert.match(panelSource, /handleDeletePersonnel/)
   assert.match(panelSource, /toggleBindings/)
   assert.match(panelSource, /绑定账号数/)
+  assert.match(panelSource, />删除</)
 })
 
 test('PersonnelManagementPanel aligns personnel table controls with account list styling', () => {
@@ -124,6 +126,7 @@ test('admin service exposes personnel management APIs', () => {
   assert.match(adminServiceSource, /createPersonnel\(/)
   assert.match(adminServiceSource, /updatePersonnel\(/)
   assert.match(adminServiceSource, /updatePersonnelStatus\(/)
+  assert.match(adminServiceSource, /deletePersonnel\(/)
   assert.match(adminServiceSource, /getPersonnelBindings\(/)
   assert.match(adminServiceSource, /batchImportPersonnel\(/)
   assert.match(adminServiceSource, /downloadPersonnelImportTemplate\(/)

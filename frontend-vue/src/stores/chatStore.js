@@ -1486,14 +1486,15 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   // PDF会话管理辅助函数
-  function addUploadedPdf(pdfInfo) {
-    if (!currentChat.value) return
+  function addUploadedPdfToChat(chatId, pdfInfo, options = {}) {
+    const targetChat = getChatById(chatId)
+    if (!targetChat) return null
     
     // 添加到对话的pdf_list
-    if (!currentChat.value.pdf_list) {
-      currentChat.value.pdf_list = []
+    if (!targetChat.pdf_list) {
+      targetChat.pdf_list = []
     }
-    currentChat.value.pdf_list.push({
+    targetChat.pdf_list.push({
       ...pdfInfo,
       parse_status: pdfInfo?.parse_status || 'uploaded',
       index_status: pdfInfo?.index_status || 'pending',
@@ -1502,22 +1503,62 @@ export const useChatStore = defineStore('chat', () => {
       last_error: pdfInfo?.last_error || '',
       file_meta: (pdfInfo?.file_meta && typeof pdfInfo.file_meta === 'object') ? pdfInfo.file_meta : {},
     })
-    reindexConversationFiles(currentChat.value)
+    reindexConversationFiles(targetChat)
     
     // 添加到新上传列表（使用file_id）
     const fileId = pdfInfo.file_id
-    if (fileId && !sessionState.value.newlyUploadedPdfIds.includes(fileId)) {
+    if (options?.trackSession !== false && fileId && !sessionState.value.newlyUploadedPdfIds.includes(fileId)) {
       sessionState.value.newlyUploadedPdfIds.push(fileId)
     }
 
     const titleCandidate =
       String(pdfInfo?.pdf_title || pdfInfo?.file_name || pdfInfo?.original_file_name || '').trim()
-    if (titleCandidate && isPlaceholderTitle(currentChat.value.title)) {
-      void updateCurrentChatTitle(titleCandidate, { persist: !!currentChat.value.synced, onlyIfPlaceholder: true })
+    if (titleCandidate && isPlaceholderTitle(targetChat.title)) {
+      targetChat.title = buildAutoTitleFromText(titleCandidate)
     }
 
-    touchChat(currentChat.value)
+    touchChat(targetChat)
     saveChats()
+    return targetChat
+  }
+
+  function addUploadedPdf(pdfInfo) {
+    if (!currentChat.value) return null
+    return addUploadedPdfToChat(currentChat.value.id, pdfInfo)
+  }
+
+  function addUploadedExcelToChat(chatId, excelInfo, options = {}) {
+    const targetChat = getChatById(chatId)
+    if (!targetChat) return null
+
+    if (!targetChat.excel_list) {
+      targetChat.excel_list = []
+    }
+
+    targetChat.excel_list.push({
+      ...excelInfo,
+      parse_status: excelInfo?.parse_status || 'uploaded',
+      index_status: excelInfo?.index_status || 'pending',
+      processing_stage: excelInfo?.processing_stage || 'uploaded',
+      status_updated_at: excelInfo?.status_updated_at || new Date().toISOString(),
+      last_error: excelInfo?.last_error || '',
+      file_meta: (excelInfo?.file_meta && typeof excelInfo.file_meta === 'object') ? excelInfo.file_meta : {},
+    })
+    reindexConversationFiles(targetChat)
+
+    const fileId = excelInfo.file_id
+    if (options?.trackSession !== false && fileId && !sessionState.value.newlyUploadedPdfIds.includes(fileId)) {
+      sessionState.value.newlyUploadedPdfIds.push(fileId)
+    }
+
+    const titleCandidate = String(excelInfo?.excel_title || excelInfo?.file_name || '').trim()
+    if (titleCandidate && isPlaceholderTitle(targetChat.title)) {
+      targetChat.title = buildAutoTitleFromText(titleCandidate)
+    }
+
+    touchChat(targetChat)
+    saveChats()
+    return targetChat
   }
 
   async function refreshCurrentChatFiles() {
@@ -1675,13 +1716,7 @@ export const useChatStore = defineStore('chat', () => {
       const response = await api.uploadExcel(file, currentChat.value.id)
       
       if (response.success && response.document) {
-        // 初始化excel_list
-        if (!currentChat.value.excel_list) {
-          currentChat.value.excel_list = []
-        }
-        
-        // 添加到excel_list
-        currentChat.value.excel_list.push({
+        addUploadedExcelToChat(currentChat.value.id, {
           file_id: response.document.file_id,
           file_no: Number(response.document.file_no || 0),
           display_no: Number(response.document.display_no || 0),
@@ -1695,20 +1730,12 @@ export const useChatStore = defineStore('chat', () => {
           last_error: '',
           file_meta: {}
         })
-        reindexConversationFiles(currentChat.value)
-        
-        // 添加到newlyUploadedPdfIds（统一使用file_id）
-        if (!sessionState.value.newlyUploadedPdfIds.includes(response.document.file_id)) {
-          sessionState.value.newlyUploadedPdfIds.push(response.document.file_id)
-        }
 
         const titleCandidate = String(response?.document?.title || file?.name || '').trim()
         if (titleCandidate && isPlaceholderTitle(currentChat.value.title)) {
           await updateCurrentChatTitle(titleCandidate, { persist: !!currentChat.value.synced, onlyIfPlaceholder: true })
         }
 
-        touchChat(currentChat.value)
-        saveChats()
         return response.document
       }
       return null
@@ -1924,6 +1951,8 @@ export const useChatStore = defineStore('chat', () => {
     setKbInfo,
     loadKbInfo,
     addUploadedPdf,
+    addUploadedPdfToChat,
+    addUploadedExcelToChat,
     refreshCurrentChatFiles,
     getAllPdfIds,
     getAllUploadedFileIds,

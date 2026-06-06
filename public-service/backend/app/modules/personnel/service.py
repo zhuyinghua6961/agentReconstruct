@@ -121,7 +121,7 @@ class PersonnelService:
             return 400
         if code in {"PERSONNEL_NOT_FOUND", "PRIMARY_DEPARTMENT_NOT_FOUND", "SECONDARY_DEPARTMENT_NOT_FOUND", "TERTIARY_DEPARTMENT_NOT_FOUND"}:
             return 404
-        if code in {"EMPLOYEE_NO_EXISTS"}:
+        if code in {"EMPLOYEE_NO_EXISTS", "PERSONNEL_HAS_BINDINGS"}:
             return 409
         if code in {"DB_UNAVAILABLE"}:
             return 503
@@ -476,6 +476,29 @@ class PersonnelService:
             if _is_db_unavailable_error(exc):
                 return self._db_error(exc)
             return {"success": False, "error": "获取绑定账号失败", "code": "FETCH_ERROR"}
+
+    def delete_personnel(self, *, personnel_id: int) -> dict[str, Any]:
+        try:
+            normalized_id = int(personnel_id)
+            record = self._repository.get_by_id(normalized_id)
+            if not record:
+                return {"success": False, "error": "人员不存在", "code": "PERSONNEL_NOT_FOUND"}
+            if int(record.get("binding_count") or 0) > 0:
+                return {"success": False, "error": "该人员仍有绑定账号，请先解绑后再删除", "code": "PERSONNEL_HAS_BINDINGS"}
+
+            deleted_count = self._repository.delete_personnel(personnel_id=normalized_id)
+            if deleted_count <= 0:
+                return {"success": False, "error": "该人员仍有绑定账号，请先解绑后再删除", "code": "PERSONNEL_HAS_BINDINGS"}
+            logger.info("personnel_deleted", extra={"event": "personnel_deleted", "personnel_id": normalized_id})
+            return {
+                "success": True,
+                "message": f"人员 {record.get('employee_no')} / {record.get('full_name')} 已删除",
+                "data": self._build_personnel_payload(record),
+            }
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "删除人员失败", "code": "DELETE_ERROR"}
 
 
 personnel_service = PersonnelService()

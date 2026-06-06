@@ -12,6 +12,12 @@ import { buildQuestionOutlineItems, buildQuestionOutlineSignature, getLastQuesti
 import { getMessageStageTimingModel, getStepTimingDurationLabel as getStepTimingDurationLabelFromModel } from '../utils/stageTimings'
 import { DEFAULT_NEAR_BOTTOM_THRESHOLD_PX, isNearBottom, shouldAutoScroll } from '../utils/scrollFollow'
 import { mergeSelectedFileIdsAfterUpload, resolveUploadedFileDisplayNumber } from '../utils/fileSelection'
+import {
+  buildPendingDraftFile,
+  buildPendingDraftFileItem,
+  defaultPromptForDraftFileType,
+  resolveDraftFileType,
+} from '../utils/draftFiles'
 import { shouldIgnoreLateStreamContent, shouldIgnoreLateStreamError } from '../utils/streamingLifecycle'
 import { normalizeTaskReplayCursor } from '../utils/taskReplayCursor'
 import { consumePendingStreamContent, shouldClearRecoveredActiveTask } from '../utils/taskRecoveryRuntime'
@@ -46,6 +52,7 @@ const uploadProgress = ref(0)
 const streamRuntimeByChatId = new Map()
 const taskAttachInFlightByChatId = new Map()
 const selectedFileIds = ref([])
+const pendingDraftFiles = ref([])
 const selectedAskMode = ref(localStorage.getItem(ASK_MODE_STORAGE_KEY) || 'thinking')
 const leftSidebarCollapsed = ref(false)
 const leftSidebarWidth = ref(280)
@@ -1344,6 +1351,33 @@ const mergedAndSortedFiles = computed(() => {
   })
 })
 
+const visibleConversationFiles = computed(() => {
+  const uploadedFiles = mergedAndSortedFiles.value
+  const draftFiles = pendingDraftFiles.value.map((draft, index) =>
+    buildPendingDraftFileItem(draft, uploadedFiles.length + index)
+  )
+  return [...uploadedFiles, ...draftFiles]
+})
+
+const visibleConversationFileCount = computed(() => visibleConversationFiles.value.length)
+const hasVisibleConversationFiles = computed(() => visibleConversationFileCount.value > 0)
+const hasSelectableConversationFiles = computed(() => mergedAndSortedFiles.value.length > 0)
+
+function isDraftFileItem(file) {
+  return String(file?.type || '').startsWith('draft-')
+}
+
+function getFileIcon(file) {
+  const type = String(file?.type || '').toLowerCase()
+  return type.includes('pdf') ? '📄' : '📊'
+}
+
+function removePendingDraftFile(draftId) {
+  const targetDraftId = String(draftId || '').trim()
+  if (!targetDraftId) return
+  pendingDraftFiles.value = pendingDraftFiles.value.filter((draft) => draft.draftId !== targetDraftId)
+}
+
 function normalizeSelectedFileIds() {
   const currentIds = mergedAndSortedFiles.value
     .map(item => Number(item?.file_id || 0))
@@ -1377,6 +1411,15 @@ function selectAllFiles() {
 
 function clearSelectedFiles() {
   selectedFileIds.value = []
+}
+
+function clearPendingDraftFiles() {
+  pendingDraftFiles.value = []
+}
+
+function clearDraftChatState() {
+  clearSelectedFiles()
+  clearPendingDraftFiles()
 }
 
 function normalizeFileStage(file) {
@@ -1547,9 +1590,7 @@ onMounted(async () => {
     store.setKbInfo({ loading: false, size: 0, vectorSize: 0, graphSize: 0, graphConnected: false })
   }
   
-  if (store.chats.length === 0) {
-    store.createChat()
-  } else {
+  if (store.chats.length > 0) {
     await store.switchChat(store.currentChatId || store.chats[0].id)
     await focusLastQuestionInView({ behavior: 'auto' })
   }
@@ -1594,10 +1635,168 @@ async function fetchKbInfo() {
 
 function createNewChat() {
   stopFileStatusPolling()
-  clearSelectedFiles()
+  clearDraftChatState()
   resetQuestionOutlineState()
-  store.createChat()
+  enterDraftChatState()
   inputMessage.value = ''
+}
+
+function enterDraftChatState() {
+  store.currentChatId = null
+  store.persistLocalState()
+}
+
+function ensureChatForSend() {
+  const currentChatId = normalizeChatId(store.currentChatId)
+  if (currentChatId && getChatById(currentChatId)) return currentChatId
+  const chat = store.createChat()
+  return normalizeChatId(chat?.id)
+}
+
+function buildRequestContextForChat(chatId) {
+  return buildChatRequestContext({
+    chat: getChatById(chatId),
+    sessionState: store.sessionState,
+    selectedFileIds: selectedFileIds.value,
+  })
+}
+
+async function discardEmptyChatAfterFailedDraftSend(chatId) {
+  const targetChatId = normalizeChatId(chatId)
+  const chat = getChatById(targetChatId)
+  if (!chat) return
+  const hasMessages = Array.isArray(chat.messages) && chat.messages.length > 0
+  if (hasMessages) return
+  try {
+    await store.deleteChat(targetChatId)
+  } catch (error) {
+    console.warn('[draft-send] 清理空会话失败:', error)
+  }
+}
+
+function normalizeUploadedPdfForStore(result, file) {
+  return {
+    file_id: result.document.file_id,
+    file_no: Number(result.document.file_no || 0),
+    display_no: Number(result.document.display_no || 0),
+    pdf_title: result.document.title,
+    file_name: file.name,
+    pdf_path: result.document.file_path,
+    file_hash: result.document.hash,
+    uploaded_at: new Date().toISOString(),
+    parse_status: result.document.parse_status || 'uploaded',
+    index_status: result.document.index_status || 'pending',
+    processing_stage: result.document.processing_stage || 'uploaded',
+    status_updated_at: new Date().toISOString(),
+    last_error: '',
+    file_meta: {}
+  }
+}
+
+function normalizeUploadedExcelForStore(result, file) {
+  return {
+    file_id: result.document.file_id,
+    file_no: Number(result.document.file_no || 0),
+    display_no: Number(result.document.display_no || 0),
+    excel_title: result.document.title,
+    file_name: file.name,
+    excel_path: result.document.file_path,
+    file_hash: result.document.hash,
+    parse_status: result.document.parse_status || 'uploaded',
+    index_status: result.document.index_status || 'pending',
+    processing_stage: result.document.processing_stage || 'uploaded',
+    status_updated_at: new Date().toISOString(),
+    last_error: '',
+    file_meta: {}
+  }
+}
+
+async function uploadSingleFileToChat({ file, fileType, chatId, onProgress }) {
+  const conversationId = parseInt(chatId, 10)
+  if (!conversationId) {
+    throw new Error('无法获取对话ID，请刷新页面重试')
+  }
+
+  if (fileType === 'pdf') {
+    const result = await api.uploadPdf(file, conversationId, onProgress)
+    if (!result?.success) {
+      throw new Error(result?.error || '上传失败')
+    }
+    store.addUploadedPdfToChat(chatId, normalizeUploadedPdfForStore(result, file))
+    return {
+      fileId: Number(result?.document?.file_id || 0),
+      title: String(result?.document?.title || file.name || ''),
+      document: result.document,
+    }
+  }
+
+  const result = await api.uploadExcel(file, conversationId)
+  if (!result?.success || !result?.document) {
+    throw new Error(result?.error || '上传失败')
+  }
+  store.addUploadedExcelToChat(chatId, normalizeUploadedExcelForStore(result, file))
+  return {
+    fileId: Number(result?.document?.file_id || 0),
+    title: String(result?.document?.title || file.name || ''),
+    document: result.document,
+  }
+}
+
+async function uploadPendingDraftFilesForSend(chatId, titleHint) {
+  const targetChatId = normalizeChatId(chatId)
+  if (!targetChatId || pendingDraftFiles.value.length === 0) {
+    return {
+      chatHistory: null,
+      conversationId: getChatById(targetChatId)?.synced ? parseInt(targetChatId, 10) : null,
+      requestChatContext: buildRequestContextForChat(targetChatId),
+    }
+  }
+
+  const uploadedIds = []
+  const drafts = [...pendingDraftFiles.value]
+  uploading.value = true
+  uploadProgress.value = 0
+  try {
+    for (const draft of drafts) {
+      const uploaded = await uploadSingleFileToChat({
+        file: draft.file,
+        fileType: draft.type,
+        chatId: targetChatId,
+        onProgress: (progress) => {
+          uploadProgress.value = progress
+        },
+      })
+      if (uploaded.fileId > 0) {
+        uploadedIds.push(uploaded.fileId)
+      }
+    }
+    if (uploadedIds.length > 0) {
+      selectedFileIds.value = uploadedIds.reduce(
+        (ids, fileId) => mergeSelectedFileIdsAfterUpload(ids, fileId),
+        selectedFileIds.value,
+      )
+    }
+    pendingDraftFiles.value = []
+    if (hasPendingFileProcessing()) {
+      startFileStatusPolling()
+    }
+    const latestChat = getChatById(targetChatId)
+    const chatHistory = (latestChat?.messages || [])
+      .filter(m => String(m?.content || '').trim().length > 0)
+      .slice(-10)
+      .map(m => ({ role: m.role, content: m.content }))
+    return {
+      chatHistory,
+      conversationId: latestChat?.synced ? parseInt(latestChat.id, 10) : null,
+      requestChatContext: buildRequestContextForChat(targetChatId),
+    }
+  } catch (error) {
+    pendingDraftFiles.value = drafts
+    throw error
+  } finally {
+    uploading.value = false
+    uploadProgress.value = 0
+  }
 }
 
 async function switchChat(chatId) {
@@ -1606,7 +1805,7 @@ async function switchChat(chatId) {
 
   const requestSeq = ++switchChatRequestSeq
   stopFileStatusPolling()
-  clearSelectedFiles()
+  clearDraftChatState()
   resetQuestionOutlineState()
   await store.switchChat(nextChatId)
   if (requestSeq !== switchChatRequestSeq) return
@@ -1660,19 +1859,14 @@ async function cancelRecoverableTask(chatId, taskId) {
   return recoverableTaskController.cancelRecoverableTask(chatId, taskId)
 }
 
-async function sendTaskMessage() {
-  const requestedChatId = normalizeChatId(store.currentChatId)
+async function sendTaskMessage(requestedChatId) {
+  requestedChatId = normalizeChatId(requestedChatId)
   if (!requestedChatId) return
 
   const message = inputMessage.value.trim()
   if (!message) return
 
-  const requestContextChat = getChatById(requestedChatId)
-  const requestChatContext = buildChatRequestContext({
-    chat: requestContextChat,
-    sessionState: store.sessionState,
-    selectedFileIds: selectedFileIds.value,
-  })
+  const requestChatContext = buildRequestContextForChat(requestedChatId)
   const requestAskMode = selectedAskMode.value
   const titleHint = store.buildAutoTitleFromText(message)
   const result = await recoverableTaskController.sendTaskMessage({
@@ -1681,6 +1875,7 @@ async function sendTaskMessage() {
     titleHint,
     requestChatContext,
     requestAskMode,
+    prepareConversation: async ({ chatId }) => uploadPendingDraftFilesForSend(chatId, titleHint),
   })
   if (!result?.ok) {
     if (result.reason === 'capacity_reached') {
@@ -1692,10 +1887,11 @@ async function sendTaskMessage() {
       alert(String(result?.error?.payload?.message || result?.error?.message || '创建任务失败'))
     }
   }
+  return result
 }
 
-async function sendLegacyMessage() {
-  const requestedChatId = normalizeChatId(store.currentChatId)
+async function sendLegacyMessage(requestedChatId) {
+  requestedChatId = normalizeChatId(requestedChatId)
   if (!requestedChatId) return
 
   const message = inputMessage.value.trim()
@@ -1710,17 +1906,14 @@ async function sendLegacyMessage() {
   }
 
   let streamChatId = requestedChatId
-  const requestContextChat = getChatById(requestedChatId)
-  const requestChatContext = buildChatRequestContext({
-    chat: requestContextChat,
-    sessionState: store.sessionState,
-    selectedFileIds: selectedFileIds.value,
-  })
+  let requestChatContext = buildRequestContextForChat(requestedChatId)
   const requestAskMode = selectedAskMode.value
 
   try {
     const messageChat = await store.addUserMessage(message, { chatId: requestedChatId })
     streamChatId = normalizeChatId(messageChat?.id || requestedChatId)
+    const prepared = await uploadPendingDraftFilesForSend(streamChatId, store.buildAutoTitleFromText(message))
+    requestChatContext = prepared.requestChatContext || buildRequestContextForChat(streamChatId)
     if (!store.isChatBusy(streamChatId) || store.isChatStopRequested(streamChatId)) return
     inputMessage.value = ''
     if (normalizeChatId(store.currentChatId) === streamChatId) {
@@ -1746,8 +1939,8 @@ async function sendLegacyMessage() {
       streamRequestId
     }, { chatId: streamChatId })
 
-    const targetChat = getChatById(streamChatId)
-    const targetIndex = Array.isArray(targetChat?.messages) ? targetChat.messages.length - 1 : -1
+    const targetChatForAssistant = getChatById(streamChatId)
+    const targetIndex = Array.isArray(targetChatForAssistant?.messages) ? targetChatForAssistant.messages.length - 1 : -1
     if (runtime) {
       runtime.targetIndex = targetIndex
     }
@@ -1778,12 +1971,13 @@ async function sendLegacyMessage() {
       scrollToBottom({ force: true })
     }
 
-    const chatHistory = (targetChat?.messages || [])
+    const targetChatForRequest = getChatById(streamChatId)
+    const chatHistory = (targetChatForRequest?.messages || [])
       .filter(m => String(m?.content || '').trim().length > 0)
       .slice(-10)
       .map(m => ({ role: m.role, content: m.content }))
 
-    const conversationId = targetChat?.synced ? parseInt(targetChat.id) : null
+    const conversationId = targetChatForRequest?.synced ? parseInt(targetChatForRequest.id) : null
     const pdfContext = requestChatContext
 
     for await (const eventFrame of api.askStream(
@@ -1843,18 +2037,33 @@ async function sendLegacyMessage() {
 }
 
 async function sendMessage() {
-  const requestedChatId = normalizeChatId(store.currentChatId)
-  if (!requestedChatId) return
-
   if (!canSend.value) {
-    if (isCurrentChatBusy.value) stopStreaming(requestedChatId)
+    if (isCurrentChatBusy.value) stopStreaming(store.currentChatId)
     return
   }
 
+  const hadActiveChatBeforeSend = Boolean(getChatById(normalizeChatId(store.currentChatId)))
+  const requestedChatId = ensureChatForSend()
+  if (!requestedChatId) return
+  const createdChatForSend = !hadActiveChatBeforeSend
+
   if (store.refreshSurvivableQATasksEnabled) {
-    return sendTaskMessage()
+    const result = await sendTaskMessage(requestedChatId)
+    if (!result?.ok && createdChatForSend) {
+      await discardEmptyChatAfterFailedDraftSend(result?.chatId)
+      await discardEmptyChatAfterFailedDraftSend(requestedChatId)
+      await discardEmptyChatAfterFailedDraftSend(store.currentChatId)
+    }
+    return result
   }
-  return sendLegacyMessage()
+  try {
+    return await sendLegacyMessage(requestedChatId)
+  } catch (error) {
+    if (createdChatForSend) {
+      await discardEmptyChatAfterFailedDraftSend(requestedChatId)
+    }
+    throw error
+  }
 }
 
 function stopStreaming(chatId = store.currentChatId) {
@@ -1982,134 +2191,77 @@ function triggerFileUpload() {
   fileInput.value?.click()
 }
 
+function resetFileInput() {
+  if (fileInput.value) {
+    fileInput.value.value = ''
+  }
+}
+
+function queuePendingDraftFile(file, fileType) {
+  const draft = buildPendingDraftFile(file, { type: fileType })
+  pendingDraftFiles.value = [...pendingDraftFiles.value, draft]
+  const defaultPrompt = defaultPromptForDraftFileType(fileType)
+  if (!inputMessage.value.trim() && defaultPrompt) {
+    inputMessage.value = defaultPrompt
+  }
+  resetFileInput()
+}
+
 async function handleFileSelect(event) {
   const file = event.target.files?.[0]
   if (!file) return
   
-  // 检查文件类型
-  const fileName = file.name.toLowerCase()
-  const isPdf = fileName.endsWith('.pdf')
-  const isExcel = fileName.endsWith('.xlsx') || fileName.endsWith('.xls') || fileName.endsWith('.csv')
-  
-  if (!isPdf && !isExcel) {
+  const fileType = resolveDraftFileType(file.name)
+  if (!fileType) {
     alert('只支持PDF、Excel和CSV文件')
+    resetFileInput()
     return
   }
-  
-  // 文件大小检查由后端配额系统处理
+
+  if (!store.currentChat) {
+    queuePendingDraftFile(file, fileType)
+    return
+  }
+
+  if (!store.currentChat.synced) {
+    alert('请先发送问题创建会话后再上传文件')
+    resetFileInput()
+    return
+  }
+
   uploading.value = true
   uploadProgress.value = 0
   const uploadConversationTitle = store.buildAutoTitleFromFileName(file.name)
   
   try {
-    // 如果对话未同步到服务器，先创建对话
-    if (!store.currentChat.synced) {
-      const userStr = localStorage.getItem('user')
-      if (userStr) {
-        const user = JSON.parse(userStr)
-        const title = uploadConversationTitle
-        
-        try {
-          const response = await api.createConversation(user.id, title)
-          
-          // 更新对话ID和同步状态
-          const oldId = store.currentChat.id
-          const chatIndex = store.chats.findIndex(c => c.id === oldId)
-          if (chatIndex !== -1) {
-            const newId = response.conversation_id.toString()
-            store.chats[chatIndex].id = newId
-            store.chats[chatIndex].title = response.title || title
-            store.chats[chatIndex].synced = true
-            store.currentChatId = newId
-            store.persistLocalState()
-          }
-        } catch (e) {
-          alert('创建对话失败: ' + e.message)
-          uploading.value = false
-          return
-        }
-      }
-    }
-    
-    // 获取当前对话ID
-    const conversationId = store.currentChat.synced ? parseInt(store.currentChat.id) : null
-    
-    if (!conversationId) {
-      alert('无法获取对话ID，请刷新页面重试')
-      uploading.value = false
-      return
-    }
-    
-    let result
-    
-    if (isPdf) {
-      // 上传PDF
-      result = await api.uploadPdf(file, conversationId, (progress) => {
+    const uploaded = await uploadSingleFileToChat({
+      file,
+      fileType,
+      chatId: store.currentChat.id,
+      onProgress: (progress) => {
         uploadProgress.value = progress
-      })
-      
-      if (result.success) {
-        store.addUploadedPdf({
-          file_id: result.document.file_id,
-          file_no: Number(result.document.file_no || 0),
-          display_no: Number(result.document.display_no || 0),
-          pdf_title: result.document.title,
-          file_name: file.name,
-          pdf_path: result.document.file_path,
-          file_hash: result.document.hash,
-          uploaded_at: new Date().toISOString(),
-          parse_status: result.document.parse_status || 'uploaded',
-          index_status: result.document.index_status || 'pending',
-          processing_stage: result.document.processing_stage || 'uploaded',
-          status_updated_at: new Date().toISOString(),
-          last_error: '',
-          file_meta: {}
-        })
-        const uploadedFileId = Number(result?.document?.file_id || 0)
-        if (uploadedFileId > 0) {
-          selectedFileIds.value = mergeSelectedFileIdsAfterUpload(selectedFileIds.value, uploadedFileId)
-        }
-        const parsedTitle = String(result?.document?.title || '').trim()
-        if (parsedTitle && store.currentChat?.title === uploadConversationTitle) {
-          await store.updateCurrentChatTitle(parsedTitle, { persist: true })
-        }
-        store.addSystemMessage(`✅ PDF上传成功: ${result.document.title || file.name} (#${resolveUploadedFileDisplayNumber(result.document)})`)
-        inputMessage.value = `请帮我总结一下这篇文献的主要内容`
-        startFileStatusPolling()
       }
-    } else if (isExcel) {
-      // 上传Excel/CSV
-      result = await store.uploadExcel(file)
-      
-      if (result) {
-        const uploadedFileId = Number(result?.file_id || 0)
-        if (uploadedFileId > 0) {
-          selectedFileIds.value = mergeSelectedFileIdsAfterUpload(selectedFileIds.value, uploadedFileId)
-        }
-        if (store.currentChat?.title === '新对话') {
-          await store.updateCurrentChatTitle(uploadConversationTitle, { persist: true, onlyIfPlaceholder: true })
-        }
-        store.addSystemMessage(`✅ Excel上传成功: ${result.title || file.name} (#${resolveUploadedFileDisplayNumber(result)})`)
-        inputMessage.value = `请帮我分析一下这个表格的数据`
-        result = { success: true }  // 标记为成功
-        startFileStatusPolling()
-      } else {
-        result = { success: false, error: '上传失败' }
-      }
+    })
+    if (uploaded.fileId > 0) {
+      selectedFileIds.value = mergeSelectedFileIdsAfterUpload(selectedFileIds.value, uploaded.fileId)
     }
-    
-    if (!result || (result.success === false)) {
-      alert('上传失败: ' + (result?.error || '未知错误'))
+    const parsedTitle = String(uploaded.title || '').trim()
+    if (parsedTitle && store.currentChat?.title === uploadConversationTitle) {
+      await store.updateCurrentChatTitle(parsedTitle, { persist: true })
     }
+    if (store.currentChat?.title === '新对话') {
+      await store.updateCurrentChatTitle(uploadConversationTitle, { persist: true, onlyIfPlaceholder: true })
+    }
+    store.addSystemMessage(`✅ ${fileType === 'pdf' ? 'PDF' : 'Excel'}上传成功: ${uploaded.title || file.name} (#${resolveUploadedFileDisplayNumber(uploaded.document)})`)
+    const defaultPrompt = defaultPromptForDraftFileType(fileType)
+    if (defaultPrompt) inputMessage.value = defaultPrompt
+    startFileStatusPolling()
   } catch (error) {
     alert('上传失败: ' + error.message)
   } finally {
     uploading.value = false
     uploadProgress.value = 0
-    // 清空文件输入
-    if (fileInput.value) {
-      fileInput.value.value = ''
-    }
+    resetFileInput()
   }
 }
 
@@ -2396,49 +2548,70 @@ watch(
       </header>
 
       <!-- 文件列表显示 (PDF + Excel统一编号) -->
-      <div v-if="(store.currentChat?.pdf_list?.length > 0) || (store.currentChat?.excel_list?.length > 0)" class="pdf-list-section">
+      <div v-if="hasVisibleConversationFiles" class="pdf-list-section">
         <div class="pdf-list-header">
           <button class="pdf-list-toggle-btn" type="button" @click="toggleFileListSection">
             <span class="history-group-title-wrap">
               <span class="history-group-toggle">{{ fileListCollapsed ? '▶' : '▼' }}</span>
-              <span class="pdf-list-title">📎 已上传的文件</span>
+              <span class="pdf-list-title">📎 对话文件</span>
             </span>
-            <span class="history-group-count">{{ (store.currentChat.pdf_list?.length || 0) + (store.currentChat.excel_list?.length || 0) }}</span>
+            <span class="history-group-count">{{ visibleConversationFileCount }}</span>
           </button>
           <div class="pdf-list-actions">
-            <button class="pdf-action-btn" @click="selectAllFiles">全选</button>
-            <button class="pdf-action-btn" @click="clearSelectedFiles">清空</button>
+            <button class="pdf-action-btn" @click="selectAllFiles" :disabled="!hasSelectableConversationFiles">全选</button>
+            <button class="pdf-action-btn" @click="clearSelectedFiles" :disabled="!hasSelectableConversationFiles && selectedFileIds.length === 0">清空</button>
             <span class="pdf-select-tip">已选 {{ selectedFileIds.length }} 个（不选则自动判定）</span>
           </div>
         </div>
         <div v-show="!fileListCollapsed" class="pdf-list-items">
           <!-- 合并并按file_id排序显示 -->
-          <template v-for="file in mergedAndSortedFiles" :key="file.type + '-' + file.id">
+          <template v-for="file in visibleConversationFiles" :key="file.type + '-' + (file.id || file.draftId)">
             <div
               class="pdf-list-item"
-              @click="toggleFileSelection(file.file_id)"
-              :class="{ selected: isFileSelected(file.file_id) }"
+              :class="{
+                selected: !isDraftFileItem(file) && isFileSelected(file.file_id),
+                'pdf-list-item-draft': isDraftFileItem(file)
+              }"
+              @click="!isDraftFileItem(file) && toggleFileSelection(file.file_id)"
             >
-              <label class="file-select-wrap" title="选择文件参与本轮问答" @click.stop>
+              <label v-if="!isDraftFileItem(file)" class="file-select-wrap" title="选择文件参与本轮问答" @click.stop>
                 <input
                   type="checkbox"
                   :checked="isFileSelected(file.file_id)"
                   @change="toggleFileSelection(file.file_id)"
                 >
               </label>
-              <span class="pdf-number">#{{ file.display_no || file.file_no || file.file_id }}</span>
-              <span class="pdf-icon">{{ file.type === 'pdf' ? '📄' : '📊' }}</span>
+              <span v-else class="file-select-spacer" aria-hidden="true"></span>
+              <span class="pdf-number">
+                <template v-if="isDraftFileItem(file)">{{ file.displayLabel }}</template>
+                <template v-else>#{{ file.display_no || file.file_no || file.file_id }}</template>
+              </span>
+              <span class="pdf-icon">{{ getFileIcon(file) }}</span>
               <span class="pdf-title">{{ file.title }}</span>
               <span
                 class="file-status-badge"
-                :class="fileStatusClass(file)"
-                :title="file.last_error || fileStatusLabel(file)"
+                :class="isDraftFileItem(file) ? 'file-status-draft' : fileStatusClass(file)"
+                :title="isDraftFileItem(file) ? file.statusLabel : (file.last_error || fileStatusLabel(file))"
               >
-                {{ fileStatusLabel(file) }}
+                {{ isDraftFileItem(file) ? file.statusLabel : fileStatusLabel(file) }}
               </span>
-              <span v-if="store.sessionState.newlyUploadedPdfIds.includes(file.file_id)" class="pdf-new-badge">新</span>
-              <button class="file-download-btn" @click.stop="downloadUploadedFile(file)" title="下载文件">下载</button>
-              <button class="pdf-remove-btn" @click.stop="file.type === 'pdf' ? handleRemovePdf(file.file_id) : handleRemoveExcel(file.file_id)" :disabled="isCurrentChatBusy" :title="isCurrentChatBusy ? '生成中不可删除文件' : '删除'">×</button>
+              <span v-if="!isDraftFileItem(file) && store.sessionState.newlyUploadedPdfIds.includes(file.file_id)" class="pdf-new-badge">新</span>
+              <button v-if="!isDraftFileItem(file)" class="file-download-btn" @click.stop="downloadUploadedFile(file)" title="下载文件">下载</button>
+              <button
+                v-if="isDraftFileItem(file)"
+                class="pdf-remove-btn"
+                type="button"
+                @click.stop="removePendingDraftFile(file.draftId)"
+                :disabled="isCurrentChatBusy || uploading"
+                :title="(isCurrentChatBusy || uploading) ? '当前不可移除待发送文件' : '移除待发送文件'"
+              >×</button>
+              <button
+                v-else
+                class="pdf-remove-btn"
+                @click.stop="file.type === 'pdf' ? handleRemovePdf(file.file_id) : handleRemoveExcel(file.file_id)"
+                :disabled="isCurrentChatBusy"
+                :title="isCurrentChatBusy ? '生成中不可删除文件' : '删除'"
+              >×</button>
             </div>
           </template>
         </div>
@@ -3805,6 +3978,11 @@ watch(
   background: #eff6ff;
 }
 
+.pdf-list-item-draft {
+  border: 1px dashed #cbd5e1;
+  background: #ffffff;
+}
+
 .pdf-list-item:hover {
   border-color: #4CAF50;
   box-shadow: 0 2px 4px rgba(76, 175, 80, 0.1);
@@ -3821,6 +3999,12 @@ watch(
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+
+.file-select-spacer {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
 }
 
 .file-select-wrap input[type="checkbox"] {
@@ -3880,6 +4064,12 @@ watch(
   background: #ffecee;
   color: #a3132f;
   border-color: #f5b5bf;
+}
+
+.file-status-draft {
+  background: #f1f5f9;
+  color: #475569;
+  border-color: #cbd5e1;
 }
 
 .file-download-btn {

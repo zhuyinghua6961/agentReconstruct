@@ -341,6 +341,20 @@ class PersonnelRepository:
             (self._clean_text(status).lower(), int(personnel_id)),
         )
 
+    def delete_personnel(self, *, personnel_id: int) -> int:
+        return self._execute_update(
+            """
+            DELETE FROM personnel_records
+            WHERE id = %s
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM users u
+                  WHERE u.personnel_id = personnel_records.id
+              )
+            """,
+            (int(personnel_id),),
+        )
+
     def _sync_user_departments_for_personnel_cursor(
         self,
         *,
