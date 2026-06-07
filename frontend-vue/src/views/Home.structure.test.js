@@ -114,6 +114,16 @@ test('Home renders QA stage timing summary and details in the processing panel',
   assert.doesNotMatch(source, /stage-timing-list/)
 })
 
+test('Home hides context-ready housekeeping steps from the visible process panel', () => {
+  assert.match(scriptSource, /function isVisibleProcessStep\(step\)/)
+  assert.match(scriptSource, /String\(step\?\.step \|\| ''\)\.trim\(\) !== 'context_ready'/)
+  assert.match(scriptSource, /function getVisibleMessageSteps\(msg\)/)
+  assert.match(scriptSource, /return getMessageSteps\(msg\)\.filter\(isVisibleProcessStep\)/)
+  assert.match(scriptSource, /function getStepPanelCount\(msg\)\s*\{\s*return getVisibleMessageSteps\(msg\)\.length\s*\}/)
+  assert.match(source, /v-for="\(([^\"]*)\) in getVisibleMessageSteps\(entry\.message\)"/)
+  assert.doesNotMatch(source, /v-for="\(([^\"]*)\) in getMessageSteps\(entry\.message\)"/)
+})
+
 test('Home hides graph step result counts from the processing panel', () => {
   assert.match(source, /function isGraphPipelineStep\(step\)/)
   assert.match(source, /function getVisibleStepCount\(step\)/)

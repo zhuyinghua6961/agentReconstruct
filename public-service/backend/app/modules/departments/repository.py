@@ -12,8 +12,10 @@ class DepartmentRepository:
         self._db = database or Database(settings=get_settings())
         self._tables_cache: set[str] | None = None
         self._user_columns_cache: set[str] | None = None
+        self._table_columns_cache: dict[str, set[str]] = {}
         self._tables_cache_loaded_at = 0.0
         self._user_columns_cache_loaded_at = 0.0
+        self._table_columns_cache_loaded_at: dict[str, float] = {}
         self._schema_cache_ttl_seconds = 1.0
         self._now = monotonic
 
@@ -70,6 +72,45 @@ class DepartmentRepository:
 
     def has_user_column(self, column_name: str) -> bool:
         return column_name in self._user_columns()
+
+    @staticmethod
+    def _identifier(value: str) -> str:
+        return f"`{str(value).replace('`', '``')}`"
+
+    def _load_table_columns(self, table_name: str) -> set[str]:
+        if not self.has_table(table_name):
+            return set()
+        rows = self._execute_query(f"SHOW COLUMNS FROM {self._identifier(table_name)}")
+        return {str(row.get("Field") or "") for row in rows}
+
+    def _table_columns(self, table_name: str) -> set[str]:
+        loaded_at = self._table_columns_cache_loaded_at.get(table_name, 0.0)
+        if self._cache_valid(loaded_at) and table_name in self._table_columns_cache:
+            return self._table_columns_cache[table_name]
+        self._table_columns_cache[table_name] = self._load_table_columns(table_name)
+        self._table_columns_cache_loaded_at[table_name] = self._now()
+        return self._table_columns_cache[table_name]
+
+    def has_table_column(self, table_name: str, column_name: str) -> bool:
+        return column_name in self._table_columns(table_name)
+
+    def _count_rows(self, query: str, params: tuple[Any, ...] = ()) -> int:
+        rows = self._execute_query(query, params)
+        if not rows:
+            return 0
+        return int(rows[0].get("total") or 0)
+
+    def _count_by_column(self, *, table_name: str, column_name: str, value: int) -> int:
+        if not self.has_table_column(table_name, column_name):
+            return 0
+        return self._count_rows(
+            f"""
+            SELECT COUNT(*) AS total
+            FROM {self._identifier(table_name)}
+            WHERE {self._identifier(column_name)} = %s
+            """,
+            (int(value),),
+        )
 
     def list_department_tree(self, *, include_disabled: bool) -> list[dict[str, Any]]:
         has_tertiary_table = self.has_table("tertiary_departments")
@@ -417,6 +458,46 @@ class DepartmentRepository:
             (int(secondary_id),),
         )
 
+    def count_secondary_departments_by_primary(self, *, primary_id: int) -> int:
+        return self._count_rows(
+            """
+            SELECT COUNT(*) AS total
+            FROM secondary_departments
+            WHERE primary_department_id = %s
+            """,
+            (int(primary_id),),
+        )
+
+    def count_tertiary_departments_by_secondary(self, *, secondary_id: int) -> int:
+        if not self.has_table("tertiary_departments"):
+            return 0
+        return self._count_rows(
+            """
+            SELECT COUNT(*) AS total
+            FROM tertiary_departments
+            WHERE secondary_department_id = %s
+            """,
+            (int(secondary_id),),
+        )
+
+    def count_users_by_primary_department(self, *, primary_id: int) -> int:
+        return self._count_by_column(table_name="users", column_name="primary_department_id", value=int(primary_id))
+
+    def count_users_by_secondary_department(self, *, secondary_id: int) -> int:
+        return self._count_by_column(table_name="users", column_name="secondary_department_id", value=int(secondary_id))
+
+    def count_users_by_tertiary_department(self, *, tertiary_id: int) -> int:
+        return self._count_by_column(table_name="users", column_name="tertiary_department_id", value=int(tertiary_id))
+
+    def count_personnel_by_primary_department(self, *, primary_id: int) -> int:
+        return self._count_by_column(table_name="personnel_records", column_name="primary_department_id", value=int(primary_id))
+
+    def count_personnel_by_secondary_department(self, *, secondary_id: int) -> int:
+        return self._count_by_column(table_name="personnel_records", column_name="secondary_department_id", value=int(secondary_id))
+
+    def count_personnel_by_tertiary_department(self, *, tertiary_id: int) -> int:
+        return self._count_by_column(table_name="personnel_records", column_name="tertiary_department_id", value=int(tertiary_id))
+
     def create_primary(self, *, name: str) -> int:
         return self._execute_update(
             """
@@ -434,6 +515,15 @@ class DepartmentRepository:
             WHERE id = %s
             """,
             (str(name or "").strip(), int(primary_id)),
+        )
+
+    def delete_primary(self, *, primary_id: int) -> int:
+        return self._execute_update(
+            """
+            DELETE FROM primary_departments
+            WHERE id = %s
+            """,
+            (int(primary_id),),
         )
 
     def update_primary_status(self, *, primary_id: int, status: str) -> int:
@@ -463,6 +553,15 @@ class DepartmentRepository:
             WHERE id = %s
             """,
             (str(name or "").strip(), int(secondary_id)),
+        )
+
+    def delete_secondary(self, *, secondary_id: int) -> int:
+        return self._execute_update(
+            """
+            DELETE FROM secondary_departments
+            WHERE id = %s
+            """,
+            (int(secondary_id),),
         )
 
     def update_secondary_status(self, *, secondary_id: int, status: str) -> int:
@@ -496,6 +595,17 @@ class DepartmentRepository:
             WHERE id = %s
             """,
             (str(name or "").strip(), int(tertiary_id)),
+        )
+
+    def delete_tertiary(self, *, tertiary_id: int) -> int:
+        if not self.has_table("tertiary_departments"):
+            return 0
+        return self._execute_update(
+            """
+            DELETE FROM tertiary_departments
+            WHERE id = %s
+            """,
+            (int(tertiary_id),),
         )
 
     def update_tertiary_status(self, *, tertiary_id: int, status: str) -> int:

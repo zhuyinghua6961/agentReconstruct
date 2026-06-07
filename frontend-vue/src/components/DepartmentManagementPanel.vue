@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { adminApi } from '../services/admin'
 import DepartmentBatchImportDialog from './DepartmentBatchImportDialog.vue'
+import DepartmentCreateDialog from './DepartmentCreateDialog.vue'
 import DepartmentImportResultDialog from './DepartmentImportResultDialog.vue'
 import { createDepartmentUsersRuntime } from '../utils/departmentSecondaryUsersRuntime'
 import { buildDepartmentRenderTree } from '../utils/departmentManagementTreeModel'
@@ -12,9 +13,7 @@ const loading = ref(false)
 const error = ref('')
 const success = ref('')
 const departmentTree = ref([])
-const newPrimaryName = ref('')
-const secondaryDrafts = ref({})
-const tertiaryDrafts = ref({})
+const showDepartmentCreateDialog = ref(false)
 const showDepartmentImportDialog = ref(false)
 const showDepartmentImportResultDialog = ref(false)
 const departmentImportResult = ref(null)
@@ -104,23 +103,6 @@ async function loadDepartmentUsers(nodeKey, options = {}) {
   await departmentUsersRuntime.load(nodeKey, options)
 }
 
-async function handleCreatePrimary() {
-  const name = String(newPrimaryName.value || '').trim()
-  if (!name) {
-    error.value = '请输入一级部门名称'
-    return
-  }
-  const result = await adminApi.createPrimaryDepartment(name)
-  if (result.success) {
-    newPrimaryName.value = ''
-    setSuccess('一级部门创建成功')
-    await fetchDepartmentTree()
-    emit('updated')
-    return
-  }
-  error.value = result.error || '创建一级部门失败'
-}
-
 async function handleRenamePrimary(item) {
   const nextName = window.prompt('请输入新的一级部门名称：', item.name)
   if (!nextName || nextName.trim() === item.name) {
@@ -136,40 +118,25 @@ async function handleRenamePrimary(item) {
   error.value = result.error || '更新一级部门失败'
 }
 
-async function handleTogglePrimaryStatus(item) {
-  const targetStatus = item.status === 'active' ? 'disabled' : 'active'
-  const actionText = targetStatus === 'disabled' ? '停用' : '启用'
-  if (!window.confirm(`确定要${actionText}一级部门 ${item.name} 吗？`)) {
-    return
-  }
-  const result = await adminApi.updatePrimaryDepartmentStatus(item.id, targetStatus)
+async function applyDepartmentDelete(requestDelete, successMessage, errorMessage) {
+  const result = await requestDelete()
   if (result.success) {
-    setSuccess(`一级部门已${actionText}`)
-    await fetchDepartmentTree()
-    emit('updated')
+    setSuccess(result.message || successMessage)
+    await refreshDepartmentChanges()
     return
   }
-  error.value = result.error || `一级部门${actionText}失败`
+  error.value = result.error || errorMessage
 }
 
-async function handleCreateSecondary(primary) {
-  const name = String(secondaryDrafts.value[primary.id] || '').trim()
-  if (!name) {
-    error.value = '请输入二级部门名称'
+async function handleDeletePrimary(item) {
+  if (!window.confirm(`确定要删除一级部门 ${item.name} 吗？仅没有二级部门、账号和人员绑定的部门可以删除。`)) {
     return
   }
-  const result = await adminApi.createSecondaryDepartment(primary.id, name)
-  if (result.success) {
-    secondaryDrafts.value = {
-      ...secondaryDrafts.value,
-      [primary.id]: '',
-    }
-    setSuccess('二级部门创建成功')
-    await fetchDepartmentTree()
-    emit('updated')
-    return
-  }
-  error.value = result.error || '创建二级部门失败'
+  await applyDepartmentDelete(
+    () => adminApi.deletePrimaryDepartment(item.id),
+    '一级部门已删除',
+    '删除一级部门失败'
+  )
 }
 
 async function handleRenameSecondary(secondary) {
@@ -187,41 +154,15 @@ async function handleRenameSecondary(secondary) {
   error.value = result.error || '更新二级部门失败'
 }
 
-async function handleToggleSecondaryStatus(secondary) {
-  const targetStatus = secondary.status === 'active' ? 'disabled' : 'active'
-  const actionText = targetStatus === 'disabled' ? '停用' : '启用'
-  if (!window.confirm(`确定要${actionText}二级部门 ${secondary.name} 吗？`)) {
+async function handleDeleteSecondary(secondary) {
+  if (!window.confirm(`确定要删除二级部门 ${secondary.name} 吗？仅没有三级部门、账号和人员绑定的部门可以删除。`)) {
     return
   }
-  const result = await adminApi.updateSecondaryDepartmentStatus(secondary.id, targetStatus)
-  if (result.success) {
-    setSuccess(`二级部门已${actionText}`)
-    await fetchDepartmentTree()
-    emit('updated')
-    return
-  }
-  error.value = result.error || `二级部门${actionText}失败`
-}
-
-async function handleCreateTertiary(secondary) {
-  const secondaryId = Number(secondary.id)
-  const name = String(tertiaryDrafts.value[secondaryId] || '').trim()
-  if (!name) {
-    error.value = '请输入三级部门名称'
-    return
-  }
-  const result = await adminApi.createTertiaryDepartment(secondaryId, name)
-  if (result.success) {
-    tertiaryDrafts.value = {
-      ...tertiaryDrafts.value,
-      [secondaryId]: '',
-    }
-    setSuccess('三级部门创建成功')
-    await fetchDepartmentTree()
-    emit('updated')
-    return
-  }
-  error.value = result.error || '创建三级部门失败'
+  await applyDepartmentDelete(
+    () => adminApi.deleteSecondaryDepartment(secondary.id),
+    '二级部门已删除',
+    '删除二级部门失败'
+  )
 }
 
 async function handleRenameTertiary(tertiary) {
@@ -239,21 +180,30 @@ async function handleRenameTertiary(tertiary) {
   error.value = result.error || '更新三级部门失败'
 }
 
-async function handleToggleTertiaryStatus(tertiary) {
-  const currentStatus = tertiary.status || 'active'
-  const targetStatus = currentStatus === 'active' ? 'disabled' : 'active'
-  const actionText = targetStatus === 'disabled' ? '停用' : '启用'
-  if (!window.confirm(`确定要${actionText}三级部门 ${tertiary.name} 吗？`)) {
+async function handleDeleteTertiary(tertiary) {
+  if (!window.confirm(`确定要删除三级部门 ${tertiary.name} 吗？仅没有账号和人员绑定的部门可以删除。`)) {
     return
   }
-  const result = await adminApi.updateTertiaryDepartmentStatus(tertiary.tertiary_id || tertiary.id, targetStatus)
-  if (result.success) {
-    setSuccess(`三级部门已${actionText}`)
-    await fetchDepartmentTree()
-    emit('updated')
-    return
-  }
-  error.value = result.error || `三级部门${actionText}失败`
+  await applyDepartmentDelete(
+    () => adminApi.deleteTertiaryDepartment(tertiary.tertiary_id || tertiary.id),
+    '三级部门已删除',
+    '删除三级部门失败'
+  )
+}
+
+async function refreshDepartmentChanges() {
+  await fetchDepartmentTree()
+  emit('updated')
+}
+
+async function handleDepartmentCreated(result) {
+  showDepartmentCreateDialog.value = false
+  setSuccess(result?.message || '部门创建成功')
+  await refreshDepartmentChanges()
+}
+
+async function handleDepartmentCreateChanged() {
+  await refreshDepartmentChanges()
 }
 
 async function handleDepartmentImportSuccess(result) {
@@ -277,21 +227,17 @@ onMounted(() => {
     <div class="panel-header">
       <div>
         <h2>部门管理</h2>
-        <p>维护一级、二级、三级部门字典。停用后不会清空已绑定用户，只会禁止后续新选择。</p>
+        <p>维护一级、二级、三级部门字典。删除前需先清空下级部门、账号和人员绑定。</p>
       </div>
       <div class="panel-actions">
         <button class="refresh-btn" @click="fetchDepartmentTree">刷新</button>
+        <button class="primary-btn" @click="showDepartmentCreateDialog = true">添加部门</button>
         <button class="import-btn" @click="showDepartmentImportDialog = true">批量导入部门</button>
       </div>
     </div>
 
     <div v-if="success" class="alert alert-success">{{ success }}</div>
     <div v-if="error" class="alert alert-error">{{ error }}</div>
-
-    <div class="create-primary">
-      <input v-model="newPrimaryName" type="text" placeholder="新增一级部门，例如：计算机学院">
-      <button class="primary-btn" @click="handleCreatePrimary">新增一级部门</button>
-    </div>
 
     <div v-if="loading" class="loading">加载中...</div>
 
@@ -330,22 +276,11 @@ onMounted(() => {
           </div>
           <div class="actions">
             <button class="action-btn" @click="handleRenamePrimary(primary)">改名</button>
-            <button class="action-btn" @click="handleTogglePrimaryStatus(primary)">
-              {{ primary.status === 'active' ? '停用' : '启用' }}
-            </button>
+            <button class="action-btn danger-btn" @click="handleDeletePrimary(primary)">删除</button>
           </div>
         </div>
 
         <div v-if="isPrimaryExpanded(primary.id)" class="primary-body">
-          <div class="create-secondary">
-            <input
-              v-model="secondaryDrafts[primary.id]"
-              type="text"
-              :placeholder="`在 ${primary.name} 下新增二级部门`"
-            >
-            <button class="secondary-btn" @click="handleCreateSecondary(primary)">新增二级部门</button>
-          </div>
-
           <div v-if="primary.renderSecondaryItems?.length" class="secondary-list">
             <div
               v-for="secondary in primary.renderSecondaryItems"
@@ -387,23 +322,12 @@ onMounted(() => {
                   </span>
                   <div class="actions">
                     <button class="action-btn" @click="handleRenameSecondary(secondary.raw)">改名</button>
-                    <button class="action-btn" @click="handleToggleSecondaryStatus(secondary.raw)">
-                      {{ secondary.raw?.status === 'active' ? '停用' : '启用' }}
-                    </button>
+                    <button class="action-btn danger-btn" @click="handleDeleteSecondary(secondary.raw)">删除</button>
                   </div>
                 </div>
               </div>
 
               <div v-if="isSecondaryExpanded(secondary.id)" class="secondary-body">
-                <div class="create-tertiary create-secondary">
-                  <input
-                    v-model="tertiaryDrafts[secondary.id]"
-                    type="text"
-                    :placeholder="`在 ${secondary.name} 下新增三级部门`"
-                  >
-                  <button class="secondary-btn" @click="handleCreateTertiary(secondary)">新增三级部门</button>
-                </div>
-
                 <div v-if="secondary.children?.length" class="tertiary-list">
                   <div
                     v-for="tertiary in secondary.children"
@@ -444,9 +368,7 @@ onMounted(() => {
                       </div>
                       <div class="actions" v-if="tertiary.nodeType === 'tertiary'">
                         <button class="action-btn" @click="handleRenameTertiary(tertiary)">改名</button>
-                        <button class="action-btn" @click="handleToggleTertiaryStatus(tertiary)">
-                          {{ tertiary.status === 'active' ? '停用' : '启用' }}
-                        </button>
+                        <button class="action-btn danger-btn" @click="handleDeleteTertiary(tertiary)">删除</button>
                       </div>
                     </div>
 
@@ -493,6 +415,13 @@ onMounted(() => {
       </div>
     </div>
 
+    <DepartmentCreateDialog
+      :show="showDepartmentCreateDialog"
+      :department-tree="departmentTree"
+      @close="showDepartmentCreateDialog = false"
+      @created="handleDepartmentCreated"
+      @changed="handleDepartmentCreateChanged"
+    />
     <DepartmentBatchImportDialog
       :show="showDepartmentImportDialog"
       @close="showDepartmentImportDialog = false"
@@ -542,7 +471,6 @@ onMounted(() => {
 .refresh-btn,
 .primary-btn,
 .import-btn,
-.secondary-btn,
 .action-btn {
   border: 1px solid #d1d5db;
   border-radius: 8px;
@@ -552,8 +480,7 @@ onMounted(() => {
   padding: 8px 14px;
 }
 
-.primary-btn,
-.secondary-btn {
+.primary-btn {
   background: #667eea;
   border-color: #667eea;
   color: white;
@@ -563,6 +490,15 @@ onMounted(() => {
   background: #0f766e;
   border-color: #0f766e;
   color: white;
+}
+
+.danger-btn {
+  border-color: #fecaca;
+  color: #dc2626;
+}
+
+.danger-btn:hover {
+  background: #fef2f2;
 }
 
 .alert {
@@ -579,25 +515,6 @@ onMounted(() => {
 .alert-error {
   background: #fef2f2;
   color: #dc2626;
-}
-
-.create-primary,
-.create-secondary {
-  display: flex;
-  gap: 12px;
-}
-
-.create-primary {
-  margin-bottom: 20px;
-}
-
-.create-primary input,
-.create-secondary input {
-  flex: 1;
-  padding: 10px 12px;
-  border: 1px solid #d1d5db;
-  border-radius: 8px;
-  font-size: 14px;
 }
 
 .department-tree {
@@ -791,8 +708,6 @@ onMounted(() => {
 @media (max-width: 768px) {
   .panel-header,
   .panel-actions,
-  .create-primary,
-  .create-secondary,
   .primary-main,
   .primary-summary,
   .primary-header,

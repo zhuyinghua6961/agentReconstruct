@@ -11,7 +11,6 @@ from app.core.deps import AuthContext
 from app.modules.auth.deps import require_admin_context
 from app.modules.departments.import_service import department_import_service
 from app.modules.departments.schemas import (
-    DepartmentStatusUpdateRequest,
     PrimaryDepartmentCreateRequest,
     PrimaryDepartmentRenameRequest,
     SecondaryDepartmentCreateRequest,
@@ -79,16 +78,12 @@ def rename_primary(
     return _respond(department_service.rename_primary(primary_id=primary_id, name=payload.name), ok_status=200)
 
 
-@router.put("/primary/{primary_id}/status")
-def update_primary_status(
+@router.delete("/primary/{primary_id}")
+def delete_primary(
     primary_id: int,
-    payload: DepartmentStatusUpdateRequest,
     _context: AuthContext = Depends(require_admin_context),
 ):
-    return _respond(
-        department_service.update_primary_status(primary_id=primary_id, status=payload.status),
-        ok_status=200,
-    )
+    return _respond(department_service.delete_primary(primary_id=primary_id), ok_status=200)
 
 
 @router.post("/secondary")
@@ -111,16 +106,12 @@ def rename_secondary(
     return _respond(department_service.rename_secondary(secondary_id=secondary_id, name=payload.name), ok_status=200)
 
 
-@router.put("/secondary/{secondary_id}/status")
-def update_secondary_status(
+@router.delete("/secondary/{secondary_id}")
+def delete_secondary(
     secondary_id: int,
-    payload: DepartmentStatusUpdateRequest,
     _context: AuthContext = Depends(require_admin_context),
 ):
-    return _respond(
-        department_service.update_secondary_status(secondary_id=secondary_id, status=payload.status),
-        ok_status=200,
-    )
+    return _respond(department_service.delete_secondary(secondary_id=secondary_id), ok_status=200)
 
 
 @router.get("/secondary/{secondary_id}/users")
@@ -165,16 +156,12 @@ def rename_tertiary(
     return _respond(department_service.rename_tertiary(tertiary_id=tertiary_id, name=payload.name), ok_status=200)
 
 
-@router.put("/tertiary/{tertiary_id}/status")
-def update_tertiary_status(
+@router.delete("/tertiary/{tertiary_id}")
+def delete_tertiary(
     tertiary_id: int,
-    payload: DepartmentStatusUpdateRequest,
     _context: AuthContext = Depends(require_admin_context),
 ):
-    return _respond(
-        department_service.update_tertiary_status(tertiary_id=tertiary_id, status=payload.status),
-        ok_status=200,
-    )
+    return _respond(department_service.delete_tertiary(tertiary_id=tertiary_id), ok_status=200)
 
 
 @router.get("/tertiary/{tertiary_id}/users")

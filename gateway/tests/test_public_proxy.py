@@ -472,6 +472,20 @@ def test_public_proxy_registers_personnel_route_methods():
     assert methods_by_path["/api/admin/users/{user_id}/personnel-binding"] == {"PUT", "DELETE"}
 
 
+def test_public_proxy_registers_department_delete_methods_without_status_routes():
+    methods_by_path = {
+        route.path: set(getattr(route, "methods", set())) - {"HEAD"}
+        for route in public_proxy_router.routes
+    }
+
+    assert methods_by_path["/api/admin/departments/primary/{primary_id}"] == {"PUT", "DELETE"}
+    assert methods_by_path["/api/admin/departments/secondary/{secondary_id}"] == {"PUT", "DELETE"}
+    assert methods_by_path["/api/admin/departments/tertiary/{tertiary_id}"] == {"PUT", "DELETE"}
+    assert "/api/admin/departments/primary/{primary_id}/status" not in methods_by_path
+    assert "/api/admin/departments/secondary/{secondary_id}/status" not in methods_by_path
+    assert "/api/admin/departments/tertiary/{tertiary_id}/status" not in methods_by_path
+
+
 def test_public_proxy_keeps_auth_register_routes_in_api_and_v1_parity():
     methods_by_path = {
         route.path: set(getattr(route, "methods", set())) - {"HEAD"}
@@ -603,10 +617,10 @@ def test_public_proxy_keeps_auth_department_routes_in_api_and_v1_parity():
             b"",
         ),
         (
-            "PUT",
-            "/api/admin/departments/primary/1/status",
-            "/api/admin/departments/primary/1/status",
-            {"status": "disabled"},
+            "DELETE",
+            "/api/admin/departments/primary/1",
+            "/api/admin/departments/primary/1",
+            None,
             b"",
         ),
         (
@@ -624,10 +638,10 @@ def test_public_proxy_keeps_auth_department_routes_in_api_and_v1_parity():
             b"",
         ),
         (
-            "PUT",
-            "/api/admin/departments/secondary/11/status",
-            "/api/admin/departments/secondary/11/status",
-            {"status": "disabled"},
+            "DELETE",
+            "/api/admin/departments/secondary/11",
+            "/api/admin/departments/secondary/11",
+            None,
             b"",
         ),
         (
@@ -659,10 +673,10 @@ def test_public_proxy_keeps_auth_department_routes_in_api_and_v1_parity():
             b"",
         ),
         (
-            "PUT",
-            "/api/admin/departments/tertiary/111/status",
-            "/api/admin/departments/tertiary/111/status",
-            {"status": "disabled"},
+            "DELETE",
+            "/api/admin/departments/tertiary/111",
+            "/api/admin/departments/tertiary/111",
+            None,
             b"",
         ),
         (

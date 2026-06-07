@@ -348,15 +348,12 @@ export const adminApi = {
     return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
   },
 
-  async updatePrimaryDepartmentStatus(primaryId, status) {
+  async deletePrimaryDepartment(primaryId) {
     const token = readStoredToken()
-    const response = await fetch(`${API_BASE}/departments/primary/${primaryId}/status`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify({ status })
+    return fetchWithErrorHandling(`${API_BASE}/departments/primary/${primaryId}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${token}` }
     })
-    const data = await safeJson(response)
-    return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
   },
 
   async createSecondaryDepartment(primaryDepartmentId, name) {
@@ -381,15 +378,12 @@ export const adminApi = {
     return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
   },
 
-  async updateSecondaryDepartmentStatus(secondaryId, status) {
+  async deleteSecondaryDepartment(secondaryId) {
     const token = readStoredToken()
-    const response = await fetch(`${API_BASE}/departments/secondary/${secondaryId}/status`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify({ status })
+    return fetchWithErrorHandling(`${API_BASE}/departments/secondary/${secondaryId}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${token}` }
     })
-    const data = await safeJson(response)
-    return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
   },
 
   async createTertiaryDepartment(secondaryDepartmentId, name) {
@@ -414,15 +408,12 @@ export const adminApi = {
     return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
   },
 
-  async updateTertiaryDepartmentStatus(tertiaryId, status) {
+  async deleteTertiaryDepartment(tertiaryId) {
     const token = readStoredToken()
-    const response = await fetch(`${API_BASE}/departments/tertiary/${tertiaryId}/status`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify({ status })
+    return fetchWithErrorHandling(`${API_BASE}/departments/tertiary/${tertiaryId}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${token}` }
     })
-    const data = await safeJson(response)
-    return data?.success !== undefined ? data : { success: false, error: `HTTP ${response.status}` }
   },
 
   async getTertiaryDepartmentUsers(tertiaryId) {

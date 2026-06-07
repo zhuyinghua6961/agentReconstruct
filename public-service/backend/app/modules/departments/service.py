@@ -42,6 +42,8 @@ class DepartmentService:
             "INVALID_FORMAT",
         }:
             return 400
+        if code in {"DEPARTMENT_IN_USE"}:
+            return 409
         if code in {"PRIMARY_DEPARTMENT_NOT_FOUND", "SECONDARY_DEPARTMENT_NOT_FOUND", "TERTIARY_DEPARTMENT_NOT_FOUND"}:
             return 404
         if code in {"DB_UNAVAILABLE"}:
@@ -166,6 +168,17 @@ class DepartmentService:
                 tertiary_status=tertiary_status,
             ),
         }
+
+    @staticmethod
+    def _delete_payload(department: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": int(department["id"]),
+            "name": department.get("name"),
+        }
+
+    @staticmethod
+    def _department_in_use(reason: str) -> dict[str, Any]:
+        return {"success": False, "error": reason, "code": "DEPARTMENT_IN_USE"}
 
     def _get_tertiary_by_id(self, tertiary_id: int | None) -> dict[str, Any] | None:
         if tertiary_id is None:
@@ -650,6 +663,33 @@ class DepartmentService:
                 return self._db_error(exc)
             return {"success": False, "error": "更新一级部门失败", "code": "UPDATE_ERROR"}
 
+    def delete_primary(self, *, primary_id: int) -> dict[str, Any]:
+        try:
+            primary = self._repository.get_primary_by_id(primary_id)
+            if not primary:
+                return {"success": False, "error": "一级部门不存在", "code": "PRIMARY_DEPARTMENT_NOT_FOUND"}
+
+            secondary_count = self._repository.count_secondary_departments_by_primary(primary_id=primary_id)
+            if secondary_count > 0:
+                return self._department_in_use("该一级部门下还有二级部门，请先删除下级部门")
+
+            user_count = self._repository.count_users_by_primary_department(primary_id=primary_id)
+            if user_count > 0:
+                return self._department_in_use("该一级部门仍有关联账号，请先调整账号部门")
+
+            personnel_count = self._repository.count_personnel_by_primary_department(primary_id=primary_id)
+            if personnel_count > 0:
+                return self._department_in_use("该一级部门仍有关联人员，请先调整人员部门")
+
+            deleted_count = self._repository.delete_primary(primary_id=primary_id)
+            if deleted_count <= 0:
+                return {"success": False, "error": "一级部门不存在", "code": "PRIMARY_DEPARTMENT_NOT_FOUND"}
+            return {"success": True, "message": "一级部门已删除", "data": self._delete_payload(primary)}
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "删除一级部门失败", "code": "DELETE_ERROR"}
+
     def update_primary_status(self, *, primary_id: int, status: str) -> dict[str, Any]:
         status_value = self.clean_text(status).lower()
         if not self._valid_status(status_value):
@@ -766,6 +806,33 @@ class DepartmentService:
                 return self._db_error(exc)
             return {"success": False, "error": "更新二级部门失败", "code": "UPDATE_ERROR"}
 
+    def delete_secondary(self, *, secondary_id: int) -> dict[str, Any]:
+        try:
+            secondary = self._repository.get_secondary_by_id(secondary_id)
+            if not secondary:
+                return {"success": False, "error": "二级部门不存在", "code": "SECONDARY_DEPARTMENT_NOT_FOUND"}
+
+            tertiary_count = self._repository.count_tertiary_departments_by_secondary(secondary_id=secondary_id)
+            if tertiary_count > 0:
+                return self._department_in_use("该二级部门下还有三级部门，请先删除下级部门")
+
+            user_count = self._repository.count_users_by_secondary_department(secondary_id=secondary_id)
+            if user_count > 0:
+                return self._department_in_use("该二级部门仍有关联账号，请先调整账号部门")
+
+            personnel_count = self._repository.count_personnel_by_secondary_department(secondary_id=secondary_id)
+            if personnel_count > 0:
+                return self._department_in_use("该二级部门仍有关联人员，请先调整人员部门")
+
+            deleted_count = self._repository.delete_secondary(secondary_id=secondary_id)
+            if deleted_count <= 0:
+                return {"success": False, "error": "二级部门不存在", "code": "SECONDARY_DEPARTMENT_NOT_FOUND"}
+            return {"success": True, "message": "二级部门已删除", "data": self._delete_payload(secondary)}
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "删除二级部门失败", "code": "DELETE_ERROR"}
+
     def rename_tertiary(self, *, tertiary_id: int, name: str) -> dict[str, Any]:
         tertiary_name = self.clean_text(name)
         if not tertiary_name:
@@ -799,6 +866,29 @@ class DepartmentService:
             if _is_db_unavailable_error(exc):
                 return self._db_error(exc)
             return {"success": False, "error": "更新三级部门失败", "code": "UPDATE_ERROR"}
+
+    def delete_tertiary(self, *, tertiary_id: int) -> dict[str, Any]:
+        try:
+            tertiary = self._get_tertiary_by_id(tertiary_id)
+            if not tertiary:
+                return {"success": False, "error": "三级部门不存在", "code": "TERTIARY_DEPARTMENT_NOT_FOUND"}
+
+            user_count = self._repository.count_users_by_tertiary_department(tertiary_id=tertiary_id)
+            if user_count > 0:
+                return self._department_in_use("该三级部门仍有关联账号，请先调整账号部门")
+
+            personnel_count = self._repository.count_personnel_by_tertiary_department(tertiary_id=tertiary_id)
+            if personnel_count > 0:
+                return self._department_in_use("该三级部门仍有关联人员，请先调整人员部门")
+
+            deleted_count = self._repository.delete_tertiary(tertiary_id=tertiary_id)
+            if deleted_count <= 0:
+                return {"success": False, "error": "三级部门不存在", "code": "TERTIARY_DEPARTMENT_NOT_FOUND"}
+            return {"success": True, "message": "三级部门已删除", "data": self._delete_payload(tertiary)}
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "删除三级部门失败", "code": "DELETE_ERROR"}
 
     def update_secondary_status(self, *, secondary_id: int, status: str) -> dict[str, Any]:
         status_value = self.clean_text(status).lower()

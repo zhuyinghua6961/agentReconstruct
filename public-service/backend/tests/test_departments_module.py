@@ -428,19 +428,27 @@ def test_tertiary_department_migration_adds_table_and_user_column():
 
 
 def test_department_routes_registered():
-    paths = {route.path for route in app.routes if hasattr(route, "path")}
+    routes_by_path = {}
+    for route in app.routes:
+        if not hasattr(route, "path"):
+            continue
+        routes_by_path.setdefault(route.path, set()).update(set(getattr(route, "methods", set())) - {"HEAD"})
+    paths = set(routes_by_path)
 
     assert "/api/admin/departments/tree" in paths
     assert "/api/admin/departments/primary" in paths
-    assert "/api/admin/departments/secondary/{secondary_id}/status" in paths
+    assert routes_by_path["/api/admin/departments/primary/{primary_id}"] == {"PUT", "DELETE"}
+    assert routes_by_path["/api/admin/departments/secondary/{secondary_id}"] == {"PUT", "DELETE"}
     assert "/api/admin/departments/secondary/{secondary_id}/users" in paths
     assert "/api/admin/departments/secondary/{secondary_id}/legacy-users" in paths
     assert "/api/admin/departments/tertiary" in paths
-    assert "/api/admin/departments/tertiary/{tertiary_id}" in paths
-    assert "/api/admin/departments/tertiary/{tertiary_id}/status" in paths
+    assert routes_by_path["/api/admin/departments/tertiary/{tertiary_id}"] == {"PUT", "DELETE"}
     assert "/api/admin/departments/tertiary/{tertiary_id}/users" in paths
     assert "/api/admin/departments/batch-import" in paths
     assert "/api/admin/departments/import-template" in paths
+    assert "/api/admin/departments/primary/{primary_id}/status" not in paths
+    assert "/api/admin/departments/secondary/{secondary_id}/status" not in paths
+    assert "/api/admin/departments/tertiary/{tertiary_id}/status" not in paths
 
 
 def test_admin_department_tree_contract(monkeypatch):
@@ -514,22 +522,12 @@ def test_admin_department_mutation_contracts(monkeypatch):
     )
     monkeypatch.setattr(
         department_service.department_service,
-        "update_primary_status",
-        lambda **kwargs: {"success": True, "data": kwargs},
-    )
-    monkeypatch.setattr(
-        department_service.department_service,
         "create_secondary",
         lambda **kwargs: {"success": True, "data": kwargs},
     )
     monkeypatch.setattr(
         department_service.department_service,
         "rename_secondary",
-        lambda **kwargs: {"success": True, "data": kwargs},
-    )
-    monkeypatch.setattr(
-        department_service.department_service,
-        "update_secondary_status",
         lambda **kwargs: {"success": True, "data": kwargs},
     )
 
@@ -543,11 +541,6 @@ def test_admin_department_mutation_contracts(monkeypatch):
         department_api_module.PrimaryDepartmentRenameRequest(name="信息学院"),
         context,
     )
-    update_primary_status_response = department_api_module.update_primary_status(
-        1,
-        department_api_module.DepartmentStatusUpdateRequest(status="disabled"),
-        context,
-    )
     create_secondary_response = department_api_module.create_secondary(
         department_api_module.SecondaryDepartmentCreateRequest(primary_department_id=1, name="软件工程系"),
         context,
@@ -557,18 +550,11 @@ def test_admin_department_mutation_contracts(monkeypatch):
         department_api_module.SecondaryDepartmentRenameRequest(name="计算机系"),
         context,
     )
-    update_secondary_status_response = department_api_module.update_secondary_status(
-        11,
-        department_api_module.DepartmentStatusUpdateRequest(status="disabled"),
-        context,
-    )
 
     assert create_primary_response.status_code == 201
     assert rename_primary_response.status_code == 200
-    assert update_primary_status_response.status_code == 200
     assert create_secondary_response.status_code == 201
     assert rename_secondary_response.status_code == 200
-    assert update_secondary_status_response.status_code == 200
 
 
 def test_admin_tertiary_department_mutation_contracts(monkeypatch):
@@ -582,11 +568,6 @@ def test_admin_tertiary_department_mutation_contracts(monkeypatch):
         "rename_tertiary",
         lambda **kwargs: {"success": True, "data": kwargs},
     )
-    monkeypatch.setattr(
-        department_service.department_service,
-        "update_tertiary_status",
-        lambda **kwargs: {"success": True, "data": kwargs},
-    )
 
     context = AuthContext(user_id=1, role="admin", username="admin")
     create_tertiary_response = department_api_module.create_tertiary(
@@ -598,15 +579,9 @@ def test_admin_tertiary_department_mutation_contracts(monkeypatch):
         department_api_module.TertiaryDepartmentRenameRequest(name="人工智能教研室"),
         context,
     )
-    update_tertiary_status_response = department_api_module.update_tertiary_status(
-        111,
-        department_api_module.DepartmentStatusUpdateRequest(status="disabled"),
-        context,
-    )
 
     assert create_tertiary_response.status_code == 201
     assert rename_tertiary_response.status_code == 200
-    assert update_tertiary_status_response.status_code == 200
 
 
 def test_admin_tertiary_department_users_route_contract(monkeypatch):
@@ -630,6 +605,116 @@ def test_admin_tertiary_department_users_route_contract(monkeypatch):
 
     assert response.status_code == 200
     assert _decode(response)["data"]["tertiary_department_id"] == 111
+
+
+def test_admin_department_delete_route_contracts(monkeypatch):
+    monkeypatch.setattr(
+        department_service.department_service,
+        "delete_primary",
+        lambda **kwargs: {"success": True, "data": kwargs},
+    )
+    monkeypatch.setattr(
+        department_service.department_service,
+        "delete_secondary",
+        lambda **kwargs: {"success": True, "data": kwargs},
+    )
+    monkeypatch.setattr(
+        department_service.department_service,
+        "delete_tertiary",
+        lambda **kwargs: {"success": True, "data": kwargs},
+    )
+
+    context = AuthContext(user_id=1, role="admin", username="admin")
+
+    primary_response = department_api_module.delete_primary(1, context)
+    secondary_response = department_api_module.delete_secondary(11, context)
+    tertiary_response = department_api_module.delete_tertiary(111, context)
+
+    assert primary_response.status_code == 200
+    assert _decode(primary_response)["data"]["primary_id"] == 1
+    assert secondary_response.status_code == 200
+    assert _decode(secondary_response)["data"]["secondary_id"] == 11
+    assert tertiary_response.status_code == 200
+    assert _decode(tertiary_response)["data"]["tertiary_id"] == 111
+
+
+def test_department_service_deletes_empty_tertiary_department():
+    class FakeRepository:
+        def __init__(self) -> None:
+            self.deleted_id = None
+
+        def get_tertiary_by_id(self, tertiary_id: int):
+            return {"id": tertiary_id, "secondary_department_id": 11, "name": "人工智能教研室", "status": "active"}
+
+        def count_users_by_tertiary_department(self, *, tertiary_id: int):
+            return 0
+
+        def count_personnel_by_tertiary_department(self, *, tertiary_id: int):
+            return 0
+
+        def delete_tertiary(self, *, tertiary_id: int):
+            self.deleted_id = tertiary_id
+            return 1
+
+    service = DepartmentService(repository=FakeRepository())
+
+    result = service.delete_tertiary(tertiary_id=111)
+
+    assert result["success"] is True
+    assert result["data"]["id"] == 111
+    assert service._repository.deleted_id == 111
+
+
+def test_department_service_rejects_secondary_delete_when_children_or_bindings_exist():
+    class FakeRepository:
+        def get_secondary_by_id(self, secondary_id: int):
+            return {"id": secondary_id, "primary_department_id": 1, "name": "软件工程系", "status": "active"}
+
+        def count_tertiary_departments_by_secondary(self, *, secondary_id: int):
+            return 1
+
+        def count_users_by_secondary_department(self, *, secondary_id: int):
+            return 0
+
+        def count_personnel_by_secondary_department(self, *, secondary_id: int):
+            return 0
+
+        def delete_secondary(self, *, secondary_id: int):
+            raise AssertionError("should not delete non-empty secondary department")
+
+    service = DepartmentService(repository=FakeRepository())
+
+    result = service.delete_secondary(secondary_id=11)
+
+    assert result["success"] is False
+    assert result["code"] == "DEPARTMENT_IN_USE"
+    assert "三级部门" in result["error"]
+
+
+def test_department_service_rejects_primary_delete_when_secondary_departments_exist():
+    class FakeRepository:
+        def get_primary_by_id(self, primary_id: int):
+            return {"id": primary_id, "name": "计算机学院", "status": "active"}
+
+        def count_secondary_departments_by_primary(self, *, primary_id: int):
+            return 1
+
+        def count_users_by_primary_department(self, *, primary_id: int):
+            return 0
+
+        def count_personnel_by_primary_department(self, *, primary_id: int):
+            return 0
+
+        def delete_primary(self, *, primary_id: int):
+            raise AssertionError("should not delete non-empty primary department")
+
+    service = DepartmentService(repository=FakeRepository())
+
+    result = service.delete_primary(primary_id=1)
+
+    assert result["success"] is False
+    assert result["code"] == "DEPARTMENT_IN_USE"
+    assert "二级部门" in result["error"]
 
 
 def test_department_effective_status_follows_disabled_primary(monkeypatch):

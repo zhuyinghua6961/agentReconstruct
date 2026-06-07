@@ -682,8 +682,16 @@ function getMessageSteps(msg) {
   return Array.isArray(msg?.steps) ? msg.steps : []
 }
 
+function isVisibleProcessStep(step) {
+  return String(step?.step || '').trim() !== 'context_ready'
+}
+
+function getVisibleMessageSteps(msg) {
+  return getMessageSteps(msg).filter(isVisibleProcessStep)
+}
+
 function getStepPanelCount(msg) {
-  return getMessageSteps(msg).length
+  return getVisibleMessageSteps(msg).length
 }
 
 function getStageTimingModel(msg) {
@@ -704,7 +712,7 @@ function hasProcessPanel(msg) {
 }
 
 function getLastStep(msg) {
-  const steps = getMessageSteps(msg)
+  const steps = getVisibleMessageSteps(msg)
   if (steps.length === 0) return null
   return steps[steps.length - 1]
 }
@@ -844,7 +852,7 @@ function getGraphStepDetail(step) {
 }
 
 function getStepOverview(msg) {
-  const steps = getMessageSteps(msg)
+  const steps = getVisibleMessageSteps(msg)
   if (steps.length === 0) return ''
   const processing = steps.filter((step) => normalizeStepStatus(step?.status) === 'processing').length
   const success = steps.filter((step) => normalizeStepStatus(step?.status) === 'success').length
@@ -856,7 +864,7 @@ function getStepOverview(msg) {
 }
 
 function getCollapsedStepSummary(msg) {
-  const current = [...getMessageSteps(msg)].reverse().find((step) => normalizeStepStatus(step?.status) === 'processing')
+  const current = [...getVisibleMessageSteps(msg)].reverse().find((step) => normalizeStepStatus(step?.status) === 'processing')
   return current || getLastStep(msg)
 }
 
@@ -2684,7 +2692,7 @@ watch(
                     </div>
                   </div>
                   <div v-show="!isStepsCollapsed(entry.message)" class="processing-steps">
-                    <div v-for="(step, idx) in getMessageSteps(entry.message)" :key="step.step || idx" class="step-item" :class="'step-' + normalizeStepStatus(step.status)">
+                    <div v-for="(step, idx) in getVisibleMessageSteps(entry.message)" :key="step.step || idx" class="step-item" :class="'step-' + normalizeStepStatus(step.status)">
                       <span class="step-icon" :class="'step-icon-' + normalizeStepStatus(step.status)">{{ getStepIcon(step) }}</span>
                       <div class="step-body">
                         <div class="step-row">

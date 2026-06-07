@@ -21,21 +21,21 @@ def test_route_table_patterns_include_department_routes():
         "/api/admin/departments/tree",
         "/api/admin/departments/primary",
         "/api/admin/departments/primary/{primary_id}",
-        "/api/admin/departments/primary/{primary_id}/status",
         "/api/admin/departments/secondary",
         "/api/admin/departments/secondary/{secondary_id}",
-        "/api/admin/departments/secondary/{secondary_id}/status",
         "/api/admin/departments/secondary/{secondary_id}/users",
         "/api/admin/departments/secondary/{secondary_id}/legacy-users",
         "/api/admin/departments/tertiary",
         "/api/admin/departments/tertiary/{tertiary_id}",
-        "/api/admin/departments/tertiary/{tertiary_id}/status",
         "/api/admin/departments/tertiary/{tertiary_id}/users",
         "/api/admin/departments/batch-import",
         "/api/admin/departments/import-template",
     }
 
     assert expected.issubset(set(PUBLIC_ROUTE_PATTERNS))
+    assert "/api/admin/departments/primary/{primary_id}/status" not in PUBLIC_ROUTE_PATTERNS
+    assert "/api/admin/departments/secondary/{secondary_id}/status" not in PUBLIC_ROUTE_PATTERNS
+    assert "/api/admin/departments/tertiary/{tertiary_id}/status" not in PUBLIC_ROUTE_PATTERNS
 
 
 def test_auth_register_routes_keep_api_and_v1_parity():
