@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -202,6 +203,34 @@ def test_hybrid_synthesis_client_does_not_close_injected_http_client():
     assert timeout.pool == 4.5
     client.close()
     assert shared.closed is False
+
+
+def test_hybrid_synthesis_client_logs_model_call_success(caplog):
+    class _FakeHttpClient:
+        def post(self, url, *, headers=None, json=None, timeout=None):
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", str(url)),
+                json={"choices": [{"message": {"content": "hybrid answer"}}]},
+            )
+
+        def close(self):
+            return None
+
+    client = PatentHybridSynthesisClient(
+        api_key="key",
+        base_url="https://example.com",
+        model="hybrid-model",
+        http_client=_FakeHttpClient(),
+    )
+
+    with caplog.at_level(logging.INFO, logger="patent.hybrid_synthesis"):
+        answer = client.answer(synthesis_contract=_sample_contract())
+
+    assert answer == "hybrid answer"
+    messages = [record.message for record in caplog.records if record.name == "patent.hybrid_synthesis"]
+    assert any("model_call start" in message and "component=llm_hybrid" in message and "model=hybrid-model" in message for message in messages)
+    assert any("model_call success" in message and "component=llm_hybrid" in message and "answer_chars=13" in message for message in messages)
 
 
 def test_hybrid_synthesis_client_from_env_reads_hybrid_budget(monkeypatch):

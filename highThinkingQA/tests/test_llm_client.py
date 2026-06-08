@@ -124,6 +124,40 @@ def test_openai_compatible_client_uses_configurable_auth_and_endpoint():
     assert kwargs["headers"]["Authorization"] == "token"
 
 
+def test_openai_compatible_client_logs_model_call_success(caplog):
+    response = _FakeHttpResponse(payload={"choices": [{"message": {"content": "answer"}}]})
+    http_client = _FakeHttpClient(post_response=response)
+    client = OpenAICompatibleChatClient(
+        base_url="https://llm.example/v1",
+        api_key="Bearer token",
+        auth_mode="authorization",
+        http_client=http_client,
+    )
+    caplog.set_level(logging.INFO, logger="agent_core.openai_compat")
+
+    client.chat.completions.create(model="qwen", messages=[{"role": "user", "content": "hi"}])
+
+    messages = [record.message for record in caplog.records]
+    assert any(
+        "model_call start" in message
+        and "service=highThinkingQA" in message
+        and "component=llm" in message
+        and "model=qwen" in message
+        and "auth_mode=authorization" in message
+        and "message_count=1" in message
+        and "stream=false" in message
+        for message in messages
+    )
+    assert any(
+        "model_call success" in message
+        and "component=llm" in message
+        and "status_code=200" in message
+        and "answer_chars=6" in message
+        and "elapsed_ms=" in message
+        for message in messages
+    )
+
+
 def test_openai_compatible_client_stream_parses_content_and_ignores_reasoning():
     stream_response = _FakeHttpResponse(
         lines=[
@@ -146,6 +180,37 @@ def test_openai_compatible_client_stream_parses_content_and_ignores_reasoning():
     assert chunks[0].choices[0].delta.reasoning_content == "hidden"
 
 
+def test_openai_compatible_client_logs_stream_model_call(caplog):
+    stream_response = _FakeHttpResponse(
+        lines=[
+            'data: {"choices":[{"delta":{"content":"ok"}}]}',
+            "data: [DONE]",
+        ]
+    )
+    http_client = _FakeHttpClient(post_response=_FakeHttpResponse(), stream_response=stream_response)
+    client = OpenAICompatibleChatClient(
+        base_url="https://llm.example/v1/chat/completions",
+        api_key="token",
+        auth_mode="bearer",
+        http_client=http_client,
+    )
+    caplog.set_level(logging.INFO, logger="agent_core.openai_compat")
+
+    chunks = list(client.chat.completions.create(model="m", messages=[{"role": "user", "content": "hi"}], stream=True))
+
+    messages = [record.message for record in caplog.records]
+    assert [chunk.choices[0].delta.content for chunk in chunks] == ["ok"]
+    assert any("model_call start" in message and "component=llm" in message and "stream=true" in message for message in messages)
+    assert any(
+        "model_call success" in message
+        and "component=llm" in message
+        and "stream=true" in message
+        and "chunk_count=1" in message
+        and "answer_chars=2" in message
+        for message in messages
+    )
+
+
 def test_openai_compatible_embedding_client_normalizes_bearer_and_endpoint():
     response = _FakeHttpResponse(payload={"data": [{"embedding": [0.1, 0.2]}]})
     http_client = _FakeHttpClient(post_response=response)
@@ -165,6 +230,39 @@ def test_openai_compatible_embedding_client_normalizes_bearer_and_endpoint():
     assert url == "https://embedding.example/v1/embeddings"
     assert kwargs["headers"]["Authorization"] == "Bearer embedding-token"
     assert kwargs["json"]["dimensions"] == 2
+
+
+def test_openai_compatible_embedding_client_logs_model_call_success(caplog):
+    response = _FakeHttpResponse(payload={"data": [{"embedding": [0.1, 0.2]}]})
+    http_client = _FakeHttpClient(post_response=response)
+    client = OpenAICompatibleEmbeddingClient(
+        base_url="https://embedding.example/v1",
+        api_key="Bearer embedding-token",
+        auth_mode="bearer",
+        http_client=http_client,
+    )
+    caplog.set_level(logging.INFO, logger="agent_core.openai_compat")
+
+    client.embeddings.create(model="m", input=["hello", "world"], encoding_format="float")
+
+    messages = [record.message for record in caplog.records]
+    assert any(
+        "model_call start" in message
+        and "service=highThinkingQA" in message
+        and "component=embedding" in message
+        and "model=m" in message
+        and "input_count=2" in message
+        for message in messages
+    )
+    assert any(
+        "model_call success" in message
+        and "component=embedding" in message
+        and "status_code=200" in message
+        and "embedding_count=1" in message
+        and "embedding_dim=2" in message
+        and "elapsed_ms=" in message
+        for message in messages
+    )
 
 
 def test_openai_compatible_embedding_client_supports_x_api_key_auth_mode():

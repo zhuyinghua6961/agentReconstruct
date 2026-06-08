@@ -243,3 +243,18 @@ test('parseMarkdownContent splits glued heading body after a Chinese colon', () 
   assert.equal(model.tokens[1].type, 'paragraph')
   assert.match(model.tokens[1].text, /^本质差异决定热稳定性鸿沟/)
 })
+
+test('parseMarkdownContent renders patent message headings as compact bold paragraphs', () => {
+  const input = [
+    '### 技术结论',
+    'CN109192948B 显示该方案可改善循环稳定性。',
+  ].join('\n')
+  const defaultModel = parseMarkdownContent(input)
+  const patentModel = parseMarkdownContent(input, { variant: 'patent-message' })
+
+  assert.equal(defaultModel.tokens[0].type, 'heading')
+  assert.equal(patentModel.tokens[0].type, 'paragraph')
+  assert.equal(patentModel.tokens[0].tokens[0].type, 'strong')
+  assert.equal(patentModel.tokens[0].tokens[0].text, '技术结论')
+  assert.equal(patentModel.diagnostics.patentLinkCount, 1)
+})

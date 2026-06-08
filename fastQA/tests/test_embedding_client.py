@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from app.modules.microscopic_runtime.embedding_client import RemoteEmbeddingClient
 
 
@@ -95,3 +97,33 @@ def test_remote_embedding_client_omits_authorization_header_without_embedding_ap
     client.encode(["hello"])
 
     assert "Authorization" not in requests_module.calls[0]["headers"]
+
+
+def test_remote_embedding_client_logs_model_call_success(monkeypatch, caplog):
+    requests_module = _Requests()
+    monkeypatch.setenv("EMBEDDING_API_KEY", "Bearer embedding-key")
+    monkeypatch.setenv("EMBEDDING_API_MODEL", "bge-local")
+    monkeypatch.setenv("EMBEDDING_AUTH_MODE", "authorization")
+    caplog.set_level(logging.INFO, logger="app.modules.microscopic_runtime.embedding_client")
+
+    client = RemoteEmbeddingClient("https://embedding.example/v1", requests_module)
+    client.encode(["hello", "world"])
+
+    messages = [record.message for record in caplog.records]
+    assert any(
+        "model_call start" in message
+        and "service=fastQA" in message
+        and "component=embedding" in message
+        and "model=bge-local" in message
+        and "auth_mode=authorization" in message
+        and "input_count=2" in message
+        for message in messages
+    )
+    assert any(
+        "model_call success" in message
+        and "component=embedding" in message
+        and "embedding_count=1" in message
+        and "embedding_dim=2" in message
+        and "elapsed_ms=" in message
+        for message in messages
+    )

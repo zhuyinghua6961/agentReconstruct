@@ -18,6 +18,7 @@ const filterStatus = ref('all')
 const summary = computed(() => props.result?.summary || {})
 const details = computed(() => props.result?.details || [])
 const duration = computed(() => props.result?.duration || 0)
+const updatedCount = computed(() => Number(summary.value?.updated || 0))
 
 // 筛选后的详细结果
 const filteredDetails = computed(() => {
@@ -31,6 +32,7 @@ const filteredDetails = computed(() => {
 function getStatusClass(status) {
   const classes = {
     success: 'status-success',
+    updated: 'status-updated',
     failed: 'status-failed',
     skipped: 'status-skipped'
   }
@@ -41,6 +43,7 @@ function getStatusClass(status) {
 function getStatusText(status) {
   const texts = {
     success: '成功',
+    updated: '更新',
     failed: '失败',
     skipped: '跳过'
   }
@@ -107,6 +110,10 @@ function close() {
               <span class="summary-label">成功</span>
               <span class="summary-value">{{ summary.success || 0 }}</span>
             </div>
+            <div class="summary-item updated">
+              <span class="summary-label">更新</span>
+              <span class="summary-value">{{ updatedCount }}</span>
+            </div>
             <div class="summary-item failed">
               <span class="summary-label">失败</span>
               <span class="summary-value">{{ summary.failed || 0 }}</span>
@@ -138,6 +145,14 @@ function close() {
               @click="filterStatus = 'success'"
             >
               成功 ({{ summary.success || 0 }})
+            </button>
+            <button
+              v-if="updatedCount > 0"
+              class="filter-btn"
+              :class="{ active: filterStatus === 'updated' }"
+              @click="filterStatus = 'updated'"
+            >
+              更新 ({{ updatedCount }})
             </button>
             <button 
               class="filter-btn" 
@@ -278,7 +293,7 @@ function close() {
 
 .summary-card {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(6, 1fr);
   gap: 16px;
   background: #f9fafb;
   padding: 20px;
@@ -305,6 +320,10 @@ function close() {
 
 .summary-item.success .summary-value {
   color: #16a34a;
+}
+
+.summary-item.updated .summary-value {
+  color: #2563eb;
 }
 
 .summary-item.failed .summary-value {
@@ -436,6 +455,11 @@ function close() {
 .status-success {
   background: #dcfce7;
   color: #166534;
+}
+
+.status-updated {
+  background: #dbeafe;
+  color: #1d4ed8;
 }
 
 .status-failed {

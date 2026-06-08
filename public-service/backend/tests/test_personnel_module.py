@@ -379,7 +379,7 @@ def test_personnel_repository_import_rows_rolls_back_on_write_error():
 
         def execute(self, query, params=()):
             query_text = " ".join(str(query).split())
-            if "SELECT id FROM personnel_records" in query_text:
+            if "SELECT" in query_text and "FROM personnel_records" in query_text:
                 return
             if "UPDATE personnel_records" in query_text:
                 return
@@ -462,6 +462,116 @@ def test_personnel_repository_import_rows_rolls_back_on_write_error():
     assert connection.commit_called == 0
     assert connection.rollback_called == 1
     assert connection.cursor_instance.inserted_rows == ["T2024001", "T2024002"]
+
+
+def test_personnel_repository_import_rows_skips_existing_unchanged_record():
+    module_spec = find_module_spec("app.modules.personnel.repository")
+    assert module_spec is not None
+
+    from app.modules.personnel.repository import PersonnelRepository
+    from app.modules.personnel.service import PersonnelService
+
+    verification_code_hash = PersonnelService.hash_verification_code("ABC123")
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.update_calls = 0
+            self.insert_calls = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, query, params=()):
+            query_text = " ".join(str(query).split())
+            if "SELECT id" in query_text and "FROM personnel_records" in query_text:
+                return
+            if "UPDATE personnel_records" in query_text:
+                self.update_calls += 1
+                return
+            if "INSERT INTO personnel_records" in query_text:
+                self.insert_calls += 1
+                return
+            raise AssertionError(f"unexpected query: {query_text}")
+
+        def fetchone(self):
+            return {
+                "id": 9,
+                "full_name": "张三",
+                "verification_code_hash": verification_code_hash,
+                "primary_department_id": 1,
+                "secondary_department_id": 11,
+                "tertiary_department_id": 111,
+                "status": "active",
+                "remarks": "示例备注",
+            }
+
+    class FakeConnection:
+        def __init__(self) -> None:
+            self.cursor_instance = FakeCursor()
+            self.begin_called = 0
+            self.commit_called = 0
+            self.rollback_called = 0
+
+        def begin(self):
+            self.begin_called += 1
+
+        def commit(self):
+            self.commit_called += 1
+
+        def rollback(self):
+            self.rollback_called += 1
+
+        def cursor(self):
+            return self.cursor_instance
+
+    class FakeConnectionManager:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def __enter__(self):
+            return self._connection
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeDatabase:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def connection(self):
+            return FakeConnectionManager(self._connection)
+
+    connection = FakeConnection()
+    repo = PersonnelRepository(database=FakeDatabase(connection))
+
+    result = repo.import_personnel_rows(
+        rows=[
+            {
+                "line_no": 2,
+                "employee_no": "T2024001",
+                "full_name": "张三",
+                "verification_code": "ABC123",
+                "verification_code_hash": PersonnelService.hash_verification_code("ABC123"),
+                "primary_department_id": 1,
+                "secondary_department_id": 11,
+                "tertiary_department_id": 111,
+                "status": "active",
+                "remarks": "示例备注",
+            },
+        ]
+    )
+
+    assert result["created"] == 0
+    assert result["updated"] == 0
+    assert result["skipped"] == 1
+    assert result["details"][0]["status"] == "skipped"
+    assert "未变化" in result["details"][0]["message"]
+    assert connection.cursor_instance.update_calls == 0
+    assert connection.cursor_instance.insert_calls == 0
+    assert connection.commit_called == 1
 
 
 def test_personnel_routes_registered():
@@ -1069,6 +1179,45 @@ def test_personnel_template_supports_csv_and_xlsx():
     assert "status" not in first_line
     assert xlsx_response.headers["Content-Disposition"].endswith('personnel_import_template.xlsx"')
     assert xlsx_response.media_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def test_personnel_import_accepts_legacy_english_headers():
+    module_spec = find_module_spec("app.modules.personnel.import_service")
+    assert module_spec is not None
+
+    from app.modules.personnel.import_service import PersonnelImportService
+
+    class FakeRepository:
+        def __init__(self) -> None:
+            self.rows = None
+
+        def import_personnel_rows(self, *, rows, sync_bound_users=True):
+            self.rows = rows
+            return {
+                "created": 1,
+                "updated": 0,
+                "details": [
+                    {
+                        "row": rows[0]["line_no"],
+                        "employee_no": rows[0]["employee_no"],
+                        "full_name": rows[0]["full_name"],
+                        "personnel_record_status": rows[0]["status"],
+                        "status": "created",
+                    }
+                ],
+            }
+
+    repo = FakeRepository()
+    service = PersonnelImportService(repository=repo, department_service=_FakeThreeLevelDepartments())
+    csv_bytes = (
+        "employee_no,full_name,verification_code,status,primary_department_name,secondary_department_name,tertiary_department_name,remarks\n"
+        "T2024001,张三,AAA111,active,计算机学院,软件工程系,智能软件实验室,示例备注\n"
+    ).encode("utf-8")
+
+    result = service.import_personnel(file_bytes=csv_bytes, filename="personnel.csv")
+
+    assert result["success"] is True
+    assert repo.rows[0]["status"] == "active"
 
 
 def test_personnel_admin_routes_registered(monkeypatch):

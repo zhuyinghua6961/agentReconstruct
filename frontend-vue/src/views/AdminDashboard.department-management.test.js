@@ -15,6 +15,7 @@ function readSource(relativePath) {
 
 const adminSource = readSource(['AdminDashboard.vue'])
 const batchImportSource = readSource(['..', 'components', 'BatchImportDialog.vue'])
+const importResultSource = readSource(['..', 'components', 'ImportResultDialog.vue'])
 const departmentBatchImportSource = readSource(['..', 'components', 'DepartmentBatchImportDialog.vue'])
 const departmentCreateSource = readSource(['..', 'components', 'DepartmentCreateDialog.vue'])
 const departmentImportResultSource = readSource(['..', 'components', 'DepartmentImportResultDialog.vue'])
@@ -60,10 +61,20 @@ test('AdminDashboard account list keeps reset password but removes direct passwo
 })
 
 test('BatchImportDialog documents the simplified user import template without department columns', () => {
-  assert.match(batchImportSource, /username、password、user_type/)
-  assert.match(batchImportSource, /部门信息由绑定的人员记录同步|不再从用户导入模板填写部门/)
+  assert.match(batchImportSource, /用户名、密码、用户类型/)
+  assert.match(batchImportSource, /也兼容旧列名 username、password、user_type/)
+  assert.match(batchImportSource, /以用户名作为匹配键/)
+  assert.match(batchImportSource, /内容未变化则跳过/)
+  assert.match(batchImportSource, /密码或用户类型变化则更新/)
   assert.doesNotMatch(batchImportSource, /primary_department_name/)
   assert.doesNotMatch(batchImportSource, /secondary_department_name/)
+})
+
+test('account import result dialog supports updated rows', () => {
+  assert.match(importResultSource, /updatedCount/)
+  assert.match(importResultSource, /updated/)
+  assert.match(importResultSource, /更新/)
+  assert.match(adminSource, /summary\.updated/)
 })
 
 test('admin service exposes department import APIs', () => {
@@ -72,9 +83,9 @@ test('admin service exposes department import APIs', () => {
 })
 
 test('DepartmentBatchImportDialog documents status columns', () => {
-  assert.match(departmentBatchImportSource, /primary_status/)
-  assert.match(departmentBatchImportSource, /secondary_status/)
-  assert.match(departmentBatchImportSource, /tertiary_status/)
+  assert.match(departmentBatchImportSource, /一级状态/)
+  assert.match(departmentBatchImportSource, /二级状态/)
+  assert.match(departmentBatchImportSource, /三级状态/)
   assert.match(departmentBatchImportSource, /active/)
   assert.match(departmentBatchImportSource, /disabled/)
 })
@@ -217,6 +228,21 @@ test('AdminDashboard mounts PersonnelManagementPanel under user management', () 
 test('AdminDashboard user table shows personnel info column', () => {
   assert.match(adminSource, /<th>\s*人员信息\s*<\/th>/)
   assert.match(adminSource, /personnel_display/)
+})
+
+test('AdminDashboard account list keeps actions in expandable rows without showing account id column', () => {
+  assert.match(adminSource, /expandedUserActionIds/)
+  assert.match(adminSource, /toggleUserActions\(user\.id\)/)
+  assert.match(adminSource, /user-action-detail-row/)
+  assert.match(adminSource, /colspan="8"/)
+  assert.match(adminSource, />\s*用户名\s*</)
+  assert.match(adminSource, />\s*角色\s*</)
+  assert.match(adminSource, />\s*部门\s*</)
+  assert.match(adminSource, />\s*人员信息\s*</)
+  assert.match(adminSource, />\s*状态\s*</)
+  assert.match(adminSource, />\s*创建时间\s*</)
+  assert.doesNotMatch(adminSource, /<th>ID<\/th>/)
+  assert.doesNotMatch(adminSource, /<th>操作<\/th>/)
 })
 
 test('AdminDashboard wires admin bind and unbind personnel actions', () => {

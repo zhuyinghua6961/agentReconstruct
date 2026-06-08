@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import os
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -18,6 +20,9 @@ try:
     from app.integrations.neo4j.client import bootstrap_neo4j
 except Exception:  # pragma: no cover
     bootstrap_neo4j = None
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
@@ -399,7 +404,6 @@ def _warm_stage2_rerank_lane(
     timeout_seconds: float,
     reason: str = "manual",
 ) -> None:
-    _ = reason
     del provider
     session = getattr(lane, "session", None)
     if session is None:
@@ -414,16 +418,54 @@ def _warm_stage2_rerank_lane(
         "documents": ["warm doc one", "warm doc two"],
         "top_n": 1,
     }
-    response = session.post(
+    started_at = time.perf_counter()
+    auth_mode = _rerank_auth_mode()
+    _LOGGER.info(
+        "model_call start service=fastQA component=rerank_warmup model=%s endpoint=%s auth_mode=%s "
+        "candidate_count=%s top_n=%s query_chars=%s timeout_seconds=%s key_present=%s reason=%s",
+        str(model or "").strip(),
         endpoint,
-        headers=headers,
-        json=payload,
-        timeout=timeout_seconds,
+        auth_mode,
+        len(payload["documents"]),
+        payload["top_n"],
+        len(str(payload["query"])),
+        timeout_seconds,
+        bool(api_key),
+        str(reason or ""),
     )
-    response.raise_for_status()
-    parse_json = getattr(response, "json", None)
-    if callable(parse_json):
-        parse_json()
+    response = None
+    try:
+        response = session.post(
+            endpoint,
+            headers=headers,
+            json=payload,
+            timeout=timeout_seconds,
+        )
+        response.raise_for_status()
+        parse_json = getattr(response, "json", None)
+        if callable(parse_json):
+            parse_json()
+    except Exception as exc:
+        _LOGGER.warning(
+            "model_call failed service=fastQA component=rerank_warmup model=%s endpoint=%s auth_mode=%s "
+            "status_code=%s elapsed_ms=%.2f reason=warmup_failed error_type=%s",
+            str(model or "").strip(),
+            endpoint,
+            auth_mode,
+            getattr(response, "status_code", None),
+            (time.perf_counter() - started_at) * 1000.0,
+            type(exc).__name__,
+        )
+        raise
+    _LOGGER.info(
+        "model_call success service=fastQA component=rerank_warmup model=%s endpoint=%s auth_mode=%s "
+        "status_code=%s elapsed_ms=%.2f",
+        str(model or "").strip(),
+        endpoint,
+        auth_mode,
+        getattr(response, "status_code", None),
+        (time.perf_counter() - started_at) * 1000.0,
+    )
 
 
 def bootstrap_generation_runtime(runtime: Any) -> None:

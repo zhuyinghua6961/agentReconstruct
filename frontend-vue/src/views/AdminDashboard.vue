@@ -60,6 +60,7 @@ const resetPasswordValue = ref('')
 const selectedPersonnelId = ref(null)
 const selectedPersonnelSummary = ref('')
 const personnelLookupOptions = ref([])
+const expandedUserActionIds = ref([])
 
 const currentPageUserIds = computed(() => users.value.map(user => user.id))
 const hasSelectedUsers = computed(() => selectedUserIds.value.length > 0)
@@ -166,6 +167,19 @@ function getTargetUserType(user) {
   return user?.user_type === 2 ? 'common' : 'super'
 }
 
+function isUserActionsExpanded(userId) {
+  return expandedUserActionIds.value.includes(Number(userId))
+}
+
+function toggleUserActions(userId) {
+  const normalizedId = Number(userId)
+  if (isUserActionsExpanded(normalizedId)) {
+    expandedUserActionIds.value = expandedUserActionIds.value.filter(id => id !== normalizedId)
+    return
+  }
+  expandedUserActionIds.value = [...expandedUserActionIds.value, normalizedId]
+}
+
 async function fetchCurrentUser() {
   const result = await authApi.getMe()
   if (result.success) currentUser.value = result.data
@@ -180,6 +194,7 @@ async function fetchUsers() {
     if (result.success) {
       users.value = result.data
       selectedUserIds.value = selectedUserIds.value.filter(id => users.value.some(user => user.id === id))
+      expandedUserActionIds.value = expandedUserActionIds.value.filter(id => users.value.some(user => user.id === id))
       console.log('fetchUsers - users.value:', users.value)
       pagination.value.total = result.pagination.total
     } else {
@@ -687,7 +702,8 @@ function handleImportSuccess(result) {
   
   // 显示成功消息
   const { summary } = result
-  success.value = `导入完成：成功 ${summary.success} 条，失败 ${summary.failed} 条，跳过 ${summary.skipped} 条`
+  const updatedText = Number(summary.updated || 0) > 0 ? `，更新 ${summary.updated} 条` : ''
+  success.value = `导入完成：成功 ${summary.success} 条${updatedText}，失败 ${summary.failed} 条，跳过 ${summary.skipped} 条`
   setTimeout(() => success.value = '', 5000)
   
   // 刷新用户列表
@@ -855,8 +871,11 @@ onMounted(async () => {
       </section>
 
       <div v-else class="user-section">
-        <div class="section-header">
-          <h2>用户管理</h2>
+        <div class="section-header user-section-header">
+          <div class="section-heading">
+            <h2>用户管理</h2>
+            <p class="section-subtitle">统一查看账号、人员信息与批量操作。</p>
+          </div>
           <div class="user-subtabs">
             <button
               type="button"
@@ -882,91 +901,120 @@ onMounted(async () => {
         </section>
 
         <template v-else>
-          <div class="header-actions">
-            <button class="action-btn batch-action-btn" :disabled="!hasSelectedUsers" @click="openBatchTypeModal">
-              批量改类型
-            </button>
-            <button class="action-btn btn-danger" :disabled="!hasSelectedUsers" @click="submitBatchDelete">
-              批量删除
-            </button>
-            <button class="action-btn" :disabled="!hasSelectedUsers" @click="clearSelectedUsers">
-              清空选择
-            </button>
-            <button class="add-user-btn batch-import-btn" @click="openBatchImportDialog">批量导入</button>
-            <button class="add-user-btn" @click="openCreateModal">添加用户</button>
+          <div class="account-toolbar">
+            <div v-if="hasSelectedUsers" class="selection-summary" aria-live="polite">
+              <span class="selection-summary-label">已选择</span>
+              <strong>{{ selectedUserIds.length }}</strong>
+              <span class="selection-summary-suffix">个用户</span>
+            </div>
+            <div class="header-actions account-actions">
+              <button class="action-btn batch-action-btn" :disabled="!hasSelectedUsers" @click="openBatchTypeModal">
+                批量改类型
+              </button>
+              <button class="action-btn btn-danger" :disabled="!hasSelectedUsers" @click="submitBatchDelete">
+                批量删除
+              </button>
+              <button class="action-btn" :disabled="!hasSelectedUsers" @click="clearSelectedUsers">
+                清空选择
+              </button>
+              <button class="add-user-btn batch-import-btn" @click="openBatchImportDialog">批量导入</button>
+              <button class="add-user-btn" @click="openCreateModal">添加用户</button>
+            </div>
           </div>
 
-          <div v-if="hasSelectedUsers" class="selection-summary">
-            已选择 {{ selectedUserIds.length }} 个用户
+          <div class="table-shell">
+            <div v-if="loading" class="loading loading-inline">加载中...</div>
+
+            <div v-else class="user-table-scroll">
+              <table class="user-table">
+                <colgroup>
+                  <col class="user-expand-col">
+                  <col class="user-select-col">
+                  <col class="user-name-col">
+                  <col class="user-role-col">
+                  <col class="user-department-col">
+                  <col class="user-personnel-col">
+                  <col class="user-status-col">
+                  <col class="user-created-col">
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th></th>
+                    <th class="checkbox-col">
+                      <input
+                        type="checkbox"
+                        :checked="allCurrentPageSelected"
+                        @change="toggleSelectAllCurrentPage"
+                      >
+                    </th>
+                    <th>用户名</th>
+                    <th>角色</th>
+                    <th>部门</th>
+                    <th>人员信息</th>
+                    <th>状态</th>
+                    <th>创建时间</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <template v-for="user in users" :key="user.id">
+                    <tr>
+                      <td>
+                        <button class="action-btn expand-btn" @click="toggleUserActions(user.id)">
+                          {{ isUserActionsExpanded(user.id) ? '收起' : '展开' }}
+                        </button>
+                      </td>
+                      <td class="checkbox-col">
+                        <input
+                          type="checkbox"
+                          :checked="selectedUserIds.includes(user.id)"
+                          @change="toggleUserSelection(user.id)"
+                        >
+                      </td>
+                      <td>{{ user.username }}</td>
+                      <td class="role-cell"><span class="role-badge" :class="getRoleClass(user)">{{ getRoleText(user) }}</span></td>
+                      <td>
+                        <span :class="{ 'department-disabled': user.department_effective_status === 'disabled' }">
+                          {{ user.department_display || '未填写' }}
+                        </span>
+                      </td>
+                      <td>{{ user.personnel_display || getPersonnelDisplay(user) }}</td>
+                      <td><span class="status-badge" :class="user.status">{{ user.status === 'active' ? '正常' : '停用' }}</span></td>
+                      <td>{{ user.created_at }}</td>
+                    </tr>
+                    <tr v-if="isUserActionsExpanded(user.id)" class="user-action-detail-row">
+                      <td colspan="8">
+                        <div class="user-action-panel">
+                          <span class="user-action-title">{{ user.username }} 的操作</span>
+                          <div class="actions">
+                            <button class="action-btn" @click="openPersonnelModal(user)">设置人员</button>
+                            <button
+                              v-if="!isAdminIdentity(user)"
+                              class="action-btn"
+                              @click="openUsernameModal(user)"
+                            >
+                              修改用户名
+                            </button>
+                            <button class="action-btn" @click="openResetPasswordModal(user)">重置密码</button>
+                            <button
+                              v-if="!isAdminIdentity(user)"
+                              class="action-btn"
+                              @click="toggleUserType(user)"
+                            >
+                              {{ user.user_type === 2 ? '设为普通' : '设为超级' }}
+                            </button>
+                            <button class="action-btn" :class="user.status === 'active' ? 'btn-danger' : 'btn-success'" @click="openStatusModal(user)">
+                              {{ user.status === 'active' ? '停用' : '启用' }}
+                            </button>
+                            <button class="action-btn btn-danger" @click="openDeleteModal(user)">删除</button>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
           </div>
-
-          <div v-if="loading" class="loading">加载中...</div>
-
-          <table v-else class="user-table">
-          <thead>
-            <tr>
-              <th class="checkbox-col">
-                <input
-                  type="checkbox"
-                  :checked="allCurrentPageSelected"
-                  @change="toggleSelectAllCurrentPage"
-                >
-              </th>
-              <th>ID</th>
-              <th>用户名</th>
-              <th>角色</th>
-              <th>部门</th>
-              <th>人员信息</th>
-              <th>状态</th>
-              <th>创建时间</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="user in users" :key="user.id">
-              <td class="checkbox-col">
-                <input
-                  type="checkbox"
-                  :checked="selectedUserIds.includes(user.id)"
-                  @change="toggleUserSelection(user.id)"
-                >
-              </td>
-              <td>{{ user.id }}</td>
-              <td>{{ user.username }}</td>
-              <td><span class="role-badge" :class="getRoleClass(user)">{{ getRoleText(user) }}</span></td>
-              <td>
-                <span :class="{ 'department-disabled': user.department_effective_status === 'disabled' }">
-                  {{ user.department_display || '未填写' }}
-                </span>
-              </td>
-              <td>{{ user.personnel_display || getPersonnelDisplay(user) }}</td>
-              <td><span class="status-badge" :class="user.status">{{ user.status === 'active' ? '正常' : '停用' }}</span></td>
-              <td>{{ user.created_at }}</td>
-              <td class="actions">
-                <button class="action-btn" @click="openPersonnelModal(user)">设置人员</button>
-                <button
-                  v-if="!isAdminIdentity(user)"
-                  class="action-btn"
-                  @click="openUsernameModal(user)"
-                >
-                  修改用户名
-                </button>
-                <button class="action-btn" @click="openResetPasswordModal(user)">重置密码</button>
-                <button
-                  v-if="!isAdminIdentity(user)"
-                  class="action-btn"
-                  @click="toggleUserType(user)"
-                >
-                  {{ user.user_type === 2 ? '设为普通' : '设为超级' }}
-                </button>
-                <button class="action-btn" :class="user.status === 'active' ? 'btn-danger' : 'btn-success'" @click="openStatusModal(user)">
-                  {{ user.status === 'active' ? '停用' : '启用' }}
-                </button>
-                <button class="action-btn btn-danger" @click="openDeleteModal(user)">删除</button>
-              </td>
-            </tr>
-          </tbody>
-          </table>
 
           <div v-if="pagination.total > pagination.pageSize" class="pagination">
             <button :disabled="pagination.page === 1" @click="changePage(pagination.page - 1)">上一页</button>
@@ -1188,38 +1236,64 @@ onMounted(async () => {
 .alert-success { background: #dcfce7; color: #166534; }
 .alert-error { background: #fef2f2; color: #dc2626; }
 .quota-management-shell { margin-bottom: 24px; }
-.user-section { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-.section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+.user-section { background: white; border: 1px solid #e5e7eb; border-radius: 12px; padding: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+.section-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 20px; }
+.section-heading { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .section-header h2 { font-size: 18px; color: #1f2937; margin: 0; }
-.section-header .header-actions { display: flex; gap: 12px; }
-.selection-summary { margin-bottom: 12px; color: #374151; font-size: 14px; }
-.add-user-btn { background: #667eea; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-size: 14px; }
+.section-subtitle { margin: 0; color: #6b7280; font-size: 13px; line-height: 1.5; }
+.user-subtabs { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.account-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; padding: 14px 16px; border: 1px solid #e5e7eb; border-radius: 10px; background: #f9fafb; }
+.header-actions { display: flex; align-items: center; gap: 10px; }
+.account-actions { justify-content: flex-end; flex-wrap: wrap; }
+.selection-summary { display: inline-flex; align-items: center; gap: 8px; color: #1d4ed8; font-size: 13px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 999px; padding: 8px 12px; white-space: nowrap; }
+.selection-summary strong { color: #1d4ed8; font-size: 18px; line-height: 1; }
+.selection-summary-label, .selection-summary-suffix { color: #1e293b; }
+.add-user-btn { background: #667eea; color: white; border: none; padding: 10px 18px; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 500; }
 .add-user-btn:hover { background: #5a67d8; }
 .add-user-btn.batch-import-btn { background: #10b981; }
 .add-user-btn.batch-import-btn:hover { background: #059669; }
 .user-count { color: #6b7280; font-size: 14px; }
+.table-shell { border: 1px solid #e5e7eb; border-radius: 12px; background: #fff; overflow: hidden; }
+.user-table-scroll { overflow-x: auto; }
 .loading { text-align: center; padding: 40px; color: #6b7280; }
-.user-table { width: 100%; border-collapse: collapse; }
-.user-table th, .user-table td { padding: 12px; text-align: left; border-bottom: 1px solid #e5e7eb; }
-.user-table .checkbox-col { width: 48px; text-align: center; }
-.user-table th { background: #f9fafb; font-weight: 500; color: #374151; font-size: 14px; }
-.user-table td { color: #1f2937; font-size: 14px; }
-.role-badge { padding: 4px 8px; border-radius: 4px; font-size: 12px; }
+.loading-inline { background: #fafafa; border: 1px dashed #d1d5db; border-radius: 12px; margin: 0; }
+.user-table { width: 100%; min-width: 900px; border-collapse: collapse; table-layout: fixed; }
+.user-table col.user-expand-col { width: 72px; }
+.user-table col.user-select-col { width: 44px; }
+.user-table col.user-name-col { width: 160px; }
+.user-table col.user-role-col { width: 96px; }
+.user-table col.user-department-col { width: 280px; }
+.user-table col.user-personnel-col { width: 160px; }
+.user-table col.user-status-col { width: 84px; }
+.user-table col.user-created-col { width: 170px; }
+.user-table th, .user-table td { padding: 12px 10px; text-align: left; border-bottom: 1px solid #e5e7eb; vertical-align: middle; }
+.user-table .checkbox-col { width: 44px; text-align: center; }
+.user-table th { background: #f9fafb; font-weight: 600; color: #374151; font-size: 13px; }
+.user-table tbody tr:hover { background: #fcfcfd; }
+.user-table td { color: #1f2937; font-size: 14px; overflow-wrap: anywhere; word-break: break-word; }
+.role-cell { text-align: center; }
+.role-badge { display: inline-flex; align-items: center; justify-content: center; min-height: 28px; padding: 0 10px; border-radius: 6px; font-size: 12px; font-weight: 600; writing-mode: horizontal-tb; letter-spacing: 0; }
 .role-badge.admin { background: #dbeafe; color: #1d4ed8; }
 .role-badge.super { background: #fef3c7; color: #92400e; }
 .role-badge.common { background: #dcfce7; color: #166534; }
 .role-badge.user { background: #f3f4f6; color: #6b7280; }
-.status-badge { padding: 4px 8px; border-radius: 4px; font-size: 12px; }
+.status-badge { display: inline-flex; align-items: center; justify-content: center; min-height: 28px; min-width: 28px; padding: 0 8px; border-radius: 6px; font-size: 12px; font-weight: 600; }
 .status-badge.active { background: #dcfce7; color: #166534; }
 .status-badge.disabled { background: #fee2e2; color: #dc2626; }
 .department-disabled { color: #b45309; font-weight: 600; }
-.actions { display: flex; gap: 8px; }
-.action-btn { padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; border: 1px solid #d1d5db; background: white; }
+.expand-btn { width: 48px; padding: 6px 0; color: #374151; }
+.user-action-detail-row td { background: #f9fafb; padding: 12px 16px; }
+.user-action-detail-row + tr td { border-top: none; }
+.user-action-panel { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.user-action-title { color: #6b7280; font-size: 13px; white-space: nowrap; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
+.action-btn { padding: 6px 10px; border-radius: 6px; font-size: 12px; line-height: 1.2; cursor: pointer; border: 1px solid #d1d5db; background: white; transition: border-color 0.2s ease, background-color 0.2s ease, color 0.2s ease; }
 .action-btn:hover { background: #f9fafb; }
 .action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .batch-action-btn { background: #eff6ff; border-color: #bfdbfe; color: #1d4ed8; }
-.action-btn.btn-success { background: #dcfce7; border-color: #86efac; color: #166534; }
-.action-btn.btn-danger { background: #fee2e2; border-color: #fca5a5; color: #dc2626; }
+.action-btn.btn-success { background: #f0fdf4; border-color: #bbf7d0; color: #166534; }
+.action-btn.btn-danger { background: #fff; border-color: #fecaca; color: #dc2626; }
+.action-btn.btn-danger:hover { background: #fef2f2; }
 .model-status-shell { background: white; border-radius: 8px; padding: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
 .model-status-note { margin: 6px 0 0; color: #6b7280; font-size: 13px; }
 .model-status-panel { display: flex; flex-direction: column; gap: 14px; }
@@ -1287,10 +1361,20 @@ onMounted(async () => {
 .btn-danger { background: #dc2626; color: white; }
 @media (max-width: 900px) {
   .admin-header { flex-direction: column; align-items: stretch; gap: 16px; }
-  .header-actions { justify-content: space-between; flex-wrap: wrap; }
+  .section-header { flex-direction: column; }
+  .user-subtabs { justify-content: flex-start; }
+  .account-toolbar { flex-direction: column; align-items: stretch; }
+  .header-actions { justify-content: flex-start; flex-wrap: wrap; }
+  .account-actions { width: 100%; }
+  .selection-summary { width: 100%; justify-content: center; }
   .model-status-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .model-endpoint-card { grid-template-columns: 1fr; }
   .model-card-side { border-left: none; border-top: 1px solid #e5e7eb; padding-left: 0; padding-top: 14px; }
   .model-route-grid { grid-template-columns: 1fr; }
+  .user-table { min-width: 820px; }
+  .user-action-panel { align-items: flex-start; flex-direction: column; }
+  .actions { justify-content: flex-start; }
+  .actions { min-width: 0; }
+  .action-btn { flex: 1 1 auto; }
 }
 </style>

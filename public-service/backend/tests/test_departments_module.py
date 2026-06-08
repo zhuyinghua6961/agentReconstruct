@@ -751,10 +751,12 @@ def test_department_effective_status_follows_disabled_primary(monkeypatch):
 def test_department_import_template_contains_status_columns():
     response = department_import_service.template_response(fmt="csv")
 
-    assert b"primary_status" in response.body
-    assert b"secondary_status" in response.body
-    assert b"tertiary_department_name" in response.body
-    assert b"tertiary_status" in response.body
+    first_line = response.body.decode("utf-8-sig").splitlines()[0]
+    assert first_line == "一级部门名称,一级状态,二级部门名称,二级状态,三级部门名称,三级状态"
+    assert b"primary_status" not in response.body
+    assert b"secondary_status" not in response.body
+    assert b"tertiary_department_name" not in response.body
+    assert b"tertiary_status" not in response.body
 
 
 def test_department_batch_import_route_contract(monkeypatch):
@@ -785,6 +787,44 @@ def test_department_batch_import_route_contract(monkeypatch):
 
     assert response.status_code == 200
     assert _decode(response)["data"]["filename"] == "departments.csv"
+
+
+def test_department_import_accepts_legacy_english_headers():
+    class FakeRepository:
+        def __init__(self) -> None:
+            self.primary_names: list[str] = []
+            self.secondary_names: list[str] = []
+
+        def get_primary_by_name(self, name: str):
+            return None
+
+        def create_primary(self, *, name: str):
+            self.primary_names.append(name)
+            return 1
+
+        def update_primary_status(self, *, primary_id: int, status: str):
+            return 1
+
+        def get_secondary_by_name(self, *, primary_department_id: int, name: str):
+            return None
+
+        def create_secondary(self, *, primary_department_id: int, name: str):
+            self.secondary_names.append(name)
+            return 11
+
+        def update_secondary_status(self, *, secondary_id: int, status: str):
+            return 1
+
+    service = DepartmentImportService(repository=FakeRepository())
+    result = service.import_departments(
+        file_bytes=(
+            b"primary_department_name,primary_status,secondary_department_name,secondary_status\n"
+            b"\xe8\xae\xa1\xe7\xae\x97\xe6\x9c\xba\xe5\xad\xa6\xe9\x99\xa2,active,\xe8\xbd\xaf\xe4\xbb\xb6\xe5\xb7\xa5\xe7\xa8\x8b\xe7\xb3\xbb,active\n"
+        ),
+        filename="departments.csv",
+    )
+
+    assert result["success"] is True
 
 
 def test_department_import_updates_existing_statuses_and_preserves_omitted_rows():
@@ -859,6 +899,84 @@ def test_department_import_updates_existing_statuses_and_preserves_omitted_rows(
     assert result["success"] is True
     assert service._repository.primary_by_name["计算机学院"]["status"] == "active"
     assert service._repository.secondary_by_key[(2, "材料系")]["status"] == "active"
+
+
+def test_department_import_skips_existing_unchanged_department_path():
+    class FakeRepository:
+        def __init__(self) -> None:
+            self.primary_by_id = {
+                1: {"id": 1, "name": "计算机学院", "status": "active"},
+            }
+            self.primary_by_name = {item["name"]: item for item in self.primary_by_id.values()}
+            self.secondary_by_id = {
+                11: {"id": 11, "primary_department_id": 1, "name": "软件工程系", "status": "active"},
+            }
+            self.secondary_by_key = {
+                (item["primary_department_id"], item["name"]): item
+                for item in self.secondary_by_id.values()
+            }
+            self.tertiary_by_id = {
+                111: {"id": 111, "secondary_department_id": 11, "name": "智能软件实验室", "status": "active"},
+            }
+            self.tertiary_by_key = {
+                (item["secondary_department_id"], item["name"]): item
+                for item in self.tertiary_by_id.values()
+            }
+            self.create_calls = 0
+            self.update_calls = 0
+
+        def get_primary_by_name(self, name: str):
+            return self.primary_by_name.get(name)
+
+        def create_primary(self, *, name: str):
+            self.create_calls += 1
+            return 2
+
+        def update_primary_status(self, *, primary_id: int, status: str):
+            self.update_calls += 1
+            self.primary_by_id[primary_id]["status"] = status
+            return 1
+
+        def get_secondary_by_name(self, *, primary_department_id: int, name: str):
+            return self.secondary_by_key.get((primary_department_id, name))
+
+        def create_secondary(self, *, primary_department_id: int, name: str):
+            self.create_calls += 1
+            return 12
+
+        def update_secondary_status(self, *, secondary_id: int, status: str):
+            self.update_calls += 1
+            self.secondary_by_id[secondary_id]["status"] = status
+            return 1
+
+        def get_tertiary_by_name(self, *, secondary_department_id: int, name: str):
+            return self.tertiary_by_key.get((secondary_department_id, name))
+
+        def create_tertiary(self, *, secondary_department_id: int, name: str):
+            self.create_calls += 1
+            return 112
+
+        def update_tertiary_status(self, *, tertiary_id: int, status: str):
+            self.update_calls += 1
+            self.tertiary_by_id[tertiary_id]["status"] = status
+            return 1
+
+    repo = FakeRepository()
+    service = DepartmentImportService(repository=repo)
+    result = service.import_departments(
+        file_bytes=(
+            b"primary_department_name,primary_status,secondary_department_name,secondary_status,tertiary_department_name,tertiary_status\n"
+            b"\xe8\xae\xa1\xe7\xae\x97\xe6\x9c\xba\xe5\xad\xa6\xe9\x99\xa2,active,\xe8\xbd\xaf\xe4\xbb\xb6\xe5\xb7\xa5\xe7\xa8\x8b\xe7\xb3\xbb,active,\xe6\x99\xba\xe8\x83\xbd\xe8\xbd\xaf\xe4\xbb\xb6\xe5\xae\x9e\xe9\xaa\x8c\xe5\xae\xa4,active\n"
+        ),
+        filename="departments.csv",
+    )
+
+    assert result["success"] is True
+    assert result["data"]["summary"] == {"total": 1, "success": 0, "failed": 0, "skipped": 1}
+    assert result["data"]["details"][0]["status"] == "skipped"
+    assert "已存在且未变化" in result["data"]["details"][0]["reason"]
+    assert repo.create_calls == 0
+    assert repo.update_calls == 0
 
 
 def test_department_import_allows_secondary_without_tertiary_when_tertiary_columns_empty():

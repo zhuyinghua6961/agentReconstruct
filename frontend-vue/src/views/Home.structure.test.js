@@ -256,6 +256,19 @@ test('Home splits patent preview streams away from the main final-answer body', 
   assert.match(source, /<div v-if="isPatentFinalAnswerPending\(entry\.message\)" class="patent-preview-pending">正在汇总最终答案\.\.\.<\/div>/)
 })
 
+test('Home renders patent answers with a scoped patent markdown variant without changing graph rendering', () => {
+  assert.match(scriptSource, /function isPatentMessage\(message\)/)
+  assert.match(scriptSource, /function getMessageMarkdownVariant\(message\)/)
+  assert.match(scriptSource, /if \(isGraphKbMessage\(message\)\) return 'graph-kb'/)
+  assert.match(scriptSource, /if \(isPatentMessage\(message\)\) return 'patent-message'/)
+  assert.match(source, /:class="\{ 'graph-kb-markdown': isGraphKbMessage\(entry\.message\), 'patent-markdown': isPatentMessage\(entry\.message\) \}"/)
+  assert.match(source, /:variant="getMessageMarkdownVariant\(entry\.message\)"/)
+  assert.match(source, /variant="patent-preview"/)
+  assert.match(source, /\.message-content\.message-patent\b/)
+  assert.match(source, /\.message-content\.message-patent\s+:deep\(\.patent-markdown h1,\s*\.patent-markdown h2,\s*\.patent-markdown h3\)/)
+  assert.match(source, /\.message-content\.message-patent\s+:deep\(\.patent-markdown \.patent-link\)/)
+})
+
 test('Home scopes busy controls to the current chat instead of globally locking the page', () => {
   assert.match(source, /const isCurrentChatBusy = computed\(\(\) => store\.isChatBusy\(store\.currentChatId\)\)/)
   assert.match(source, /const canSend = computed\(\(\) => inputMessage\.value\.trim\(\) && !isCurrentChatBusy\.value\)/)
@@ -379,7 +392,7 @@ test('Home flushes buffered recoverable content before settling canceled or expi
 test('Home renders streaming and terminal markdown through the shared token renderer', () => {
   assert.match(source, /import MarkdownRenderer from '\.\.\/features\/markdown\/MarkdownRenderer\.vue'/)
   assert.match(source, /:streaming="true"/)
-  assert.match(source, /:variant="isGraphKbMessage\(entry\.message\) \? 'graph-kb' : 'message'"/)
+  assert.match(source, /:variant="getMessageMarkdownVariant\(entry\.message\)"/)
   assert.doesNotMatch(source, /createStreamingHtmlRenderer/)
   assert.doesNotMatch(source, /renderedMessageCache/)
   assert.doesNotMatch(source, /getStreamingMessageHtml/)
@@ -394,9 +407,9 @@ test('Home header no longer renders knowledge-base summary status text', () => {
 })
 
 test('Home scopes graph kb markdown styles through deep selectors instead of global markdown rules', () => {
-  assert.match(source, /class="message-markdown-content"[^>]*:class="\{ 'graph-kb-markdown': isGraphKbMessage\(entry\.message\) \}"/)
-  assert.match(source, /<MarkdownRenderer[\s\S]*:streaming="true"[\s\S]*:variant="isGraphKbMessage\(entry\.message\) \? 'graph-kb' : 'message'"/s)
-  assert.match(source, /<MarkdownRenderer[\s\S]*:variant="isGraphKbMessage\(entry\.message\) \? 'graph-kb' : 'message'"/s)
+  assert.match(source, /class="message-markdown-content"[^>]*:class="\{ 'graph-kb-markdown': isGraphKbMessage\(entry\.message\), 'patent-markdown': isPatentMessage\(entry\.message\) \}"/)
+  assert.match(source, /<MarkdownRenderer[\s\S]*:streaming="true"[\s\S]*:variant="getMessageMarkdownVariant\(entry\.message\)"/s)
+  assert.match(source, /<MarkdownRenderer[\s\S]*:variant="getMessageMarkdownVariant\(entry\.message\)"/s)
   assertGraphScopedSelector('h2')
   assertGraphScopedSelector('h3')
   assertGraphScopedSelector('ul')

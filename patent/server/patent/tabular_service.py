@@ -15,6 +15,13 @@ import httpx
 
 from server.patent.pdf_contract import is_summary_question
 from server.patent.file_models import PatentFileContract
+from server.patent.model_call_logging import (
+    auth_mode_label,
+    log_model_call_failed,
+    log_model_call_start,
+    log_model_call_success,
+    message_chars,
+)
 from server.patent.object_reader import ObjectReader
 from server.patent.streaming import emit_text_chunks, iter_text_output
 from server.patent.tabular_context import build_compare_tabular_context_bundle, build_tabular_context_bundle
@@ -587,7 +594,10 @@ class PatentTabularAnswerClient:
             http_client=self._client,
             timeout_seconds=self._timeout_seconds,
         )
+        endpoint = f"{self._base_url.rstrip('/')}/chat/completions"
         dispatch_started = time.perf_counter()
+        model_call_started = time.perf_counter()
+        response = None
         try:
             request_payload = {
                 "model": self._model,
@@ -606,21 +616,70 @@ class PatentTabularAnswerClient:
                 stream=False,
             )
             apply_openai_compatible_thinking(request_payload, controls)
+            model_call_started = log_model_call_start(
+                _LOGGER,
+                component="llm_tabular",
+                model=self._model,
+                endpoint=endpoint,
+                auth_mode=auth_mode_label(),
+                stream=False,
+                message_count=len(list(request_payload.get("messages") or [])),
+                message_chars_value=message_chars(request_payload.get("messages")),
+                timeout_seconds=self._timeout_seconds,
+                key_present=bool(self._api_key),
+            )
             response = self._client.post(
-                f"{self._base_url.rstrip('/')}/chat/completions",
+                endpoint,
                 headers=auth_headers(self._api_key),
                 json=request_payload,
                 timeout=request_timeout,
             )
         except Exception as exc:
+            log_model_call_failed(
+                _LOGGER,
+                component="llm_tabular",
+                model=self._model,
+                endpoint=endpoint,
+                started_at=model_call_started,
+                exc=exc,
+                auth_mode=auth_mode_label(),
+                status_code=getattr(response, "status_code", None),
+                stream=False,
+            )
             record_patent_dispatch_error(http_client=self._client, started_at=dispatch_started, exc=exc)
             raise
         record_patent_dispatch_success(http_client=self._client, started_at=dispatch_started)
-        response.raise_for_status()
-        payload = response.json()
+        try:
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            log_model_call_failed(
+                _LOGGER,
+                component="llm_tabular",
+                model=self._model,
+                endpoint=endpoint,
+                started_at=model_call_started,
+                exc=exc,
+                auth_mode=auth_mode_label(),
+                status_code=getattr(response, "status_code", None),
+                stream=False,
+            )
+            raise
         choices = list(payload.get("choices") or [])
         message = dict((choices[0] or {}).get("message") or {}) if choices else {}
-        return str(message.get("content") or "").strip()
+        answer = str(message.get("content") or "").strip()
+        log_model_call_success(
+            _LOGGER,
+            component="llm_tabular",
+            model=self._model,
+            endpoint=endpoint,
+            started_at=model_call_started,
+            auth_mode=auth_mode_label(),
+            status_code=getattr(response, "status_code", None),
+            stream=False,
+            answer_chars=len(answer),
+        )
+        return answer
 
     def close(self) -> None:
         if self._owns_http_client:

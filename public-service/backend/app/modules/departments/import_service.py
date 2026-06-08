@@ -7,21 +7,23 @@ from typing import Any
 
 from fastapi.responses import Response
 
+from app.core.import_columns import resolve_column_aliases
 from app.core.spreadsheet import build_xlsx, load_rows
 from app.modules.departments.repository import DepartmentRepository
 from app.modules.departments.service import _is_db_unavailable_error
 
 
-REQUIRED_COLUMNS = [
-    "primary_department_name",
-    "primary_status",
-    "secondary_department_name",
-    "secondary_status",
-]
-OPTIONAL_TERTIARY_COLUMNS = [
-    "tertiary_department_name",
-    "tertiary_status",
-]
+REQUIRED_COLUMN_ALIASES = {
+    "primary_department_name": ("一级部门名称", "primary_department_name"),
+    "primary_status": ("一级状态", "primary_status"),
+    "secondary_department_name": ("二级部门名称", "secondary_department_name"),
+    "secondary_status": ("二级状态", "secondary_status"),
+}
+OPTIONAL_COLUMN_ALIASES = {
+    "tertiary_department_name": ("三级部门名称", "tertiary_department_name"),
+    "tertiary_status": ("三级状态", "tertiary_status"),
+}
+TEMPLATE_HEADERS = ["一级部门名称", "一级状态", "二级部门名称", "二级状态", "三级部门名称", "三级状态"]
 VALID_STATUSES = {"active", "disabled"}
 
 
@@ -52,8 +54,11 @@ class DepartmentImportService:
                 return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
             return {"success": False, "error": "批量导入失败", "code": "IMPORT_ERROR"}
 
-        normalized = {str(col).strip().lower(): col for col in rows["columns"]}
-        missing = [column for column in REQUIRED_COLUMNS if column not in normalized]
+        columns, missing = resolve_column_aliases(
+            rows["columns"],
+            REQUIRED_COLUMN_ALIASES,
+            OPTIONAL_COLUMN_ALIASES,
+        )
         if missing:
             return {
                 "success": False,
@@ -61,12 +66,12 @@ class DepartmentImportService:
                 "code": "VALIDATION_ERROR",
             }
 
-        primary_name_col = normalized["primary_department_name"]
-        primary_status_col = normalized["primary_status"]
-        secondary_name_col = normalized["secondary_department_name"]
-        secondary_status_col = normalized["secondary_status"]
-        tertiary_name_col = normalized.get("tertiary_department_name")
-        tertiary_status_col = normalized.get("tertiary_status")
+        primary_name_col = columns["primary_department_name"]
+        primary_status_col = columns["primary_status"]
+        secondary_name_col = columns["secondary_department_name"]
+        secondary_status_col = columns["secondary_status"]
+        tertiary_name_col = columns.get("tertiary_department_name")
+        tertiary_status_col = columns.get("tertiary_status")
 
         details: list[dict[str, Any]] = []
         success_count = 0
@@ -149,6 +154,28 @@ class DepartmentImportService:
                     details.append({**detail, "status": "failed", "reason": "同一部门组合在文件中存在冲突"})
                     continue
 
+                skip_row, primary_id, secondary_id, tertiary_id = self._is_existing_unchanged_path(
+                    primary_name=primary_name,
+                    primary_status=primary_status,
+                    secondary_name=secondary_name,
+                    secondary_status=secondary_status,
+                    tertiary_name=tertiary_name,
+                    tertiary_status=tertiary_status,
+                )
+                if skip_row:
+                    skipped_count += 1
+                    details.append(
+                        {
+                            **detail,
+                            "status": "skipped",
+                            "reason": "部门已存在且未变化",
+                            "primary_department_id": primary_id,
+                            "secondary_department_id": secondary_id,
+                            "tertiary_department_id": tertiary_id,
+                        }
+                    )
+                    continue
+
                 primary_id = self._upsert_primary(name=primary_name, status=primary_status)
                 secondary_id = self._upsert_secondary(
                     primary_department_id=primary_id,
@@ -198,7 +225,7 @@ class DepartmentImportService:
         if fmt not in {"xlsx", "csv"}:
             return {"success": False, "error": "不支持的格式，只支持xlsx和csv", "code": "INVALID_FORMAT"}
 
-        headers = [*REQUIRED_COLUMNS, *OPTIONAL_TERTIARY_COLUMNS]
+        headers = TEMPLATE_HEADERS
         rows = [
             ["计算机学院", "active", "软件工程系", "active", "人工智能实验室", "active"],
             ["计算机学院", "active", "人工智能系", "disabled", "", ""],
@@ -221,6 +248,41 @@ class DepartmentImportService:
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": 'attachment; filename="department_import_template.xlsx"'},
         )
+
+    def _is_existing_unchanged_path(
+        self,
+        *,
+        primary_name: str,
+        primary_status: str,
+        secondary_name: str,
+        secondary_status: str,
+        tertiary_name: str,
+        tertiary_status: str,
+    ) -> tuple[bool, int | None, int | None, int | None]:
+        primary = self._repository.get_primary_by_name(primary_name)
+        if not primary or self._clean_text(primary.get("status")).lower() != primary_status:
+            return False, None, None, None
+
+        primary_id = int(primary["id"])
+        secondary = self._repository.get_secondary_by_name(
+            primary_department_id=primary_id,
+            name=secondary_name,
+        )
+        if not secondary or self._clean_text(secondary.get("status")).lower() != secondary_status:
+            return False, primary_id, None, None
+
+        secondary_id = int(secondary["id"])
+        if not tertiary_name and not tertiary_status:
+            return True, primary_id, secondary_id, None
+
+        tertiary = self._repository.get_tertiary_by_name(
+            secondary_department_id=secondary_id,
+            name=tertiary_name,
+        )
+        if not tertiary or self._clean_text(tertiary.get("status")).lower() != tertiary_status:
+            return False, primary_id, secondary_id, None
+
+        return True, primary_id, secondary_id, int(tertiary["id"])
 
     def _upsert_primary(self, *, name: str, status: str) -> int:
         primary = self._repository.get_primary_by_name(name)

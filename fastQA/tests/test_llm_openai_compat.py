@@ -140,6 +140,74 @@ def test_openai_compat_logs_llm_auth_success_once(caplog):
     assert "sk-demo-secret" not in auth_ok[0]
 
 
+def test_openai_compat_client_logs_model_call_success(caplog):
+    post_response = _FakeResponse(payload={"choices": [{"message": {"content": "answer"}}]})
+    stream_response = _FakeResponse(lines=["data: [DONE]"])
+    fake_client = _FakeClient(post_response=post_response, stream_response=stream_response)
+    fake_httpx = _FakeHttpx(client=fake_client)
+    client = OpenAICompatClient(
+        httpx_module=fake_httpx,
+        endpoint="https://example.invalid/v1/chat/completions",
+        api_key="Bearer sk-demo-secret",
+    )
+    caplog.set_level(logging.INFO, logger="app.integrations.llm.openai_compat")
+
+    client.chat.completions.create(model="m", messages=[{"role": "user", "content": "hi"}])
+
+    messages = [record.message for record in caplog.records]
+    assert any(
+        "model_call start" in message
+        and "service=fastQA" in message
+        and "component=llm" in message
+        and "model=m" in message
+        and "stream=false" in message
+        and "message_count=1" in message
+        for message in messages
+    )
+    assert any(
+        "model_call success" in message
+        and "service=fastQA" in message
+        and "component=llm" in message
+        and "status_code=200" in message
+        and "answer_chars=6" in message
+        and "elapsed_ms=" in message
+        for message in messages
+    )
+
+
+def test_openai_compat_client_logs_stream_model_call_success(caplog):
+    post_response = _FakeResponse(payload={"choices": [{"message": {"content": "unused"}}]})
+    stream_response = _FakeResponse(
+        lines=[
+            'data: {"choices":[{"delta":{"content":"a"}}]}',
+            'data: {"choices":[{"delta":{"content":"b"}}]}',
+            "data: [DONE]",
+        ]
+    )
+    fake_client = _FakeClient(post_response=post_response, stream_response=stream_response)
+    fake_httpx = _FakeHttpx(client=fake_client)
+    client = OpenAICompatClient(
+        httpx_module=fake_httpx,
+        endpoint="https://example.invalid/v1/chat/completions",
+        api_key="token",
+    )
+    caplog.set_level(logging.INFO, logger="app.integrations.llm.openai_compat")
+
+    chunks = list(client.chat.completions.create(model="m", messages=[{"role": "user", "content": "hi"}], stream=True))
+
+    messages = [record.message for record in caplog.records]
+    assert [chunk.choices[0].delta.content for chunk in chunks] == ["a", "b"]
+    assert any("model_call start" in message and "component=llm" in message and "stream=true" in message for message in messages)
+    assert any(
+        "model_call success" in message
+        and "component=llm" in message
+        and "stream=true" in message
+        and "chunk_count=2" in message
+        and "answer_chars=2" in message
+        for message in messages
+    )
+
+
 def test_openai_compat_client_matches_openai_shape():
     post_response = _FakeResponse(payload={"choices": [{"message": {"content": "answer"}}]})
     stream_response = _FakeResponse(lines=['data: {"choices":[{"delta":{"content":"a"}}]}', "data: [DONE]"])

@@ -233,6 +233,24 @@ def test_patent_query_expander_uses_configurable_http_auth(monkeypatch):
     assert payload["thinking"] == {"type": "disabled"}
 
 
+def test_patent_query_expander_logs_model_call_success(caplog):
+    http_client = _FakeQueryExpansionHttpClient("expanded query")
+    expander = QueryExpander(
+        api_key="query-token",
+        base_url="http://example.invalid/v1",
+        model="query-model",
+        http_client=http_client,
+    )
+
+    with caplog.at_level(logging.INFO, logger="patent.query_expander"):
+        result = expander.expand("battery coating")
+
+    assert result == "expanded query"
+    messages = [record.message for record in caplog.records if record.name == "patent.query_expander"]
+    assert any("model_call start" in message and "component=llm_query_expansion" in message and "model=query-model" in message for message in messages)
+    assert any("model_call success" in message and "component=llm_query_expansion" in message and "answer_chars=14" in message for message in messages)
+
+
 def test_patent_query_expander_normalizes_empty_and_full_chat_endpoint():
     assert _chat_completions_url("") == "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
     assert _chat_completions_url("http://example.invalid/v1/chat/completions") == "http://example.invalid/v1/chat/completions"

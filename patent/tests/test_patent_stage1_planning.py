@@ -523,6 +523,57 @@ def test_patent_planning_client_uses_injected_http_client_and_request_timeout(ca
     assert http_client.closed is False
 
 
+def test_patent_planning_client_logs_model_call_success(caplog):
+    class _FakeHttpClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def post(self, url, *, headers=None, json=None, timeout=None):
+            self.calls.append({"url": str(url), "headers": headers, "json": json, "timeout": timeout})
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", str(url)),
+                json={"choices": [{"message": {"content": "planner response"}}]},
+            )
+
+    http_client = _FakeHttpClient()
+    client = PatentPlanningClient(
+        api_key="test-key",
+        base_url="http://example.invalid",
+        timeout_seconds=17.0,
+        http_client=http_client,
+    )
+
+    with caplog.at_level("INFO", logger="patent.runtime"):
+        response = client.chat.completions.create(
+            model="planner-model",
+            messages=[{"role": "user", "content": "what should we check?"}],
+            temperature=0.2,
+            max_tokens=128,
+            response_format={"type": "json_object"},
+        )
+
+    assert response.choices[0].message.content == "planner response"
+    messages = [record.message for record in caplog.records]
+    assert any(
+        "model_call start" in message
+        and "service=patent" in message
+        and "component=llm_planning" in message
+        and "model=planner-model" in message
+        and "message_count=1" in message
+        and "key_present=True" in message
+        for message in messages
+    )
+    assert any(
+        "model_call success" in message
+        and "service=patent" in message
+        and "component=llm_planning" in message
+        and "status_code=200" in message
+        and "answer_chars=16" in message
+        for message in messages
+    )
+
+
 def test_patent_stage1_planning_logs_prompt_and_llm_boundaries():
     client = _FakeClient('{"deep_answer":"answer","retrieval_claims":[]}')
     logger = _CaptureLogger()

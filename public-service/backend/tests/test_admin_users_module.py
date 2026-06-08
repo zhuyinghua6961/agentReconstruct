@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from app.core.spreadsheet import build_xlsx
+from app.core.spreadsheet import build_xlsx, load_rows
 from app.core.deps import AuthContext
 from app.main import app
 from app.modules.admin_users import api as admin_users_api_module
@@ -446,15 +446,41 @@ def test_admin_batch_import_and_template_routes(monkeypatch):
     assert "attachment; filename=\"user_import_template.csv\"" == template_resp.headers["content-disposition"]
 
 
-def test_admin_import_template_drops_department_columns():
-    response = admin_users_import_service.template_response(fmt="csv")
+def test_admin_import_template_uses_chinese_headers_and_drops_department_columns():
+    csv_response = admin_users_import_service.template_response(fmt="csv")
+    xlsx_response = admin_users_import_service.template_response(fmt="xlsx")
 
-    assert b"primary_department_name" not in response.body
-    assert b"secondary_department_name" not in response.body
-    assert b"tertiary_department_name" not in response.body
+    first_line = csv_response.body.decode("utf-8-sig").splitlines()[0]
+    assert first_line == "用户名,密码,用户类型"
+    assert b"username" not in csv_response.body
+    assert b"password" not in csv_response.body
+    assert b"user_type" not in csv_response.body
+
+    xlsx_rows = load_rows(file_bytes=xlsx_response.body, ext="xlsx")
+    assert xlsx_rows["columns"] == ["用户名", "密码", "用户类型"]
 
 
 def test_admin_import_calls_create_user_without_department_ids(monkeypatch):
+    created = []
+
+    monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
+    monkeypatch.setattr(admin_users_import_service, "_finalize_excel_upload_quota", lambda **kwargs: None)
+    monkeypatch.setattr(
+        admin_users_service,
+        "create_user",
+        lambda **kwargs: created.append(kwargs)
+        or {"success": True, "data": {"id": 1, "username": kwargs["username"], **kwargs}},
+    )
+
+    csv_bytes = "用户名,密码,用户类型\nuser1,Pass123!,common\n".encode("utf-8")
+    result = admin_users_import_service.import_users(file_bytes=csv_bytes, filename="users.csv", actor_user_id=1)
+
+    assert result["success"] is True
+    assert result["data"]["summary"]["success"] == 1
+    assert created == [{"username": "user1", "password": "Pass123!", "user_type": "common"}]
+
+
+def test_admin_import_accepts_legacy_english_headers(monkeypatch):
     created = []
 
     monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
@@ -533,6 +559,156 @@ def test_admin_import_accepts_xlsx_without_department_columns(monkeypatch):
     assert result["success"] is True
     assert result["data"]["summary"]["success"] == 1
     assert created == [{"username": "user1", "password": "Pass123!", "user_type": "common"}]
+
+
+def test_admin_import_skips_existing_account_when_password_and_type_are_unchanged(monkeypatch):
+    existing_hash = admin_users_service.hash_password("Pass123!")
+    created = []
+    updated_passwords = []
+    updated_types = []
+
+    monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
+    monkeypatch.setattr(admin_users_import_service, "_finalize_excel_upload_quota", lambda **kwargs: None)
+    monkeypatch.setattr(
+        admin_users_service.users,
+        "get_by_username",
+        lambda username: {
+            "id": 7,
+            "username": username,
+            "password_hash": existing_hash,
+            "role": "user",
+            "user_type": 3,
+            "status": "active",
+        },
+    )
+    monkeypatch.setattr(
+        admin_users_service,
+        "create_user",
+        lambda **kwargs: created.append(kwargs) or {"success": False, "error": "用户名已存在", "code": "USERNAME_EXISTS"},
+    )
+    monkeypatch.setattr(
+        admin_users_service.users,
+        "update_password_hash",
+        lambda **kwargs: updated_passwords.append(kwargs) or 1,
+    )
+    monkeypatch.setattr(
+        admin_users_service.users,
+        "update_user_type",
+        lambda **kwargs: updated_types.append(kwargs) or 1,
+    )
+
+    csv_bytes = "用户名,密码,用户类型\nuser1,Pass123!,common\n".encode("utf-8")
+    result = admin_users_import_service.import_users(file_bytes=csv_bytes, filename="users.csv", actor_user_id=1)
+
+    assert result["success"] is True
+    assert result["data"]["summary"] == {
+        "total": 1,
+        "success": 0,
+        "updated": 0,
+        "failed": 0,
+        "skipped": 1,
+    }
+    assert result["data"]["details"][0]["status"] == "skipped"
+    assert "未变化" in result["data"]["details"][0]["reason"]
+    assert created == []
+    assert updated_passwords == []
+    assert updated_types == []
+
+
+def test_admin_import_updates_existing_account_when_password_or_type_changes(monkeypatch):
+    old_hash = admin_users_service.hash_password("Pass123!")
+    updates = {"password_hashes": [], "user_types": [], "history": [], "trim": [], "first_login": [], "security": []}
+
+    monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
+    monkeypatch.setattr(admin_users_import_service, "_finalize_excel_upload_quota", lambda **kwargs: None)
+    monkeypatch.setattr(
+        admin_users_service.users,
+        "get_by_username",
+        lambda username: {
+            "id": 7,
+            "username": username,
+            "password_hash": old_hash,
+            "role": "user",
+            "user_type": 3,
+            "status": "active",
+        },
+    )
+    monkeypatch.setattr(
+        admin_users_service,
+        "create_user",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("existing account should be updated, not created")),
+    )
+    monkeypatch.setattr(
+        admin_users_service.users,
+        "update_password_hash",
+        lambda **kwargs: updates["password_hashes"].append(kwargs) or 1,
+    )
+    monkeypatch.setattr(
+        admin_users_service.users,
+        "update_user_type",
+        lambda **kwargs: updates["user_types"].append(kwargs) or 1,
+    )
+    monkeypatch.setattr(
+        admin_users_service.users,
+        "add_password_history",
+        lambda **kwargs: updates["history"].append(kwargs) or 1,
+    )
+    monkeypatch.setattr(
+        admin_users_service.users,
+        "trim_password_history",
+        lambda **kwargs: updates["trim"].append(kwargs) or 1,
+    )
+    monkeypatch.setattr(
+        admin_users_service.users,
+        "mark_first_login_required",
+        lambda **kwargs: updates["first_login"].append(kwargs) or 1,
+    )
+    monkeypatch.setattr(
+        admin_users_service.users,
+        "set_security_setup_required",
+        lambda **kwargs: updates["security"].append(kwargs) or 1,
+    )
+
+    csv_bytes = "用户名,密码,用户类型\nuser1,NewPass123!,super\n".encode("utf-8")
+    result = admin_users_import_service.import_users(file_bytes=csv_bytes, filename="users.csv", actor_user_id=1)
+
+    assert result["success"] is True
+    assert result["data"]["summary"] == {
+        "total": 1,
+        "success": 0,
+        "updated": 1,
+        "failed": 0,
+        "skipped": 0,
+    }
+    detail = result["data"]["details"][0]
+    assert detail["status"] == "updated"
+    assert "密码" in detail["message"]
+    assert "用户类型" in detail["message"]
+    assert updates["password_hashes"][0]["user_id"] == 7
+    assert updates["password_hashes"][0]["password_hash"] != old_hash
+    assert updates["user_types"] == [{"user_id": 7, "user_type": 2}]
+    assert updates["history"][0]["user_id"] == 7
+    assert updates["trim"] == [{"user_id": 7, "keep_limit": 3}]
+    assert updates["first_login"] == [{"user_id": 7}]
+    assert updates["security"] == [{"user_id": 7, "required": True}]
+
+
+def test_admin_import_rejects_duplicate_usernames_inside_same_file(monkeypatch):
+    created = []
+
+    monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
+    monkeypatch.setattr(admin_users_import_service, "_finalize_excel_upload_quota", lambda **kwargs: None)
+    monkeypatch.setattr(admin_users_service, "create_user", lambda **kwargs: created.append(kwargs))
+
+    csv_bytes = "用户名,密码,用户类型\nuser1,Pass123!,common\nuser1,NewPass123!,super\n".encode("utf-8")
+    result = admin_users_import_service.import_users(file_bytes=csv_bytes, filename="users.csv", actor_user_id=1)
+
+    assert result == {
+        "success": False,
+        "error": "导入文件中存在重复用户名: user1（行号: 2,3）",
+        "code": "VALIDATION_ERROR",
+    }
+    assert created == []
 
 
 def test_admin_import_quota_precheck_returns_db_unavailable_on_actor_lookup_failure(monkeypatch):

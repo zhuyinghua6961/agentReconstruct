@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import httpx
 import pytest
 from types import SimpleNamespace
@@ -138,6 +139,50 @@ def test_run_intent_detect_uses_dedicated_endpoint_when_key_is_configured(monkey
     assert calls[0]["json"]["model"] == "intent-model"
     assert calls[0]["json"]["enable_thinking"] is False
     assert "thinking" not in calls[0]["json"]
+
+
+def test_run_intent_detect_dedicated_endpoint_logs_model_call(monkeypatch, caplog):
+    calls: list[dict] = []
+
+    class _Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "comparative_tradeoff"}}]}
+
+    def _post(url, **kwargs):
+        calls.append({"url": url, **kwargs})
+        return _Response()
+
+    monkeypatch.setenv("INTENT_MODEL_API_KEY", "intent-key")
+    monkeypatch.setenv("INTENT_MODEL_BASE_URL", "https://intent.example/v1")
+    monkeypatch.setenv("INTENT_MODEL", "intent-model")
+    monkeypatch.setattr(idetect.httpx, "post", _post)
+    caplog.set_level(logging.INFO, logger="server.patent.intent_detect")
+
+    got = run_intent_detect_quick_tag(client=object(), user_question="对比两种路线？", logger=_Logger())
+
+    messages = [record.message for record in caplog.records]
+    assert got["ok"] is True
+    assert any(
+        "model_call start" in message
+        and "service=patent" in message
+        and "component=llm_intent" in message
+        and "model=intent-model" in message
+        and "message_count=2" in message
+        for message in messages
+    )
+    assert any(
+        "model_call success" in message
+        and "component=llm_intent" in message
+        and "status_code=200" in message
+        and "answer_chars=" in message
+        and "elapsed_ms=" in message
+        for message in messages
+    )
 
 
 def test_run_intent_detect_normalizes_full_chat_completion_base_url(monkeypatch):

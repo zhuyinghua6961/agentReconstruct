@@ -464,7 +464,7 @@ def test_public_proxy_registers_personnel_route_methods():
     assert methods_by_path["/api/auth/personnel-binding"] == {"PUT"}
     assert methods_by_path["/api/v1/auth/personnel-binding"] == {"PUT"}
     assert methods_by_path["/api/admin/personnel"] == {"GET", "POST"}
-    assert methods_by_path["/api/admin/personnel/{personnel_id}"] == {"PUT"}
+    assert methods_by_path["/api/admin/personnel/{personnel_id}"] == {"PUT", "DELETE"}
     assert methods_by_path["/api/admin/personnel/{personnel_id}/status"] == {"PUT"}
     assert methods_by_path["/api/admin/personnel/{personnel_id}/bindings"] == {"GET"}
     assert methods_by_path["/api/admin/personnel/batch-import"] == {"POST"}
@@ -719,6 +719,13 @@ def test_public_proxy_keeps_auth_department_routes_in_api_and_v1_parity():
             "/api/admin/personnel/9",
             "/api/admin/personnel/9",
             {"full_name": "张三老师", "remarks": "updated"},
+            b"",
+        ),
+        (
+            "DELETE",
+            "/api/admin/personnel/9",
+            "/api/admin/personnel/9",
+            None,
             b"",
         ),
         (

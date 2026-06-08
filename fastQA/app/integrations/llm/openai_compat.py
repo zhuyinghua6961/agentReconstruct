@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from app.integrations.llm.upstream_auth_logging import (
 )
 
 DEFAULT_LLM_COMPATIBLE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+_LOGGER = logging.getLogger(__name__)
 
 
 def _coerce_text_content(content: Any) -> str:
@@ -113,6 +115,16 @@ def extract_openai_compatible_text(payload: Any) -> str:
 
 def _httpx_timeout(httpx_module: Any, *, connect: float, read: float, write: float, pool: float) -> Any:
     return httpx_module.Timeout(connect=connect, read=read, write=write, pool=pool)
+
+
+def _bool_text(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _message_chars(messages: Any) -> int:
+    if not isinstance(messages, list):
+        return 0
+    return sum(len(_coerce_text_content((item or {}).get("content") if isinstance(item, Mapping) else "")) for item in messages)
 
 @dataclass(frozen=True)
 class _ClientConfig:
@@ -277,10 +289,8 @@ class _OpenAICompatBase(_TimingMixin):
             record(wait_ms=wait_ms)
 
     def _log_auth_success(self, *, model: str, status_code: Any = None) -> None:
-        import logging
-
         log_upstream_auth_success_once(
-            logger=logging.getLogger(__name__),
+            logger=_LOGGER,
             service="fastQA",
             endpoint="chat",
             model=str(model or ""),
@@ -291,10 +301,8 @@ class _OpenAICompatBase(_TimingMixin):
         )
 
     def _log_auth_failure(self, *, model: str, status_code: Any = None, exc: Exception | None = None) -> None:
-        import logging
-
         log_upstream_auth_failure(
-            logger=logging.getLogger(__name__),
+            logger=_LOGGER,
             service="fastQA",
             endpoint="chat",
             model=str(model or ""),
@@ -303,6 +311,79 @@ class _OpenAICompatBase(_TimingMixin):
             status_code=status_code,
             exc=exc,
             auth_mode=self._auth_mode(),
+        )
+
+    def _log_model_call_start(
+        self,
+        *,
+        component: str,
+        model: str,
+        stream: bool,
+        message_count: int,
+        message_chars: int,
+    ) -> float:
+        started_at = time.monotonic()
+        _LOGGER.info(
+            "model_call start service=fastQA component=%s model=%s endpoint=%s auth_mode=%s "
+            "stream=%s message_count=%s message_chars=%s key_present=%s",
+            component,
+            str(model or ""),
+            self._cfg.endpoint,
+            self._auth_mode(),
+            _bool_text(stream),
+            int(message_count),
+            int(message_chars),
+            bool(str(self._cfg.api_key or "").strip()),
+        )
+        return started_at
+
+    def _log_model_call_success(
+        self,
+        *,
+        component: str,
+        model: str,
+        started_at: float,
+        status_code: Any = None,
+        stream: bool,
+        answer_chars: int,
+        chunk_count: int | None = None,
+    ) -> None:
+        chunk_field = f" chunk_count={int(chunk_count)}" if chunk_count is not None else ""
+        _LOGGER.info(
+            "model_call success service=fastQA component=%s model=%s endpoint=%s auth_mode=%s "
+            "status_code=%s stream=%s answer_chars=%s%s elapsed_ms=%.2f",
+            component,
+            str(model or ""),
+            self._cfg.endpoint,
+            self._auth_mode(),
+            status_code,
+            _bool_text(stream),
+            int(answer_chars),
+            chunk_field,
+            (time.monotonic() - started_at) * 1000.0,
+        )
+
+    def _log_model_call_failed(
+        self,
+        *,
+        component: str,
+        model: str,
+        started_at: float,
+        exc: Exception,
+        status_code: Any = None,
+        stream: bool,
+    ) -> None:
+        _LOGGER.warning(
+            "model_call failed service=fastQA component=%s model=%s endpoint=%s auth_mode=%s "
+            "status_code=%s stream=%s elapsed_ms=%.2f error_type=%s",
+            component,
+            str(model or ""),
+            self._cfg.endpoint,
+            self._auth_mode(),
+            status_code,
+            _bool_text(stream),
+            (time.monotonic() - started_at) * 1000.0,
+            type(exc).__name__,
         )
 
     def _is_pool_timeout(self, exc: Exception) -> bool:
@@ -471,7 +552,13 @@ class OpenAICompatChatAdapter(_OpenAICompatBase):
         messages = normalize_messages(payload)
         if not messages:
             return SimpleNamespace(content="")
-        started_at = time.monotonic()
+        started_at = self._log_model_call_start(
+            component="llm",
+            model=self._model,
+            stream=False,
+            message_count=len(messages),
+            message_chars=_message_chars(messages),
+        )
         thinking_controls = resolve_thinking_controls(
             stage=LLM_STAGE_STAGE4_FINAL_ANSWER,
             max_tokens=self._max_tokens,
@@ -500,21 +587,46 @@ class OpenAICompatChatAdapter(_OpenAICompatBase):
         )
         if request_timeout is not None:
             request_kwargs["timeout"] = request_timeout
+        response = None
         try:
             response = self._client.post(
                 self._cfg.endpoint,
                 **request_kwargs,
             )
         except Exception as exc:
+            self._log_model_call_failed(
+                component="llm",
+                model=self._model,
+                started_at=started_at,
+                exc=exc,
+                status_code=getattr(response, "status_code", None),
+                stream=False,
+            )
             self._handle_transport_error(stage="openai_compat_invoke_error", started_at=started_at, exc=exc)
         try:
             response.raise_for_status()
         except Exception as exc:
             self._log_auth_failure(model=self._model, status_code=getattr(response, "status_code", None), exc=exc)
+            self._log_model_call_failed(
+                component="llm",
+                model=self._model,
+                started_at=started_at,
+                exc=exc,
+                status_code=getattr(response, "status_code", None),
+                stream=False,
+            )
             raise
         self._log_auth_success(model=self._model, status_code=getattr(response, "status_code", None))
         body = response.json()
         content = extract_openai_compatible_text(body)
+        self._log_model_call_success(
+            component="llm",
+            model=self._model,
+            started_at=started_at,
+            status_code=getattr(response, "status_code", None),
+            stream=False,
+            answer_chars=len(content),
+        )
         self._log_transport_success(
             "openai_compat_invoke_done",
             started_at,
@@ -536,7 +648,13 @@ class OpenAICompatChatAdapter(_OpenAICompatBase):
         messages = normalize_messages(payload)
         if not messages:
             return
-        request_started_at = time.monotonic()
+        request_started_at = self._log_model_call_start(
+            component="llm",
+            model=self._model,
+            stream=True,
+            message_count=len(messages),
+            message_chars=_message_chars(messages),
+        )
         self._log_timing("openai_compat_stream_start", request_started_at, message_count=len(messages))
         first_chunk_logged = False
         thinking_controls = resolve_thinking_controls(
@@ -567,6 +685,7 @@ class OpenAICompatChatAdapter(_OpenAICompatBase):
         )
         if request_timeout is not None:
             request_kwargs["timeout"] = request_timeout
+        response = None
         try:
             stream_context = self._client.stream(
                 "POST",
@@ -574,6 +693,14 @@ class OpenAICompatChatAdapter(_OpenAICompatBase):
                 **request_kwargs,
             )
         except Exception as exc:
+            self._log_model_call_failed(
+                component="llm",
+                model=self._model,
+                started_at=request_started_at,
+                exc=exc,
+                status_code=getattr(response, "status_code", None),
+                stream=True,
+            )
             self._handle_transport_error(stage="openai_compat_stream_error", started_at=request_started_at, exc=exc)
         try:
             with stream_context as response:
@@ -581,6 +708,14 @@ class OpenAICompatChatAdapter(_OpenAICompatBase):
                     response.raise_for_status()
                 except Exception as exc:
                     self._log_auth_failure(model=self._model, status_code=getattr(response, "status_code", None), exc=exc)
+                    self._log_model_call_failed(
+                        component="llm",
+                        model=self._model,
+                        started_at=request_started_at,
+                        exc=exc,
+                        status_code=getattr(response, "status_code", None),
+                        stream=True,
+                    )
                     raise
                 self._log_auth_success(model=self._model, status_code=getattr(response, "status_code", None))
                 self._log_transport_success(
@@ -590,6 +725,8 @@ class OpenAICompatChatAdapter(_OpenAICompatBase):
                 )
                 iter_started_at = time.monotonic()
                 reasoning_chars = 0
+                chunk_count = 0
+                answer_chars = 0
                 for payload_json in self._iter_sse_json(response):
                     choices = payload_json.get("choices") or []
                     if choices:
@@ -600,13 +737,32 @@ class OpenAICompatChatAdapter(_OpenAICompatBase):
                     content = extract_openai_compatible_text(payload_json)
                     if not content:
                         continue
+                    chunk_count += 1
+                    answer_chars += len(content)
                     if not first_chunk_logged:
                         self._log_timing("openai_compat_first_chunk", iter_started_at, first_chunk_chars=len(content))
                         first_chunk_logged = True
                     yield SimpleNamespace(content=content)
                 if reasoning_chars and self._logger is not None:
                     self._logger.info("openai_compat_stream reasoning_chars=%s thinking_enabled=%s", reasoning_chars, thinking_controls.enabled)
+                self._log_model_call_success(
+                    component="llm",
+                    model=self._model,
+                    started_at=request_started_at,
+                    status_code=getattr(response, "status_code", None),
+                    stream=True,
+                    answer_chars=answer_chars,
+                    chunk_count=chunk_count,
+                )
         except Exception as exc:
+            self._log_model_call_failed(
+                component="llm",
+                model=self._model,
+                started_at=request_started_at,
+                exc=exc,
+                status_code=getattr(response, "status_code", None),
+                stream=True,
+            )
             self._handle_transport_error(stage="openai_compat_stream_error", started_at=request_started_at, exc=exc)
 
 
@@ -728,7 +884,13 @@ class OpenAICompatClient(_OpenAICompatBase):
         write_timeout_seconds: float | None,
         pool_timeout_seconds: float | None,
     ) -> Any:
-        started_at = time.monotonic()
+        started_at = self._log_model_call_start(
+            component="llm",
+            model=model,
+            stream=False,
+            message_count=len(messages),
+            message_chars=_message_chars(messages),
+        )
         request_kwargs: dict[str, Any] = {
             "headers": self._headers(),
             "json": self._build_payload(
@@ -753,21 +915,46 @@ class OpenAICompatClient(_OpenAICompatBase):
         )
         if request_timeout is not None:
             request_kwargs["timeout"] = request_timeout
+        response = None
         try:
             response = self._client.post(
                 self._cfg.endpoint,
                 **request_kwargs,
             )
         except Exception as exc:
+            self._log_model_call_failed(
+                component="llm",
+                model=model,
+                started_at=started_at,
+                exc=exc,
+                status_code=getattr(response, "status_code", None),
+                stream=False,
+            )
             self._handle_transport_error(stage="openai_compat_client_invoke_error", started_at=started_at, exc=exc)
         try:
             response.raise_for_status()
         except Exception as exc:
             self._log_auth_failure(model=model, status_code=getattr(response, "status_code", None), exc=exc)
+            self._log_model_call_failed(
+                component="llm",
+                model=model,
+                started_at=started_at,
+                exc=exc,
+                status_code=getattr(response, "status_code", None),
+                stream=False,
+            )
             raise
         self._log_auth_success(model=model, status_code=getattr(response, "status_code", None))
         body = response.json()
         content = extract_openai_compatible_text(body)
+        self._log_model_call_success(
+            component="llm",
+            model=model,
+            started_at=started_at,
+            status_code=getattr(response, "status_code", None),
+            stream=False,
+            answer_chars=len(content),
+        )
         self._log_transport_success(
             "openai_compat_client_invoke_done",
             started_at,
@@ -794,7 +981,13 @@ class OpenAICompatClient(_OpenAICompatBase):
         write_timeout_seconds: float | None,
         pool_timeout_seconds: float | None,
     ) -> Iterator[Any]:
-        request_started_at = time.monotonic()
+        request_started_at = self._log_model_call_start(
+            component="llm",
+            model=model,
+            stream=True,
+            message_count=len(messages),
+            message_chars=_message_chars(messages),
+        )
         self._log_timing("openai_compat_client_stream_start", request_started_at, message_count=len(messages))
         first_chunk_logged = False
         request_kwargs: dict[str, Any] = {
@@ -821,6 +1014,7 @@ class OpenAICompatClient(_OpenAICompatBase):
         )
         if request_timeout is not None:
             request_kwargs["timeout"] = request_timeout
+        response = None
         try:
             stream_context = self._client.stream(
                 "POST",
@@ -828,6 +1022,14 @@ class OpenAICompatClient(_OpenAICompatBase):
                 **request_kwargs,
             )
         except Exception as exc:
+            self._log_model_call_failed(
+                component="llm",
+                model=model,
+                started_at=request_started_at,
+                exc=exc,
+                status_code=getattr(response, "status_code", None),
+                stream=True,
+            )
             self._handle_transport_error(stage="openai_compat_client_stream_error", started_at=request_started_at, exc=exc)
         try:
             with stream_context as response:
@@ -835,6 +1037,14 @@ class OpenAICompatClient(_OpenAICompatBase):
                     response.raise_for_status()
                 except Exception as exc:
                     self._log_auth_failure(model=model, status_code=getattr(response, "status_code", None), exc=exc)
+                    self._log_model_call_failed(
+                        component="llm",
+                        model=model,
+                        started_at=request_started_at,
+                        exc=exc,
+                        status_code=getattr(response, "status_code", None),
+                        stream=True,
+                    )
                     raise
                 self._log_auth_success(model=model, status_code=getattr(response, "status_code", None))
                 self._log_transport_success(
@@ -843,15 +1053,36 @@ class OpenAICompatClient(_OpenAICompatBase):
                     message_count=len(messages),
                 )
                 iter_started_at = time.monotonic()
+                chunk_count = 0
+                answer_chars = 0
                 for payload_json in self._iter_sse_json(response):
                     content = extract_openai_compatible_text(payload_json)
                     if not content:
                         continue
+                    chunk_count += 1
+                    answer_chars += len(content)
                     if not first_chunk_logged:
                         self._log_timing("openai_compat_client_first_chunk", iter_started_at, first_chunk_chars=len(content))
                         first_chunk_logged = True
                     yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=content))])
+                self._log_model_call_success(
+                    component="llm",
+                    model=model,
+                    started_at=request_started_at,
+                    status_code=getattr(response, "status_code", None),
+                    stream=True,
+                    answer_chars=answer_chars,
+                    chunk_count=chunk_count,
+                )
         except Exception as exc:
+            self._log_model_call_failed(
+                component="llm",
+                model=model,
+                started_at=request_started_at,
+                exc=exc,
+                status_code=getattr(response, "status_code", None),
+                stream=True,
+            )
             self._handle_transport_error(stage="openai_compat_client_stream_error", started_at=request_started_at, exc=exc)
 
 

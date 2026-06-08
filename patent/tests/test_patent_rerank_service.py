@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from server.patent.rerank_service import build_patent_stage2_rerank_fn, rerank_patent_stage2_documents
 
 
@@ -112,6 +114,72 @@ def test_patent_rerank_payload_does_not_send_legacy_return_documents():
         "documents": ["doc-a"],
         "top_n": 1,
     }
+
+
+def test_patent_rerank_logs_model_call_success(caplog):
+    requests = _Requests({"results": [{"index": 0, "relevance_score": 0.95}]})
+    caplog.set_level(logging.INFO, logger="server.patent.rerank_service")
+
+    result = rerank_patent_stage2_documents(
+        query="thermal",
+        documents=["doc-a", "doc-b"],
+        top_n=1,
+        provider="local",
+        api_key="Bearer key-1",
+        model="qwen3-vl-rerank",
+        base_url="http://localhost:8084",
+        requests_module=requests,
+    )
+
+    messages = [record.message for record in caplog.records]
+    assert result["fallback"] is False
+    assert any(
+        "model_call start" in message
+        and "service=patent" in message
+        and "component=rerank" in message
+        and "model=qwen3-vl-rerank" in message
+        and "auth_mode=bearer" in message
+        and "candidate_count=2" in message
+        for message in messages
+    )
+    assert any(
+        "model_call success" in message
+        and "component=rerank" in message
+        and "selected=1" in message
+        and "elapsed_ms=" in message
+        for message in messages
+    )
+
+
+def test_patent_rerank_logs_model_call_failure(caplog):
+    class _FailingRequests:
+        def post(self, endpoint, *, headers, json, timeout):
+            raise RuntimeError("boom")
+
+    caplog.set_level(logging.WARNING, logger="server.patent.rerank_service")
+
+    result = rerank_patent_stage2_documents(
+        query="thermal",
+        documents=["doc-a"],
+        top_n=1,
+        provider="local",
+        model="qwen3-vl-rerank",
+        base_url="http://localhost:8084",
+        requests_module=_FailingRequests(),
+    )
+
+    messages = [record.message for record in caplog.records]
+    assert result["fallback"] is True
+    assert any(
+        "model_call failed" in message
+        and "service=patent" in message
+        and "component=rerank" in message
+        and "model=qwen3-vl-rerank" in message
+        and "fallback=true" in message
+        and "reason=request_failed" in message
+        and "error_type=RuntimeError" in message
+        for message in messages
+    )
 
 
 def test_patent_rerank_fn_reads_unified_env_and_does_not_require_runtime_injection(monkeypatch):

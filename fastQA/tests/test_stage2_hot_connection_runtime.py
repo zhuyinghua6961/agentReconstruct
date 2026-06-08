@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 from app.core.config import get_settings
@@ -218,6 +219,43 @@ def test_stage2_rerank_warmup_ignores_retired_provider_argument():
 
     assert calls["endpoint"] == "http://reranker/v1/rerank"
     assert calls["headers"] == {"Content-Type": "application/json"}
+
+
+def test_stage2_rerank_warmup_logs_model_call_success(caplog):
+    from app.core.runtime import _warm_stage2_rerank_lane
+
+    class _Session:
+        def post(self, endpoint, headers, json, timeout):
+            return SimpleNamespace(status_code=200, raise_for_status=lambda: None, json=lambda: {"ok": True})
+
+    caplog.set_level(logging.INFO, logger="app.core.runtime")
+
+    _warm_stage2_rerank_lane(
+        lane=SimpleNamespace(session=_Session()),
+        provider="disabled",
+        api_key="rerank-key",
+        model="m",
+        base_url="http://reranker",
+        timeout_seconds=1.0,
+        reason="test",
+    )
+
+    messages = [record.message for record in caplog.records]
+    assert any(
+        "model_call start" in message
+        and "service=fastQA" in message
+        and "component=rerank_warmup" in message
+        and "model=m" in message
+        and "key_present=True" in message
+        for message in messages
+    )
+    assert any(
+        "model_call success" in message
+        and "service=fastQA" in message
+        and "component=rerank_warmup" in message
+        and "status_code=200" in message
+        for message in messages
+    )
 
 
 def test_stage2_rerank_warmup_skips_missing_base_url_without_http_call():

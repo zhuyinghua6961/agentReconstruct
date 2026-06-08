@@ -519,6 +519,213 @@ def _looks_like_embedding_vector(value: Any) -> bool:
     return isinstance(first, (int, float)) and not isinstance(first, bool)
 
 
+def _message_chars(messages: Any) -> int:
+    if not isinstance(messages, list):
+        return 0
+    total = 0
+    for item in messages:
+        if isinstance(item, dict):
+            total += len(str(item.get("content") or ""))
+    return total
+
+
+def _input_items(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return list(value)
+    if value is None:
+        return []
+    return [value]
+
+
+def _input_chars(value: Any) -> int:
+    return sum(len(str(item or "")) for item in _input_items(value))
+
+
+def _probe_start_metrics(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+    kind_norm = str(kind or "").strip().lower()
+    if kind_norm == "chat":
+        messages = list(payload.get("messages") or [])
+        return {
+            "message_count": len(messages),
+            "message_chars": _message_chars(messages),
+        }
+    if kind_norm == "embedding":
+        input_value = payload.get("input")
+        return {
+            "input_count": len(_input_items(input_value)),
+            "input_chars": _input_chars(input_value),
+            "dimensions_param_present": "dimensions" in payload,
+        }
+    if kind_norm == "rerank":
+        documents = list(payload.get("documents") or [])
+        return {
+            "query_chars": len(str(payload.get("query") or "")),
+            "candidate_count": len(documents),
+            "document_chars": sum(len(str(item or "")) for item in documents),
+            "top_n": payload.get("top_n"),
+        }
+    return {
+        "input_count": len(_input_items(payload.get("input"))),
+        "input_chars": _input_chars(payload.get("input")),
+    }
+
+
+def _probe_failure_reason(
+    *,
+    status_ok: bool,
+    status_code: int,
+    response_truncated: bool,
+    transport_error: str,
+    result_message: str,
+) -> tuple[str, str]:
+    if status_code and not status_ok:
+        return "http_error", "upstream_http_error"
+    if transport_error:
+        return "transport_error", "transport_error"
+    if status_ok and response_truncated:
+        return "response_truncated", "response_truncated"
+    if status_ok and result_message:
+        return "invalid_model_response", "model_response_invalid"
+    return "unrecognized_response", "model_response_invalid"
+
+
+def _log_model_status_config_summary(*, summary: dict[str, Any], endpoints: list[dict[str, Any]]) -> None:
+    logger.info(
+        "admin_model_status config_summary probe_method=config_only total=%s configured=%s unconfigured=%s "
+        "disabled=%s test_supported=%s",
+        summary.get("total"),
+        summary.get("configured"),
+        summary.get("unconfigured"),
+        summary.get("disabled"),
+        summary.get("test_supported"),
+    )
+    for item in endpoints:
+        logger.info(
+            "admin_model_status config_endpoint id=%s label=%s kind=%s status=%s enabled=%s configured=%s "
+            "test_supported=%s model=%s base_url=%s endpoint=%s auth_mode=%s key_present=%s "
+            "key_input_has_bearer=%s key_fingerprint=%s expected_dimension=%s",
+            str(item.get("id") or ""),
+            str(item.get("label") or ""),
+            str(item.get("kind") or ""),
+            str(item.get("status") or ""),
+            bool(item.get("enabled")),
+            bool(item.get("configured")),
+            bool(item.get("test_supported")),
+            str(item.get("model") or ""),
+            str(item.get("base_url") or ""),
+            str(item.get("endpoint_url") or ""),
+            str(item.get("auth_mode") or ""),
+            bool(item.get("api_key_present")),
+            bool(item.get("api_key_input_has_bearer")),
+            str(item.get("key_fingerprint") or ""),
+            item.get("expected_dimension"),
+        )
+
+
+def _log_model_status_probe_start(
+    *,
+    endpoint_id: str,
+    public_spec: dict[str, Any],
+    payload: dict[str, Any],
+    timeout_seconds: float,
+) -> None:
+    metrics = _probe_start_metrics(str(public_spec.get("kind") or ""), payload)
+    logger.info(
+        "admin_model_status probe_start id=%s label=%s kind=%s model=%s base_url=%s endpoint=%s "
+        "auth_mode=%s key_present=%s key_input_has_bearer=%s key_fingerprint=%s timeout_seconds=%s "
+        "message_count=%s message_chars=%s input_count=%s input_chars=%s query_chars=%s "
+        "candidate_count=%s document_chars=%s top_n=%s dimensions_param_present=%s expected_dimension=%s",
+        endpoint_id,
+        str(public_spec.get("label") or ""),
+        str(public_spec.get("kind") or ""),
+        str(public_spec.get("model") or ""),
+        str(public_spec.get("base_url") or ""),
+        str(public_spec.get("endpoint_url") or ""),
+        str(public_spec.get("auth_mode") or ""),
+        bool(public_spec.get("api_key_present")),
+        bool(public_spec.get("api_key_input_has_bearer")),
+        str(public_spec.get("key_fingerprint") or ""),
+        float(timeout_seconds),
+        metrics.get("message_count"),
+        metrics.get("message_chars"),
+        metrics.get("input_count"),
+        metrics.get("input_chars"),
+        metrics.get("query_chars"),
+        metrics.get("candidate_count"),
+        metrics.get("document_chars"),
+        metrics.get("top_n"),
+        bool(metrics.get("dimensions_param_present")),
+        public_spec.get("expected_dimension"),
+    )
+
+
+def _log_model_status_probe_result(
+    *,
+    endpoint_id: str,
+    public_spec: dict[str, Any],
+    result_ok: bool,
+    test_status: str,
+    status_code: int,
+    elapsed_ms: float,
+    response_truncated: bool,
+    diagnostics: dict[str, Any],
+    transport_error: str,
+) -> None:
+    kind = str(public_spec.get("kind") or "").strip().lower()
+    answer_present = None
+    if kind == "chat":
+        answer_present = bool(diagnostics.get("ok"))
+    detected_dimension = diagnostics.get("detected_dimension")
+    expected_dimension = diagnostics.get("expected_dimension")
+    if result_ok:
+        logger.info(
+            "admin_model_status probe_success id=%s kind=%s model=%s endpoint=%s auth_mode=%s "
+            "status_code=%s ok=%s test_status=%s elapsed_ms=%s response_truncated=%s "
+            "answer_present=%s detected_dimension=%s expected_dimension=%s",
+            endpoint_id,
+            kind,
+            str(public_spec.get("model") or ""),
+            str(public_spec.get("endpoint_url") or ""),
+            str(public_spec.get("auth_mode") or ""),
+            status_code or None,
+            result_ok,
+            test_status,
+            elapsed_ms,
+            response_truncated,
+            answer_present,
+            detected_dimension,
+            expected_dimension,
+        )
+        return
+
+    reason, error_type = _probe_failure_reason(
+        status_ok=200 <= int(status_code or 0) < 300,
+        status_code=int(status_code or 0),
+        response_truncated=response_truncated,
+        transport_error=transport_error,
+        result_message=str(diagnostics.get("message") or ""),
+    )
+    logger.warning(
+        "admin_model_status probe_failed id=%s kind=%s model=%s endpoint=%s auth_mode=%s "
+        "status_code=%s ok=%s test_status=%s elapsed_ms=%s response_truncated=%s reason=%s "
+        "error_type=%s detected_dimension=%s expected_dimension=%s",
+        endpoint_id,
+        kind,
+        str(public_spec.get("model") or ""),
+        str(public_spec.get("endpoint_url") or ""),
+        str(public_spec.get("auth_mode") or ""),
+        status_code or None,
+        result_ok,
+        test_status,
+        elapsed_ms,
+        response_truncated,
+        reason,
+        error_type,
+        detected_dimension,
+        expected_dimension,
+    )
+
+
 class SystemService:
     @staticmethod
     def _ttl_or_none(runtime: PublicServiceRuntime, key: str) -> int | None:
@@ -647,6 +854,7 @@ class SystemService:
             "disabled": sum(1 for item in endpoints if item["status"] == "disabled"),
             "test_supported": sum(1 for item in endpoints if item["test_supported"]),
         }
+        _log_model_status_config_summary(summary=summary, endpoints=endpoints)
         return {
             "success": True,
             "data": {
@@ -668,10 +876,23 @@ class SystemService:
         specs = {str(spec.get("id") or ""): spec for spec in _model_status_specs()}
         spec = specs.get(endpoint_id)
         if spec is None:
+            logger.warning("admin_model_status probe_failed id=%s reason=endpoint_not_found error_type=config_missing", endpoint_id)
             return {"success": False, "error": "model_endpoint_not_found", "message": "模型配置不存在"}, 404
 
         public_spec = _public_endpoint_spec(spec)
         if not public_spec["test_supported"]:
+            logger.info(
+                "admin_model_status probe_skipped id=%s kind=%s model=%s base_url=%s endpoint=%s "
+                "status=%s enabled=%s configured=%s reason=unsupported_or_unconfigured",
+                endpoint_id,
+                str(public_spec.get("kind") or ""),
+                str(public_spec.get("model") or ""),
+                str(public_spec.get("base_url") or ""),
+                str(public_spec.get("endpoint_url") or ""),
+                str(public_spec.get("status") or ""),
+                bool(public_spec.get("enabled")),
+                bool(public_spec.get("configured")),
+            )
             return {
                 "success": True,
                 "data": {
@@ -690,6 +911,12 @@ class SystemService:
         headers = _auth_headers(api_key, auth_mode=str(public_spec.get("auth_mode") or ""))
         payload = _test_payload_for_spec(spec)
         post_json = requester or _http_post_json
+        _log_model_status_probe_start(
+            endpoint_id=endpoint_id,
+            public_spec=public_spec,
+            payload=payload,
+            timeout_seconds=MODEL_STATUS_TEST_TIMEOUT_SECONDS,
+        )
         started_at = time.monotonic()
         response = post_json(
             url=endpoint_url,
@@ -758,6 +985,17 @@ class SystemService:
             message = "模型测试失败：未获得可识别响应"
             test_status = "failed"
 
+        _log_model_status_probe_result(
+            endpoint_id=endpoint_id,
+            public_spec=public_spec,
+            result_ok=result_ok,
+            test_status=test_status,
+            status_code=status_code_int,
+            elapsed_ms=elapsed_ms,
+            response_truncated=response_truncated,
+            diagnostics=result_diagnostics,
+            transport_error=transport_error,
+        )
         return {
             "success": True,
             "data": {

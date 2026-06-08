@@ -56,6 +56,23 @@ function decorateBlockToken(token, diagnostics, options = {}) {
     return { ...token, text: token.raw || token.text || '' }
   }
 
+  if (token.type === 'heading' && shouldCompactPatentHeadings(options)) {
+    const headingText = token.text || stripMarkdownHeadingMarker(token.raw || '')
+    return {
+      type: 'paragraph',
+      raw: token.raw,
+      text: headingText,
+      tokens: [
+        {
+          type: 'strong',
+          raw: headingText,
+          text: headingText,
+          tokens: decorateInlineOrBlockTokens(token.tokens || [{ type: 'text', raw: headingText, text: headingText }], diagnostics, options),
+        },
+      ],
+    }
+  }
+
   if (token.type === 'paragraph') {
     const displayMath = readDisplayMathBlock(token.text)
     if (displayMath) {
@@ -90,6 +107,15 @@ function decorateBlockToken(token, diagnostics, options = {}) {
   }
 
   return token
+}
+
+function shouldCompactPatentHeadings(options = {}) {
+  const variant = String(options?.variant || '').trim().toLowerCase()
+  return variant === 'patent-message' || variant === 'patent-preview'
+}
+
+function stripMarkdownHeadingMarker(value) {
+  return String(value || '').replace(/^\s{0,3}#{1,6}\s+/, '').trim()
 }
 
 function decorateInlineOrBlockTokens(tokens, diagnostics, options = {}) {

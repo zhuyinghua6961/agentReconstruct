@@ -1330,6 +1330,8 @@ def test_patent_answer_builder_stream_logs_prompt_and_evidence_chars(caplog):
     assert any("patent answer builder stream first payload received" in record.message and "elapsed_ms=" in record.message for record in caplog.records)
     assert any("patent answer builder stream first chunk" in record.message and "chunk_chars=" in record.message for record in caplog.records)
     assert any("patent answer builder stream completed" in record.message and "answer_chars=" in record.message for record in caplog.records)
+    assert any("model_call start" in record.message and "component=llm_patent_answer" in record.message and "stream=true" in record.message for record in caplog.records)
+    assert any("model_call success" in record.message and "component=llm_patent_answer" in record.message and "stream=true" in record.message for record in caplog.records)
 
 
 def test_patent_answer_builder_stream_stops_when_should_cancel_is_set(caplog):
@@ -1450,6 +1452,8 @@ def test_patent_answer_builder_request_logs_prompt_and_evidence_chars(caplog):
         and "elapsed_ms=" in record.message
         for record in caplog.records
     )
+    assert any("model_call start" in record.message and "component=llm_patent_answer" in record.message and "stream=false" in record.message for record in caplog.records)
+    assert any("model_call success" in record.message and "component=llm_patent_answer" in record.message and "stream=false" in record.message for record in caplog.records)
 
 
 def test_stage4_fallback_answer_does_not_drop_patents_beyond_first_three():

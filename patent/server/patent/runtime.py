@@ -17,6 +17,13 @@ from server.patent.archive_loader import PatentArchiveLoader
 from server.patent.models import PatentRetrievalClaim, PatentRetrievalPlan
 from server.patent.object_reader import ObjectReader
 from server.patent.original_minio_loader import PatentOriginalMinioLoader
+from server.patent.model_call_logging import (
+    auth_mode_label,
+    log_model_call_failed,
+    log_model_call_start,
+    log_model_call_success,
+    message_chars,
+)
 from server.patent.resource_registry import PatentResourceRegistry
 from server.patent.retrieval_service import PatentRetrievalService
 from server.patent.rerank_service import build_patent_stage2_rerank_fn
@@ -230,6 +237,18 @@ class PatentPlanningClient:
             describe_patent_transport(http_client=self._http, owns_http_client=self._owns_http_client).get("client_owner"),
             describe_patent_transport(http_client=self._http, owns_http_client=self._owns_http_client).get("shared_client_id"),
         )
+        model_call_started = log_model_call_start(
+            _LOGGER,
+            component="llm_planning",
+            model=str(model or "").strip(),
+            endpoint=request_url,
+            auth_mode=auth_mode_label(),
+            stream=False,
+            message_count=len(list(payload.get("messages") or [])),
+            message_chars_value=message_chars(payload.get("messages")),
+            timeout_seconds=effective_timeout_seconds,
+            key_present=bool(self._api_key),
+        )
         request_started = time.perf_counter()
         request_timeout = build_patent_request_timeout(
             http_client=self._http,
@@ -238,28 +257,43 @@ class PatentPlanningClient:
         )
         headers = auth_headers(self._api_key)
         request = None
+        response = None
         if hasattr(self._http, "build_request"):
             try:
-                request = self._http.build_request(
-                    "POST",
-                    request_url,
-                    headers=headers,
-                    json=payload,
-                    timeout=request_timeout,
-                )
-            except TypeError as exc:
-                if "timeout" not in str(exc):
-                    raise
-                request = self._http.build_request(
-                    "POST",
-                    request_url,
-                    headers=headers,
-                    json=payload,
-                )
                 try:
-                    request.extensions["timeout"] = request_timeout.as_dict()
-                except Exception:
-                    pass
+                    request = self._http.build_request(
+                        "POST",
+                        request_url,
+                        headers=headers,
+                        json=payload,
+                        timeout=request_timeout,
+                    )
+                except TypeError as exc:
+                    if "timeout" not in str(exc):
+                        raise
+                    request = self._http.build_request(
+                        "POST",
+                        request_url,
+                        headers=headers,
+                        json=payload,
+                    )
+                    try:
+                        request.extensions["timeout"] = request_timeout.as_dict()
+                    except Exception:
+                        pass
+            except Exception as exc:
+                log_model_call_failed(
+                    _LOGGER,
+                    component="llm_planning",
+                    model=str(model or "").strip(),
+                    endpoint=request_url,
+                    started_at=model_call_started,
+                    exc=exc,
+                    auth_mode=auth_mode_label(),
+                    stream=False,
+                    reason="request_build_failed",
+                )
+                raise
             _LOGGER.info(
                 "Patent planning client request object built model=%s method=%s url=%s elapsed_ms=%.3f content_length=%s",
                 str(model or "").strip(),
@@ -281,6 +315,18 @@ class PatentPlanningClient:
                 response = self._http.send(request, stream=False)
             except Exception as exc:
                 record_patent_dispatch_error(http_client=self._http, started_at=dispatch_started, exc=exc)
+                log_model_call_failed(
+                    _LOGGER,
+                    component="llm_planning",
+                    model=str(model or "").strip(),
+                    endpoint=request_url,
+                    started_at=model_call_started,
+                    exc=exc,
+                    auth_mode=auth_mode_label(),
+                    status_code=getattr(response, "status_code", None),
+                    stream=False,
+                    reason="request_failed",
+                )
                 raise
         else:
             try:
@@ -292,6 +338,18 @@ class PatentPlanningClient:
                 )
             except Exception as exc:
                 record_patent_dispatch_error(http_client=self._http, started_at=dispatch_started, exc=exc)
+                log_model_call_failed(
+                    _LOGGER,
+                    component="llm_planning",
+                    model=str(model or "").strip(),
+                    endpoint=request_url,
+                    started_at=model_call_started,
+                    exc=exc,
+                    auth_mode=auth_mode_label(),
+                    status_code=getattr(response, "status_code", None),
+                    stream=False,
+                    reason="request_failed",
+                )
                 raise
         record_patent_dispatch_success(http_client=self._http, started_at=dispatch_started)
         _LOGGER.info(
@@ -321,6 +379,18 @@ class PatentPlanningClient:
                 exc=exc,
                 auth_mode=resolve_auth_mode(),
             )
+            log_model_call_failed(
+                _LOGGER,
+                component="llm_planning",
+                model=str(model or "").strip(),
+                endpoint=request_url,
+                started_at=model_call_started,
+                exc=exc,
+                auth_mode=auth_mode_label(),
+                status_code=getattr(response, "status_code", None),
+                stream=False,
+                reason="request_failed",
+            )
             raise
         log_upstream_auth_success_once(
             logger=_LOGGER,
@@ -332,9 +402,24 @@ class PatentPlanningClient:
             status_code=getattr(response, "status_code", None),
             auth_mode=resolve_auth_mode(),
         )
-        body = response.json()
-        choices = list(body.get("choices") or [])
-        message = dict((choices[0] or {}).get("message") or {}) if choices else {}
+        try:
+            body = response.json()
+            choices = list(body.get("choices") or [])
+            message = dict((choices[0] or {}).get("message") or {}) if choices else {}
+        except Exception as exc:
+            log_model_call_failed(
+                _LOGGER,
+                component="llm_planning",
+                model=str(model or "").strip(),
+                endpoint=request_url,
+                started_at=model_call_started,
+                exc=exc,
+                auth_mode=auth_mode_label(),
+                status_code=getattr(response, "status_code", None),
+                stream=False,
+                reason="response_parse_failed",
+            )
+            raise
         _LOGGER.info(
             "Patent planning client response body parsed model=%s status_code=%s elapsed_ms=%.3f response_chars=%s",
             str(model or "").strip(),
@@ -348,6 +433,17 @@ class PatentPlanningClient:
             getattr(response, "status_code", ""),
             (time.perf_counter() - request_started) * 1000,
             len(str(message.get("content") or "")),
+        )
+        log_model_call_success(
+            _LOGGER,
+            component="llm_planning",
+            model=str(model or "").strip(),
+            endpoint=request_url,
+            started_at=model_call_started,
+            auth_mode=auth_mode_label(),
+            status_code=getattr(response, "status_code", None),
+            stream=False,
+            answer_chars=len(str(message.get("content") or "")),
         )
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=str(message.get("content") or "")))]
@@ -456,17 +552,53 @@ class PatentEmbeddingClient:
                     _preview(" | ".join(input_texts[:3])),
                 )
                 return embeddings
-        response = self._http.post(
+        auth_mode = _first_env("EMBEDDING_AUTH_MODE", "QA_EMBEDDING_AUTH_MODE", default="bearer")
+        _LOGGER.info(
+            "model_call start service=patent component=embedding model=%s endpoint=%s auth_mode=%s "
+            "input_count=%s input_chars=%s key_present=%s",
+            self._api_model,
             self._api_url,
-            json={"input": texts, "model": self._api_model},
-            headers=self._embedding_headers(),
+            auth_mode,
+            len(input_texts),
+            input_chars,
+            bool(self._api_key),
         )
-        response.raise_for_status()
-        payload = response.json()
+        response = None
+        try:
+            response = self._http.post(
+                self._api_url,
+                json={"input": texts, "model": self._api_model},
+                headers=self._embedding_headers(),
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            _LOGGER.warning(
+                "model_call failed service=patent component=embedding model=%s endpoint=%s auth_mode=%s "
+                "status_code=%s elapsed_ms=%.2f error_type=%s",
+                self._api_model,
+                self._api_url,
+                auth_mode,
+                getattr(response, "status_code", None),
+                (time.perf_counter() - started_at) * 1000.0,
+                type(exc).__name__,
+            )
+            raise
         data = list(payload.get("data") or [])
         embeddings = [list(item.get("embedding") or []) for item in data if isinstance(item, dict)]
         if embeddings:
             diag = _vector_diagnostics(embeddings)
+            _LOGGER.info(
+                "model_call success service=patent component=embedding model=%s endpoint=%s auth_mode=%s "
+                "status_code=%s elapsed_ms=%.2f embedding_count=%s embedding_dim=%s",
+                self._api_model,
+                self._api_url,
+                auth_mode,
+                getattr(response, "status_code", None),
+                (time.perf_counter() - started_at) * 1000.0,
+                diag["count"],
+                diag["dim"],
+            )
             _LOGGER.info(
                 "patent embedding diagnostic mode=%s model=%s endpoint=%s input_count=%s input_chars=%s "
                 "input_utf8_bytes=%s embedding_count=%s embedding_dim=%s embedding_norm=%.6f has_nan=%s "
@@ -490,6 +622,17 @@ class PatentEmbeddingClient:
         single = list(payload.get("embedding") or [])
         out = [single] if single else []
         diag = _vector_diagnostics(out)
+        _LOGGER.info(
+            "model_call success service=patent component=embedding model=%s endpoint=%s auth_mode=%s "
+            "status_code=%s elapsed_ms=%.2f embedding_count=%s embedding_dim=%s",
+            self._api_model,
+            self._api_url,
+            auth_mode,
+            getattr(response, "status_code", None),
+            (time.perf_counter() - started_at) * 1000.0,
+            diag["count"],
+            diag["dim"],
+        )
         _LOGGER.info(
             "patent embedding diagnostic mode=%s model=%s endpoint=%s input_count=%s input_chars=%s "
             "input_utf8_bytes=%s embedding_count=%s embedding_dim=%s embedding_norm=%.6f has_nan=%s "

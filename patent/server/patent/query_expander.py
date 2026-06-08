@@ -7,6 +7,13 @@ from typing import Any
 
 import httpx
 
+from server.patent.model_call_logging import (
+    auth_mode_label,
+    log_model_call_failed,
+    log_model_call_start,
+    log_model_call_success,
+    message_chars,
+)
 from server.patent.thinking import LLM_STAGE_CONTROL, auth_headers, merge_extra_body, resolve_thinking_controls
 
 
@@ -145,15 +152,57 @@ class QueryExpander:
                 response = client.chat.completions.create(**kwargs)
                 expanded = str(response.choices[0].message.content or "").strip()
             else:
-                response = self._get_http_client().post(
-                    _chat_completions_url(self.base_url),
-                    headers=auth_headers(self.api_key, accept="application/json"),
-                    json=payload,
-                    timeout=_timeout_seconds(),
+                endpoint = _chat_completions_url(self.base_url)
+                timeout_seconds = _timeout_seconds()
+                model_call_started = log_model_call_start(
+                    _LOGGER,
+                    component="llm_query_expansion",
+                    model=self.model,
+                    endpoint=endpoint,
+                    auth_mode=auth_mode_label(),
+                    stream=False,
+                    message_count=len(messages),
+                    message_chars_value=message_chars(messages),
+                    timeout_seconds=timeout_seconds,
+                    key_present=bool(self.api_key),
                 )
-                response.raise_for_status()
-                body = response.json()
+                response = None
+                try:
+                    response = self._get_http_client().post(
+                        endpoint,
+                        headers=auth_headers(self.api_key, accept="application/json"),
+                        json=payload,
+                        timeout=timeout_seconds,
+                    )
+                    response.raise_for_status()
+                    body = response.json()
+                except Exception as exc:
+                    log_model_call_failed(
+                        _LOGGER,
+                        component="llm_query_expansion",
+                        model=self.model,
+                        endpoint=endpoint,
+                        started_at=model_call_started,
+                        exc=exc,
+                        auth_mode=auth_mode_label(),
+                        status_code=getattr(response, "status_code", None),
+                        stream=False,
+                        fallback=True,
+                        reason="request_failed",
+                    )
+                    raise
                 expanded = str((body.get("choices") or [{}])[0].get("message", {}).get("content") or "").strip()
+                log_model_call_success(
+                    _LOGGER,
+                    component="llm_query_expansion",
+                    model=self.model,
+                    endpoint=endpoint,
+                    started_at=model_call_started,
+                    auth_mode=auth_mode_label(),
+                    status_code=getattr(response, "status_code", None),
+                    stream=False,
+                    answer_chars=len(expanded),
+                )
             if expanded and len(expanded) > 5:
                 return self._filter_density_confusion(normalized_query, expanded)
         except Exception:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import secrets
 from hashlib import pbkdf2_hmac
+from hmac import compare_digest
 from typing import Any
 
 from app.modules.departments.service import department_service as shared_department_service
@@ -39,6 +40,26 @@ class AdminUsersService:
         salt = secrets.token_hex(16)
         digest = pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), iterations).hex()
         return f"pbkdf2_sha256${iterations}${salt}${digest}"
+
+    @staticmethod
+    def verify_password(password: str, password_hash: str) -> bool:
+        try:
+            algo, iter_text, salt, digest_hex = str(password_hash or "").split("$", 3)
+        except ValueError:
+            return False
+        if algo != "pbkdf2_sha256":
+            return False
+        try:
+            iterations = int(iter_text)
+        except ValueError:
+            return False
+        expected = pbkdf2_hmac(
+            "sha256",
+            str(password or "").encode("utf-8"),
+            salt.encode("utf-8"),
+            iterations,
+        ).hex()
+        return compare_digest(expected, digest_hex)
 
     @staticmethod
     def _role_to_user_type(role: str) -> int:

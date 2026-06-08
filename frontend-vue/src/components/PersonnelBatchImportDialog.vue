@@ -148,7 +148,7 @@ function requestClose() {
             <button class="template-btn" @click="downloadTemplate('xlsx')">下载 Excel 模板</button>
             <button class="template-btn" @click="downloadTemplate('csv')">下载 CSV 模板</button>
           </div>
-          <p class="hint">模板列固定为工号、姓名、一级部门、二级部门、三级部门、校验码、备注；导入后人员状态默认启用。</p>
+          <p class="hint">模板列为工号、姓名、一级部门、二级部门、三级部门、校验码、备注；系统同时兼容旧英文列名，导入后人员状态默认启用。</p>
         </div>
 
         <div class="upload-section">
@@ -188,10 +188,13 @@ function requestClose() {
           <p class="info-title">导入说明：</p>
           <ul class="info-list">
             <li>工号、姓名、一级部门、二级部门、三级部门、校验码必填。</li>
+            <li>也兼容旧列名 employee_no、full_name、primary_department_name、secondary_department_name、tertiary_department_name、verification_code。</li>
             <li>备注可留空，用于记录补充说明。</li>
             <li>模板不包含状态列，新导入和更新的人员状态默认启用。</li>
             <li>同一文件内重复的工号会导致整次导入失败。</li>
-            <li>数据库里已存在的工号会按导入值覆盖更新。</li>
+            <li>工号作为匹配键：工号相同且内容一致会显示跳过。</li>
+            <li>工号相同但姓名、部门、校验码、备注等其他信息变化会显示更新。</li>
+            <li>工号变化会作为新人员创建，不会关联到原人员。</li>
           </ul>
         </div>
       </div>

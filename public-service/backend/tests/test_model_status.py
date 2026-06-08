@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from app.core.deps import AuthContext
 from app.main import app
@@ -66,6 +67,37 @@ def test_model_status_lists_configured_models_without_network_probe(monkeypatch)
     assert "provider" not in endpoints["rerank"]
 
 
+def test_model_status_list_logs_configuration_summary(monkeypatch, caplog):
+    monkeypatch.setenv("LLM_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("LLM_MODEL", "chat-model")
+    monkeypatch.setenv("LLM_API_KEY", "Bearer secret-token")
+    monkeypatch.setenv("QA_EMBEDDING_BASE_URL", "http://embedding.example/v1")
+    monkeypatch.setenv("QA_EMBEDDING_MODEL", "bge-local")
+
+    with caplog.at_level(logging.INFO, logger="app.modules.system.service"):
+        payload, status_code = system_service.build_model_status()
+
+    assert status_code == 200
+    assert payload["success"] is True
+    messages = [record.message for record in caplog.records]
+    assert any(
+        "admin_model_status config_summary" in message
+        and "total=" in message
+        and "configured=" in message
+        and "probe_method=config_only" in message
+        for message in messages
+    )
+    assert any(
+        "admin_model_status config_endpoint" in message
+        and "id=llm_chat" in message
+        and "kind=chat" in message
+        and "model=chat-model" in message
+        and "key_present=True" in message
+        for message in messages
+    )
+    assert all("secret-token" not in message for message in messages)
+
+
 def test_model_status_normalizes_rerank_base_url_without_duplicate_v1(monkeypatch):
     monkeypatch.setenv("RERANK_BASE_URL", "http://host.docker.internal:8084/v1/v1")
     monkeypatch.setenv("RERANK_MODEL", "qwen3-vl-rerank")
@@ -117,6 +149,95 @@ def test_model_status_test_sends_chat_hello_with_normalized_bearer(monkeypatch):
             "timeout_seconds": 30.0,
         }
     ]
+
+
+def test_model_status_test_logs_probe_success_without_sensitive_values(monkeypatch, caplog):
+    monkeypatch.setenv("LLM_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("LLM_MODEL", "chat-model")
+    monkeypatch.setenv("LLM_API_KEY", "Bearer secret-token")
+
+    def fake_requester(*, url: str, headers: dict, payload: dict, timeout_seconds: float) -> dict:
+        return {
+            "status_code": 200,
+            "json": {"choices": [{"message": {"content": "hello back"}}]},
+            "text": "",
+        }
+
+    with caplog.at_level(logging.INFO, logger="app.modules.system.service"):
+        payload, status_code = system_service.test_model_status_endpoint(
+            "llm_chat",
+            requester=fake_requester,
+        )
+
+    assert status_code == 200
+    assert payload["data"]["ok"] is True
+    messages = [record.message for record in caplog.records]
+    assert any(
+        "admin_model_status probe_start" in message
+        and "id=llm_chat" in message
+        and "kind=chat" in message
+        and "model=chat-model" in message
+        and "endpoint=https://llm.example/v1/chat/completions" in message
+        and "auth_mode=bearer" in message
+        and "key_present=True" in message
+        and "message_count=1" in message
+        and "message_chars=5" in message
+        for message in messages
+    )
+    assert any(
+        "admin_model_status probe_success" in message
+        and "id=llm_chat" in message
+        and "status_code=200" in message
+        and "ok=True" in message
+        and "answer_present=True" in message
+        for message in messages
+    )
+    assert all("secret-token" not in message for message in messages)
+    assert all("hello" not in message.lower() for message in messages)
+
+
+def test_model_status_test_logs_probe_failure_without_response_body(monkeypatch, caplog):
+    monkeypatch.setenv("QA_EMBEDDING_BASE_URL", "http://embedding.example/v1")
+    monkeypatch.setenv("QA_EMBEDDING_MODEL", "bge-local")
+    monkeypatch.setenv("QA_EMBEDDING_API_KEY", "Bearer embedding-token")
+
+    def fake_requester(*, url: str, headers: dict, payload: dict, timeout_seconds: float) -> dict:
+        return {
+            "status_code": 502,
+            "json": {"error": {"message": "sensitive upstream body"}},
+            "text": "sensitive upstream body",
+            "error": "sensitive transport detail",
+        }
+
+    with caplog.at_level(logging.INFO, logger="app.modules.system.service"):
+        payload, status_code = system_service.test_model_status_endpoint(
+            "fastqa_embedding",
+            requester=fake_requester,
+        )
+
+    assert status_code == 200
+    assert payload["data"]["ok"] is False
+    messages = [record.message for record in caplog.records]
+    assert any(
+        "admin_model_status probe_start" in message
+        and "id=fastqa_embedding" in message
+        and "kind=embedding" in message
+        and "input_count=1" in message
+        and "input_chars=5" in message
+        and "dimensions_param_present=False" in message
+        for message in messages
+    )
+    assert any(
+        "admin_model_status probe_failed" in message
+        and "id=fastqa_embedding" in message
+        and "status_code=502" in message
+        and "reason=http_error" in message
+        and "error_type=upstream_http_error" in message
+        for message in messages
+    )
+    assert all("embedding-token" not in message for message in messages)
+    assert all("sensitive upstream body" not in message for message in messages)
+    assert all("sensitive transport detail" not in message for message in messages)
 
 
 def test_model_status_test_supports_non_bearer_auth_mode(monkeypatch):

@@ -424,6 +424,31 @@ function isGraphKbMessage(message) {
   return ['graph_kb', 'neo4j'].includes(rawMode)
 }
 
+function isPatentMessage(message) {
+  const candidates = [
+    message?.metadata?.actual_mode,
+    message?.actual_mode,
+    message?.metadata?.requested_mode,
+    message?.requested_mode,
+    message?.metadata?.query_mode,
+    message?.query_mode,
+    message?.metadata?.queryMode,
+    message?.queryMode,
+    message?.metadata?.route,
+    message?.route,
+  ]
+    .map((value) => String(value || '').trim().toLowerCase())
+    .filter(Boolean)
+
+  return candidates.some((value) => value === 'patent' || value.startsWith('patent_'))
+}
+
+function getMessageMarkdownVariant(message) {
+  if (isGraphKbMessage(message)) return 'graph-kb'
+  if (isPatentMessage(message)) return 'patent-message'
+  return 'message'
+}
+
 function setUserMessageElement(messageIndex, el) {
   if (el) {
     userMessageElements.set(messageIndex, el)
@@ -2666,7 +2691,7 @@ watch(
             </template>
             <template v-else-if="entry.message.role === 'bot' || entry.message.role === 'assistant'">
               <div class="bot-avatar">✨</div>
-              <div class="message-content" :class="{ 'message-graph-kb': isGraphKbMessage(entry.message) }">
+              <div class="message-content" :class="{ 'message-graph-kb': isGraphKbMessage(entry.message), 'message-patent': isPatentMessage(entry.message) }">
                 <div v-if="entry.message.queryMode" class="query-mode-badge">{{ entry.message.queryMode }}</div>
                 <div v-if="hasProcessPanel(entry.message)" class="steps-panel">
                   <div class="steps-header" @click="toggleSteps(entry.absoluteMessageIndex)">
@@ -2734,7 +2759,7 @@ watch(
                     >
                       <MarkdownRenderer
                         :content="String(stream.content || '')"
-                        variant="compact"
+                        variant="patent-preview"
                         @open-doi="(doi) => handleMarkdownDoiOpen(doi, entry.absoluteMessageIndex)"
                         @open-patent="handleMarkdownPatentOpen"
                       />
@@ -2746,12 +2771,12 @@ watch(
                 <div
                   v-else-if="entry.message.content && isStreamingTextMessage(entry.message)"
                   class="message-markdown-content"
-                  :class="{ 'graph-kb-markdown': isGraphKbMessage(entry.message) }"
+                  :class="{ 'graph-kb-markdown': isGraphKbMessage(entry.message), 'patent-markdown': isPatentMessage(entry.message) }"
                 >
                   <MarkdownRenderer
                     :content="String(entry.message.content || '')"
                     :streaming="true"
-                    :variant="isGraphKbMessage(entry.message) ? 'graph-kb' : 'message'"
+                    :variant="getMessageMarkdownVariant(entry.message)"
                     @open-doi="(doi) => handleMarkdownDoiOpen(doi, entry.absoluteMessageIndex)"
                     @open-patent="handleMarkdownPatentOpen"
                   />
@@ -2759,11 +2784,11 @@ watch(
                 <template v-else-if="entry.message.content">
                   <div
                     class="message-markdown-content"
-                    :class="{ 'graph-kb-markdown': isGraphKbMessage(entry.message) }"
+                    :class="{ 'graph-kb-markdown': isGraphKbMessage(entry.message), 'patent-markdown': isPatentMessage(entry.message) }"
                   >
                     <MarkdownRenderer
                       :content="String(entry.message.content || '')"
-                      :variant="isGraphKbMessage(entry.message) ? 'graph-kb' : 'message'"
+                      :variant="getMessageMarkdownVariant(entry.message)"
                       @open-doi="(doi) => handleMarkdownDoiOpen(doi, entry.absoluteMessageIndex)"
                       @open-patent="handleMarkdownPatentOpen"
                     />
@@ -3450,6 +3475,45 @@ watch(
   text-underline-offset: 2px;
 }
 
+.message-content.message-patent {
+  border-color: #dbe3ef;
+  box-shadow: none;
+}
+
+.message-content.message-patent :deep(.patent-markdown h1, .patent-markdown h2, .patent-markdown h3) {
+  margin: 14px 0 8px;
+  padding-bottom: 0;
+  border-bottom: none;
+  color: #1f2937;
+  font-weight: 700;
+  line-height: 1.55;
+}
+
+.message-content.message-patent :deep(.patent-markdown h1) {
+  font-size: 17px;
+}
+
+.message-content.message-patent :deep(.patent-markdown h2) {
+  font-size: 16px;
+}
+
+.message-content.message-patent :deep(.patent-markdown h3) {
+  font-size: 15px;
+}
+
+.message-content.message-patent :deep(.patent-markdown .patent-link) {
+  color: #2563eb;
+  font-weight: 500;
+  text-decoration: underline;
+  text-decoration-color: rgba(37, 99, 235, 0.26);
+  text-underline-offset: 2px;
+}
+
+.message-content.message-patent :deep(.patent-markdown .patent-link:hover) {
+  color: #1d4ed8;
+  text-decoration-color: rgba(29, 78, 216, 0.48);
+}
+
 .bot-avatar {
   font-size: 24px;
 }
@@ -3609,6 +3673,25 @@ watch(
 
 .patent-preview-stream-empty {
   color: #64748b;
+}
+
+.patent-preview-stream-body :deep(.markdown-renderer-patent-preview h1),
+.patent-preview-stream-body :deep(.markdown-renderer-patent-preview h2),
+.patent-preview-stream-body :deep(.markdown-renderer-patent-preview h3) {
+  margin: 10px 0 6px;
+  padding-bottom: 0;
+  border-bottom: none;
+  color: #1f2937;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.patent-preview-stream-body :deep(.markdown-renderer-patent-preview .patent-link) {
+  color: #2563eb;
+  font-weight: 500;
+  text-decoration: underline;
+  text-decoration-color: rgba(37, 99, 235, 0.24);
+  text-underline-offset: 2px;
 }
 
 .steps-summary {

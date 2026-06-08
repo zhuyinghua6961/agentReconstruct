@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -22,6 +23,8 @@ from server.patent.thinking import (
     auth_headers,
 )
 from server.patent.upstream_transport import is_patent_pool_timeout
+
+_LOGGER = logging.getLogger(__name__)
 
 # 百炼/兼容网关登记的轻量意图分类模型 ID（可用 env 覆盖）。
 DEFAULT_INTENT_DETECT_MODEL = "qwen3-8b"
@@ -109,8 +112,13 @@ def _intent_model_timeout_seconds() -> float:
         return 30.0
 
 
+def _message_chars(messages: list[dict[str, Any]]) -> int:
+    return sum(len(str(item.get("content") or "")) for item in messages if isinstance(item, dict))
+
+
 def _create_dedicated_intent_completion(*, model: str, messages: list[dict[str, Any]]) -> Any:
     endpoint_url = _chat_completions_url(_intent_model_base_url())
+    timeout_seconds = _intent_model_timeout_seconds()
     payload = {
         "model": model,
         "messages": messages,
@@ -119,15 +127,52 @@ def _create_dedicated_intent_completion(*, model: str, messages: list[dict[str, 
         "stream": False,
         "enable_thinking": False,
     }
-    response = httpx.post(
+    auth_mode = str(os.getenv("INTENT_MODEL_AUTH_MODE") or os.getenv("LLM_AUTH_MODE") or "bearer").strip() or "bearer"
+    started_at = time.perf_counter()
+    _LOGGER.info(
+        "model_call start service=patent component=llm_intent model=%s endpoint=%s auth_mode=%s "
+        "stream=false message_count=%s message_chars=%s timeout_seconds=%s key_present=%s",
+        model,
         endpoint_url,
-        headers=auth_headers(_intent_model_api_key(), auth_mode_env="INTENT_MODEL_AUTH_MODE"),
-        json=payload,
-        timeout=_intent_model_timeout_seconds(),
+        auth_mode,
+        len(messages),
+        _message_chars(messages),
+        timeout_seconds,
+        bool(_intent_model_api_key()),
     )
-    response.raise_for_status()
-    payload = response.json()
-    content = payload["choices"][0]["message"]["content"]
+    response = None
+    try:
+        response = httpx.post(
+            endpoint_url,
+            headers=auth_headers(_intent_model_api_key(), auth_mode_env="INTENT_MODEL_AUTH_MODE"),
+            json=payload,
+            timeout=timeout_seconds,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        content = payload["choices"][0]["message"]["content"]
+    except Exception as exc:
+        _LOGGER.warning(
+            "model_call failed service=patent component=llm_intent model=%s endpoint=%s auth_mode=%s "
+            "status_code=%s stream=false elapsed_ms=%.2f error_type=%s",
+            model,
+            endpoint_url,
+            auth_mode,
+            getattr(response, "status_code", None),
+            (time.perf_counter() - started_at) * 1000.0,
+            type(exc).__name__,
+        )
+        raise
+    _LOGGER.info(
+        "model_call success service=patent component=llm_intent model=%s endpoint=%s auth_mode=%s "
+        "status_code=%s stream=false answer_chars=%s elapsed_ms=%.2f",
+        model,
+        endpoint_url,
+        auth_mode,
+        getattr(response, "status_code", None),
+        len(str(content or "")),
+        (time.perf_counter() - started_at) * 1000.0,
+    )
     return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=str(content or "")))])
 
 

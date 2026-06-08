@@ -149,7 +149,7 @@ function close() {
               下载 CSV 模板
             </button>
           </div>
-          <p class="hint">模板包含示例数据，请按照格式填写用户信息</p>
+          <p class="hint">模板列为用户名、密码、用户类型；系统同时兼容旧的英文列名。</p>
         </div>
 
         <!-- 文件上传 -->
@@ -193,7 +193,10 @@ function close() {
         <div class="info-section">
           <p class="info-title">📌 导入说明：</p>
           <ul class="info-list">
-            <li>文件包含三列：username、password、user_type</li>
+            <li>文件包含三列：用户名、密码、用户类型</li>
+            <li>也兼容旧列名 username、password、user_type</li>
+            <li>以用户名作为匹配键：新用户名会新增账号，已有用户名会对比导入内容</li>
+            <li>已有账号内容未变化则跳过；密码或用户类型变化则更新</li>
             <li>用户身份只能是 <code>super</code>（超级用户）或 <code>common</code>（普通用户）</li>
             <li>部门信息由绑定的人员记录同步，不再从用户导入模板填写部门</li>
             <li>用户名长度 3-50 字符，不能以 admin 开头</li>

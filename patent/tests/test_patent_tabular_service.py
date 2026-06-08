@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import httpx
@@ -308,6 +309,40 @@ def test_tabular_answer_client_uses_injected_http_client_and_preserves_timeout_d
     assert timeout.pool == 4.5
     client.close()
     assert http_client.closed is False
+
+
+def test_tabular_answer_client_logs_model_call_success(caplog):
+    class _FakeHttpClient:
+        def post(self, url, *, headers=None, json=None, timeout=None):
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", str(url)),
+                json={"choices": [{"message": {"content": "table answer"}}]},
+            )
+
+        def close(self) -> None:
+            return None
+
+    client = PatentTabularAnswerClient(
+        api_key="key",
+        base_url="https://example.com",
+        model="tabular-model",
+        http_client=_FakeHttpClient(),
+    )
+
+    with caplog.at_level(logging.INFO, logger="patent.tabular_service"):
+        answer = client.answer(
+            question="哪个材料容量更高",
+            table_text="LMFP 120\nLFP 115",
+            include_kb=False,
+            route_hint="tabular_qa",
+            source_scope="table",
+        )
+
+    assert answer == "table answer"
+    messages = [record.message for record in caplog.records if record.name == "patent.tabular_service"]
+    assert any("model_call start" in message and "component=llm_tabular" in message and "model=tabular-model" in message for message in messages)
+    assert any("model_call success" in message and "component=llm_tabular" in message and "answer_chars=12" in message for message in messages)
 
 
 def test_tabular_answer_client_stage4_enables_thinking(monkeypatch):

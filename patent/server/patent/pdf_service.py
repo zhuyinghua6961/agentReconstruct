@@ -27,6 +27,13 @@ from server.patent.pdf_contract import (
     validate_compare_context,
 )
 from server.patent.file_models import PatentFileContract
+from server.patent.model_call_logging import (
+    auth_mode_label,
+    log_model_call_failed,
+    log_model_call_start,
+    log_model_call_success,
+    message_chars,
+)
 from server.patent.object_reader import ObjectReader
 from server.patent.pdf_extraction import extract_pdf_text as extract_patent_file_qa_pdf_text
 from server.patent.summary_formatting import (
@@ -1009,11 +1016,27 @@ class PatentPdfAnswerClient:
             timeout_seconds=self._timeout_seconds,
             stream=True,
         )
+        endpoint = f"{self._base_url.rstrip('/')}/chat/completions"
+        model_call_started = log_model_call_start(
+            _LOGGER,
+            component="llm_pdf",
+            model=self._model,
+            endpoint=endpoint,
+            auth_mode=auth_mode_label(),
+            stream=True,
+            message_count=len(list(request_payload.get("messages") or [])),
+            message_chars_value=message_chars(request_payload.get("messages")),
+            timeout_seconds=self._timeout_seconds,
+            key_present=bool(self._api_key),
+        )
         dispatch_started = time.perf_counter()
+        response = None
+        chunk_count = 0
+        answer_chars = 0
         try:
             response_context = self._client.stream(
                 "POST",
-                f"{self._base_url.rstrip('/')}/chat/completions",
+                endpoint,
                 headers=auth_headers(self._api_key, accept="application/json, text/event-stream"),
                 json=request_payload,
                 timeout=request_timeout,
@@ -1036,8 +1059,33 @@ class PatentPdfAnswerClient:
                         continue
                     text = self._extract_delta_text(payload)
                     if text:
+                        chunk_count += 1
+                        answer_chars += len(text)
                         yield text
+                log_model_call_success(
+                    _LOGGER,
+                    component="llm_pdf",
+                    model=self._model,
+                    endpoint=endpoint,
+                    started_at=model_call_started,
+                    auth_mode=auth_mode_label(),
+                    status_code=getattr(response, "status_code", None),
+                    stream=True,
+                    answer_chars=answer_chars,
+                    chunk_count=chunk_count,
+                )
         except Exception as exc:
+            log_model_call_failed(
+                _LOGGER,
+                component="llm_pdf",
+                model=self._model,
+                endpoint=endpoint,
+                started_at=model_call_started,
+                exc=exc,
+                auth_mode=auth_mode_label(),
+                status_code=getattr(response, "status_code", None),
+                stream=True,
+            )
             record_patent_dispatch_error(http_client=self._client, started_at=dispatch_started, exc=exc)
             raise
 
@@ -1076,23 +1124,73 @@ class PatentPdfAnswerClient:
             http_client=self._client,
             timeout_seconds=self._timeout_seconds,
         )
+        endpoint = f"{self._base_url.rstrip('/')}/chat/completions"
+        model_call_started = log_model_call_start(
+            _LOGGER,
+            component="llm_pdf",
+            model=self._model,
+            endpoint=endpoint,
+            auth_mode=auth_mode_label(),
+            stream=False,
+            message_count=len(list(request_payload.get("messages") or [])),
+            message_chars_value=message_chars(request_payload.get("messages")),
+            timeout_seconds=self._timeout_seconds,
+            key_present=bool(self._api_key),
+        )
         dispatch_started = time.perf_counter()
+        response = None
         try:
             response = self._client.post(
-                f"{self._base_url.rstrip('/')}/chat/completions",
+                endpoint,
                 headers=auth_headers(self._api_key),
                 json=request_payload,
                 timeout=request_timeout,
             )
         except Exception as exc:
+            log_model_call_failed(
+                _LOGGER,
+                component="llm_pdf",
+                model=self._model,
+                endpoint=endpoint,
+                started_at=model_call_started,
+                exc=exc,
+                auth_mode=auth_mode_label(),
+                status_code=getattr(response, "status_code", None),
+                stream=False,
+            )
             record_patent_dispatch_error(http_client=self._client, started_at=dispatch_started, exc=exc)
             raise
         record_patent_dispatch_success(http_client=self._client, started_at=dispatch_started)
-        response.raise_for_status()
-        payload = response.json()
+        try:
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            log_model_call_failed(
+                _LOGGER,
+                component="llm_pdf",
+                model=self._model,
+                endpoint=endpoint,
+                started_at=model_call_started,
+                exc=exc,
+                auth_mode=auth_mode_label(),
+                status_code=getattr(response, "status_code", None),
+                stream=False,
+            )
+            raise
         choices = list(payload.get("choices") or [])
         message = dict((choices[0] or {}).get("message") or {}) if choices else {}
         answer = str(message.get("content") or "").strip()
+        log_model_call_success(
+            _LOGGER,
+            component="llm_pdf",
+            model=self._model,
+            endpoint=endpoint,
+            started_at=model_call_started,
+            auth_mode=auth_mode_label(),
+            status_code=getattr(response, "status_code", None),
+            stream=False,
+            answer_chars=len(answer),
+        )
         if is_summary_question(question) and not is_compare_question(question, selected_pdf_count=len(selected_file_labels or []) or 1):
             usage = dict(payload.get("usage") or {}) if isinstance(payload, dict) else {}
             finish_reason = str((choices[0] or {}).get("finish_reason") or "").strip() if choices else ""

@@ -7,6 +7,7 @@ from typing import Any
 
 from fastapi.responses import Response
 
+from app.core.import_columns import resolve_column_aliases
 from app.core.spreadsheet import build_xlsx, load_rows
 from app.modules.auth.repository import AuthRepository
 from app.modules.departments.service import department_service as shared_department_service
@@ -20,16 +21,15 @@ TEMPLATE_COLUMNS = ["工号", "姓名", "一级部门", "二级部门", "三级�
 REQUIRED_COLUMN_ALIASES = {
     "employee_no": ("工号", "employee_no"),
     "full_name": ("姓名", "full_name"),
-    "primary_department_name": ("一级部门", "primary_department_name"),
-    "secondary_department_name": ("二级部门", "secondary_department_name"),
-    "tertiary_department_name": ("三级部门", "tertiary_department_name"),
+    "primary_department_name": ("一级部门名称", "一级部门", "primary_department_name"),
+    "secondary_department_name": ("二级部门名称", "二级部门", "secondary_department_name"),
+    "tertiary_department_name": ("三级部门名称", "三级部门", "tertiary_department_name"),
     "verification_code": ("校验码", "verification_code"),
 }
 OPTIONAL_COLUMN_ALIASES = {
     "remarks": ("备注", "remarks"),
     "status": ("状态", "status"),
 }
-REQUIRED_COLUMNS = list(REQUIRED_COLUMN_ALIASES)
 VALID_STATUSES = {"active", "disabled"}
 STATUS_ALIASES = {
     "active": "active",
@@ -59,36 +59,6 @@ class PersonnelImportService:
     @staticmethod
     def _clean_text(value: object) -> str:
         return str(value or "").strip()
-
-    @staticmethod
-    def _normalize_column_name(value: object) -> str:
-        return str(value or "").strip().lower()
-
-    def _match_column(self, normalized: dict[str, Any], aliases: tuple[str, ...]) -> Any | None:
-        for alias in aliases:
-            normalized_alias = self._normalize_column_name(alias)
-            if normalized_alias in normalized:
-                return normalized[normalized_alias]
-        return None
-
-    def _resolve_import_columns(self, columns: list[Any]) -> tuple[dict[str, Any], list[str]]:
-        normalized = {self._normalize_column_name(col): col for col in columns}
-        resolved: dict[str, Any] = {}
-        missing: list[str] = []
-
-        for canonical, aliases in REQUIRED_COLUMN_ALIASES.items():
-            matched = self._match_column(normalized, aliases)
-            if matched is None:
-                missing.append(str(aliases[0]))
-            else:
-                resolved[canonical] = matched
-
-        for canonical, aliases in OPTIONAL_COLUMN_ALIASES.items():
-            matched = self._match_column(normalized, aliases)
-            if matched is not None:
-                resolved[canonical] = matched
-
-        return resolved, missing
 
     def _normalize_status(self, value: object) -> str:
         status = self._clean_text(value).lower()
@@ -189,7 +159,11 @@ class PersonnelImportService:
                 return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
             return {"success": False, "error": "批量导入失败", "code": "IMPORT_ERROR"}
 
-        columns, missing = self._resolve_import_columns(rows["columns"])
+        columns, missing = resolve_column_aliases(
+            rows["columns"],
+            REQUIRED_COLUMN_ALIASES,
+            OPTIONAL_COLUMN_ALIASES,
+        )
         if missing:
             return {"success": False, "error": f"缺少必要列: {', '.join(missing)}", "code": "VALIDATION_ERROR"}
 
@@ -253,6 +227,7 @@ class PersonnelImportService:
                 self._sync_imported_personnel_departments(rows=prepared_rows)
             created = int(write_result.get("created") or 0)
             updated = int(write_result.get("updated") or 0)
+            skipped = int(write_result.get("skipped") or 0)
             details = list(write_result.get("details") or [])
         except Exception as exc:
             if _is_db_unavailable_error(exc):
@@ -268,9 +243,10 @@ class PersonnelImportService:
             "message": "人员导入完成",
             "data": {
                 "summary": {
-                    "total": created + updated,
+                    "total": created + updated + skipped,
                     "created": created,
                     "updated": updated,
+                    "skipped": skipped,
                     "failed": 0,
                 },
                 "details": details,

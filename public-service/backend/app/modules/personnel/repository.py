@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 from time import monotonic
 from typing import Any
 
@@ -77,6 +79,61 @@ class PersonnelRepository:
     @staticmethod
     def _clean_text(value: object) -> str:
         return str(value or "").strip()
+
+    @staticmethod
+    def _normalize_optional_int(value: object) -> int | None:
+        if value is None or value == "":
+            return None
+        return int(value)
+
+    @staticmethod
+    def _verify_verification_code(verification_code: str, verification_code_hash: str) -> bool:
+        try:
+            algo, iter_text, salt, digest_hex = str(verification_code_hash or "").split("$", 3)
+        except ValueError:
+            return False
+        if algo != "pbkdf2_sha256":
+            return False
+        try:
+            iterations = int(iter_text)
+        except ValueError:
+            return False
+        expected = hashlib.pbkdf2_hmac(
+            "sha256",
+            str(verification_code or "").encode("utf-8"),
+            salt.encode("utf-8"),
+            iterations,
+        ).hex()
+        return hmac.compare_digest(expected, digest_hex)
+
+    def _is_import_row_unchanged(
+        self,
+        *,
+        existing: dict[str, Any],
+        full_name: str,
+        verification_code: object,
+        primary_department_id: object,
+        secondary_department_id: object,
+        tertiary_department_id: object,
+        status: str,
+        remarks: object,
+    ) -> bool:
+        if self._clean_text(existing.get("full_name")) != full_name:
+            return False
+        if self._clean_text(existing.get("status")).lower() != status:
+            return False
+        if self._normalize_optional_int(existing.get("primary_department_id")) != self._normalize_optional_int(primary_department_id):
+            return False
+        if self._normalize_optional_int(existing.get("secondary_department_id")) != self._normalize_optional_int(secondary_department_id):
+            return False
+        if self._normalize_optional_int(existing.get("tertiary_department_id")) != self._normalize_optional_int(tertiary_department_id):
+            return False
+        if remarks is not REMARKS_UNSET and (self._clean_text(existing.get("remarks")) or None) != (self._clean_text(remarks) or None):
+            return False
+        return self._verify_verification_code(
+            str(verification_code or ""),
+            str(existing.get("verification_code_hash") or ""),
+        )
 
     def _personnel_filters(
         self,
@@ -596,6 +653,7 @@ class PersonnelRepository:
                         line_no = int(row["line_no"])
                         employee_no = self._clean_text(row.get("employee_no"))
                         full_name = self._clean_text(row.get("full_name"))
+                        verification_code = row.get("verification_code")
                         verification_code_hash = str(row.get("verification_code_hash") or "")
                         status = self._clean_text(row.get("status")).lower()
                         primary_department_id = row.get("primary_department_id")
@@ -606,7 +664,15 @@ class PersonnelRepository:
 
                         cursor.execute(
                             """
-                            SELECT id
+                            SELECT
+                                id,
+                                full_name,
+                                verification_code_hash,
+                                primary_department_id,
+                                secondary_department_id,
+                                tertiary_department_id,
+                                status,
+                                remarks
                             FROM personnel_records
                             WHERE employee_no = %s
                             LIMIT 1
@@ -617,6 +683,28 @@ class PersonnelRepository:
                         existing = cursor.fetchone() or None
                         if existing:
                             current_personnel_id = int(existing["id"])
+                            if self._is_import_row_unchanged(
+                                existing=dict(existing),
+                                full_name=full_name,
+                                verification_code=verification_code,
+                                primary_department_id=primary_department_id,
+                                secondary_department_id=secondary_department_id,
+                                tertiary_department_id=tertiary_department_id,
+                                status=status,
+                                remarks=remarks,
+                            ):
+                                details.append(
+                                    {
+                                        "row": line_no,
+                                        "employee_no": employee_no,
+                                        "full_name": full_name,
+                                        "personnel_record_status": status,
+                                        "status": "skipped",
+                                        "message": "人员已存在且未变化",
+                                    }
+                                )
+                                continue
+
                             update_sets = [
                                 "full_name = %s",
                                 "verification_code_hash = %s",
@@ -717,5 +805,6 @@ class PersonnelRepository:
         return {
             "created": created,
             "updated": updated,
+            "skipped": sum(1 for item in details if item.get("status") == "skipped"),
             "details": details,
         }

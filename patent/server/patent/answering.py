@@ -11,6 +11,13 @@ from typing import Any, Iterator
 
 import httpx
 
+from server.patent.model_call_logging import (
+    auth_mode_label,
+    log_model_call_failed,
+    log_model_call_start,
+    log_model_call_success,
+    message_chars,
+)
 from server.patent.prompt_loader import load_patent_prompt_template
 from server.patent.retrieval_models import PatentEvidence, PatentRetrievalOutcome, PatentTableSupplement
 from server.patent.thinking import (
@@ -670,8 +677,10 @@ class PatentAnswerBuilder:
             int(prompt_metadata.get("evidence_chars", 0)),
             len(prompt),
         )
+        request_url = f"{self.base_url.rstrip('/')}/chat/completions"
+        model_call_started = time.perf_counter()
+        response = None
         try:
-            request_url = f"{self.base_url.rstrip('/')}/chat/completions"
             headers = auth_headers(self.api_key)
             payload = self._build_request_payload(
                 prompt=prompt,
@@ -689,6 +698,18 @@ class PatentAnswerBuilder:
                 len(payload.get("messages") or []),
                 len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"))),
                 allowed_patent_ids,
+            )
+            model_call_started = log_model_call_start(
+                _LOGGER,
+                component="llm_patent_answer",
+                model=self.model,
+                endpoint=request_url,
+                auth_mode=auth_mode_label(),
+                stream=False,
+                message_count=len(list(payload.get("messages") or [])),
+                message_chars_value=message_chars(payload.get("messages")),
+                timeout_seconds=self.timeout_seconds,
+                key_present=bool(self.api_key),
             )
             request_started = time.perf_counter()
             request = None
@@ -772,6 +793,18 @@ class PatentAnswerBuilder:
                 (time.perf_counter() - request_started) * 1000,
             )
             if content:
+                log_model_call_success(
+                    _LOGGER,
+                    component="llm_patent_answer",
+                    model=self.model,
+                    endpoint=request_url,
+                    started_at=model_call_started,
+                    auth_mode=auth_mode_label(),
+                    status_code=getattr(response, "status_code", None),
+                    stream=False,
+                    answer_chars=len(content),
+                    fallback=False,
+                )
                 _LOGGER.info(
                     "patent answer builder llm response received chars=%s elapsed_ms=%.3f",
                     len(content),
@@ -779,6 +812,18 @@ class PatentAnswerBuilder:
                 )
                 return sanitize_patent_id_citations(content, allowed_patent_ids=allowed_patent_ids)[0]
             _LOGGER.warning("patent answer builder returned empty content; using fallback answer")
+            log_model_call_success(
+                _LOGGER,
+                component="llm_patent_answer",
+                model=self.model,
+                endpoint=request_url,
+                started_at=model_call_started,
+                auth_mode=auth_mode_label(),
+                status_code=getattr(response, "status_code", None),
+                stream=False,
+                answer_chars=0,
+                fallback=True,
+            )
             return self._build_sanitized_fallback_answer(
                 question=question,
                 retrieval_outcome=retrieval_outcome,
@@ -786,6 +831,19 @@ class PatentAnswerBuilder:
                 allowed_patent_ids=allowed_patent_ids,
             )
         except Exception as exc:
+            log_model_call_failed(
+                _LOGGER,
+                component="llm_patent_answer",
+                model=self.model,
+                endpoint=request_url,
+                started_at=model_call_started,
+                exc=exc,
+                auth_mode=auth_mode_label(),
+                status_code=getattr(response, "status_code", None),
+                stream=False,
+                fallback=True,
+                reason="request_failed",
+            )
             _LOGGER.warning("patent answer builder request failed; using fallback answer: %s", exc)
             return self._build_sanitized_fallback_answer(
                 question=question,
@@ -873,6 +931,19 @@ class PatentAnswerBuilder:
             len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"))),
             allowed_patent_ids,
         )
+        model_call_started = log_model_call_start(
+            _LOGGER,
+            component="llm_patent_answer",
+            model=self.model,
+            endpoint=request_url,
+            auth_mode=auth_mode_label(),
+            stream=True,
+            message_count=len(list(payload.get("messages") or [])),
+            message_chars_value=message_chars(payload.get("messages")),
+            timeout_seconds=self.timeout_seconds,
+            key_present=bool(self.api_key),
+        )
+        response = None
         try:
             if callable(should_cancel) and should_cancel():
                 _LOGGER.info("patent answer builder stream cancelled before request dispatch")
@@ -1017,6 +1088,19 @@ class PatentAnswerBuilder:
                             )
                             return
             if streamed_any:
+                log_model_call_success(
+                    _LOGGER,
+                    component="llm_patent_answer",
+                    model=self.model,
+                    endpoint=request_url,
+                    started_at=model_call_started,
+                    auth_mode=auth_mode_label(),
+                    status_code=getattr(response, "status_code", None),
+                    stream=True,
+                    answer_chars=answer_chars,
+                    chunk_count=chunk_count,
+                    fallback=False,
+                )
                 _LOGGER.info(
                     "patent answer builder stream completed chunk_count=%s answer_chars=%s elapsed_ms=%.3f",
                     chunk_count,
@@ -1025,10 +1109,49 @@ class PatentAnswerBuilder:
                 )
                 return
             _LOGGER.warning("patent answer builder stream returned no content; using fallback answer")
+            log_model_call_success(
+                _LOGGER,
+                component="llm_patent_answer",
+                model=self.model,
+                endpoint=request_url,
+                started_at=model_call_started,
+                auth_mode=auth_mode_label(),
+                status_code=getattr(response, "status_code", None),
+                stream=True,
+                answer_chars=0,
+                chunk_count=0,
+                fallback=True,
+            )
         except Exception as exc:
             if streamed_any:
+                log_model_call_failed(
+                    _LOGGER,
+                    component="llm_patent_answer",
+                    model=self.model,
+                    endpoint=request_url,
+                    started_at=model_call_started,
+                    exc=exc,
+                    auth_mode=auth_mode_label(),
+                    status_code=getattr(response, "status_code", None),
+                    stream=True,
+                    fallback=False,
+                    reason="partial_stream_failed",
+                )
                 _LOGGER.warning("patent answer builder stream failed after partial content: %s", exc)
                 return
+            log_model_call_failed(
+                _LOGGER,
+                component="llm_patent_answer",
+                model=self.model,
+                endpoint=request_url,
+                started_at=model_call_started,
+                exc=exc,
+                auth_mode=auth_mode_label(),
+                status_code=getattr(response, "status_code", None),
+                stream=True,
+                fallback=True,
+                reason="request_failed",
+            )
             _LOGGER.warning("patent answer builder stream failed; using fallback answer: %s", exc)
         fallback = self._build_sanitized_fallback_answer(
             question=question,

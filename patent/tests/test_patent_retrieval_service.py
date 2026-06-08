@@ -964,6 +964,54 @@ def test_patent_embedding_client_logs_embedding_diagnostics(monkeypatch, caplog)
         and "empty_embedding=false" in message
         for message in messages
     )
+    assert any(
+        "model_call start" in message
+        and "service=patent" in message
+        and "component=embedding" in message
+        and "model=bge-test" in message
+        and "input_count=1" in message
+        for message in messages
+    )
+    assert any(
+        "model_call success" in message
+        and "service=patent" in message
+        and "component=embedding" in message
+        and "embedding_count=1" in message
+        and "embedding_dim=3" in message
+        and "elapsed_ms=" in message
+        for message in messages
+    )
+
+
+def test_patent_embedding_client_logs_model_call_failure(monkeypatch, caplog):
+    class _HttpClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def post(self, *args, **kwargs):
+            raise RuntimeError("embedding down")
+
+        def close(self):
+            return None
+
+    monkeypatch.setenv("EMBEDDING_MODEL_TYPE", "remote")
+    monkeypatch.setenv("EMBEDDING_API_URL", "http://embedding.example/v1/embeddings")
+    monkeypatch.setenv("EMBEDDING_API_MODEL", "bge-test")
+    monkeypatch.setattr("server.patent.runtime.httpx.Client", _HttpClient)
+
+    with caplog.at_level(logging.WARNING, logger="patent.runtime"):
+        with pytest.raises(RuntimeError):
+            PatentEmbeddingClient().encode(["电池热管理"])
+
+    messages = [record.message for record in caplog.records if record.name == "patent.runtime"]
+    assert any(
+        "model_call failed" in message
+        and "service=patent" in message
+        and "component=embedding" in message
+        and "model=bge-test" in message
+        and "error_type=RuntimeError" in message
+        for message in messages
+    )
 
 
 def test_targeted_retrieval_global_chunk_when_abstract_has_no_patent_ids(monkeypatch):

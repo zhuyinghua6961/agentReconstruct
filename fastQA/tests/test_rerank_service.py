@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from app.modules.generation_pipeline.rerank_service import rerank_documents
 
 
@@ -207,6 +209,72 @@ def test_rerank_falls_back_when_request_fails():
     assert result["fallback"] is True
     assert result["fallback_reason"] == "request_failed"
     assert result["provider"] == "openai_compatible"
+
+
+def test_rerank_logs_model_call_success(caplog):
+    req = _Requests({"results": [{"index": 0, "relevance_score": 0.8}]})
+    caplog.set_level(logging.INFO, logger="app.modules.generation_pipeline.rerank_service")
+
+    result = rerank_documents(
+        query="q",
+        documents=["doc-a", "doc-b"],
+        top_n=1,
+        api_key="Bearer rerank-key",
+        model="rerank-model",
+        base_url="http://reranker",
+        requests_module=req,
+    )
+
+    messages = [record.message for record in caplog.records]
+    assert result["fallback"] is False
+    assert any(
+        "model_call start" in message
+        and "service=fastQA" in message
+        and "component=rerank" in message
+        and "model=rerank-model" in message
+        and "auth_mode=bearer" in message
+        and "candidate_count=2" in message
+        and "top_n=1" in message
+        for message in messages
+    )
+    assert any(
+        "model_call success" in message
+        and "component=rerank" in message
+        and "status_code=" in message
+        and "selected=1" in message
+        and "elapsed_ms=" in message
+        for message in messages
+    )
+
+
+def test_rerank_logs_model_call_failure(caplog):
+    class _FailingRequests:
+        def post(self, endpoint, headers, json, timeout):
+            raise RuntimeError("boom")
+
+    caplog.set_level(logging.WARNING, logger="app.modules.generation_pipeline.rerank_service")
+
+    result = rerank_documents(
+        query="q",
+        documents=["doc-a", "doc-b"],
+        top_n=1,
+        model="rerank-model",
+        base_url="http://reranker",
+        requests_module=_FailingRequests(),
+    )
+
+    messages = [record.message for record in caplog.records]
+    assert result["fallback"] is True
+    assert any(
+        "model_call failed" in message
+        and "service=fastQA" in message
+        and "component=rerank" in message
+        and "model=rerank-model" in message
+        and "fallback=true" in message
+        and "reason=request_failed" in message
+        and "error_type=RuntimeError" in message
+        for message in messages
+    )
 
 
 def test_rerank_falls_back_when_response_has_no_valid_rows():

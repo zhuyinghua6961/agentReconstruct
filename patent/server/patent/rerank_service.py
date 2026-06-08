@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import os
+import time
 from typing import Any
 
 from server.patent.thinking import auth_headers
@@ -11,6 +13,7 @@ except Exception:  # pragma: no cover - dependency guard
     requests = None
 
 RERANK_PROVIDER_NAME = "openai_compatible"
+_LOGGER = logging.getLogger(__name__)
 
 
 def _fallback_result(
@@ -118,8 +121,22 @@ def rerank_patent_stage2_documents(
         "documents": docs_to_rerank,
         "top_n": requested_top_n,
     }
-    headers = auth_headers(api_key, auth_mode=_rerank_auth_mode()) if api_key else {"Content-Type": "application/json"}
+    auth_mode = _rerank_auth_mode()
+    headers = auth_headers(api_key, auth_mode=auth_mode) if api_key else {"Content-Type": "application/json"}
 
+    started_at = time.perf_counter()
+    _LOGGER.info(
+        "model_call start service=patent component=rerank model=%s endpoint=%s auth_mode=%s "
+        "candidate_count=%s top_n=%s query_chars=%s timeout_seconds=%s key_present=%s",
+        str(model or "").strip(),
+        endpoint,
+        auth_mode,
+        len(docs_to_rerank),
+        requested_top_n,
+        len(str(query or "")),
+        float(timeout_seconds),
+        bool(api_key),
+    )
     try:
         response = req.post(endpoint, headers=headers, json=payload, timeout=float(timeout_seconds))
         response.raise_for_status()
@@ -131,6 +148,15 @@ def rerank_patent_stage2_documents(
                 logger.warning("patent stage2 rerank request failed provider=%s error=%s", RERANK_PROVIDER_NAME, exc)
             except Exception:
                 pass
+        _LOGGER.warning(
+            "model_call failed service=patent component=rerank model=%s endpoint=%s auth_mode=%s "
+            "elapsed_ms=%.2f fallback=true reason=request_failed error_type=%s",
+            str(model or "").strip(),
+            endpoint,
+            auth_mode,
+            (time.perf_counter() - started_at) * 1000.0,
+            type(exc).__name__,
+        )
         return _fallback_result(
             documents=documents,
             metadatas=metadatas,
@@ -157,6 +183,15 @@ def rerank_patent_stage2_documents(
             break
 
     if not ranked_docs:
+        _LOGGER.warning(
+            "model_call failed service=patent component=rerank model=%s endpoint=%s auth_mode=%s "
+            "status_code=%s elapsed_ms=%.2f fallback=true reason=empty_rerank_result selected=0",
+            str(model or "").strip(),
+            endpoint,
+            auth_mode,
+            getattr(response, "status_code", None),
+            (time.perf_counter() - started_at) * 1000.0,
+        )
         return _fallback_result(
             documents=documents,
             metadatas=metadatas,
@@ -165,6 +200,16 @@ def rerank_patent_stage2_documents(
             provider=RERANK_PROVIDER_NAME,
         )
 
+    _LOGGER.info(
+        "model_call success service=patent component=rerank model=%s endpoint=%s auth_mode=%s "
+        "status_code=%s elapsed_ms=%.2f selected=%s fallback=false",
+        str(model or "").strip(),
+        endpoint,
+        auth_mode,
+        getattr(response, "status_code", None),
+        (time.perf_counter() - started_at) * 1000.0,
+        len(ranked_docs),
+    )
     return {
         "documents": ranked_docs,
         "metadatas": ranked_metas,

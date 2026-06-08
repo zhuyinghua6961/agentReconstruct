@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -280,6 +281,44 @@ def test_pdf_answer_client_uses_injected_http_client_and_request_timeout():
     assert timeout.pool == 4.5
     client.close()
     assert http_client.closed is False
+
+
+def test_pdf_answer_client_logs_model_call_success(caplog):
+    class _FakeHttpClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def post(self, url, *, headers=None, json=None, timeout=None):
+            self.calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", str(url)),
+                json={"choices": [{"message": {"content": "pdf answer"}}]},
+            )
+
+        def close(self):
+            return None
+
+    client = PatentPdfAnswerClient(
+        api_key="key",
+        base_url="https://example.com",
+        model="pdf-model",
+        http_client=_FakeHttpClient(),
+    )
+
+    with caplog.at_level(logging.INFO, logger="patent.pdf_service"):
+        answer = client.answer(
+            question="请总结这篇文献",
+            pdf_text="标题: A study\nAbstract text",
+            file_name="paper-a.pdf",
+            include_kb=False,
+            selected_file_labels=["paper-a.pdf"],
+        )
+
+    assert answer == "pdf answer"
+    messages = [record.message for record in caplog.records if record.name == "patent.pdf_service"]
+    assert any("model_call start" in message and "component=llm_pdf" in message and "model=pdf-model" in message for message in messages)
+    assert any("model_call success" in message and "component=llm_pdf" in message and "answer_chars=10" in message for message in messages)
 
 
 def test_pdf_answer_client_from_env_accepts_injected_http_client(monkeypatch):

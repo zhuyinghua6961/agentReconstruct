@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import os
+import logging
+import time
 from typing import Any, Dict, List, Optional
 
 from app.integrations.llm.thinking import auth_headers
@@ -15,6 +17,7 @@ except Exception:  # pragma: no cover - covered by fallback tests via injected m
     requests = None
 
 RERANK_PROVIDER_NAME = "openai_compatible"
+_LOGGER = logging.getLogger(__name__)
 
 
 def _fallback_result(
@@ -121,8 +124,22 @@ def rerank_documents(
         "documents": docs_to_rerank,
         "top_n": requested_top_n,
     }
+    auth_mode = _rerank_auth_mode()
     headers = _build_headers(api_key=api_key, include_auth=bool(api_key))
 
+    started_at = time.perf_counter()
+    _LOGGER.info(
+        "model_call start service=fastQA component=rerank model=%s endpoint=%s auth_mode=%s "
+        "candidate_count=%s top_n=%s query_chars=%s timeout_seconds=%s key_present=%s",
+        str(model or "").strip(),
+        endpoint,
+        auth_mode,
+        len(docs_to_rerank),
+        requested_top_n,
+        len(str(query or "")),
+        timeout_seconds,
+        bool(api_key),
+    )
     try:
         response = req.post(endpoint, headers=headers, json=payload, timeout=timeout_seconds)
         response.raise_for_status()
@@ -147,6 +164,15 @@ def rerank_documents(
                 break
 
         if not ranked_docs:
+            _LOGGER.warning(
+                "model_call failed service=fastQA component=rerank model=%s endpoint=%s auth_mode=%s "
+                "status_code=%s elapsed_ms=%.2f fallback=true reason=empty_rerank_result selected=0",
+                str(model or "").strip(),
+                endpoint,
+                auth_mode,
+                getattr(response, "status_code", None),
+                (time.perf_counter() - started_at) * 1000.0,
+            )
             return _fallback_result(
                 documents=documents,
                 metadatas=metadatas,
@@ -155,6 +181,16 @@ def rerank_documents(
                 provider=RERANK_PROVIDER_NAME,
             )
 
+        _LOGGER.info(
+            "model_call success service=fastQA component=rerank model=%s endpoint=%s auth_mode=%s "
+            "status_code=%s elapsed_ms=%.2f selected=%s fallback=false",
+            str(model or "").strip(),
+            endpoint,
+            auth_mode,
+            getattr(response, "status_code", None),
+            (time.perf_counter() - started_at) * 1000.0,
+            len(ranked_docs),
+        )
         return {
             "documents": ranked_docs,
             "metadatas": ranked_metas,
@@ -169,6 +205,15 @@ def rerank_documents(
                 logger.warning(f"rerank failed ({RERANK_PROVIDER_NAME}), fallback to vector order: {exc}")
             except Exception:
                 pass
+        _LOGGER.warning(
+            "model_call failed service=fastQA component=rerank model=%s endpoint=%s auth_mode=%s "
+            "elapsed_ms=%.2f fallback=true reason=request_failed error_type=%s",
+            str(model or "").strip(),
+            endpoint,
+            auth_mode,
+            (time.perf_counter() - started_at) * 1000.0,
+            type(exc).__name__,
+        )
         return _fallback_result(
             documents=documents,
             metadatas=metadatas,
