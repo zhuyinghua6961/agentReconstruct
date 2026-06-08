@@ -11,6 +11,10 @@ from app.core.deps import AuthContext
 from app.modules.auth.deps import require_admin_context
 from app.modules.departments.import_service import department_import_service
 from app.modules.departments.schemas import (
+    DepartmentBatchDeleteItem,
+    DepartmentBatchDeleteRequest,
+    DepartmentBatchForceDeleteRequest,
+    DepartmentForceDeleteRequest,
     PrimaryDepartmentCreateRequest,
     PrimaryDepartmentRenameRequest,
     SecondaryDepartmentCreateRequest,
@@ -84,6 +88,34 @@ def delete_primary(
     _context: AuthContext = Depends(require_admin_context),
 ):
     return _respond(department_service.delete_primary(primary_id=primary_id), ok_status=200)
+
+
+@router.post("/batch-delete")
+def batch_delete_departments(
+    payload: DepartmentBatchDeleteRequest,
+    _context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(
+        department_service.batch_delete_departments(
+            items=[item.model_dump() if hasattr(item, "model_dump") else item.dict() for item in payload.items]
+        ),
+        ok_status=200,
+    )
+
+
+@router.post("/batch-force-delete")
+def batch_force_delete_departments(
+    payload: DepartmentBatchForceDeleteRequest,
+    _context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(
+        department_service.batch_force_delete_departments(
+            items=[item.model_dump() if hasattr(item, "model_dump") else item.dict() for item in payload.items],
+            actor_user_id=_context.user_id,
+            admin_password=payload.admin_password,
+        ),
+        ok_status=200,
+    )
 
 
 @router.post("/secondary")
@@ -193,6 +225,24 @@ def get_tertiary_users(
 ):
     return _respond(
         department_service.list_tertiary_users(tertiary_id=tertiary_id),
+        ok_status=200,
+    )
+
+
+@router.post("/{level}/{department_id}/force-delete")
+def force_delete_department(
+    level: str,
+    department_id: int,
+    payload: DepartmentForceDeleteRequest,
+    _context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(
+        department_service.force_delete_department(
+            level=level,
+            department_id=department_id,
+            actor_user_id=_context.user_id,
+            admin_password=payload.admin_password,
+        ),
         ok_status=200,
     )
 

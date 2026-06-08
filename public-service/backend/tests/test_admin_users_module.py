@@ -465,6 +465,7 @@ def test_admin_import_calls_create_user_without_department_ids(monkeypatch):
 
     monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
     monkeypatch.setattr(admin_users_import_service, "_finalize_excel_upload_quota", lambda **kwargs: None)
+    monkeypatch.setattr(admin_users_service.users, "get_by_username", lambda username: None)
     monkeypatch.setattr(
         admin_users_service,
         "create_user",
@@ -485,6 +486,7 @@ def test_admin_import_accepts_legacy_english_headers(monkeypatch):
 
     monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
     monkeypatch.setattr(admin_users_import_service, "_finalize_excel_upload_quota", lambda **kwargs: None)
+    monkeypatch.setattr(admin_users_service.users, "get_by_username", lambda username: None)
     monkeypatch.setattr(
         admin_users_service,
         "create_user",
@@ -505,6 +507,7 @@ def test_admin_import_rejects_case_insensitive_admin_prefix_via_shared_rules(mon
 
     monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
     monkeypatch.setattr(admin_users_import_service, "_finalize_excel_upload_quota", lambda **kwargs: None)
+    monkeypatch.setattr(admin_users_service.users, "get_by_username", lambda username: None)
     monkeypatch.setattr(
         admin_users_service,
         "create_user",
@@ -533,6 +536,7 @@ def test_admin_import_accepts_xlsx_without_department_columns(monkeypatch):
 
     monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
     monkeypatch.setattr(admin_users_import_service, "_finalize_excel_upload_quota", lambda **kwargs: None)
+    monkeypatch.setattr(admin_users_service.users, "get_by_username", lambda username: None)
     monkeypatch.setattr(
         admin_users_service,
         "create_user",
@@ -693,22 +697,34 @@ def test_admin_import_updates_existing_account_when_password_or_type_changes(mon
     assert updates["security"] == [{"user_id": 7, "required": True}]
 
 
-def test_admin_import_rejects_duplicate_usernames_inside_same_file(monkeypatch):
+def test_admin_import_marks_duplicate_usernames_inside_same_file_failed_and_continues(monkeypatch):
     created = []
 
     monkeypatch.setattr(admin_users_import_service, "_precheck_excel_upload_quota", lambda **kwargs: (None, None))
     monkeypatch.setattr(admin_users_import_service, "_finalize_excel_upload_quota", lambda **kwargs: None)
-    monkeypatch.setattr(admin_users_service, "create_user", lambda **kwargs: created.append(kwargs))
+    monkeypatch.setattr(admin_users_service.users, "get_by_username", lambda username: None)
+    monkeypatch.setattr(
+        admin_users_service,
+        "create_user",
+        lambda **kwargs: created.append(kwargs)
+        or {"success": True, "data": {"id": len(created), "username": kwargs["username"]}},
+    )
 
-    csv_bytes = "用户名,密码,用户类型\nuser1,Pass123!,common\nuser1,NewPass123!,super\n".encode("utf-8")
+    csv_bytes = "用户名,密码,用户类型\nuser1,Pass123!,common\nuser1,NewPass123!,super\nuser2,Pass123!,common\n".encode("utf-8")
     result = admin_users_import_service.import_users(file_bytes=csv_bytes, filename="users.csv", actor_user_id=1)
 
-    assert result == {
-        "success": False,
-        "error": "导入文件中存在重复用户名: user1（行号: 2,3）",
-        "code": "VALIDATION_ERROR",
+    assert result["success"] is True
+    assert result["data"]["summary"] == {
+        "total": 3,
+        "success": 1,
+        "updated": 0,
+        "failed": 2,
+        "skipped": 0,
     }
-    assert created == []
+    assert created == [{"username": "user2", "password": "Pass123!", "user_type": "common"}]
+    failed_details = [detail for detail in result["data"]["details"] if detail["status"] == "failed"]
+    assert [detail["row"] for detail in failed_details] == [2, 3]
+    assert all("重复用户名" in detail["reason"] for detail in failed_details)
 
 
 def test_admin_import_quota_precheck_returns_db_unavailable_on_actor_lookup_failure(monkeypatch):

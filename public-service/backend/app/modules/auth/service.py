@@ -252,6 +252,12 @@ class AuthService:
     def status_code_for(self, result: dict[str, Any], *, ok_status: int) -> int:
         if result.get("success"):
             return ok_status
+        explicit_status = result.get("http_status")
+        if explicit_status is not None:
+            try:
+                return int(explicit_status)
+            except (TypeError, ValueError):
+                pass
         code = str(result.get("code") or "")
         if code in {
             "VALIDATION_ERROR",
@@ -379,6 +385,36 @@ class AuthService:
         if not isinstance(payload, dict):
             return False
         return payload.get("primary_department_id") is not None and not bool(payload.get("require_department_setup"))
+
+    def _personnel_disabled_payload(self, *, user: dict[str, Any]) -> dict[str, Any] | None:
+        if self._is_admin_user(user):
+            return None
+        personnel_id = user.get("personnel_id")
+        if personnel_id is None:
+            return None
+        record = self._get_personnel_record(personnel_id=personnel_id)
+        if not isinstance(record, dict):
+            return None
+        if str(record.get("status") or "").strip().lower() == "active":
+            return None
+        department = self._describe_department_from_mapping(record)
+        return {
+            "employee_no": str(record.get("employee_no") or ""),
+            "full_name": str(record.get("full_name") or ""),
+            "department_display": str(department.get("department_display") or "未填写"),
+        }
+
+    def build_disabled_personnel_login_error(self, user: dict[str, Any]) -> dict[str, Any] | None:
+        personnel_payload = self._personnel_disabled_payload(user=user)
+        if not personnel_payload:
+            return None
+        return {
+            "success": False,
+            "error": "账号所属人员已停用，请联系管理员",
+            "code": "PERSONNEL_DISABLED",
+            "http_status": 403,
+            "data": {"personnel": personnel_payload},
+        }
 
     def _resolve_department_from_personnel_record(self, *, personnel_record: dict[str, Any] | None) -> dict[str, Any]:
         payload = self._describe_department_from_mapping(personnel_record)
@@ -861,7 +897,7 @@ class AuthService:
             if not user:
                 return {"success": False, "error": "invalid_credentials", "code": "INVALID_CREDENTIALS"}
             if user.get("status") != "active":
-                return {"success": False, "error": "account_disabled", "code": "ACCOUNT_DISABLED"}
+                return {"success": False, "error": "您的账号已被停用，请联系管理员", "code": "ACCOUNT_DISABLED"}
 
             locked_until = self._to_datetime(user.get("locked_until"))
             now = datetime.now()
@@ -898,6 +934,10 @@ class AuthService:
                     "failed_attempts": failed_attempts,
                     "remaining_attempts": max(0, self._lock_threshold - failed_attempts),
                 }
+
+            disabled_personnel_error = self.build_disabled_personnel_login_error(user)
+            if disabled_personnel_error:
+                return disabled_personnel_error
 
             self._repo.reset_login_attempts(user_id=int(user["id"]))
             token = self._tokens.issue_access_token(user_id=int(user["id"]), role=str(user["role"]))

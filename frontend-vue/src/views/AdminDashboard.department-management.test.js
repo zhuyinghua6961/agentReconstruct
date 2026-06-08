@@ -140,6 +140,37 @@ test('DepartmentManagementPanel exposes delete actions instead of department sta
   assert.doesNotMatch(adminServiceSource, /updateTertiaryDepartmentStatus/)
 })
 
+test('DepartmentManagementPanel supports selecting mixed department levels for batch delete', () => {
+  assert.match(adminServiceSource, /batchDeleteDepartments/)
+  assert.match(adminServiceSource, /departments\/batch-delete/)
+  assert.match(panelSource, /selectedDepartmentItems/)
+  assert.match(panelSource, /departmentSelectionKey/)
+  assert.match(panelSource, /collectSelectableDepartments/)
+  assert.match(panelSource, /toggleDepartmentSelection/)
+  assert.match(panelSource, /handleBatchDeleteDepartments/)
+  assert.match(panelSource, /批量删除部门/)
+  assert.match(panelSource, /仅无下级、无账号\/人员绑定的部门可删除/)
+  assert.match(panelSource, /department-checkbox/)
+  assert.match(panelSource, /primary/)
+  assert.match(panelSource, /secondary/)
+  assert.match(panelSource, /tertiary/)
+})
+
+test('DepartmentManagementPanel upgrades in-use delete failures to password-confirmed force delete', () => {
+  assert.match(panelSource, /forceDeleteDepartmentState/)
+  assert.match(panelSource, /adminPassword/)
+  assert.match(panelSource, /DEPARTMENT_IN_USE/)
+  assert.match(panelSource, /submitForceDeleteDepartment/)
+  assert.match(panelSource, /forceDeleteDepartment/)
+  assert.match(panelSource, /batchForceDeleteDepartments/)
+  assert.match(panelSource, /将删除下级部门/)
+  assert.match(panelSource, /清空相关人员和账号部门/)
+  assert.match(adminServiceSource, /forceDeleteDepartment\(/)
+  assert.match(adminServiceSource, /departments\/\$\{level\}\/\$\{departmentId\}\/force-delete/)
+  assert.match(adminServiceSource, /batchForceDeleteDepartments\(/)
+  assert.match(adminServiceSource, /departments\/batch-force-delete/)
+})
+
 test('DepartmentCreateDialog supports existing and new parent choices with ordered creation api calls', () => {
   assert.match(departmentCreateSource, /primaryMode/)
   assert.match(departmentCreateSource, /secondaryMode/)
@@ -183,27 +214,31 @@ test('admin service exposes direct and tertiary department user query api', () =
   assert.match(adminServiceSource, /departments\/secondary\/\$\{secondaryId\}\/direct-users/)
 })
 
-test('DepartmentManagementPanel renders collapsible secondary and tertiary sections with user counts', () => {
+test('DepartmentManagementPanel renders collapsible secondary and tertiary sections with member counts', () => {
   assert.match(panelSource, /expandedSecondaryIds/)
   assert.match(panelSource, /toggleSecondary/)
   assert.match(panelSource, /isSecondaryExpanded/)
   assert.match(panelSource, /secondary\.tertiary_count/)
   assert.match(panelSource, /direct_user_count/)
-  assert.match(panelSource, /直属一级部门用户/)
-  assert.match(panelSource, /直属二级部门用户/)
+  assert.match(panelSource, /直属一级部门成员/)
+  assert.match(panelSource, /直属二级部门成员/)
+  assert.match(panelSource, /工号/)
+  assert.match(panelSource, /姓名/)
   assert.doesNotMatch(panelSource, /未补全三级部门用户/)
   assert.doesNotMatch(panelSource, /未补全三级/)
+  assert.doesNotMatch(panelSource, /用户名/)
+  assert.doesNotMatch(panelSource, /用户类型/)
   assert.match(panelSource, /tertiary\.user_count/)
 })
 
-test('DepartmentManagementPanel lazy loads direct and tertiary users with local loading and error states', () => {
+test('DepartmentManagementPanel lazy loads direct and tertiary members with local loading and error states', () => {
   assert.match(panelSource, /createDepartmentUsersRuntime/)
   assert.match(panelSource, /loadDepartmentUsers/)
   assert.match(panelSource, /departmentUsersById/)
   assert.match(panelSource, /departmentUsersLoadingById/)
   assert.match(panelSource, /departmentUsersErrorById/)
-  assert.match(runtimeSource, /获取用户列表失败/)
-  assert.match(panelSource, /暂无用户/)
+  assert.match(runtimeSource, /获取成员列表失败/)
+  assert.match(panelSource, /暂无成员/)
 })
 
 test('AdminDashboard promotes quota, users, and departments into top admin tabs', () => {

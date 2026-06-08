@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 
 import { createDepartmentUsersRuntime } from './departmentSecondaryUsersRuntime.js'
 
-test('department users runtime expands once and reuses cached users on reopen', async () => {
+test('department users runtime expands once and reuses cached members on reopen', async () => {
   const calls = []
   const runtime = createDepartmentUsersRuntime({
     requestUsers: async (nodeKey) => {
@@ -11,8 +11,8 @@ test('department users runtime expands once and reuses cached users on reopen', 
       return {
         success: true,
         data: {
-          users: [
-            { id: 1, username: 'alice', user_type: 3, user_type_label: '普通用户', status: 'active' },
+          members: [
+            { id: 1, employee_no: 'P001', full_name: '张三', status: 'active' },
           ],
         },
       }
@@ -24,7 +24,7 @@ test('department users runtime expands once and reuses cached users on reopen', 
   assert.equal(calls.length, 1)
   assert.equal(runtime.loadingById.value['111'], false)
   assert.equal(runtime.errorById.value['111'], '')
-  assert.equal(runtime.usersById.value['111'][0].username, 'alice')
+  assert.equal(runtime.usersById.value['111'][0].employee_no, 'P001')
 
   await runtime.toggle('111')
   assert.equal(runtime.isExpanded('111'), false)
@@ -60,7 +60,7 @@ test('department users runtime turns transport failures into retryable error sta
         success: true,
         data: {
           users: [
-            { id: 2, username: 'bob', user_type: 2, user_type_label: '超级用户', status: 'disabled' },
+            { id: 2, employee_no: 'P002', full_name: '李四', status: 'disabled' },
           ],
         },
       }
@@ -70,7 +70,7 @@ test('department users runtime turns transport failures into retryable error sta
   await runtime.toggle('111')
   assert.equal(runtime.isExpanded('111'), true)
   assert.equal(runtime.loadingById.value['111'], false)
-  assert.match(runtime.errorById.value['111'], /获取用户列表失败/)
+  assert.match(runtime.errorById.value['111'], /获取成员列表失败/)
   assert.equal(runtime.usersById.value['111'], undefined)
 
   shouldFail = false
@@ -78,5 +78,5 @@ test('department users runtime turns transport failures into retryable error sta
   assert.equal(calls, 2)
   assert.equal(runtime.errorById.value['111'], '')
   assert.equal(runtime.loadingById.value['111'], false)
-  assert.equal(runtime.usersById.value['111'][0].username, 'bob')
+  assert.equal(runtime.usersById.value['111'][0].full_name, '李四')
 })

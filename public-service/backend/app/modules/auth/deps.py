@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import Depends, Header, Query
 
 from app.core.deps import AuthContext
@@ -9,6 +11,16 @@ from app.modules.auth import service as auth_service_module
 
 def _is_db_unavailable_error(exc: Exception) -> bool:
     return exc.__class__.__name__ in {"DatabaseConfigError", "DatabaseConnectionError", "DatabaseUnavailableError"}
+
+
+def _disabled_personnel_error(user: dict[str, Any]) -> dict[str, Any] | None:
+    build_error = getattr(auth_service_module.auth_service, "build_disabled_personnel_login_error", None)
+    if not callable(build_error):
+        return None
+    result = build_error(user)
+    if isinstance(result, dict) and not result.get("success") and result.get("code") == "PERSONNEL_DISABLED":
+        return result
+    return None
 
 
 def get_bearer_token(
@@ -41,6 +53,8 @@ def get_optional_auth_context(token: str | None = Depends(get_bearer_token)) -> 
         raise
     if not user or str(user.get("status") or "") != "active":
         return None
+    if _disabled_personnel_error(user):
+        return None
     return AuthContext(
         user_id=user_id,
         role=str(user.get("role") or payload.get("role") or "user"),
@@ -64,7 +78,17 @@ def require_auth_context(token: str | None = Depends(get_bearer_token)) -> AuthC
     if not user:
         raise AppError(message="user_not_found", code="USER_NOT_FOUND", status_code=401)
     if str(user.get("status") or "") != "active":
-        raise AppError(message="account_disabled", code="ACCOUNT_DISABLED", status_code=403)
+        raise AppError(message="您的账号已被停用，请联系管理员", code="ACCOUNT_DISABLED", status_code=403)
+    disabled_personnel_error = _disabled_personnel_error(user)
+    if disabled_personnel_error:
+        exc = AppError(
+            message=str(disabled_personnel_error.get("error") or "账号所属人员已停用，请联系管理员"),
+            code="PERSONNEL_DISABLED",
+            status_code=403,
+            details=None,
+        )
+        exc.extra_payload = {"data": disabled_personnel_error.get("data")}
+        raise exc
     return AuthContext(
         user_id=user_id,
         role=str(user.get("role") or payload.get("role") or "user"),

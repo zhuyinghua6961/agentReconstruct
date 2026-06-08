@@ -6,6 +6,7 @@ import logging
 import secrets
 from typing import Any
 
+from app.modules.admin_credentials import verify_admin_password as verify_admin_password_for_repo
 from app.modules.auth.repository import AuthRepository
 from app.modules.departments.service import department_service as shared_department_service
 from app.modules.personnel.repository import PersonnelRepository, REMARKS_UNSET
@@ -117,15 +118,32 @@ class PersonnelService:
             "DEPARTMENT_REQUIRED",
             "DEPARTMENT_RELATION_INVALID",
             "DEPARTMENT_DISABLED",
+            "ADMIN_PASSWORD_REQUIRED",
         }:
             return 400
         if code in {"PERSONNEL_NOT_FOUND", "PRIMARY_DEPARTMENT_NOT_FOUND", "SECONDARY_DEPARTMENT_NOT_FOUND", "TERTIARY_DEPARTMENT_NOT_FOUND"}:
             return 404
+        if code in {"ADMIN_PASSWORD_INVALID"}:
+            return 403
         if code in {"EMPLOYEE_NO_EXISTS", "PERSONNEL_HAS_BINDINGS"}:
             return 409
         if code in {"DB_UNAVAILABLE"}:
             return 503
         return 500
+
+    def verify_admin_password(self, *, actor_user_id: int, admin_password: str) -> bool:
+        return verify_admin_password_for_repo(
+            users_repo=self._users,
+            actor_user_id=int(actor_user_id or 0),
+            admin_password=str(admin_password or ""),
+        )
+
+    def _validate_force_delete_password(self, *, actor_user_id: int, admin_password: str) -> dict[str, Any] | None:
+        if not self.clean_text(admin_password):
+            return {"success": False, "error": "请输入管理员密码", "code": "ADMIN_PASSWORD_REQUIRED"}
+        if not self.verify_admin_password(actor_user_id=actor_user_id, admin_password=admin_password):
+            return {"success": False, "error": "管理员密码不正确", "code": "ADMIN_PASSWORD_INVALID"}
+        return None
 
     def _describe_personnel_department(self, record: dict[str, Any] | None) -> dict[str, Any]:
         primary_department_id, secondary_department_id, tertiary_department_id = self._department_triplet_from_mapping(record)
@@ -499,6 +517,257 @@ class PersonnelService:
             if _is_db_unavailable_error(exc):
                 return self._db_error(exc)
             return {"success": False, "error": "删除人员失败", "code": "DELETE_ERROR"}
+
+    def force_delete_personnel(self, *, personnel_id: int, actor_user_id: int, admin_password: str) -> dict[str, Any]:
+        password_error = self._validate_force_delete_password(
+            actor_user_id=actor_user_id,
+            admin_password=admin_password,
+        )
+        if password_error:
+            return password_error
+        try:
+            normalized_id = int(personnel_id)
+            record = self._repository.get_by_id(normalized_id)
+            if not record:
+                return {"success": False, "error": "人员不存在", "code": "PERSONNEL_NOT_FOUND"}
+            result = self._repository.force_delete_personnel_and_unbind_users(personnel_id=normalized_id)
+            deleted = int(result.get("deleted") or 0)
+            unbound_users = int(result.get("unbound_users") or 0)
+            if deleted <= 0:
+                return {"success": False, "error": "人员不存在", "code": "PERSONNEL_NOT_FOUND"}
+            logger.info(
+                "personnel_force_deleted",
+                extra={
+                    "event": "personnel_force_deleted",
+                    "actor_user_id": int(actor_user_id or 0),
+                    "personnel_id": normalized_id,
+                    "unbound_users": unbound_users,
+                },
+            )
+            return {
+                "success": True,
+                "message": f"人员 {record.get('employee_no')} / {record.get('full_name')} 已删除，已解绑 {unbound_users} 个账号",
+                "data": {
+                    "personnel": self._build_personnel_payload(record),
+                    "summary": {"deleted": deleted, "unbound_users": unbound_users},
+                },
+            }
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "强制删除人员失败", "code": "FORCE_DELETE_ERROR"}
+
+    def batch_force_delete_personnel(
+        self,
+        *,
+        personnel_ids: list[int],
+        actor_user_id: int,
+        admin_password: str,
+    ) -> dict[str, Any]:
+        password_error = self._validate_force_delete_password(
+            actor_user_id=actor_user_id,
+            admin_password=admin_password,
+        )
+        if password_error:
+            return password_error
+        try:
+            normalized_ids: list[int] = []
+            seen: set[int] = set()
+            for item in list(personnel_ids or []):
+                try:
+                    parsed = int(item)
+                except Exception:
+                    continue
+                if parsed <= 0 or parsed in seen:
+                    continue
+                seen.add(parsed)
+                normalized_ids.append(parsed)
+
+            if not normalized_ids:
+                return {"success": False, "error": "请选择至少一个人员", "code": "VALIDATION_ERROR"}
+
+            details: list[dict[str, Any]] = []
+            success_count = 0
+            failed_count = 0
+            total_unbound_users = 0
+
+            for index, personnel_id in enumerate(normalized_ids, start=1):
+                record = self._repository.get_by_id(personnel_id)
+                if not record:
+                    failed_count += 1
+                    details.append(
+                        {
+                            "row": index,
+                            "personnel_id": personnel_id,
+                            "employee_no": "",
+                            "full_name": "",
+                            "status": "failed",
+                            "code": "PERSONNEL_NOT_FOUND",
+                            "message": "人员不存在",
+                        }
+                    )
+                    continue
+                result = self._repository.force_delete_personnel_and_unbind_users(personnel_id=personnel_id)
+                deleted = int(result.get("deleted") or 0)
+                unbound_users = int(result.get("unbound_users") or 0)
+                if deleted <= 0:
+                    failed_count += 1
+                    details.append(
+                        {
+                            "row": index,
+                            "personnel_id": personnel_id,
+                            "employee_no": str(record.get("employee_no") or ""),
+                            "full_name": str(record.get("full_name") or ""),
+                            "status": "failed",
+                            "code": "PERSONNEL_NOT_FOUND",
+                            "message": "人员不存在",
+                        }
+                    )
+                    continue
+                success_count += 1
+                total_unbound_users += unbound_users
+                details.append(
+                    {
+                        "row": index,
+                        "personnel_id": personnel_id,
+                        "employee_no": str(record.get("employee_no") or ""),
+                        "full_name": str(record.get("full_name") or ""),
+                        "status": "success",
+                        "message": f"删除成功，已解绑 {unbound_users} 个账号",
+                        "unbound_users": unbound_users,
+                    }
+                )
+
+            logger.info(
+                "personnel_batch_force_deleted",
+                extra={
+                    "event": "personnel_batch_force_deleted",
+                    "actor_user_id": int(actor_user_id or 0),
+                    "total": len(normalized_ids),
+                    "success": success_count,
+                    "failed": failed_count,
+                    "unbound_users": total_unbound_users,
+                },
+            )
+            return {
+                "success": True,
+                "message": "批量强制删除人员完成",
+                "data": {
+                    "summary": {
+                        "total": len(normalized_ids),
+                        "success": success_count,
+                        "failed": failed_count,
+                        "unbound_users": total_unbound_users,
+                    },
+                    "details": details,
+                },
+            }
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "批量强制删除人员失败", "code": "BATCH_FORCE_DELETE_ERROR"}
+
+    def batch_delete_personnel(self, *, personnel_ids: list[int]) -> dict[str, Any]:
+        try:
+            normalized_ids: list[int] = []
+            seen: set[int] = set()
+            for item in list(personnel_ids or []):
+                try:
+                    parsed = int(item)
+                except Exception:
+                    continue
+                if parsed <= 0 or parsed in seen:
+                    continue
+                seen.add(parsed)
+                normalized_ids.append(parsed)
+
+            if not normalized_ids:
+                return {"success": False, "error": "请选择至少一个人员", "code": "VALIDATION_ERROR"}
+
+            details: list[dict[str, Any]] = []
+            success_count = 0
+            failed_count = 0
+            skipped_count = 0
+
+            for index, personnel_id in enumerate(normalized_ids, start=1):
+                record = self._repository.get_by_id(personnel_id)
+                if not record:
+                    failed_count += 1
+                    details.append(
+                        {
+                            "row": index,
+                            "personnel_id": personnel_id,
+                            "employee_no": "",
+                            "full_name": "",
+                            "status": "failed",
+                            "code": "PERSONNEL_NOT_FOUND",
+                            "message": "人员不存在",
+                        }
+                    )
+                    continue
+
+                employee_no = str(record.get("employee_no") or "")
+                full_name = str(record.get("full_name") or "")
+                if int(record.get("binding_count") or 0) > 0:
+                    failed_count += 1
+                    details.append(
+                        {
+                            "row": index,
+                            "personnel_id": personnel_id,
+                            "employee_no": employee_no,
+                            "full_name": full_name,
+                            "status": "failed",
+                            "code": "PERSONNEL_HAS_BINDINGS",
+                            "message": "该人员仍有绑定账号，请先解绑后再删除",
+                        }
+                    )
+                    continue
+
+                deleted_count = self._repository.delete_personnel(personnel_id=personnel_id)
+                if deleted_count <= 0:
+                    failed_count += 1
+                    details.append(
+                        {
+                            "row": index,
+                            "personnel_id": personnel_id,
+                            "employee_no": employee_no,
+                            "full_name": full_name,
+                            "status": "failed",
+                            "code": "PERSONNEL_HAS_BINDINGS",
+                            "message": "该人员仍有绑定账号，请先解绑后再删除",
+                        }
+                    )
+                    continue
+
+                success_count += 1
+                details.append(
+                    {
+                        "row": index,
+                        "personnel_id": personnel_id,
+                        "employee_no": employee_no,
+                        "full_name": full_name,
+                        "status": "success",
+                        "message": "删除成功",
+                    }
+                )
+
+            return {
+                "success": True,
+                "message": "批量删除人员完成",
+                "data": {
+                    "summary": {
+                        "total": len(normalized_ids),
+                        "success": success_count,
+                        "failed": failed_count,
+                        "skipped": skipped_count,
+                    },
+                    "details": details,
+                },
+            }
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "批量删除人员失败", "code": "BATCH_DELETE_ERROR"}
 
 
 personnel_service = PersonnelService()

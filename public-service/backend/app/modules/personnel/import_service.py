@@ -70,6 +70,7 @@ class PersonnelImportService:
         self,
         *,
         items: list[dict[str, Any]],
+        duplicate_employee_nos: dict[str, list[int]] | None,
         employee_no_col: str,
         full_name_col: str,
         verification_code_col: str,
@@ -78,8 +79,10 @@ class PersonnelImportService:
         secondary_department_name_col: str,
         tertiary_department_name_col: str,
         remarks_col: str | None,
-    ) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None, dict[str, int]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
         validated_rows: list[dict[str, Any]] = []
+        failed_details: list[dict[str, Any]] = []
+        duplicate_employee_nos = duplicate_employee_nos or {}
         created_departments = {"primary": 0, "secondary": 0, "tertiary": 0, "total": 0}
         for index, row in enumerate(items):
             line_no = index + 2
@@ -93,29 +96,52 @@ class PersonnelImportService:
             remarks = self._clean_text(row.get(remarks_col)) if remarks_col else REMARKS_UNSET
 
             if not employee_no:
-                return None, {"success": False, "error": f"第 {line_no} 行工号为空", "code": "VALIDATION_ERROR"}, created_departments
+                failed_details.append(self._failed_detail(line_no=line_no, employee_no="", full_name=full_name, reason="工号为空"))
+                continue
+            if employee_no in duplicate_employee_nos:
+                line_nos = ",".join(str(item) for item in duplicate_employee_nos[employee_no])
+                failed_details.append(
+                    self._failed_detail(
+                        line_no=line_no,
+                        employee_no=employee_no,
+                        full_name=full_name,
+                        reason=f"导入文件中存在重复工号（行号: {line_nos}）",
+                    )
+                )
+                continue
             if not full_name:
-                return None, {"success": False, "error": f"第 {line_no} 行姓名为空", "code": "VALIDATION_ERROR"}, created_departments
+                failed_details.append(self._failed_detail(line_no=line_no, employee_no=employee_no, full_name="", reason="姓名为空"))
+                continue
             if not verification_code:
-                return None, {"success": False, "error": f"第 {line_no} 行校验码为空", "code": "VALIDATION_ERROR"}, created_departments
+                failed_details.append(
+                    self._failed_detail(line_no=line_no, employee_no=employee_no, full_name=full_name, reason="校验码为空")
+                )
+                continue
             if status not in VALID_STATUSES:
-                return None, {
-                    "success": False,
-                    "error": f"第 {line_no} 行状态必须是 active/disabled 或 启用/停用",
-                    "code": "VALIDATION_ERROR",
-                }, created_departments
+                failed_details.append(
+                    self._failed_detail(
+                        line_no=line_no,
+                        employee_no=employee_no,
+                        full_name=full_name,
+                        reason="状态必须是 active/disabled 或 启用/停用",
+                    )
+                )
+                continue
             if not primary_department_name:
-                return None, {
-                    "success": False,
-                    "error": f"第 {line_no} 行一级部门名称不能为空",
-                    "code": "VALIDATION_ERROR",
-                }, created_departments
+                failed_details.append(
+                    self._failed_detail(line_no=line_no, employee_no=employee_no, full_name=full_name, reason="一级部门名称不能为空")
+                )
+                continue
             if tertiary_department_name and not secondary_department_name:
-                return None, {
-                    "success": False,
-                    "error": f"第 {line_no} 行三级部门名称不能在二级部门为空时填写",
-                    "code": "VALIDATION_ERROR",
-                }, created_departments
+                failed_details.append(
+                    self._failed_detail(
+                        line_no=line_no,
+                        employee_no=employee_no,
+                        full_name=full_name,
+                        reason="三级部门名称不能在二级部门为空时填写",
+                    )
+                )
+                continue
 
             resolver = getattr(self._departments, "resolve_or_create_by_names", None)
             if not callable(resolver):
@@ -128,11 +154,16 @@ class PersonnelImportService:
                 allow_legacy_two_level=True,
             )
             if not resolved.get("success"):
-                return None, {
-                    "success": False,
-                    "error": f"第 {line_no} 行{resolved.get('error') or '部门解析失败'}",
-                    "code": str(resolved.get("code") or "VALIDATION_ERROR"),
-                }, created_departments
+                failed_details.append(
+                    self._failed_detail(
+                        line_no=line_no,
+                        employee_no=employee_no,
+                        full_name=full_name,
+                        reason=str(resolved.get("error") or "部门解析失败"),
+                        code=str(resolved.get("code") or "VALIDATION_ERROR"),
+                    )
+                )
+                continue
             department_data = resolved.get("data") if isinstance(resolved.get("data"), dict) else {}
             row_created_departments = (
                 department_data.get("created_departments")
@@ -157,7 +188,25 @@ class PersonnelImportService:
                 }
             )
 
-        return validated_rows, None, created_departments
+        return validated_rows, failed_details, created_departments
+
+    @staticmethod
+    def _failed_detail(
+        *,
+        line_no: int,
+        employee_no: str,
+        full_name: str,
+        reason: str,
+        code: str = "VALIDATION_ERROR",
+    ) -> dict[str, Any]:
+        return {
+            "row": line_no,
+            "employee_no": employee_no,
+            "full_name": full_name,
+            "status": "failed",
+            "reason": reason,
+            "code": code,
+        }
 
     def import_personnel(self, *, file_bytes: bytes, filename: str) -> dict[str, Any]:
         filename = self._clean_text(filename)
@@ -201,17 +250,9 @@ class PersonnelImportService:
             if employee_no:
                 seen_rows.setdefault(employee_no, []).append(line_no)
         duplicates = {employee_no: line_nos for employee_no, line_nos in seen_rows.items() if len(line_nos) > 1}
-        if duplicates:
-            first_employee_no = next(iter(duplicates))
-            line_nos = ",".join(str(line_no) for line_no in duplicates[first_employee_no])
-            return {
-                "success": False,
-                "error": f"导入文件中存在重复工号: {first_employee_no}（行号: {line_nos}）",
-                "code": "VALIDATION_ERROR",
-            }
-
-        validated_rows, validation_error, created_departments = self._validate_rows(
+        validated_rows, failed_details, created_departments = self._validate_rows(
             items=rows["items"],
+            duplicate_employee_nos=duplicates,
             employee_no_col=employee_no_col,
             full_name_col=full_name_col,
             verification_code_col=verification_code_col,
@@ -221,57 +262,59 @@ class PersonnelImportService:
             tertiary_department_name_col=tertiary_department_name_col,
             remarks_col=remarks_col,
         )
-        if validation_error:
-            return validation_error
 
         created = 0
         updated = 0
         details: list[dict[str, Any]] = []
+        skipped = 0
 
-        try:
-            prepared_rows = [
-                {
-                    **row,
-                    "verification_code_hash": self._service.hash_verification_code(str(row["verification_code"])),
-                }
-                for row in (validated_rows or [])
-            ]
+        prepared_rows = [
+            {
+                **row,
+                "verification_code_hash": self._service.hash_verification_code(str(row["verification_code"])),
+            }
+            for row in validated_rows
+        ]
+        if prepared_rows:
             try:
-                write_result = self._repository.import_personnel_rows(rows=prepared_rows, sync_bound_users=True)
-            except TypeError as exc:
-                if "sync_bound_users" not in str(exc):
-                    raise
-                write_result = self._repository.import_personnel_rows(rows=prepared_rows)
-                self._sync_imported_personnel_departments(rows=prepared_rows)
-            created = int(write_result.get("created") or 0)
-            updated = int(write_result.get("updated") or 0)
-            skipped = int(write_result.get("skipped") or 0)
-            details = list(write_result.get("details") or [])
-        except Exception as exc:
-            if _is_db_unavailable_error(exc):
-                return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
-            return {"success": False, "error": "批量导入失败", "code": "IMPORT_ERROR"}
+                try:
+                    write_result = self._repository.import_personnel_rows(rows=prepared_rows, sync_bound_users=True)
+                except TypeError as exc:
+                    if "sync_bound_users" not in str(exc):
+                        raise
+                    write_result = self._repository.import_personnel_rows(rows=prepared_rows)
+                    self._sync_imported_personnel_departments(rows=prepared_rows)
+                created = int(write_result.get("created") or 0)
+                updated = int(write_result.get("updated") or 0)
+                skipped = int(write_result.get("skipped") or 0)
+                details = list(write_result.get("details") or [])
+            except Exception as exc:
+                if _is_db_unavailable_error(exc):
+                    return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
+                return {"success": False, "error": "批量导入失败", "code": "IMPORT_ERROR"}
 
         logger.info(
             "personnel_import_applied",
             extra={"event": "personnel_import_applied", "created_count": created, "updated_count": updated},
         )
+        write_failed_count = sum(1 for item in details if item.get("status") == "failed")
+        failed_count = len(failed_details) + write_failed_count
         return {
             "success": True,
             "message": "人员导入完成",
             "data": {
                 "summary": {
-                    "total": created + updated + skipped,
+                    "total": created + updated + skipped + failed_count,
                     "created": created,
                     "updated": updated,
                     "skipped": skipped,
-                    "failed": 0,
+                    "failed": failed_count,
                     "created_departments_total": int(created_departments.get("total") or 0),
                     "created_primary_departments": int(created_departments.get("primary") or 0),
                     "created_secondary_departments": int(created_departments.get("secondary") or 0),
                     "created_tertiary_departments": int(created_departments.get("tertiary") or 0),
                 },
-                "details": details,
+                "details": sorted([*details, *failed_details], key=lambda item: int(item.get("row") or 0)),
             },
         }
 

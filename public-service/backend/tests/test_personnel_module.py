@@ -361,7 +361,7 @@ def test_personnel_repository_lists_bound_department_triplets_for_backfill():
     ]
 
 
-def test_personnel_repository_import_rows_rolls_back_on_write_error():
+def test_personnel_repository_import_rows_records_write_error_and_continues():
     module_spec = find_module_spec("app.modules.personnel.repository")
     assert module_spec is not None
 
@@ -379,6 +379,8 @@ def test_personnel_repository_import_rows_rolls_back_on_write_error():
 
         def execute(self, query, params=()):
             query_text = " ".join(str(query).split())
+            if query_text.startswith("SAVEPOINT") or query_text.startswith("ROLLBACK TO SAVEPOINT") or query_text.startswith("RELEASE SAVEPOINT"):
+                return
             if "SELECT" in query_text and "FROM personnel_records" in query_text:
                 return
             if "UPDATE personnel_records" in query_text:
@@ -432,36 +434,34 @@ def test_personnel_repository_import_rows_rolls_back_on_write_error():
     connection = FakeConnection()
     repo = PersonnelRepository(database=FakeDatabase(connection))
 
-    try:
-        repo.import_personnel_rows(
-            rows=[
-                {
-                    "line_no": 2,
-                    "employee_no": "T2024001",
-                    "full_name": "张三",
-                    "verification_code_hash": "hash-1",
-                    "status": "active",
-                    "remarks": "化学学院",
-                },
-                {
-                    "line_no": 3,
-                    "employee_no": "T2024002",
-                    "full_name": "李四",
-                    "verification_code_hash": "hash-2",
-                    "status": "active",
-                    "remarks": "材料系",
-                },
-            ]
-        )
-    except RuntimeError as exc:
-        assert str(exc) == "boom"
-    else:
-        raise AssertionError("expected RuntimeError")
+    result = repo.import_personnel_rows(
+        rows=[
+            {
+                "line_no": 2,
+                "employee_no": "T2024001",
+                "full_name": "张三",
+                "verification_code_hash": "hash-1",
+                "status": "active",
+                "remarks": "化学学院",
+            },
+            {
+                "line_no": 3,
+                "employee_no": "T2024002",
+                "full_name": "李四",
+                "verification_code_hash": "hash-2",
+                "status": "active",
+                "remarks": "材料系",
+            },
+        ]
+    )
 
     assert connection.begin_called == 1
-    assert connection.commit_called == 0
-    assert connection.rollback_called == 1
+    assert connection.commit_called == 1
+    assert connection.rollback_called == 0
     assert connection.cursor_instance.inserted_rows == ["T2024001", "T2024002"]
+    assert result["created"] == 1
+    assert result["details"][1]["status"] == "failed"
+    assert result["details"][1]["reason"] == "boom"
 
 
 def test_personnel_repository_import_rows_skips_existing_unchanged_record():
@@ -486,6 +486,8 @@ def test_personnel_repository_import_rows_skips_existing_unchanged_record():
 
         def execute(self, query, params=()):
             query_text = " ".join(str(query).split())
+            if query_text.startswith("SAVEPOINT") or query_text.startswith("ROLLBACK TO SAVEPOINT") or query_text.startswith("RELEASE SAVEPOINT"):
+                return
             if "SELECT id" in query_text and "FROM personnel_records" in query_text:
                 return
             if "UPDATE personnel_records" in query_text:
@@ -581,6 +583,7 @@ def test_personnel_routes_registered():
     assert "/api/admin/personnel/{personnel_id}" in paths
     assert "/api/admin/personnel/{personnel_id}/status" in paths
     assert "/api/admin/personnel/{personnel_id}/bindings" in paths
+    assert "/api/admin/personnel/batch-delete" in paths
     assert "/api/admin/personnel/batch-import" in paths
     assert "/api/admin/personnel/import-template" in paths
 
@@ -927,24 +930,109 @@ def test_personnel_service_delete_removes_unbound_personnel():
     assert repository.deleted_id == 9
 
 
-def test_personnel_import_rejects_duplicate_employee_no_inside_file():
+def test_personnel_service_batch_delete_requires_selection():
+    from app.modules.personnel.service import PersonnelService
+
+    service = PersonnelService(repository=object())
+
+    result = service.batch_delete_personnel(personnel_ids=[])
+
+    assert result["success"] is False
+    assert result["code"] == "VALIDATION_ERROR"
+
+
+def test_personnel_service_batch_delete_partially_succeeds_and_deduplicates():
+    from app.modules.personnel.service import PersonnelService
+
+    class FakeRepository:
+        def __init__(self) -> None:
+            self.deleted_ids = []
+
+        def get_by_id(self, personnel_id: int):
+            records = {
+                9: {
+                    "id": 9,
+                    "employee_no": "T2024001",
+                    "full_name": "张三",
+                    "status": "active",
+                    "binding_count": 0,
+                    "created_at": None,
+                    "updated_at": None,
+                },
+                10: {
+                    "id": 10,
+                    "employee_no": "T2024002",
+                    "full_name": "李四",
+                    "status": "active",
+                    "binding_count": 2,
+                    "created_at": None,
+                    "updated_at": None,
+                },
+            }
+            return records.get(int(personnel_id))
+
+        def delete_personnel(self, *, personnel_id: int):
+            self.deleted_ids.append(personnel_id)
+            return 1
+
+    repository = FakeRepository()
+    service = PersonnelService(repository=repository)
+
+    result = service.batch_delete_personnel(personnel_ids=[9, 10, 404, 9])
+
+    assert result["success"] is True
+    assert result["data"]["summary"] == {"total": 3, "success": 1, "failed": 2, "skipped": 0}
+    assert repository.deleted_ids == [9]
+    assert [detail["status"] for detail in result["data"]["details"]] == ["success", "failed", "failed"]
+    assert result["data"]["details"][1]["code"] == "PERSONNEL_HAS_BINDINGS"
+    assert result["data"]["details"][2]["code"] == "PERSONNEL_NOT_FOUND"
+
+
+def test_personnel_import_marks_duplicate_employee_no_rows_failed_and_continues():
     module_spec = find_module_spec("app.modules.personnel.import_service")
     assert module_spec is not None
 
     from app.modules.personnel.import_service import PersonnelImportService
 
-    service = PersonnelImportService(repository=object())
+    class FakeRepository:
+        def __init__(self) -> None:
+            self.rows = None
+
+        def import_personnel_rows(self, *, rows, sync_bound_users=True):
+            self.rows = rows
+            return {
+                "created": 1,
+                "updated": 0,
+                "skipped": 0,
+                "details": [
+                    {
+                        "row": rows[0]["line_no"],
+                        "employee_no": rows[0]["employee_no"],
+                        "full_name": rows[0]["full_name"],
+                        "personnel_record_status": rows[0]["status"],
+                        "status": "created",
+                    }
+                ],
+            }
+
+    repo = FakeRepository()
+    service = PersonnelImportService(repository=repo, department_service=_FakeThreeLevelDepartments())
     csv_bytes = (
         "employee_no,full_name,verification_code,status,primary_department_name,secondary_department_name,tertiary_department_name,remarks\n"
         "T2024001,张三,AAA111,active,计算机学院,软件工程系,智能软件实验室,化学学院\n"
         "T2024001,李四,BBB222,disabled,计算机学院,软件工程系,智能软件实验室,材料系\n"
+        "T2024002,王五,CCC333,active,计算机学院,软件工程系,智能软件实验室,材料系\n"
     ).encode("utf-8")
 
     result = service.import_personnel(file_bytes=csv_bytes, filename="personnel.csv")
 
-    assert result["success"] is False
-    assert result["code"] == "VALIDATION_ERROR"
-    assert "T2024001" in result["error"]
+    assert result["success"] is True
+    assert result["data"]["summary"]["created"] == 1
+    assert result["data"]["summary"]["failed"] == 2
+    assert [row["employee_no"] for row in repo.rows] == ["T2024002"]
+    failed_details = [detail for detail in result["data"]["details"] if detail["status"] == "failed"]
+    assert [detail["row"] for detail in failed_details] == [2, 3]
+    assert all("重复工号" in detail["reason"] for detail in failed_details)
 
 
 def test_personnel_import_updates_existing_employee_no():
@@ -1124,7 +1212,7 @@ def test_personnel_import_accepts_chinese_template_headers_and_defaults_status_a
     assert repo.rows[0]["remarks"] == "示例备注"
 
 
-def test_personnel_import_is_atomic_when_late_row_validation_fails():
+def test_personnel_import_keeps_valid_rows_when_late_row_validation_fails():
     module_spec = find_module_spec("app.modules.personnel.import_service")
     assert module_spec is not None
 
@@ -1132,19 +1220,25 @@ def test_personnel_import_is_atomic_when_late_row_validation_fails():
 
     class FakeRepository:
         def __init__(self) -> None:
-            self.create_calls = []
-            self.update_calls = []
+            self.rows = None
 
-        def get_by_employee_no(self, employee_no: str):
-            return None
-
-        def update_personnel(self, **kwargs):
-            self.update_calls.append(kwargs)
-            return 1
-
-        def create_personnel(self, **kwargs):
-            self.create_calls.append(kwargs)
-            return 10
+        def import_personnel_rows(self, *, rows, sync_bound_users=True):
+            self.rows = rows
+            return {
+                "created": len(rows),
+                "updated": 0,
+                "skipped": 0,
+                "details": [
+                    {
+                        "row": row["line_no"],
+                        "employee_no": row["employee_no"],
+                        "full_name": row["full_name"],
+                        "personnel_record_status": row["status"],
+                        "status": "created",
+                    }
+                    for row in rows
+                ],
+            }
 
     repo = FakeRepository()
     service = PersonnelImportService(repository=repo, department_service=_FakeThreeLevelDepartments())
@@ -1156,11 +1250,145 @@ def test_personnel_import_is_atomic_when_late_row_validation_fails():
 
     result = service.import_personnel(file_bytes=csv_bytes, filename="personnel.csv")
 
-    assert result["success"] is False
-    assert result["code"] == "VALIDATION_ERROR"
-    assert "第 3 行校验码为空" == result["error"]
-    assert repo.create_calls == []
-    assert repo.update_calls == []
+    assert result["success"] is True
+    assert result["data"]["summary"] == {
+        "total": 2,
+        "created": 1,
+        "updated": 0,
+        "skipped": 0,
+        "failed": 1,
+        "created_departments_total": 0,
+        "created_primary_departments": 0,
+        "created_secondary_departments": 0,
+        "created_tertiary_departments": 0,
+    }
+    assert [row["employee_no"] for row in repo.rows] == ["T2024001"]
+    assert result["data"]["details"][1]["row"] == 3
+    assert result["data"]["details"][1]["employee_no"] == "T2024002"
+    assert result["data"]["details"][1]["full_name"] == "李四"
+    assert result["data"]["details"][1]["status"] == "failed"
+    assert result["data"]["details"][1]["reason"] == "校验码为空"
+
+
+def test_personnel_repository_import_records_row_write_failure_and_continues():
+    module_spec = find_module_spec("app.modules.personnel.repository")
+    assert module_spec is not None
+
+    from app.modules.personnel.repository import PersonnelRepository
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.lastrowid = 0
+            self.current_employee_no = ""
+            self.records: dict[str, dict] = {}
+            self.fail_on_insert = {"T2024002"}
+            self.next_id = 10
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, query, params=()):
+            normalized = " ".join(str(query).split())
+            if normalized.startswith("SAVEPOINT") or normalized.startswith("RELEASE SAVEPOINT") or normalized.startswith("ROLLBACK TO SAVEPOINT"):
+                return
+            if "FROM personnel_records" in normalized and "WHERE employee_no = %s" in normalized:
+                self.current_employee_no = str(params[0])
+                return
+            if normalized.startswith("INSERT INTO personnel_records"):
+                employee_no = str(params[0])
+                if employee_no in self.fail_on_insert:
+                    raise RuntimeError("duplicate key")
+                self.next_id += 1
+                self.lastrowid = self.next_id
+                self.records[employee_no] = {"id": self.lastrowid}
+                return
+            raise AssertionError(f"unexpected query: {normalized}")
+
+        def fetchone(self):
+            return self.records.get(self.current_employee_no)
+
+    class FakeConnection:
+        def __init__(self) -> None:
+            self.cursor_obj = FakeCursor()
+            self.commits = 0
+            self.rollbacks = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def begin(self):
+            return None
+
+        def cursor(self):
+            return self.cursor_obj
+
+        def commit(self):
+            self.commits += 1
+
+        def rollback(self):
+            self.rollbacks += 1
+
+    class FakeDatabase:
+        def __init__(self) -> None:
+            self.connection_obj = FakeConnection()
+
+        def connection(self):
+            return self.connection_obj
+
+    db = FakeDatabase()
+    repo = PersonnelRepository(database=db)
+    rows = [
+        {
+            "line_no": 2,
+            "employee_no": "T2024001",
+            "full_name": "张三",
+            "verification_code": "AAA111",
+            "verification_code_hash": "hashed-1",
+            "status": "active",
+            "primary_department_id": 1,
+            "secondary_department_id": None,
+            "tertiary_department_id": None,
+        },
+        {
+            "line_no": 3,
+            "employee_no": "T2024002",
+            "full_name": "李四",
+            "verification_code": "BBB222",
+            "verification_code_hash": "hashed-2",
+            "status": "active",
+            "primary_department_id": 1,
+            "secondary_department_id": None,
+            "tertiary_department_id": None,
+        },
+        {
+            "line_no": 4,
+            "employee_no": "T2024003",
+            "full_name": "王五",
+            "verification_code": "CCC333",
+            "verification_code_hash": "hashed-3",
+            "status": "active",
+            "primary_department_id": 1,
+            "secondary_department_id": None,
+            "tertiary_department_id": None,
+        },
+    ]
+
+    result = repo.import_personnel_rows(rows=rows)
+
+    assert result["created"] == 2
+    assert result["updated"] == 0
+    assert result["skipped"] == 0
+    assert [detail["status"] for detail in result["details"]] == ["created", "failed", "created"]
+    assert result["details"][1]["row"] == 3
+    assert "duplicate key" in result["details"][1]["reason"]
+    assert db.connection_obj.commits == 1
+    assert db.connection_obj.rollbacks == 0
 
 
 def test_personnel_template_supports_csv_and_xlsx():
@@ -1225,7 +1453,7 @@ def test_personnel_admin_routes_registered(monkeypatch):
     assert module_spec is not None
 
     from app.core.deps import AuthContext
-    from app.modules.personnel.api import PersonnelUpdateRequest
+    from app.modules.personnel.api import PersonnelBatchDeleteRequest, PersonnelUpdateRequest
     from app.modules.personnel import api as personnel_api_module
     from app.modules.personnel.repository import REMARKS_UNSET
     from app.modules.personnel import service as personnel_service_module
@@ -1292,6 +1520,68 @@ def test_personnel_admin_routes_registered(monkeypatch):
 
     assert delete_response.status_code == 200
     assert _decode(delete_response)["data"]["id"] == 9
+
+    batch_calls = []
+
+    def fake_batch_delete_personnel(**kwargs):
+        batch_calls.append(kwargs)
+        return {
+            "success": True,
+            "data": {
+                "summary": {"total": 2, "success": 2, "failed": 0, "skipped": 0},
+                "details": [],
+            },
+        }
+
+    monkeypatch.setattr(personnel_service_module.personnel_service, "batch_delete_personnel", fake_batch_delete_personnel)
+
+    batch_delete_response = personnel_api_module.batch_delete_personnel(
+        payload=PersonnelBatchDeleteRequest(personnel_ids=[9, 10]),
+        _context=AuthContext(user_id=1, role="admin", username="admin"),
+    )
+
+    assert batch_delete_response.status_code == 200
+    assert batch_calls == [{"personnel_ids": [9, 10]}]
+
+    force_calls = []
+
+    def fake_force_delete_personnel(**kwargs):
+        force_calls.append(kwargs)
+        return {"success": True, "data": {"summary": {"deleted": 1, "unbound_users": 2}}}
+
+    def fake_batch_force_delete_personnel(**kwargs):
+        force_calls.append(kwargs)
+        return {
+            "success": True,
+            "data": {
+                "summary": {"total": 2, "success": 2, "failed": 0, "unbound_users": 3},
+                "details": [],
+            },
+        }
+
+    monkeypatch.setattr(personnel_service_module.personnel_service, "force_delete_personnel", fake_force_delete_personnel)
+    monkeypatch.setattr(
+        personnel_service_module.personnel_service,
+        "batch_force_delete_personnel",
+        fake_batch_force_delete_personnel,
+    )
+
+    force_response = personnel_api_module.force_delete_personnel(
+        personnel_id=9,
+        payload=personnel_api_module.PersonnelForceDeleteRequest(admin_password="secret"),
+        _context=AuthContext(user_id=1, role="admin", username="admin"),
+    )
+    batch_force_response = personnel_api_module.batch_force_delete_personnel(
+        payload=personnel_api_module.PersonnelBatchForceDeleteRequest(personnel_ids=[9, 10], admin_password="secret"),
+        _context=AuthContext(user_id=1, role="admin", username="admin"),
+    )
+
+    assert force_response.status_code == 200
+    assert batch_force_response.status_code == 200
+    assert force_calls == [
+        {"personnel_id": 9, "actor_user_id": 1, "admin_password": "secret"},
+        {"personnel_ids": [9, 10], "actor_user_id": 1, "admin_password": "secret"},
+    ]
 
 
 def test_create_personnel_requires_complete_three_level_department():
@@ -1817,62 +2107,132 @@ def test_import_personnel_auto_creates_missing_departments_and_reports_summary()
     assert repo.rows[1]["tertiary_department_id"] == 103
 
 
-def test_import_personnel_fails_when_existing_department_is_disabled():
+def test_import_personnel_marks_disabled_department_row_failed_and_continues():
     module_spec = find_module_spec("app.modules.personnel.import_service")
     assert module_spec is not None
 
     from app.modules.personnel.import_service import PersonnelImportService
 
     class FakeRepository:
-        def import_personnel_rows(self, **kwargs):
-            raise AssertionError("import should stop during department validation")
+        def __init__(self) -> None:
+            self.rows = None
+
+        def import_personnel_rows(self, *, rows: list[dict], sync_bound_users: bool):
+            self.rows = rows
+            return {
+                "created": len(rows),
+                "updated": 0,
+                "skipped": 0,
+                "details": [
+                    {
+                        "row": row["line_no"],
+                        "employee_no": row["employee_no"],
+                        "full_name": row["full_name"],
+                        "status": "created",
+                    }
+                    for row in rows
+                ],
+            }
 
     class FakeDepartments:
         def resolve_or_create_by_names(self, **kwargs):
+            if kwargs["primary_name"] == "计算机学院":
+                return {
+                    "success": True,
+                    "data": {
+                        "primary_department_id": 1,
+                        "secondary_department_id": None,
+                        "tertiary_department_id": None,
+                        "created_departments": {"primary": 0, "secondary": 0, "tertiary": 0, "total": 0},
+                    },
+                }
             return {"success": False, "error": "部门已停用，无法选择", "code": "DEPARTMENT_DISABLED"}
 
     csv_content = "\n".join(
         [
             "工号,姓名,校验码,状态,一级部门,二级部门,三级部门,备注",
             "T2024001,张三,ABC123,active,停用学院,,,",
+            "T2024002,李四,ABC124,active,计算机学院,,,",
         ]
     ).encode("utf-8")
 
-    service = PersonnelImportService(repository=FakeRepository(), service=object(), department_service=FakeDepartments())
+    class FakeService:
+        def hash_verification_code(self, verification_code: str) -> str:
+            return f"hashed-{verification_code}"
+
+    repo = FakeRepository()
+    service = PersonnelImportService(repository=repo, service=FakeService(), department_service=FakeDepartments())
     result = service.import_personnel(file_bytes=csv_content, filename="personnel.csv")
 
-    assert result["success"] is False
-    assert result["code"] == "DEPARTMENT_DISABLED"
-    assert "部门已停用" in result["error"]
+    assert result["success"] is True
+    assert result["data"]["summary"]["created"] == 1
+    assert result["data"]["summary"]["failed"] == 1
+    assert repo.rows[0]["employee_no"] == "T2024002"
+    assert result["data"]["details"][0]["status"] == "failed"
+    assert "部门已停用" in result["data"]["details"][0]["reason"]
 
 
-def test_import_personnel_rejects_tertiary_name_without_secondary_name():
+def test_import_personnel_marks_tertiary_name_without_secondary_name_failed_and_continues():
     module_spec = find_module_spec("app.modules.personnel.import_service")
     assert module_spec is not None
 
     from app.modules.personnel.import_service import PersonnelImportService
 
     class FakeRepository:
-        def import_personnel_rows(self, **kwargs):
-            raise AssertionError("import should stop during validation")
+        def __init__(self) -> None:
+            self.rows = None
+
+        def import_personnel_rows(self, *, rows: list[dict], sync_bound_users: bool):
+            self.rows = rows
+            return {
+                "created": len(rows),
+                "updated": 0,
+                "skipped": 0,
+                "details": [
+                    {
+                        "row": row["line_no"],
+                        "employee_no": row["employee_no"],
+                        "full_name": row["full_name"],
+                        "status": "created",
+                    }
+                    for row in rows
+                ],
+            }
 
     class FakeDepartments:
         def resolve_or_create_by_names(self, **kwargs):
-            raise AssertionError("department resolver should not be called for invalid hierarchy")
+            return {
+                "success": True,
+                "data": {
+                    "primary_department_id": 1,
+                    "secondary_department_id": None,
+                    "tertiary_department_id": None,
+                    "created_departments": {"primary": 0, "secondary": 0, "tertiary": 0, "total": 0},
+                },
+            }
 
     csv_content = "\n".join(
         [
             "工号,姓名,校验码,状态,一级部门,二级部门,三级部门,备注",
             "T2024001,张三,ABC123,active,计算机学院,,智能软件实验室,",
+            "T2024002,李四,ABC124,active,计算机学院,,,",
         ]
     ).encode("utf-8")
 
-    service = PersonnelImportService(repository=FakeRepository(), service=object(), department_service=FakeDepartments())
+    class FakeService:
+        def hash_verification_code(self, verification_code: str) -> str:
+            return f"hashed-{verification_code}"
+
+    repo = FakeRepository()
+    service = PersonnelImportService(repository=repo, service=FakeService(), department_service=FakeDepartments())
     result = service.import_personnel(file_bytes=csv_content, filename="personnel.csv")
 
-    assert result["success"] is False
-    assert result["code"] == "VALIDATION_ERROR"
-    assert "三级部门名称不能在二级部门为空时填写" in result["error"]
+    assert result["success"] is True
+    assert result["data"]["summary"]["created"] == 1
+    assert result["data"]["summary"]["failed"] == 1
+    assert repo.rows[0]["employee_no"] == "T2024002"
+    assert result["data"]["details"][0]["status"] == "failed"
+    assert "三级部门名称不能在二级部门为空时填写" in result["data"]["details"][0]["reason"]
 
 
 def test_personnel_payload_includes_department_display_fields():
@@ -2074,3 +2434,111 @@ def test_personnel_department_backfill_cli_reports_summary_and_exit_code(monkeyp
     assert module.main(["--apply"]) == 0
     apply_output = capsys.readouterr().out
     assert "synced" in apply_output
+
+
+def test_personnel_service_force_delete_requires_admin_password_before_unbinding():
+    from app.modules.personnel.service import PersonnelService
+
+    class FakeRepository:
+        def __init__(self):
+            self.force_deleted = []
+
+        def get_by_id(self, personnel_id: int):
+            return {
+                "id": personnel_id,
+                "employee_no": "T2024001",
+                "full_name": "张三",
+                "status": "active",
+                "binding_count": 2,
+            }
+
+        def force_delete_personnel_and_unbind_users(self, *, personnel_id: int):
+            self.force_deleted.append(personnel_id)
+            return {"deleted": 1, "unbound_users": 2}
+
+    class FakeUsers:
+        def get_by_id(self, user_id: int):
+            return {"id": user_id, "role": "admin", "user_type": 1, "password_hash": "hash"}
+
+    repo = FakeRepository()
+    service = PersonnelService(repository=repo, users_repo=FakeUsers())
+    service.verify_admin_password = lambda *, actor_user_id, admin_password: False
+
+    result = service.force_delete_personnel(
+        personnel_id=9,
+        actor_user_id=1,
+        admin_password="wrong-password",
+    )
+
+    assert result["success"] is False
+    assert result["code"] == "ADMIN_PASSWORD_INVALID"
+    assert repo.force_deleted == []
+
+
+def test_personnel_service_force_delete_unbinds_accounts_and_deletes_personnel():
+    from app.modules.personnel.service import PersonnelService
+
+    class FakeRepository:
+        def get_by_id(self, personnel_id: int):
+            return {
+                "id": personnel_id,
+                "employee_no": "T2024001",
+                "full_name": "张三",
+                "status": "active",
+                "binding_count": 2,
+            }
+
+        def force_delete_personnel_and_unbind_users(self, *, personnel_id: int):
+            assert personnel_id == 9
+            return {"deleted": 1, "unbound_users": 2}
+
+    service = PersonnelService(repository=FakeRepository(), users_repo=object())
+    service.verify_admin_password = lambda *, actor_user_id, admin_password: True
+
+    result = service.force_delete_personnel(
+        personnel_id=9,
+        actor_user_id=1,
+        admin_password="admin-password",
+    )
+
+    assert result["success"] is True
+    assert result["data"]["summary"]["deleted"] == 1
+    assert result["data"]["summary"]["unbound_users"] == 2
+    assert "已解绑 2 个账号" in result["message"]
+
+
+def test_personnel_service_batch_force_delete_only_processes_requested_failed_items():
+    from app.modules.personnel.service import PersonnelService
+
+    class FakeRepository:
+        def get_by_id(self, personnel_id: int):
+            if personnel_id == 404:
+                return None
+            return {
+                "id": personnel_id,
+                "employee_no": f"T{personnel_id}",
+                "full_name": f"人员{personnel_id}",
+                "status": "active",
+                "binding_count": 1,
+            }
+
+        def force_delete_personnel_and_unbind_users(self, *, personnel_id: int):
+            return {"deleted": 1, "unbound_users": personnel_id}
+
+    service = PersonnelService(repository=FakeRepository(), users_repo=object())
+    service.verify_admin_password = lambda *, actor_user_id, admin_password: True
+
+    result = service.batch_force_delete_personnel(
+        personnel_ids=[9, 404, 9, 10],
+        actor_user_id=1,
+        admin_password="admin-password",
+    )
+
+    assert result["success"] is True
+    assert result["data"]["summary"] == {
+        "total": 3,
+        "success": 2,
+        "failed": 1,
+        "unbound_users": 19,
+    }
+    assert result["data"]["details"][1]["code"] == "PERSONNEL_NOT_FOUND"

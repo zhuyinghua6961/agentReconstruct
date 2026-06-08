@@ -54,6 +54,18 @@ async function downloadFile(url, token, filename) {
   window.URL.revokeObjectURL(objectUrl)
 }
 
+function formatDisabledPersonnelMessage(error) {
+  const personnel = error?.data?.personnel || {}
+  const employeeNo = String(personnel.employee_no || '').trim()
+  const fullName = String(personnel.full_name || '').trim()
+  const departmentDisplay = String(personnel.department_display || '').trim()
+  const details = []
+  if (employeeNo) details.push(`工号：${employeeNo}`)
+  if (fullName) details.push(`姓名：${fullName}`)
+  if (departmentDisplay) details.push(`部门：${departmentDisplay}`)
+  return ['账号所属人员已停用，请联系管理员', ...details].join('\n')
+}
+
 // 全局错误处理函数
 function handleAdminError(error, response) {
   // 检查是否是账号停用错误
@@ -67,6 +79,13 @@ function handleAdminError(error, response) {
     // 跳转到登录页
     window.location.href = '/login'
     
+    return
+  }
+
+  if (error.code === 'PERSONNEL_DISABLED') {
+    clearStoredAuth()
+    alert(formatDisabledPersonnelMessage(error))
+    window.location.href = '/login'
     return
   }
   
@@ -298,6 +317,33 @@ export const adminApi = {
     })
   },
 
+  async forceDeletePersonnel(personnelId, adminPassword) {
+    const token = readStoredToken()
+    return fetchWithErrorHandling(`${API_BASE}/personnel/${personnelId}/force-delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ admin_password: adminPassword })
+    })
+  },
+
+  async batchDeletePersonnel(personnelIds) {
+    const token = readStoredToken()
+    return fetchWithErrorHandling(`${API_BASE}/personnel/batch-delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ personnel_ids: personnelIds })
+    })
+  },
+
+  async batchForceDeletePersonnel(personnelIds, adminPassword) {
+    const token = readStoredToken()
+    return fetchWithErrorHandling(`${API_BASE}/personnel/batch-force-delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ personnel_ids: personnelIds, admin_password: adminPassword })
+    })
+  },
+
   async getPersonnelBindings(personnelId) {
     const token = readStoredToken()
     return fetchWithErrorHandling(`${API_BASE}/personnel/${personnelId}/bindings`, {
@@ -413,6 +459,33 @@ export const adminApi = {
     return fetchWithErrorHandling(`${API_BASE}/departments/tertiary/${tertiaryId}`, {
       method: 'DELETE',
       headers: { 'Authorization': `Bearer ${token}` }
+    })
+  },
+
+  async batchDeleteDepartments(items) {
+    const token = readStoredToken()
+    return fetchWithErrorHandling(`${API_BASE}/departments/batch-delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ items })
+    })
+  },
+
+  async forceDeleteDepartment(level, departmentId, adminPassword) {
+    const token = readStoredToken()
+    return fetchWithErrorHandling(`${API_BASE}/departments/${level}/${departmentId}/force-delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ admin_password: adminPassword })
+    })
+  },
+
+  async batchForceDeleteDepartments(items, adminPassword) {
+    const token = readStoredToken()
+    return fetchWithErrorHandling(`${API_BASE}/departments/batch-force-delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ items, admin_password: adminPassword })
     })
   },
 

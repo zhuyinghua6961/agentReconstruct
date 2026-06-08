@@ -33,3 +33,21 @@ class TertiaryDepartmentRenameRequest(BaseModel):
 
 class DepartmentStatusUpdateRequest(BaseModel):
     status: Literal["active", "disabled"] | str = Field(default="active")
+
+
+class DepartmentBatchDeleteItem(BaseModel):
+    level: str = Field(default="")
+    id: int = Field(default=0)
+
+
+class DepartmentBatchDeleteRequest(BaseModel):
+    items: list[DepartmentBatchDeleteItem] = Field(default_factory=list)
+
+
+class DepartmentForceDeleteRequest(BaseModel):
+    admin_password: str = Field(default="")
+
+
+class DepartmentBatchForceDeleteRequest(BaseModel):
+    items: list[DepartmentBatchDeleteItem] = Field(default_factory=list)
+    admin_password: str = Field(default="")

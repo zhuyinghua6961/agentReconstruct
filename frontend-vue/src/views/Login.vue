@@ -15,12 +15,23 @@ const remainingSeconds = ref(0)
 const showSetupWarning = ref(false)
 const setupWarningTitle = ref('首次登录')
 const setupWarningText = ref('为了您的账号安全，请立即修改密码')
+const disabledPersonnel = ref(null)
+
+function normalizeDisabledPersonnel(result) {
+  const personnel = result?.data?.personnel || {}
+  return {
+    employee_no: String(personnel.employee_no || '').trim(),
+    full_name: String(personnel.full_name || '').trim(),
+    department_display: String(personnel.department_display || '').trim(),
+  }
+}
 
 async function handleLogin() {
   error.value = ''
   showPasswordWarning.value = false
   showAccountLocked.value = false
   showSetupWarning.value = false
+  disabledPersonnel.value = null
   
   if (!username.value || !password.value) {
     error.value = '请输入用户名和密码'
@@ -123,6 +134,13 @@ function handleLoginError(result) {
   else if (result.code === 'INVALID_CREDENTIALS' && result.remaining_attempts !== undefined) {
     error.value = result.error
   }
+  else if (result.code === 'ACCOUNT_DISABLED') {
+    error.value = '您的账号已被停用，请联系管理员'
+  }
+  else if (result.code === 'PERSONNEL_DISABLED') {
+    error.value = '账号所属人员已停用，请联系管理员'
+    disabledPersonnel.value = normalizeDisabledPersonnel(result)
+  }
   // 其他错误
   else {
     error.value = result.error
@@ -164,6 +182,21 @@ function goToChangePassword() {
       <form @submit.prevent="handleLogin" class="login-form">
         <div v-if="error" class="error-message">
           {{ error }}
+        </div>
+
+        <div v-if="disabledPersonnel" class="disabled-personnel-card">
+          <div v-if="disabledPersonnel.employee_no" class="disabled-personnel-row">
+            <span>工号</span>
+            <strong>{{ disabledPersonnel.employee_no }}</strong>
+          </div>
+          <div v-if="disabledPersonnel.full_name" class="disabled-personnel-row">
+            <span>姓名</span>
+            <strong>{{ disabledPersonnel.full_name }}</strong>
+          </div>
+          <div v-if="disabledPersonnel.department_display" class="disabled-personnel-row">
+            <span>部门</span>
+            <strong>{{ disabledPersonnel.department_display }}</strong>
+          </div>
         </div>
         
         <div v-if="showAccountLocked" class="locked-message">
@@ -347,6 +380,34 @@ function goToChangePassword() {
   border-radius: 8px;
   font-size: 14px;
   text-align: center;
+}
+
+.disabled-personnel-card {
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.disabled-personnel-row {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.disabled-personnel-row span {
+  color: #9a3412;
+}
+
+.disabled-personnel-row strong {
+  color: #7c2d12;
+  font-weight: 600;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .warning-message {

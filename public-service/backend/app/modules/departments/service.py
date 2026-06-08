@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.modules.admin_credentials import verify_admin_password as verify_admin_password_for_repo
+from app.modules.auth.repository import AuthRepository
 from app.modules.departments.repository import DepartmentRepository
 
 
@@ -10,8 +12,9 @@ def _is_db_unavailable_error(exc: Exception) -> bool:
 
 
 class DepartmentService:
-    def __init__(self, *, repository: DepartmentRepository | None = None) -> None:
+    def __init__(self, *, repository: DepartmentRepository | None = None, users_repo: AuthRepository | Any | None = None) -> None:
         self._repository = repository or DepartmentRepository()
+        self._users = users_repo or AuthRepository()
 
     @staticmethod
     def clean_text(value: object) -> str:
@@ -40,8 +43,11 @@ class DepartmentService:
             "FILENAME_EMPTY",
             "INVALID_FILE_TYPE",
             "INVALID_FORMAT",
+            "ADMIN_PASSWORD_REQUIRED",
         }:
             return 400
+        if code in {"ADMIN_PASSWORD_INVALID"}:
+            return 403
         if code in {"DEPARTMENT_IN_USE"}:
             return 409
         if code in {"PRIMARY_DEPARTMENT_NOT_FOUND", "SECONDARY_DEPARTMENT_NOT_FOUND", "TERTIARY_DEPARTMENT_NOT_FOUND"}:
@@ -105,46 +111,30 @@ class DepartmentService:
             return label
         return "未填写"
 
-    @staticmethod
-    def _user_type_code(*, user_type: object, role: object) -> int:
-        try:
-            user_type_code = int(user_type) if user_type is not None else None
-        except (TypeError, ValueError):
-            user_type_code = None
-
-        role_text = str(role or "").strip().lower()
-        if user_type_code == 1 or role_text == "admin":
-            return 1
-        if user_type_code == 2 or role_text == "super":
-            return 2
-        return 3
-
-    @classmethod
-    def _user_type_label(cls, *, user_type: object, role: object) -> str:
-        user_type_code = cls._user_type_code(user_type=user_type, role=role)
-        if user_type_code == 1:
-            return "管理员"
-        if user_type_code == 2:
-            return "超级用户"
-        return "普通用户"
-
-    def _build_user_items(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _build_member_items(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [
             {
                 "id": int(row["id"]),
-                "username": row["username"],
-                "user_type": self._user_type_code(
-                    user_type=row.get("user_type"),
-                    role=row.get("role"),
-                ),
-                "user_type_label": self._user_type_label(
-                    user_type=row.get("user_type"),
-                    role=row.get("role"),
-                ),
+                "employee_no": row.get("employee_no"),
+                "full_name": row.get("full_name"),
                 "status": self._normalize_status(row.get("status")),
+                "remarks": row.get("remarks"),
             }
             for row in rows
         ]
+
+    @staticmethod
+    def _member_payload(*, members: list[dict[str, Any]], extra: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "success": True,
+            "data": {
+                **extra,
+                "user_count": len(members),
+                "member_count": len(members),
+                "users": members,
+                "members": members,
+            },
+        }
 
     def _build_primary_payload(self, primary: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -197,6 +187,20 @@ class DepartmentService:
     @staticmethod
     def _department_in_use(reason: str) -> dict[str, Any]:
         return {"success": False, "error": reason, "code": "DEPARTMENT_IN_USE"}
+
+    def verify_admin_password(self, *, actor_user_id: int, admin_password: str) -> bool:
+        return verify_admin_password_for_repo(
+            users_repo=self._users,
+            actor_user_id=int(actor_user_id or 0),
+            admin_password=str(admin_password or ""),
+        )
+
+    def _validate_force_delete_password(self, *, actor_user_id: int, admin_password: str) -> dict[str, Any] | None:
+        if not self.clean_text(admin_password):
+            return {"success": False, "error": "请输入管理员密码", "code": "ADMIN_PASSWORD_REQUIRED"}
+        if not self.verify_admin_password(actor_user_id=actor_user_id, admin_password=admin_password):
+            return {"success": False, "error": "管理员密码不正确", "code": "ADMIN_PASSWORD_INVALID"}
+        return None
 
     def _get_tertiary_by_id(self, tertiary_id: int | None) -> dict[str, Any] | None:
         if tertiary_id is None:
@@ -278,23 +282,21 @@ class DepartmentService:
 
             primary_id = int(secondary["primary_department_id"])
             primary = self._repository.get_primary_by_id(primary_id)
-            rows = self._repository.list_users_by_secondary_department(secondary_id=int(secondary["id"]))
-            users = self._build_user_items(rows)
-            return {
-                "success": True,
-                "data": {
+            rows = self._repository.list_personnel_by_secondary_department(secondary_id=int(secondary["id"]))
+            members = self._build_member_items(rows)
+            return self._member_payload(
+                members=members,
+                extra={
                     "secondary_department_id": int(secondary["id"]),
                     "primary_department_id": primary_id,
                     "primary_department_name": (primary or {}).get("name"),
                     "secondary_department_name": secondary.get("name"),
-                    "user_count": len(users),
-                    "users": users,
                 },
-            }
+            )
         except Exception as exc:
             if _is_db_unavailable_error(exc):
                 return self._db_error(exc)
-            return {"success": False, "error": "获取部门用户失败", "code": "FETCH_ERROR"}
+            return {"success": False, "error": "获取部门成员失败", "code": "FETCH_ERROR"}
 
     def list_secondary_legacy_users(self, *, secondary_id: int) -> dict[str, Any]:
         try:
@@ -304,47 +306,41 @@ class DepartmentService:
 
             primary_id = int(secondary["primary_department_id"])
             primary = self._repository.get_primary_by_id(primary_id)
-            getter = getattr(self._repository, "list_direct_users_by_secondary_department", None)
-            if not callable(getter):
-                getter = getattr(self._repository, "list_legacy_users_by_secondary_department", None)
+            getter = getattr(self._repository, "list_direct_personnel_by_secondary_department", None)
             rows = getter(secondary_id=int(secondary["id"])) if callable(getter) else []
-            users = self._build_user_items(rows)
-            return {
-                "success": True,
-                "data": {
+            members = self._build_member_items(rows)
+            return self._member_payload(
+                members=members,
+                extra={
                     "secondary_department_id": int(secondary["id"]),
                     "primary_department_id": primary_id,
                     "primary_department_name": (primary or {}).get("name"),
                     "secondary_department_name": secondary.get("name"),
-                    "user_count": len(users),
-                    "users": users,
                 },
-            }
+            )
         except Exception as exc:
             if _is_db_unavailable_error(exc):
                 return self._db_error(exc)
-            return {"success": False, "error": "获取部门遗留用户失败", "code": "FETCH_ERROR"}
+            return {"success": False, "error": "获取部门直属成员失败", "code": "FETCH_ERROR"}
 
     def list_primary_direct_users(self, *, primary_id: int) -> dict[str, Any]:
         try:
             primary = self._repository.get_primary_by_id(int(primary_id))
             if not primary:
                 return {"success": False, "error": "一级部门不存在", "code": "PRIMARY_DEPARTMENT_NOT_FOUND"}
-            rows = self._repository.list_direct_users_by_primary_department(primary_id=int(primary["id"]))
-            users = self._build_user_items(rows)
-            return {
-                "success": True,
-                "data": {
+            rows = self._repository.list_direct_personnel_by_primary_department(primary_id=int(primary["id"]))
+            members = self._build_member_items(rows)
+            return self._member_payload(
+                members=members,
+                extra={
                     "primary_department_id": int(primary["id"]),
                     "primary_department_name": primary.get("name"),
-                    "user_count": len(users),
-                    "users": users,
                 },
-            }
+            )
         except Exception as exc:
             if _is_db_unavailable_error(exc):
                 return self._db_error(exc)
-            return {"success": False, "error": "获取一级部门直属用户失败", "code": "FETCH_ERROR"}
+            return {"success": False, "error": "获取一级部门直属成员失败", "code": "FETCH_ERROR"}
 
     def list_secondary_direct_users(self, *, secondary_id: int) -> dict[str, Any]:
         try:
@@ -354,23 +350,21 @@ class DepartmentService:
 
             primary_id = int(secondary["primary_department_id"])
             primary = self._repository.get_primary_by_id(primary_id)
-            rows = self._repository.list_direct_users_by_secondary_department(secondary_id=int(secondary["id"]))
-            users = self._build_user_items(rows)
-            return {
-                "success": True,
-                "data": {
+            rows = self._repository.list_direct_personnel_by_secondary_department(secondary_id=int(secondary["id"]))
+            members = self._build_member_items(rows)
+            return self._member_payload(
+                members=members,
+                extra={
                     "secondary_department_id": int(secondary["id"]),
                     "primary_department_id": primary_id,
                     "primary_department_name": (primary or {}).get("name"),
                     "secondary_department_name": secondary.get("name"),
-                    "user_count": len(users),
-                    "users": users,
                 },
-            }
+            )
         except Exception as exc:
             if _is_db_unavailable_error(exc):
                 return self._db_error(exc)
-            return {"success": False, "error": "获取二级部门直属用户失败", "code": "FETCH_ERROR"}
+            return {"success": False, "error": "获取二级部门直属成员失败", "code": "FETCH_ERROR"}
 
     def list_tertiary_users(self, *, tertiary_id: int) -> dict[str, Any]:
         try:
@@ -381,25 +375,23 @@ class DepartmentService:
             secondary_id = int(tertiary["secondary_department_id"])
             secondary = self._repository.get_secondary_by_id(secondary_id)
             primary = self._repository.get_primary_by_id(int((secondary or {}).get("primary_department_id") or 0)) if secondary else None
-            rows = self._repository.list_users_by_tertiary_department(tertiary_id=int(tertiary["id"]))
-            users = self._build_user_items(rows)
-            return {
-                "success": True,
-                "data": {
+            rows = self._repository.list_personnel_by_tertiary_department(tertiary_id=int(tertiary["id"]))
+            members = self._build_member_items(rows)
+            return self._member_payload(
+                members=members,
+                extra={
                     "tertiary_department_id": int(tertiary["id"]),
                     "secondary_department_id": secondary_id,
                     "primary_department_id": int((secondary or {}).get("primary_department_id") or 0) if secondary else None,
                     "primary_department_name": (primary or {}).get("name"),
                     "secondary_department_name": (secondary or {}).get("name"),
                     "tertiary_department_name": tertiary.get("name"),
-                    "user_count": len(users),
-                    "users": users,
                 },
-            }
+            )
         except Exception as exc:
             if _is_db_unavailable_error(exc):
                 return self._db_error(exc)
-            return {"success": False, "error": "获取三级部门用户失败", "code": "FETCH_ERROR"}
+            return {"success": False, "error": "获取三级部门成员失败", "code": "FETCH_ERROR"}
 
     def get_selectable_tree(self) -> dict[str, Any]:
         try:
@@ -868,6 +860,339 @@ class DepartmentService:
             if _is_db_unavailable_error(exc):
                 return self._db_error(exc)
             return {"success": False, "error": "删除一级部门失败", "code": "DELETE_ERROR"}
+
+    def batch_delete_departments(self, *, items: list[dict[str, Any]]) -> dict[str, Any]:
+        level_order = {"tertiary": 0, "secondary": 1, "primary": 2}
+        level_names = {"primary": "一级部门", "secondary": "二级部门", "tertiary": "三级部门"}
+
+        raw_items = list(items or [])
+        if not raw_items:
+            return {"success": False, "error": "请选择至少一个部门", "code": "VALIDATION_ERROR"}
+
+        normalized_items: list[dict[str, Any]] = []
+        invalid_details: list[dict[str, Any]] = []
+        seen: set[tuple[str, int]] = set()
+
+        for raw_index, raw_item in enumerate(raw_items, start=1):
+            getter = raw_item.get if isinstance(raw_item, dict) else lambda key, default=None: getattr(raw_item, key, default)
+            level = self.clean_text(getter("level", "")).lower()
+            try:
+                department_id = int(getter("id", 0))
+            except Exception:
+                department_id = 0
+
+            if level not in level_order or department_id <= 0:
+                duplicate_key = (level or "__invalid__", department_id)
+                if duplicate_key in seen:
+                    continue
+                seen.add(duplicate_key)
+                invalid_details.append(
+                    {
+                        "row": raw_index,
+                        "level": level,
+                        "id": department_id,
+                        "department_name": "",
+                        "status": "failed",
+                        "code": "VALIDATION_ERROR",
+                        "message": "部门层级或 ID 无效",
+                    }
+                )
+                continue
+
+            key = (level, department_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized_items.append({"row": raw_index, "level": level, "id": department_id})
+
+        if not normalized_items and not invalid_details:
+            return {"success": False, "error": "请选择至少一个部门", "code": "VALIDATION_ERROR"}
+
+        details: list[dict[str, Any]] = []
+        success_count = 0
+        failed_count = 0
+        skipped_count = 0
+
+        def load_department(level: str, department_id: int) -> dict[str, Any] | None:
+            if level == "primary":
+                return self._repository.get_primary_by_id(department_id)
+            if level == "secondary":
+                return self._repository.get_secondary_by_id(department_id)
+            return self._get_tertiary_by_id(department_id)
+
+        def run_delete(level: str, department_id: int) -> dict[str, Any]:
+            if level == "primary":
+                return self.delete_primary(primary_id=department_id)
+            if level == "secondary":
+                return self.delete_secondary(secondary_id=department_id)
+            return self.delete_tertiary(tertiary_id=department_id)
+
+        for item in sorted(normalized_items, key=lambda entry: (level_order[entry["level"]], entry["row"])):
+            record = load_department(item["level"], item["id"])
+            department_name = str((record or {}).get("name") or "")
+            result = run_delete(item["level"], item["id"])
+            detail = {
+                "row": item["row"],
+                "level": item["level"],
+                "level_name": level_names[item["level"]],
+                "id": item["id"],
+                "department_name": department_name,
+                "status": "success" if result.get("success") else "failed",
+                "message": result.get("message") or result.get("error") or "",
+            }
+            if result.get("success"):
+                success_count += 1
+            else:
+                failed_count += 1
+                detail["code"] = result.get("code") or "DELETE_ERROR"
+            details.append(detail)
+
+        failed_count += len(invalid_details)
+        details.extend(invalid_details)
+
+        return {
+            "success": True,
+            "message": "批量删除部门完成",
+            "data": {
+                "summary": {
+                    "total": len(normalized_items) + len(invalid_details),
+                    "success": success_count,
+                    "failed": failed_count,
+                    "skipped": skipped_count,
+                },
+                "details": details,
+            },
+        }
+
+    def _load_department_for_level(self, *, level: str, department_id: int) -> dict[str, Any] | None:
+        if level == "primary":
+            return self._repository.get_primary_by_id(department_id)
+        if level == "secondary":
+            return self._repository.get_secondary_by_id(department_id)
+        if level == "tertiary":
+            return self._get_tertiary_by_id(department_id)
+        return None
+
+    def _normalize_force_delete_items(self, items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        normalized_items: list[dict[str, Any]] = []
+        invalid_details: list[dict[str, Any]] = []
+        seen: set[tuple[str, int]] = set()
+        for raw_index, raw_item in enumerate(list(items or []), start=1):
+            getter = raw_item.get if isinstance(raw_item, dict) else lambda key, default=None: getattr(raw_item, key, default)
+            level = self.clean_text(getter("level", "")).lower()
+            try:
+                department_id = int(getter("id", 0))
+            except Exception:
+                department_id = 0
+            key = (level, department_id)
+            if level not in {"primary", "secondary", "tertiary"} or department_id <= 0:
+                if key not in seen:
+                    seen.add(key)
+                    invalid_details.append(
+                        {
+                            "row": raw_index,
+                            "level": level,
+                            "id": department_id,
+                            "department_name": "",
+                            "status": "failed",
+                            "code": "VALIDATION_ERROR",
+                            "message": "部门层级或 ID 无效",
+                        }
+                    )
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized_items.append({"row": raw_index, "level": level, "id": department_id})
+        return self._remove_child_items_covered_by_parents(normalized_items), invalid_details
+
+    def _remove_child_items_covered_by_parents(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        primary_ids = {int(item["id"]) for item in items if item["level"] == "primary"}
+        secondary_ids = {int(item["id"]) for item in items if item["level"] == "secondary"}
+        covered_secondary: set[int] = set()
+        for primary_id in primary_ids:
+            list_secondary = getattr(self._repository, "list_secondary_ids_by_primary", None)
+            if callable(list_secondary):
+                covered_secondary.update(int(item) for item in list_secondary(primary_id=primary_id))
+        for item in items:
+            if item["level"] != "secondary":
+                continue
+            record = self._repository.get_secondary_by_id(int(item["id"]))
+            if record and int(record.get("primary_department_id") or 0) in primary_ids:
+                covered_secondary.add(int(item["id"]))
+
+        covered_tertiary: set[int] = set()
+        list_tertiary = getattr(self._repository, "list_tertiary_ids_by_secondary", None)
+        if callable(list_tertiary):
+            for secondary_id in secondary_ids | covered_secondary:
+                covered_tertiary.update(int(item) for item in list_tertiary(secondary_id=secondary_id))
+        for item in items:
+            if item["level"] != "tertiary":
+                continue
+            record = self._get_tertiary_by_id(int(item["id"]))
+            if record and int(record.get("secondary_department_id") or 0) in (secondary_ids | covered_secondary):
+                covered_tertiary.add(int(item["id"]))
+
+        filtered: list[dict[str, Any]] = []
+        for item in items:
+            if item["level"] == "secondary" and int(item["id"]) in covered_secondary:
+                continue
+            if item["level"] == "tertiary" and int(item["id"]) in covered_tertiary:
+                continue
+            filtered.append(item)
+        return filtered
+
+    @staticmethod
+    def _force_delete_summary(raw: dict[str, Any]) -> dict[str, int]:
+        return {
+            "deleted_primary": int(raw.get("deleted_primary") or 0),
+            "deleted_secondary": int(raw.get("deleted_secondary") or 0),
+            "deleted_tertiary": int(raw.get("deleted_tertiary") or 0),
+            "cleared_personnel": int(raw.get("cleared_personnel") or 0),
+            "cleared_users": int(raw.get("cleared_users") or 0),
+        }
+
+    @staticmethod
+    def _force_delete_message(summary: dict[str, int]) -> str:
+        deleted_departments = (
+            int(summary.get("deleted_primary") or 0)
+            + int(summary.get("deleted_secondary") or 0)
+            + int(summary.get("deleted_tertiary") or 0)
+        )
+        return (
+            f"强制删除完成，已删除 {deleted_departments} 个部门，"
+            f"已清空 {int(summary.get('cleared_personnel') or 0)} 个人员和 "
+            f"{int(summary.get('cleared_users') or 0)} 个账号的部门信息"
+        )
+
+    def force_delete_department(
+        self,
+        *,
+        level: str,
+        department_id: int,
+        actor_user_id: int,
+        admin_password: str,
+    ) -> dict[str, Any]:
+        password_error = self._validate_force_delete_password(
+            actor_user_id=actor_user_id,
+            admin_password=admin_password,
+        )
+        if password_error:
+            return password_error
+        normalized_level = self.clean_text(level).lower()
+        if normalized_level not in {"primary", "secondary", "tertiary"}:
+            return {"success": False, "error": "部门层级无效", "code": "VALIDATION_ERROR"}
+        try:
+            normalized_id = int(department_id)
+            record = self._load_department_for_level(level=normalized_level, department_id=normalized_id)
+            if not record:
+                not_found_codes = {
+                    "primary": "PRIMARY_DEPARTMENT_NOT_FOUND",
+                    "secondary": "SECONDARY_DEPARTMENT_NOT_FOUND",
+                    "tertiary": "TERTIARY_DEPARTMENT_NOT_FOUND",
+                }
+                return {"success": False, "error": "部门不存在", "code": not_found_codes[normalized_level]}
+            raw_summary = self._repository.force_delete_department_subtree(
+                level=normalized_level,
+                department_id=normalized_id,
+            )
+            summary = self._force_delete_summary(raw_summary)
+            logger_extra = {
+                "event": "department_force_deleted",
+                "actor_user_id": int(actor_user_id or 0),
+                "level": normalized_level,
+                "department_id": normalized_id,
+                **summary,
+            }
+            # Department service does not currently own a module logger; keep the event in response and avoid password logs.
+            return {
+                "success": True,
+                "message": self._force_delete_message(summary),
+                "data": {
+                    "department": self._delete_payload(record),
+                    "summary": summary,
+                    "audit": logger_extra,
+                },
+            }
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "强制删除部门失败", "code": "FORCE_DELETE_ERROR"}
+
+    def batch_force_delete_departments(
+        self,
+        *,
+        items: list[dict[str, Any]],
+        actor_user_id: int,
+        admin_password: str,
+    ) -> dict[str, Any]:
+        password_error = self._validate_force_delete_password(
+            actor_user_id=actor_user_id,
+            admin_password=admin_password,
+        )
+        if password_error:
+            return password_error
+        normalized_items, invalid_details = self._normalize_force_delete_items(items)
+        if not normalized_items and not invalid_details:
+            return {"success": False, "error": "请选择至少一个部门", "code": "VALIDATION_ERROR"}
+
+        details: list[dict[str, Any]] = list(invalid_details)
+        existing_items: list[dict[str, Any]] = []
+        level_names = {"primary": "一级部门", "secondary": "二级部门", "tertiary": "三级部门"}
+        not_found_codes = {
+            "primary": "PRIMARY_DEPARTMENT_NOT_FOUND",
+            "secondary": "SECONDARY_DEPARTMENT_NOT_FOUND",
+            "tertiary": "TERTIARY_DEPARTMENT_NOT_FOUND",
+        }
+
+        for item in normalized_items:
+            record = self._load_department_for_level(level=item["level"], department_id=int(item["id"]))
+            if not record:
+                details.append(
+                    {
+                        "row": item["row"],
+                        "level": item["level"],
+                        "level_name": level_names[item["level"]],
+                        "id": item["id"],
+                        "department_name": "",
+                        "status": "failed",
+                        "code": not_found_codes[item["level"]],
+                        "message": "部门不存在",
+                    }
+                )
+                continue
+            existing_items.append(item)
+
+        raw_summary: dict[str, Any] = {}
+        if existing_items:
+            try:
+                raw_summary = self._repository.force_delete_departments(
+                    items=[{"level": item["level"], "id": int(item["id"])} for item in existing_items]
+                )
+            except Exception as exc:
+                if _is_db_unavailable_error(exc):
+                    return self._db_error(exc)
+                return {"success": False, "error": "批量强制删除部门失败", "code": "BATCH_FORCE_DELETE_ERROR"}
+            for detail in list(raw_summary.get("details") or []):
+                detail.setdefault("level_name", level_names.get(str(detail.get("level") or ""), "部门"))
+                details.append(detail)
+
+        summary = self._force_delete_summary(raw_summary)
+        success_count = sum(1 for detail in details if detail.get("status") == "success")
+        failed_count = sum(1 for detail in details if detail.get("status") == "failed")
+        return {
+            "success": True,
+            "message": "批量强制删除部门完成",
+            "data": {
+                "summary": {
+                    "total": len(existing_items) + len(invalid_details),
+                    "success": success_count,
+                    "failed": failed_count,
+                    **summary,
+                },
+                "details": details,
+            },
+        }
 
     def update_primary_status(self, *, primary_id: int, status: str) -> dict[str, Any]:
         status_value = self.clean_text(status).lower()

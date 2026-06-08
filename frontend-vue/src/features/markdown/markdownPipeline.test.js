@@ -52,6 +52,24 @@ test('parseMarkdownContent leaves ordinary pipe prose alone instead of inserting
   assert.match(html, /C \| D/)
 })
 
+test('parseMarkdownContent repairs table header glued to previous prose before separator', () => {
+  const input = [
+    '安全性至关重要 (CN121107379A)。 | 制备策略 | 核心技术特点 | 关键工艺参数 | 压实密度 (g/cm³) | 代表性专利 |',
+    '| :--- | :--- | :--- | :--- | :--- |',
+    '| 前驱体结晶度级配 | 混合高/低结晶度磷酸铁 | 前驱体比例5:1-5:3 | 2.608-2.632 | CN121376938A |',
+  ].join('\n')
+
+  const model = parseMarkdownContent(input, { variant: 'patent-message' })
+  const html = renderMarkdownContentToHtml(input, { variant: 'patent-message' })
+  const tableToken = model.tokens.find((token) => token.type === 'table')
+
+  assert.match(model.normalized, /CN121107379A\)。\n\| 制备策略 \| 核心技术特点/)
+  assert.equal(tableToken?.header?.[0]?.text, '制备策略')
+  assert.equal(tableToken?.header?.[4]?.text, '代表性专利')
+  assert.doesNotMatch(html, /<th>:---<\/th>/)
+  assert.match(html, /<th[^>]*>制备策略<\/th>/)
+})
+
 test('parseMarkdownContent keeps approximate numeric tildes as text while preserving double-tilde deletion', () => {
   const input = '结构稳定（~-250 J g^-1）远低于层状（<~-941 J g^-1），但 ~~失效~~。'
   const model = parseMarkdownContent(input)

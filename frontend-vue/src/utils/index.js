@@ -1592,7 +1592,7 @@ export function formatStreamingAnswer(text) {
 
 // 修复表格格式
 function fixTableFormat(text) {
-  const lines = text.split('\n')
+  const lines = splitGluedTableHeaderRows(text).split('\n')
   const result = []
   let i = 0
   
@@ -1629,6 +1629,70 @@ function fixTableFormat(text) {
   return result.join('\n')
 }
 
+function splitGluedTableHeaderRows(text) {
+  const lines = String(text || '').split('\n')
+  const result = []
+  let inFence = false
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
+    const trimmed = String(line || '').trim()
+    if (trimmed.startsWith('```')) {
+      inFence = !inFence
+      result.push(line)
+      continue
+    }
+
+    if (!inFence) {
+      const split = splitGluedTableHeaderLine(line, lines[index + 1])
+      if (split) {
+        result.push(split.prefix)
+        result.push(split.header)
+        continue
+      }
+    }
+
+    result.push(line)
+  }
+
+  return result.join('\n')
+}
+
+function splitGluedTableHeaderLine(line, nextLine) {
+  const source = String(line || '')
+  const trimmed = source.trim()
+  if (!trimmed.includes('|') || trimmed.startsWith('|') || !trimmed.endsWith('|')) return null
+  if (!isMarkdownTableSeparatorLine(nextLine)) return null
+
+  const separatorColumnCount = getMarkdownTableColumnCount(nextLine)
+  for (const match of source.matchAll(/\|/g)) {
+    const pipeIndex = Number(match.index)
+    const prefix = source.slice(0, pipeIndex).trimEnd()
+    const header = source.slice(pipeIndex).trim()
+    if (!looksLikeGluedTablePrefix(prefix)) continue
+    if (!isRepairableTableLine(header)) continue
+    if (getMarkdownTableColumnCount(header) !== separatorColumnCount) continue
+    if (!looksLikeMarkdownTableHeader(header)) continue
+    return { prefix, header }
+  }
+
+  return null
+}
+
+function looksLikeGluedTablePrefix(prefix) {
+  const text = String(prefix || '').trim()
+  if (text.length < 4) return false
+  if (!/[\u4e00-\u9fffA-Za-z0-9]/.test(text)) return false
+  return /[。！？!?；;）)\]】]$/.test(text)
+}
+
+function looksLikeMarkdownTableHeader(line) {
+  const cells = getMarkdownTableCells(line)
+  if (cells.length < 2) return false
+  if (cells.every(isMarkdownTableSeparatorCell)) return false
+  return cells.some((cell) => /[\u4e00-\u9fffA-Za-z]/.test(cell))
+}
+
 function isRepairableTableLine(line) {
   const trimmed = String(line || '').trim()
   if (!trimmed || trimmed.startsWith('```')) return false
@@ -1638,13 +1702,16 @@ function isRepairableTableLine(line) {
 }
 
 function getMarkdownTableColumnCount(line) {
+  return getMarkdownTableCells(line).length
+}
+
+function getMarkdownTableCells(line) {
   const trimmed = String(line || '').trim()
-  if (!trimmed.startsWith('|') || !trimmed.endsWith('|')) return 0
+  if (!trimmed.startsWith('|') || !trimmed.endsWith('|')) return []
   return trimmed
     .slice(1, -1)
     .split('|')
     .map((part) => part.trim())
-    .length
 }
 
 function isRepairableTableBlock(lines) {
@@ -1652,6 +1719,15 @@ function isRepairableTableBlock(lines) {
   const columnCount = getMarkdownTableColumnCount(lines[0])
   if (columnCount < 2) return false
   return lines.every((line) => getMarkdownTableColumnCount(line) === columnCount)
+}
+
+function isMarkdownTableSeparatorLine(line) {
+  const cells = getMarkdownTableCells(line)
+  return cells.length >= 2 && cells.every(isMarkdownTableSeparatorCell)
+}
+
+function isMarkdownTableSeparatorCell(value) {
+  return /^:?-{3,}:?$/.test(String(value || '').replace(/\s+/g, ''))
 }
 
 function renderMathMarkup(text) {

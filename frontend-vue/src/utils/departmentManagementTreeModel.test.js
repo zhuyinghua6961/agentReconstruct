@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { buildDepartmentRenderPrimary } from './departmentManagementTreeModel.js'
 import { buildDepartmentRenderTree } from './departmentManagementTreeModel.js'
 
-test('buildDepartmentRenderTree inserts secondary-direct user leaf when direct users exist', () => {
+test('buildDepartmentRenderTree inserts secondary-direct member leaf when direct members exist', () => {
   const nodes = buildDepartmentRenderTree([
     {
       id: 11,
@@ -17,7 +17,7 @@ test('buildDepartmentRenderTree inserts secondary-direct user leaf when direct u
   ])
 
   assert.equal(nodes[0].children[0].nodeType, 'secondary_direct')
-  assert.equal(nodes[0].children[0].name, '直属二级部门用户')
+  assert.equal(nodes[0].children[0].name, '直属二级部门成员')
   assert.equal(nodes[0].children[0].userCount, 2)
 })
 
@@ -37,7 +37,7 @@ test('buildDepartmentRenderTree keeps legacy count as a backward compatible seco
   assert.equal(nodes[0].children[0].userCount, 2)
 })
 
-test('buildDepartmentRenderPrimary inserts primary-direct user leaf before secondary items', () => {
+test('buildDepartmentRenderPrimary inserts primary-direct member leaf before secondary items', () => {
   const primary = buildDepartmentRenderPrimary({
     id: 1,
     name: '计算机学院',
@@ -48,7 +48,7 @@ test('buildDepartmentRenderPrimary inserts primary-direct user leaf before secon
   })
 
   assert.equal(primary.children[0].nodeType, 'primary_direct')
-  assert.equal(primary.children[0].name, '直属一级部门用户')
+  assert.equal(primary.children[0].name, '直属一级部门成员')
   assert.equal(primary.children[0].userCount, 3)
   assert.equal(primary.children[1].nodeType, 'secondary')
 })

@@ -467,6 +467,8 @@ def test_public_proxy_registers_personnel_route_methods():
     assert methods_by_path["/api/admin/personnel/{personnel_id}"] == {"PUT", "DELETE"}
     assert methods_by_path["/api/admin/personnel/{personnel_id}/status"] == {"PUT"}
     assert methods_by_path["/api/admin/personnel/{personnel_id}/bindings"] == {"GET"}
+    assert methods_by_path["/api/admin/personnel/{personnel_id}/force-delete"] == {"POST"}
+    assert methods_by_path["/api/admin/personnel/batch-force-delete"] == {"POST"}
     assert methods_by_path["/api/admin/personnel/batch-import"] == {"POST"}
     assert methods_by_path["/api/admin/personnel/import-template"] == {"GET"}
     assert methods_by_path["/api/admin/users/{user_id}/personnel-binding"] == {"PUT", "DELETE"}
@@ -479,8 +481,12 @@ def test_public_proxy_registers_department_delete_methods_without_status_routes(
     }
 
     assert methods_by_path["/api/admin/departments/primary/{primary_id}"] == {"PUT", "DELETE"}
+    assert methods_by_path["/api/admin/departments/primary/{primary_id}/direct-users"] == {"GET"}
     assert methods_by_path["/api/admin/departments/secondary/{secondary_id}"] == {"PUT", "DELETE"}
+    assert methods_by_path["/api/admin/departments/secondary/{secondary_id}/direct-users"] == {"GET"}
     assert methods_by_path["/api/admin/departments/tertiary/{tertiary_id}"] == {"PUT", "DELETE"}
+    assert methods_by_path["/api/admin/departments/{level}/{department_id}/force-delete"] == {"POST"}
+    assert methods_by_path["/api/admin/departments/batch-force-delete"] == {"POST"}
     assert "/api/admin/departments/primary/{primary_id}/status" not in methods_by_path
     assert "/api/admin/departments/secondary/{secondary_id}/status" not in methods_by_path
     assert "/api/admin/departments/tertiary/{tertiary_id}/status" not in methods_by_path
@@ -624,6 +630,13 @@ def test_public_proxy_keeps_auth_department_routes_in_api_and_v1_parity():
             b"",
         ),
         (
+            "GET",
+            "/api/admin/departments/primary/1/direct-users",
+            "/api/admin/departments/primary/1/direct-users",
+            None,
+            b"",
+        ),
+        (
             "POST",
             "/api/admin/departments/secondary",
             "/api/admin/departments/secondary",
@@ -648,6 +661,13 @@ def test_public_proxy_keeps_auth_department_routes_in_api_and_v1_parity():
             "GET",
             "/api/admin/departments/secondary/11/users",
             "/api/admin/departments/secondary/11/users",
+            None,
+            b"",
+        ),
+        (
+            "GET",
+            "/api/admin/departments/secondary/11/direct-users",
+            "/api/admin/departments/secondary/11/direct-users",
             None,
             b"",
         ),
@@ -691,6 +711,27 @@ def test_public_proxy_keeps_auth_department_routes_in_api_and_v1_parity():
             "/api/admin/departments/batch-import",
             "/api/admin/departments/batch-import",
             None,
+            b"",
+        ),
+        (
+            "POST",
+            "/api/admin/departments/batch-delete",
+            "/api/admin/departments/batch-delete",
+            {"items": [{"level": "tertiary", "id": 111}]},
+            b"",
+        ),
+        (
+            "POST",
+            "/api/admin/departments/primary/1/force-delete",
+            "/api/admin/departments/primary/1/force-delete",
+            {"admin_password": "secret"},
+            b"",
+        ),
+        (
+            "POST",
+            "/api/admin/departments/batch-force-delete",
+            "/api/admin/departments/batch-force-delete",
+            {"items": [{"level": "primary", "id": 1}], "admin_password": "secret"},
             b"",
         ),
         (
@@ -747,6 +788,27 @@ def test_public_proxy_keeps_auth_department_routes_in_api_and_v1_parity():
             "/api/admin/personnel/batch-import",
             "/api/admin/personnel/batch-import",
             None,
+            b"",
+        ),
+        (
+            "POST",
+            "/api/admin/personnel/batch-delete",
+            "/api/admin/personnel/batch-delete",
+            {"personnel_ids": [9, 10]},
+            b"",
+        ),
+        (
+            "POST",
+            "/api/admin/personnel/9/force-delete",
+            "/api/admin/personnel/9/force-delete",
+            {"admin_password": "secret"},
+            b"",
+        ),
+        (
+            "POST",
+            "/api/admin/personnel/batch-force-delete",
+            "/api/admin/personnel/batch-force-delete",
+            {"personnel_ids": [9, 10], "admin_password": "secret"},
             b"",
         ),
         (

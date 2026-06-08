@@ -22,6 +22,17 @@ test('Login persists personnel completion flags from auth payload', () => {
   assert.match(loginSource, /params\.set\('personnel', 'required'\)/)
 })
 
+test('Login renders disabled account and disabled personnel errors as Chinese messages', () => {
+  assert.match(loginSource, /ACCOUNT_DISABLED/)
+  assert.match(loginSource, /您的账号已被停用，请联系管理员/)
+  assert.match(loginSource, /PERSONNEL_DISABLED/)
+  assert.match(loginSource, /账号所属人员已停用，请联系管理员/)
+  assert.match(loginSource, /disabledPersonnel/)
+  assert.match(loginSource, /employee_no/)
+  assert.match(loginSource, /full_name/)
+  assert.match(loginSource, /department_display/)
+})
+
 test('UserProfile renders department section as read-only personnel-sourced information', () => {
   assert.match(profileSource, /部门信息/)
   assert.match(profileSource, /部门由人员信息统一维护|联系管理员在人员表维护/)

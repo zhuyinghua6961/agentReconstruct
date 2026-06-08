@@ -73,6 +73,9 @@ class DepartmentRepository:
     def has_user_column(self, column_name: str) -> bool:
         return column_name in self._user_columns()
 
+    def has_personnel_column(self, column_name: str) -> bool:
+        return self.has_table_column("personnel_records", column_name)
+
     @staticmethod
     def _identifier(value: str) -> str:
         return f"`{str(value).replace('`', '``')}`"
@@ -131,45 +134,45 @@ class DepartmentRepository:
         primary_direct_user_count_join = ""
         secondary_direct_user_count_select = "0 AS secondary_direct_user_count"
         secondary_direct_user_count_join = ""
-        has_primary_user_column = self.has_user_column("primary_department_id")
-        has_secondary_user_column = self.has_user_column("secondary_department_id")
-        has_tertiary_user_column = self.has_user_column("tertiary_department_id")
+        has_primary_personnel_column = self.has_personnel_column("primary_department_id")
+        has_secondary_personnel_column = self.has_personnel_column("secondary_department_id")
+        has_tertiary_personnel_column = self.has_personnel_column("tertiary_department_id")
 
-        if has_primary_user_column:
-            primary_direct_user_count_select = "COALESCE(pu.direct_user_count, 0) AS primary_direct_user_count"
-            secondary_null_clause = "AND secondary_department_id IS NULL" if has_secondary_user_column else ""
+        if has_primary_personnel_column:
+            primary_direct_user_count_select = "COALESCE(pm.direct_user_count, 0) AS primary_direct_user_count"
+            secondary_null_clause = "AND secondary_department_id IS NULL" if has_secondary_personnel_column else ""
             primary_direct_user_count_join = """
             LEFT JOIN (
                 SELECT primary_department_id, COUNT(*) AS direct_user_count
-                FROM users
+                FROM personnel_records
                 WHERE primary_department_id IS NOT NULL
                   {secondary_null_clause}
                 GROUP BY primary_department_id
-            ) pu
-                ON pu.primary_department_id = p.id
+            ) pm
+                ON pm.primary_department_id = p.id
             """.format(secondary_null_clause=secondary_null_clause)
-        if has_secondary_user_column:
-            user_count_select = "COALESCE(u.user_count, 0) AS secondary_user_count"
+        if has_secondary_personnel_column:
+            user_count_select = "COALESCE(pm.user_count, 0) AS secondary_user_count"
             user_count_join = """
             LEFT JOIN (
                 SELECT secondary_department_id, COUNT(*) AS user_count
-                FROM users
+                FROM personnel_records
                 WHERE secondary_department_id IS NOT NULL
                 GROUP BY secondary_department_id
-            ) u
-                ON u.secondary_department_id = s.id
+            ) pm
+                ON pm.secondary_department_id = s.id
             """
-            secondary_direct_user_count_select = "COALESCE(sdu.direct_user_count, 0) AS secondary_direct_user_count"
-            tertiary_null_clause = "AND tertiary_department_id IS NULL" if has_tertiary_user_column else ""
+            secondary_direct_user_count_select = "COALESCE(sdm.direct_user_count, 0) AS secondary_direct_user_count"
+            tertiary_null_clause = "AND tertiary_department_id IS NULL" if has_tertiary_personnel_column else ""
             secondary_direct_user_count_join = """
             LEFT JOIN (
                 SELECT secondary_department_id, COUNT(*) AS direct_user_count
-                FROM users
+                FROM personnel_records
                 WHERE secondary_department_id IS NOT NULL
                   {tertiary_null_clause}
                 GROUP BY secondary_department_id
-            ) sdu
-                ON sdu.secondary_department_id = s.id
+            ) sdm
+                ON sdm.secondary_department_id = s.id
             """.format(tertiary_null_clause=tertiary_null_clause)
 
         rows = self._execute_query(
@@ -248,66 +251,66 @@ class DepartmentRepository:
         tertiary_user_count_select = "0 AS tertiary_user_count"
         tertiary_user_count_join = ""
 
-        has_primary_user_column = self.has_user_column("primary_department_id")
-        has_secondary_user_column = self.has_user_column("secondary_department_id")
-        has_tertiary_user_column = self.has_user_column("tertiary_department_id")
+        has_primary_personnel_column = self.has_personnel_column("primary_department_id")
+        has_secondary_personnel_column = self.has_personnel_column("secondary_department_id")
+        has_tertiary_personnel_column = self.has_personnel_column("tertiary_department_id")
 
-        if has_primary_user_column:
-            primary_direct_user_count_select = "COALESCE(pu.direct_user_count, 0) AS primary_direct_user_count"
-            secondary_null_clause = "AND secondary_department_id IS NULL" if has_secondary_user_column else ""
+        if has_primary_personnel_column:
+            primary_direct_user_count_select = "COALESCE(pm.direct_user_count, 0) AS primary_direct_user_count"
+            secondary_null_clause = "AND secondary_department_id IS NULL" if has_secondary_personnel_column else ""
             primary_direct_user_count_join = """
             LEFT JOIN (
                 SELECT primary_department_id, COUNT(*) AS direct_user_count
-                FROM users
+                FROM personnel_records
                 WHERE primary_department_id IS NOT NULL
                   {secondary_null_clause}
                 GROUP BY primary_department_id
-            ) pu
-                ON pu.primary_department_id = p.id
+            ) pm
+                ON pm.primary_department_id = p.id
             """.format(secondary_null_clause=secondary_null_clause)
-        if has_secondary_user_column:
-            secondary_user_count_select = "COALESCE(su.user_count, 0) AS secondary_user_count"
+        if has_secondary_personnel_column:
+            secondary_user_count_select = "COALESCE(sm.user_count, 0) AS secondary_user_count"
             secondary_user_count_join = """
             LEFT JOIN (
                 SELECT secondary_department_id, COUNT(*) AS user_count
-                FROM users
+                FROM personnel_records
                 WHERE secondary_department_id IS NOT NULL
                 GROUP BY secondary_department_id
-            ) su
-                ON su.secondary_department_id = s.id
+            ) sm
+                ON sm.secondary_department_id = s.id
             """
-            secondary_direct_user_count_select = "COALESCE(sdu.direct_user_count, 0) AS secondary_direct_user_count"
-            if has_tertiary_user_column:
+            secondary_direct_user_count_select = "COALESCE(sdm.direct_user_count, 0) AS secondary_direct_user_count"
+            if has_tertiary_personnel_column:
                 secondary_direct_user_count_join = """
                 LEFT JOIN (
                     SELECT secondary_department_id, COUNT(*) AS direct_user_count
-                    FROM users
+                    FROM personnel_records
                     WHERE secondary_department_id IS NOT NULL
                       AND tertiary_department_id IS NULL
                     GROUP BY secondary_department_id
-                ) sdu
-                    ON sdu.secondary_department_id = s.id
+                ) sdm
+                    ON sdm.secondary_department_id = s.id
                 """
             else:
                 secondary_direct_user_count_join = """
                 LEFT JOIN (
                     SELECT secondary_department_id, COUNT(*) AS direct_user_count
-                    FROM users
+                    FROM personnel_records
                     WHERE secondary_department_id IS NOT NULL
                     GROUP BY secondary_department_id
-                ) sdu
-                    ON sdu.secondary_department_id = s.id
+                ) sdm
+                    ON sdm.secondary_department_id = s.id
                 """
-        if self.has_user_column("tertiary_department_id"):
-            tertiary_user_count_select = "COALESCE(tu.user_count, 0) AS tertiary_user_count"
+        if has_tertiary_personnel_column:
+            tertiary_user_count_select = "COALESCE(tm.user_count, 0) AS tertiary_user_count"
             tertiary_user_count_join = """
             LEFT JOIN (
                 SELECT tertiary_department_id, COUNT(*) AS user_count
-                FROM users
+                FROM personnel_records
                 WHERE tertiary_department_id IS NOT NULL
                 GROUP BY tertiary_department_id
-            ) tu
-                ON tu.tertiary_department_id = t.id
+            ) tm
+                ON tm.tertiary_department_id = t.id
             """
 
         rows = self._execute_query(
@@ -430,6 +433,32 @@ class DepartmentRepository:
         )
         return rows[0] if rows else None
 
+    def list_secondary_ids_by_primary(self, *, primary_id: int) -> list[int]:
+        rows = self._execute_query(
+            """
+            SELECT id
+            FROM secondary_departments
+            WHERE primary_department_id = %s
+            ORDER BY id ASC
+            """,
+            (int(primary_id),),
+        )
+        return [int(row["id"]) for row in rows]
+
+    def list_tertiary_ids_by_secondary(self, *, secondary_id: int) -> list[int]:
+        if not self.has_table("tertiary_departments"):
+            return []
+        rows = self._execute_query(
+            """
+            SELECT id
+            FROM tertiary_departments
+            WHERE secondary_department_id = %s
+            ORDER BY id ASC
+            """,
+            (int(secondary_id),),
+        )
+        return [int(row["id"]) for row in rows]
+
     def get_secondary_by_name(self, *, primary_department_id: int, name: str) -> dict[str, Any] | None:
         rows = self._execute_query(
             """
@@ -504,6 +533,76 @@ class DepartmentRepository:
             ORDER BY username ASC, id ASC
             """,
             (int(tertiary_id),),
+        )
+
+    def _personnel_list_fields(self) -> list[str]:
+        fields = ["id", "employee_no", "full_name", "status"]
+        if self.has_personnel_column("remarks"):
+            fields.append("remarks")
+        return fields
+
+    def list_personnel_by_secondary_department(self, *, secondary_id: int) -> list[dict[str, Any]]:
+        if not self.has_personnel_column("secondary_department_id"):
+            return []
+
+        return self._execute_query(
+            f"""
+            SELECT {", ".join(self._personnel_list_fields())}
+            FROM personnel_records
+            WHERE secondary_department_id = %s
+            ORDER BY employee_no ASC, id ASC
+            """,
+            (int(secondary_id),),
+        )
+
+    def list_personnel_by_tertiary_department(self, *, tertiary_id: int) -> list[dict[str, Any]]:
+        if not self.has_personnel_column("tertiary_department_id"):
+            return []
+
+        return self._execute_query(
+            f"""
+            SELECT {", ".join(self._personnel_list_fields())}
+            FROM personnel_records
+            WHERE tertiary_department_id = %s
+            ORDER BY employee_no ASC, id ASC
+            """,
+            (int(tertiary_id),),
+        )
+
+    def list_direct_personnel_by_primary_department(self, *, primary_id: int) -> list[dict[str, Any]]:
+        if not self.has_personnel_column("primary_department_id"):
+            return []
+
+        where_clause = "primary_department_id = %s"
+        if self.has_personnel_column("secondary_department_id"):
+            where_clause += " AND secondary_department_id IS NULL"
+
+        return self._execute_query(
+            f"""
+            SELECT {", ".join(self._personnel_list_fields())}
+            FROM personnel_records
+            WHERE {where_clause}
+            ORDER BY employee_no ASC, id ASC
+            """,
+            (int(primary_id),),
+        )
+
+    def list_direct_personnel_by_secondary_department(self, *, secondary_id: int) -> list[dict[str, Any]]:
+        if not self.has_personnel_column("secondary_department_id"):
+            return []
+
+        where_clause = "secondary_department_id = %s"
+        if self.has_personnel_column("tertiary_department_id"):
+            where_clause += " AND tertiary_department_id IS NULL"
+
+        return self._execute_query(
+            f"""
+            SELECT {", ".join(self._personnel_list_fields())}
+            FROM personnel_records
+            WHERE {where_clause}
+            ORDER BY employee_no ASC, id ASC
+            """,
+            (int(secondary_id),),
         )
 
     def list_direct_users_by_primary_department(self, *, primary_id: int) -> list[dict[str, Any]]:
@@ -702,6 +801,224 @@ class DepartmentRepository:
             """,
             (int(tertiary_id),),
         )
+
+    @staticmethod
+    def _ordered_unique(values: list[int]) -> list[int]:
+        seen: set[int] = set()
+        result: list[int] = []
+        for value in values:
+            normalized = int(value)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            result.append(normalized)
+        return result
+
+    def _department_subtree_ids(self, *, level: str, department_id: int) -> dict[str, list[int]]:
+        normalized_level = str(level or "").strip().lower()
+        normalized_id = int(department_id)
+        primary_ids: list[int] = []
+        secondary_ids: list[int] = []
+        tertiary_ids: list[int] = []
+
+        if normalized_level == "primary":
+            primary_ids.append(normalized_id)
+            secondary_ids.extend(self.list_secondary_ids_by_primary(primary_id=normalized_id))
+            for secondary_id in list(secondary_ids):
+                tertiary_ids.extend(self.list_tertiary_ids_by_secondary(secondary_id=secondary_id))
+        elif normalized_level == "secondary":
+            secondary_ids.append(normalized_id)
+            tertiary_ids.extend(self.list_tertiary_ids_by_secondary(secondary_id=normalized_id))
+        elif normalized_level == "tertiary":
+            tertiary_ids.append(normalized_id)
+        else:
+            raise ValueError(f"invalid_department_level:{normalized_level}")
+
+        return {
+            "primary": self._ordered_unique(primary_ids),
+            "secondary": self._ordered_unique(secondary_ids),
+            "tertiary": self._ordered_unique(tertiary_ids),
+        }
+
+    def _merge_department_scopes(self, scopes: list[dict[str, list[int]]]) -> dict[str, list[int]]:
+        return {
+            "primary": self._ordered_unique([item for scope in scopes for item in scope.get("primary", [])]),
+            "secondary": self._ordered_unique([item for scope in scopes for item in scope.get("secondary", [])]),
+            "tertiary": self._ordered_unique([item for scope in scopes for item in scope.get("tertiary", [])]),
+        }
+
+    def _execute_in_clause_update(
+        self,
+        cursor: Any,
+        *,
+        query_template: str,
+        ids: list[int],
+    ) -> int:
+        if not ids:
+            return 0
+        placeholders = ", ".join(["%s"] * len(ids))
+        cursor.execute(query_template.format(placeholders=placeholders), tuple(int(item) for item in ids))
+        return int(cursor.rowcount or 0)
+
+    def _clear_personnel_department_references_cursor(
+        self,
+        cursor: Any,
+        *,
+        primary_ids: list[int],
+        secondary_ids: list[int],
+        tertiary_ids: list[int],
+    ) -> int:
+        if not self.has_table("personnel_records"):
+            return 0
+        cleared = 0
+        if primary_ids and self.has_personnel_column("primary_department_id"):
+            cleared += self._execute_in_clause_update(
+                cursor,
+                query_template="""
+                    UPDATE personnel_records
+                    SET primary_department_id = NULL,
+                        secondary_department_id = NULL,
+                        tertiary_department_id = NULL
+                    WHERE primary_department_id IN ({placeholders})
+                """,
+                ids=primary_ids,
+            )
+        if secondary_ids and self.has_personnel_column("secondary_department_id"):
+            cleared += self._execute_in_clause_update(
+                cursor,
+                query_template="""
+                    UPDATE personnel_records
+                    SET secondary_department_id = NULL,
+                        tertiary_department_id = NULL
+                    WHERE secondary_department_id IN ({placeholders})
+                """,
+                ids=secondary_ids,
+            )
+        if tertiary_ids and self.has_personnel_column("tertiary_department_id"):
+            cleared += self._execute_in_clause_update(
+                cursor,
+                query_template="""
+                    UPDATE personnel_records
+                    SET tertiary_department_id = NULL
+                    WHERE tertiary_department_id IN ({placeholders})
+                """,
+                ids=tertiary_ids,
+            )
+        return cleared
+
+    def _clear_user_department_references_cursor(
+        self,
+        cursor: Any,
+        *,
+        primary_ids: list[int],
+        secondary_ids: list[int],
+        tertiary_ids: list[int],
+    ) -> int:
+        if not self.has_table("users"):
+            return 0
+        cleared = 0
+        if primary_ids and self.has_user_column("primary_department_id"):
+            cleared += self._execute_in_clause_update(
+                cursor,
+                query_template="""
+                    UPDATE users
+                    SET primary_department_id = NULL,
+                        secondary_department_id = NULL,
+                        tertiary_department_id = NULL
+                    WHERE primary_department_id IN ({placeholders})
+                """,
+                ids=primary_ids,
+            )
+        if secondary_ids and self.has_user_column("secondary_department_id"):
+            cleared += self._execute_in_clause_update(
+                cursor,
+                query_template="""
+                    UPDATE users
+                    SET secondary_department_id = NULL,
+                        tertiary_department_id = NULL
+                    WHERE secondary_department_id IN ({placeholders})
+                """,
+                ids=secondary_ids,
+            )
+        if tertiary_ids and self.has_user_column("tertiary_department_id"):
+            cleared += self._execute_in_clause_update(
+                cursor,
+                query_template="""
+                    UPDATE users
+                    SET tertiary_department_id = NULL
+                    WHERE tertiary_department_id IN ({placeholders})
+                """,
+                ids=tertiary_ids,
+            )
+        return cleared
+
+    def force_delete_department_subtree(self, *, level: str, department_id: int) -> dict[str, int]:
+        return self.force_delete_departments(items=[{"level": level, "id": int(department_id)}])
+
+    def force_delete_departments(self, *, items: list[dict[str, Any]]) -> dict[str, Any]:
+        scopes = [
+            self._department_subtree_ids(level=str(item.get("level") or ""), department_id=int(item.get("id") or 0))
+            for item in list(items or [])
+        ]
+        scope = self._merge_department_scopes(scopes)
+        primary_ids = scope["primary"]
+        secondary_ids = scope["secondary"]
+        tertiary_ids = scope["tertiary"]
+
+        with self._db.connection() as conn:
+            try:
+                conn.begin()
+                with conn.cursor() as cursor:
+                    cleared_personnel = self._clear_personnel_department_references_cursor(
+                        cursor,
+                        primary_ids=primary_ids,
+                        secondary_ids=secondary_ids,
+                        tertiary_ids=tertiary_ids,
+                    )
+                    cleared_users = self._clear_user_department_references_cursor(
+                        cursor,
+                        primary_ids=primary_ids,
+                        secondary_ids=secondary_ids,
+                        tertiary_ids=tertiary_ids,
+                    )
+                    deleted_tertiary = self._execute_in_clause_update(
+                        cursor,
+                        query_template="DELETE FROM tertiary_departments WHERE id IN ({placeholders})",
+                        ids=tertiary_ids,
+                    )
+                    deleted_secondary = self._execute_in_clause_update(
+                        cursor,
+                        query_template="DELETE FROM secondary_departments WHERE id IN ({placeholders})",
+                        ids=secondary_ids,
+                    )
+                    deleted_primary = self._execute_in_clause_update(
+                        cursor,
+                        query_template="DELETE FROM primary_departments WHERE id IN ({placeholders})",
+                        ids=primary_ids,
+                    )
+                conn.commit()
+                return {
+                    "deleted_primary": deleted_primary,
+                    "deleted_secondary": deleted_secondary,
+                    "deleted_tertiary": deleted_tertiary,
+                    "cleared_personnel": cleared_personnel,
+                    "cleared_users": cleared_users,
+                    "details": [
+                        {"level": "primary", "id": item, "status": "success", "message": "删除成功"}
+                        for item in primary_ids
+                    ]
+                    + [
+                        {"level": "secondary", "id": item, "status": "success", "message": "删除成功"}
+                        for item in secondary_ids
+                    ]
+                    + [
+                        {"level": "tertiary", "id": item, "status": "success", "message": "删除成功"}
+                        for item in tertiary_ids
+                    ],
+                }
+            except Exception:
+                conn.rollback()
+                raise
 
     def update_tertiary_status(self, *, tertiary_id: int, status: str) -> int:
         if not self.has_table("tertiary_departments"):

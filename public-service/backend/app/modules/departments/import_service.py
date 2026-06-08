@@ -81,8 +81,8 @@ class DepartmentImportService:
         pair_status_seen: dict[tuple[str, str], tuple[str, str]] = {}
         row_status_seen: dict[tuple[str, str, str], tuple[str, str, str]] = {}
 
-        try:
-            for index, row in enumerate(rows["items"]):
+        for index, row in enumerate(rows["items"]):
+            try:
                 line_no = index + 2
                 primary_name = self._clean_text(row.get(primary_name_col))
                 primary_status = self._clean_text(row.get(primary_status_col)).lower()
@@ -199,10 +199,24 @@ class DepartmentImportService:
                         "tertiary_department_id": tertiary_id,
                     }
                 )
-        except Exception as exc:
-            if _is_db_unavailable_error(exc):
-                return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
-            return {"success": False, "error": "批量导入失败", "code": "IMPORT_ERROR"}
+            except Exception as exc:
+                if _is_db_unavailable_error(exc):
+                    return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
+                failed_count += 1
+                details.append(
+                    {
+                        "row": index + 2,
+                        "primary_department_name": self._clean_text(row.get(primary_name_col)),
+                        "primary_status": self._clean_text(row.get(primary_status_col)).lower(),
+                        "secondary_department_name": self._clean_text(row.get(secondary_name_col)),
+                        "secondary_status": self._clean_text(row.get(secondary_status_col)).lower(),
+                        "tertiary_department_name": self._clean_text(row.get(tertiary_name_col)) if tertiary_name_col else "",
+                        "tertiary_status": self._clean_text(row.get(tertiary_status_col)).lower() if tertiary_status_col else "",
+                        "status": "failed",
+                        "reason": str(exc) or "导入失败",
+                    }
+                )
+                continue
 
         total = success_count + failed_count + skipped_count
         return {

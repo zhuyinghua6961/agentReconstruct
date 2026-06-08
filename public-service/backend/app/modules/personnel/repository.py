@@ -413,6 +413,68 @@ class PersonnelRepository:
             (int(personnel_id),),
         )
 
+    def force_delete_personnel_and_unbind_users(self, *, personnel_id: int) -> dict[str, int]:
+        normalized_id = int(personnel_id)
+        has_users_table = self.has_table("users")
+        has_personnel_id = has_users_table and self.has_user_column("personnel_id")
+        has_primary_department = has_users_table and self.has_user_column("primary_department_id")
+        has_secondary_department = has_users_table and self.has_user_column("secondary_department_id")
+        has_tertiary_department = has_users_table and self.has_user_column("tertiary_department_id")
+
+        with self._db.connection() as conn:
+            try:
+                conn.begin()
+                with conn.cursor() as cursor:
+                    unbound_users = 0
+                    if has_personnel_id:
+                        if has_primary_department and has_secondary_department and has_tertiary_department:
+                            cursor.execute(
+                                """
+                                UPDATE users
+                                SET personnel_id = NULL,
+                                    primary_department_id = NULL,
+                                    secondary_department_id = NULL,
+                                    tertiary_department_id = NULL
+                                WHERE personnel_id = %s
+                                """,
+                                (normalized_id,),
+                            )
+                        elif has_primary_department and has_secondary_department:
+                            cursor.execute(
+                                """
+                                UPDATE users
+                                SET personnel_id = NULL,
+                                    primary_department_id = NULL,
+                                    secondary_department_id = NULL
+                                WHERE personnel_id = %s
+                                """,
+                                (normalized_id,),
+                            )
+                        else:
+                            cursor.execute(
+                                """
+                                UPDATE users
+                                SET personnel_id = NULL
+                                WHERE personnel_id = %s
+                                """,
+                                (normalized_id,),
+                            )
+                        unbound_users = int(cursor.rowcount or 0)
+
+                    cursor.execute(
+                        """
+                        DELETE FROM personnel_records
+                        WHERE id = %s
+                        """,
+                        (normalized_id,),
+                    )
+                    deleted = int(cursor.rowcount or 0)
+                conn.commit()
+                return {"deleted": deleted, "unbound_users": unbound_users}
+            except Exception:
+                conn.rollback()
+                raise
+
     def _sync_user_departments_for_personnel_cursor(
         self,
         *,
@@ -650,154 +712,30 @@ class PersonnelRepository:
             try:
                 conn.begin()
                 with conn.cursor() as cursor:
-                    for row in rows:
-                        line_no = int(row["line_no"])
-                        employee_no = self._clean_text(row.get("employee_no"))
-                        full_name = self._clean_text(row.get("full_name"))
-                        verification_code = row.get("verification_code")
-                        verification_code_hash = str(row.get("verification_code_hash") or "")
-                        status = self._clean_text(row.get("status")).lower()
-                        primary_department_id = row.get("primary_department_id")
-                        secondary_department_id = row.get("secondary_department_id")
-                        tertiary_department_id = row.get("tertiary_department_id")
-                        raw_remarks = row.get("remarks", REMARKS_UNSET)
-                        remarks = REMARKS_UNSET if raw_remarks is REMARKS_UNSET else (self._clean_text(raw_remarks) or None)
-
-                        cursor.execute(
-                            """
-                            SELECT
-                                id,
-                                full_name,
-                                verification_code_hash,
-                                primary_department_id,
-                                secondary_department_id,
-                                tertiary_department_id,
-                                status,
-                                remarks
-                            FROM personnel_records
-                            WHERE employee_no = %s
-                            LIMIT 1
-                            FOR UPDATE
-                            """,
-                            (employee_no,),
-                        )
-                        existing = cursor.fetchone() or None
-                        if existing:
-                            current_personnel_id = int(existing["id"])
-                            if self._is_import_row_unchanged(
-                                existing=dict(existing),
-                                full_name=full_name,
-                                verification_code=verification_code,
-                                primary_department_id=primary_department_id,
-                                secondary_department_id=secondary_department_id,
-                                tertiary_department_id=tertiary_department_id,
-                                status=status,
-                                remarks=remarks,
-                            ):
-                                details.append(
-                                    {
-                                        "row": line_no,
-                                        "employee_no": employee_no,
-                                        "full_name": full_name,
-                                        "personnel_record_status": status,
-                                        "status": "skipped",
-                                        "message": "人员已存在且未变化",
-                                    }
-                                )
-                                continue
-
-                            update_sets = [
-                                "full_name = %s",
-                                "verification_code_hash = %s",
-                                "primary_department_id = %s",
-                                "secondary_department_id = %s",
-                                "tertiary_department_id = %s",
-                                "status = %s",
-                            ]
-                            update_params: list[Any] = [
-                                full_name,
-                                verification_code_hash,
-                                int(primary_department_id) if primary_department_id is not None else None,
-                                int(secondary_department_id) if secondary_department_id is not None else None,
-                                int(tertiary_department_id) if tertiary_department_id is not None else None,
-                                status,
-                            ]
-                            if remarks is not REMARKS_UNSET:
-                                update_sets.insert(5, "remarks = %s")
-                                update_params.insert(5, remarks)
-                            update_params.append(int(existing["id"]))
-                            cursor.execute(
-                                f"""
-                                UPDATE personnel_records
-                                SET {", ".join(update_sets)}
-                                WHERE id = %s
-                                """,
-                                tuple(update_params),
-                            )
-                            if sync_bound_users:
-                                self._sync_user_departments_for_personnel_cursor(
-                                    cursor=cursor,
-                                    personnel_id=current_personnel_id,
-                                    primary_department_id=primary_department_id,
-                                    secondary_department_id=secondary_department_id,
-                                    tertiary_department_id=tertiary_department_id,
-                                )
-                            updated += 1
+                    for index, row in enumerate(rows):
+                        savepoint_name = f"personnel_import_row_{index}"
+                        cursor.execute(f"SAVEPOINT {savepoint_name}")
+                        try:
+                            outcome = self._import_personnel_row_cursor(cursor=cursor, row=row, sync_bound_users=sync_bound_users)
+                            status = str(outcome.get("status") or "")
+                            if status == "created":
+                                created += 1
+                            elif status == "updated":
+                                updated += 1
+                            details.append(outcome)
+                            cursor.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+                        except Exception as exc:
+                            cursor.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+                            cursor.execute(f"RELEASE SAVEPOINT {savepoint_name}")
                             details.append(
                                 {
-                                    "row": line_no,
-                                    "employee_no": employee_no,
-                                    "full_name": full_name,
-                                    "personnel_record_status": status,
-                                    "status": "updated",
+                                    "row": int(row.get("line_no") or 0),
+                                    "employee_no": self._clean_text(row.get("employee_no")),
+                                    "full_name": self._clean_text(row.get("full_name")),
+                                    "status": "failed",
+                                    "reason": str(exc) or "导入失败",
                                 }
                             )
-                            continue
-
-                        cursor.execute(
-                            """
-                            INSERT INTO personnel_records (
-                                employee_no,
-                                full_name,
-                                verification_code_hash,
-                                primary_department_id,
-                                secondary_department_id,
-                                tertiary_department_id,
-                                status,
-                                remarks
-                            )
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                            """,
-                            (
-                                employee_no,
-                                full_name,
-                                verification_code_hash,
-                                int(primary_department_id) if primary_department_id is not None else None,
-                                int(secondary_department_id) if secondary_department_id is not None else None,
-                                int(tertiary_department_id) if tertiary_department_id is not None else None,
-                                status,
-                                None if remarks is REMARKS_UNSET else remarks,
-                            ),
-                        )
-                        current_personnel_id = int(getattr(cursor, "lastrowid", 0) or 0)
-                        if sync_bound_users and current_personnel_id > 0:
-                            self._sync_user_departments_for_personnel_cursor(
-                                cursor=cursor,
-                                personnel_id=current_personnel_id,
-                                primary_department_id=primary_department_id,
-                                secondary_department_id=secondary_department_id,
-                                tertiary_department_id=tertiary_department_id,
-                            )
-                        created += 1
-                        details.append(
-                            {
-                                "row": line_no,
-                                "employee_no": employee_no,
-                                "full_name": full_name,
-                                "personnel_record_status": status,
-                                "status": "created",
-                            }
-                        )
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -808,4 +746,149 @@ class PersonnelRepository:
             "updated": updated,
             "skipped": sum(1 for item in details if item.get("status") == "skipped"),
             "details": details,
+        }
+
+    def _import_personnel_row_cursor(
+        self,
+        *,
+        cursor: Any,
+        row: dict[str, Any],
+        sync_bound_users: bool,
+    ) -> dict[str, Any]:
+        line_no = int(row["line_no"])
+        employee_no = self._clean_text(row.get("employee_no"))
+        full_name = self._clean_text(row.get("full_name"))
+        verification_code = row.get("verification_code")
+        verification_code_hash = str(row.get("verification_code_hash") or "")
+        status = self._clean_text(row.get("status")).lower()
+        primary_department_id = row.get("primary_department_id")
+        secondary_department_id = row.get("secondary_department_id")
+        tertiary_department_id = row.get("tertiary_department_id")
+        raw_remarks = row.get("remarks", REMARKS_UNSET)
+        remarks = REMARKS_UNSET if raw_remarks is REMARKS_UNSET else (self._clean_text(raw_remarks) or None)
+
+        cursor.execute(
+            """
+            SELECT
+                id,
+                full_name,
+                verification_code_hash,
+                primary_department_id,
+                secondary_department_id,
+                tertiary_department_id,
+                status,
+                remarks
+            FROM personnel_records
+            WHERE employee_no = %s
+            LIMIT 1
+            FOR UPDATE
+            """,
+            (employee_no,),
+        )
+        existing = cursor.fetchone() or None
+        if existing:
+            current_personnel_id = int(existing["id"])
+            if self._is_import_row_unchanged(
+                existing=dict(existing),
+                full_name=full_name,
+                verification_code=verification_code,
+                primary_department_id=primary_department_id,
+                secondary_department_id=secondary_department_id,
+                tertiary_department_id=tertiary_department_id,
+                status=status,
+                remarks=remarks,
+            ):
+                return {
+                    "row": line_no,
+                    "employee_no": employee_no,
+                    "full_name": full_name,
+                    "personnel_record_status": status,
+                    "status": "skipped",
+                    "message": "人员已存在且未变化",
+                }
+
+            update_sets = [
+                "full_name = %s",
+                "verification_code_hash = %s",
+                "primary_department_id = %s",
+                "secondary_department_id = %s",
+                "tertiary_department_id = %s",
+                "status = %s",
+            ]
+            update_params: list[Any] = [
+                full_name,
+                verification_code_hash,
+                int(primary_department_id) if primary_department_id is not None else None,
+                int(secondary_department_id) if secondary_department_id is not None else None,
+                int(tertiary_department_id) if tertiary_department_id is not None else None,
+                status,
+            ]
+            if remarks is not REMARKS_UNSET:
+                update_sets.insert(5, "remarks = %s")
+                update_params.insert(5, remarks)
+            update_params.append(current_personnel_id)
+            cursor.execute(
+                f"""
+                UPDATE personnel_records
+                SET {", ".join(update_sets)}
+                WHERE id = %s
+                """,
+                tuple(update_params),
+            )
+            if sync_bound_users:
+                self._sync_user_departments_for_personnel_cursor(
+                    cursor=cursor,
+                    personnel_id=current_personnel_id,
+                    primary_department_id=primary_department_id,
+                    secondary_department_id=secondary_department_id,
+                    tertiary_department_id=tertiary_department_id,
+                )
+            return {
+                "row": line_no,
+                "employee_no": employee_no,
+                "full_name": full_name,
+                "personnel_record_status": status,
+                "status": "updated",
+            }
+
+        cursor.execute(
+            """
+            INSERT INTO personnel_records (
+                employee_no,
+                full_name,
+                verification_code_hash,
+                primary_department_id,
+                secondary_department_id,
+                tertiary_department_id,
+                status,
+                remarks
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                employee_no,
+                full_name,
+                verification_code_hash,
+                int(primary_department_id) if primary_department_id is not None else None,
+                int(secondary_department_id) if secondary_department_id is not None else None,
+                int(tertiary_department_id) if tertiary_department_id is not None else None,
+                status,
+                None if remarks is REMARKS_UNSET else remarks,
+            ),
+        )
+        current_personnel_id = int(getattr(cursor, "lastrowid", 0) or 0)
+        if sync_bound_users and current_personnel_id > 0:
+            self._sync_user_departments_for_personnel_cursor(
+                cursor=cursor,
+                personnel_id=current_personnel_id,
+                primary_department_id=primary_department_id,
+                secondary_department_id=secondary_department_id,
+                tertiary_department_id=tertiary_department_id,
+            )
+        return {
+            "row": line_no,
+            "employee_no": employee_no,
+            "full_name": full_name,
+            "personnel_record_status": status,
+            "status": "created",
         }

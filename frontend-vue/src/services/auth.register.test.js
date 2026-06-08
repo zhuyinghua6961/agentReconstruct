@@ -9,6 +9,9 @@ import { authApi } from './auth.js'
 
 const currentDir = dirname(fileURLToPath(import.meta.url))
 const apiAuthSource = readFileSync(join(currentDir, '../api/auth.js'), 'utf8')
+const apiServiceSource = readFileSync(join(currentDir, 'api.js'), 'utf8')
+const adminServiceSource = readFileSync(join(currentDir, 'admin.js'), 'utf8')
+const authServiceSource = readFileSync(join(currentDir, 'auth.js'), 'utf8')
 const sessionSource = readFileSync(join(currentDir, '../features/auth/composables/useAuthSession.js'), 'utf8')
 
 function createStorage(initial = {}) {
@@ -117,6 +120,18 @@ test('auxiliary auth helpers no longer expose a username-password-only register 
   assert.match(sessionSource, /async function register\(payload\)/)
   assert.match(sessionSource, /registerAuth\(payload\)/)
   assert.doesNotMatch(sessionSource, /registerAuth\(username,\s*password\)/)
+})
+
+test('global service error handlers handle disabled personnel with personnel details', () => {
+  for (const source of [apiServiceSource, adminServiceSource, authServiceSource]) {
+    assert.match(source, /PERSONNEL_DISABLED/)
+    assert.match(source, /账号所属人员已停用，请联系管理员/)
+    assert.match(source, /employee_no/)
+    assert.match(source, /full_name/)
+    assert.match(source, /department_display/)
+    assert.match(source, /clearStoredAuth\(\)/)
+    assert.match(source, /window\.location\.href = '\/login'/)
+  }
 })
 
 test('registerAuth strips confirmPassword fields before posting to backend', async () => {

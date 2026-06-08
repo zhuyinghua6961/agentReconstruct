@@ -44,9 +44,10 @@ export function createDepartmentUsersRuntime({ requestUsers }) {
     try {
       const result = await requestUsers(normalizedId)
       if (result?.success) {
+        const members = Array.isArray(result.data?.members) ? result.data.members : result.data?.users
         usersById.value = {
           ...usersById.value,
-          [normalizedId]: Array.isArray(result.data?.users) ? result.data.users : [],
+          [normalizedId]: Array.isArray(members) ? members : [],
         }
         errorById.value = {
           ...errorById.value,
@@ -55,13 +56,13 @@ export function createDepartmentUsersRuntime({ requestUsers }) {
       } else {
         errorById.value = {
           ...errorById.value,
-          [normalizedId]: result?.error || '获取用户列表失败',
+          [normalizedId]: result?.error || '获取成员列表失败',
         }
       }
     } catch {
       errorById.value = {
         ...errorById.value,
-        [normalizedId]: '获取用户列表失败',
+        [normalizedId]: '获取成员列表失败',
       }
     } finally {
       loadingById.value = {

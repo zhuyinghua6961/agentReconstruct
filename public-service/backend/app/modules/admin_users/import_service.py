@@ -71,10 +71,7 @@ class AdminUsersImportService:
             password_col = columns["password"]
             user_type_col = columns.get("user_type")
 
-            duplicate_error = self._validate_unique_usernames(rows=rows["items"], username_col=username_col)
-            if duplicate_error:
-                result = duplicate_error
-                return result
+            duplicate_usernames = self._duplicate_usernames_by_row(rows=rows["items"], username_col=username_col)
 
             details: list[dict[str, Any]] = []
             success_count = 0
@@ -93,6 +90,18 @@ class AdminUsersImportService:
                 if not username:
                     failed_count += 1
                     details.append({"row": line_no, "username": "", "status": "failed", "reason": "用户名为空"})
+                    continue
+                if username in duplicate_usernames:
+                    failed_count += 1
+                    line_nos = ",".join(str(item) for item in duplicate_usernames[username])
+                    details.append(
+                        {
+                            "row": line_no,
+                            "username": username,
+                            "status": "failed",
+                            "reason": f"导入文件中存在重复用户名（行号: {line_nos}）",
+                        }
+                    )
                     continue
                 if len(password) < 6:
                     failed_count += 1
@@ -172,23 +181,14 @@ class AdminUsersImportService:
         finally:
             self._finalize_excel_upload_quota(actor_user_id=actor_user_id, grant=quota_grant, result=result)
 
-    def _validate_unique_usernames(self, *, rows: list[dict[str, Any]], username_col: Any) -> dict[str, Any] | None:
+    def _duplicate_usernames_by_row(self, *, rows: list[dict[str, Any]], username_col: Any) -> dict[str, list[int]]:
         seen_rows: dict[str, list[int]] = {}
         for index, row in enumerate(rows):
             line_no = index + 2
             username = admin_users_service.clean_text(row.get(username_col))
             if username:
                 seen_rows.setdefault(username, []).append(line_no)
-        duplicates = {username: line_nos for username, line_nos in seen_rows.items() if len(line_nos) > 1}
-        if not duplicates:
-            return None
-        first_username = next(iter(duplicates))
-        line_nos = ",".join(str(line_no) for line_no in duplicates[first_username])
-        return {
-            "success": False,
-            "error": f"导入文件中存在重复用户名: {first_username}（行号: {line_nos}）",
-            "code": "VALIDATION_ERROR",
-        }
+        return {username: line_nos for username, line_nos in seen_rows.items() if len(line_nos) > 1}
 
     def _apply_import_row(self, *, username: str, password: str, user_type: str) -> dict[str, Any]:
         try:

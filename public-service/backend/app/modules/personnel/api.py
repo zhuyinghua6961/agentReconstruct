@@ -11,7 +11,10 @@ from app.core.deps import AuthContext
 from app.modules.auth.deps import require_admin_context
 from app.modules.personnel.import_service import personnel_import_service
 from app.modules.personnel.schemas import (
+    PersonnelBatchDeleteRequest,
+    PersonnelBatchForceDeleteRequest,
     PersonnelCreateRequest,
+    PersonnelForceDeleteRequest,
     PersonnelStatusUpdateRequest,
     PersonnelUpdateRequest,
 )
@@ -100,6 +103,32 @@ def create_personnel(
     )
 
 
+@router.post("/batch-delete")
+def batch_delete_personnel(
+    payload: PersonnelBatchDeleteRequest,
+    _context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(
+        personnel_service.batch_delete_personnel(personnel_ids=payload.personnel_ids),
+        ok_status=200,
+    )
+
+
+@router.post("/batch-force-delete")
+def batch_force_delete_personnel(
+    payload: PersonnelBatchForceDeleteRequest,
+    _context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(
+        personnel_service.batch_force_delete_personnel(
+            personnel_ids=payload.personnel_ids,
+            actor_user_id=_context.user_id,
+            admin_password=payload.admin_password,
+        ),
+        ok_status=200,
+    )
+
+
 @router.put("/{personnel_id}")
 def update_personnel(
     personnel_id: int,
@@ -146,6 +175,22 @@ def delete_personnel(
 ):
     return _respond(
         personnel_service.delete_personnel(personnel_id=personnel_id),
+        ok_status=200,
+    )
+
+
+@router.post("/{personnel_id}/force-delete")
+def force_delete_personnel(
+    personnel_id: int,
+    payload: PersonnelForceDeleteRequest,
+    _context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(
+        personnel_service.force_delete_personnel(
+            personnel_id=personnel_id,
+            actor_user_id=_context.user_id,
+            admin_password=payload.admin_password,
+        ),
         ok_status=200,
     )
 

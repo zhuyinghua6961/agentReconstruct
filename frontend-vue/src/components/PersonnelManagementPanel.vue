@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { adminApi } from '../services/admin'
 import PersonnelBatchImportDialog from './PersonnelBatchImportDialog.vue'
 import PersonnelEditorDialog from './PersonnelEditorDialog.vue'
@@ -11,6 +11,8 @@ const loading = ref(false)
 const error = ref('')
 const success = ref('')
 const personnelItems = ref([])
+const selectedPersonnelIds = ref([])
+const batchDeleteResult = ref(null)
 const searchEmployeeNo = ref('')
 const searchFullName = ref('')
 const statusFilter = ref('')
@@ -27,6 +29,16 @@ const selectedPersonnel = ref(null)
 const personnelSubmitting = ref(false)
 const selectableDepartmentTree = ref([])
 const departmentOptionsLoading = ref(false)
+const forceDeletePersonnelState = ref({
+  visible: false,
+  mode: 'single',
+  item: null,
+  ids: [],
+  adminPassword: '',
+  submitting: false,
+  error: '',
+  impactText: '',
+})
 
 function setSuccess(message) {
   success.value = message
@@ -35,6 +47,13 @@ function setSuccess(message) {
     success.value = ''
   }, 3000)
 }
+
+const selectedPersonnelCount = computed(() => selectedPersonnelIds.value.length)
+const hasSelectedPersonnel = computed(() => selectedPersonnelCount.value > 0)
+const allCurrentPersonnelSelected = computed(() => {
+  const ids = personnelItems.value.map(item => Number(item.id)).filter(Boolean)
+  return ids.length > 0 && ids.every(id => selectedPersonnelIds.value.includes(id))
+})
 
 async function fetchPersonnel() {
   loading.value = true
@@ -46,12 +65,91 @@ async function fetchPersonnel() {
   })
   if (result.success) {
     personnelItems.value = Array.isArray(result.data?.items) ? result.data.items : []
+    const currentIds = new Set(personnelItems.value.map(item => Number(item.id)))
+    selectedPersonnelIds.value = selectedPersonnelIds.value.filter(id => currentIds.has(Number(id)))
     error.value = ''
   } else {
     personnelItems.value = []
     error.value = result.error || '获取人员列表失败'
   }
   loading.value = false
+}
+
+function togglePersonnelSelection(personnelId) {
+  const normalizedId = Number(personnelId)
+  if (!normalizedId) {
+    return
+  }
+  if (selectedPersonnelIds.value.includes(normalizedId)) {
+    selectedPersonnelIds.value = selectedPersonnelIds.value.filter(id => id !== normalizedId)
+    return
+  }
+  selectedPersonnelIds.value = [...selectedPersonnelIds.value, normalizedId]
+}
+
+function toggleSelectAllCurrentPersonnel() {
+  const ids = personnelItems.value.map(item => Number(item.id)).filter(Boolean)
+  if (allCurrentPersonnelSelected.value) {
+    const currentIds = new Set(ids)
+    selectedPersonnelIds.value = selectedPersonnelIds.value.filter(id => !currentIds.has(Number(id)))
+    return
+  }
+  selectedPersonnelIds.value = Array.from(new Set([...selectedPersonnelIds.value, ...ids]))
+}
+
+function clearSelectedPersonnel() {
+  selectedPersonnelIds.value = []
+}
+
+function formatBatchDeleteSummary(result) {
+  const summary = result?.summary || {}
+  return `批量删除完成：成功 ${summary.success || 0} 条，失败 ${summary.failed || 0} 条`
+}
+
+function resetForceDeletePersonnelState() {
+  forceDeletePersonnelState.value = {
+    visible: false,
+    mode: 'single',
+    item: null,
+    ids: [],
+    adminPassword: '',
+    submitting: false,
+    error: '',
+    impactText: '',
+  }
+}
+
+function openSingleForceDeletePersonnel(item, reason = '') {
+  const bindingCount = Number(item?.binding_count || 0)
+  forceDeletePersonnelState.value = {
+    visible: true,
+    mode: 'single',
+    item,
+    ids: [Number(item?.id)].filter(Boolean),
+    adminPassword: '',
+    submitting: false,
+    error: '',
+    impactText: reason || `该人员仍有 ${bindingCount} 个绑定账号。强制删除将解绑这些账号，账号下次登录需要重新绑定人员。`,
+  }
+}
+
+function openBatchForceDeletePersonnel(details = []) {
+  const forceItems = (Array.isArray(details) ? details : [])
+    .filter(detail => detail?.code === 'PERSONNEL_HAS_BINDINGS')
+  const ids = Array.from(new Set(forceItems.map(detail => Number(detail.personnel_id)).filter(Boolean)))
+  if (!ids.length) {
+    return
+  }
+  forceDeletePersonnelState.value = {
+    visible: true,
+    mode: 'batch',
+    item: null,
+    ids,
+    adminPassword: '',
+    submitting: false,
+    error: '',
+    impactText: `本次有 ${ids.length} 个人员仍有绑定账号。强制删除将解绑这些账号，账号下次登录需要重新绑定人员。`,
+  }
 }
 
 async function fetchDepartmentTree() {
@@ -207,7 +305,8 @@ async function handleTogglePersonnelStatus(item) {
 async function handleDeletePersonnel(item) {
   const bindingCount = Number(item.binding_count || 0)
   if (bindingCount > 0) {
-    error.value = '该人员仍有绑定账号，请先解绑后再删除'
+    error.value = '该人员仍有绑定账号，可输入管理员密码强制删除'
+    openSingleForceDeletePersonnel(item)
     return
   }
   if (!window.confirm(`确定要删除人员 ${item.employee_no} / ${item.full_name} 吗？此操作不可恢复。`)) {
@@ -221,7 +320,66 @@ async function handleDeletePersonnel(item) {
     emit('updated')
     return
   }
+  if (result.code === 'PERSONNEL_HAS_BINDINGS') {
+    openSingleForceDeletePersonnel(item, result.error)
+    return
+  }
   error.value = result.error || '删除人员失败'
+}
+
+async function handleBatchDeletePersonnel() {
+  error.value = ''
+  batchDeleteResult.value = null
+  if (!hasSelectedPersonnel.value) {
+    error.value = '请至少选择一个人员'
+    return
+  }
+  if (!window.confirm(`确定批量删除选中的 ${selectedPersonnelCount.value} 个人员吗？有绑定账号的人员会失败，其他人员继续删除。`)) {
+    return
+  }
+  const result = await adminApi.batchDeletePersonnel(selectedPersonnelIds.value)
+  if (result.success) {
+    batchDeleteResult.value = result.data
+    setSuccess(formatBatchDeleteSummary(result.data))
+    openBatchForceDeletePersonnel(result.data?.details)
+    if (!forceDeletePersonnelState.value.visible) {
+      clearSelectedPersonnel()
+    }
+    await fetchPersonnel()
+    emit('updated')
+    return
+  }
+  error.value = result.error || '批量删除人员失败'
+}
+
+async function submitForceDeletePersonnel() {
+  const state = forceDeletePersonnelState.value
+  const adminPassword = String(state.adminPassword || '').trim()
+  if (!adminPassword) {
+    forceDeletePersonnelState.value = { ...state, error: '请输入管理员密码' }
+    return
+  }
+  forceDeletePersonnelState.value = { ...state, submitting: true, error: '' }
+  const result = state.mode === 'batch'
+    ? await adminApi.batchForceDeletePersonnel(state.ids, adminPassword)
+    : await adminApi.forceDeletePersonnel(state.ids[0], adminPassword)
+  if (result.success) {
+    if (state.mode === 'batch') {
+      batchDeleteResult.value = result.data
+    }
+    setSuccess(result.message || '强制删除完成')
+    expandedPersonnelIds.value = expandedPersonnelIds.value.filter(id => !state.ids.includes(Number(id)))
+    selectedPersonnelIds.value = selectedPersonnelIds.value.filter(id => !state.ids.includes(Number(id)))
+    resetForceDeletePersonnelState()
+    await fetchPersonnel()
+    emit('updated')
+    return
+  }
+  forceDeletePersonnelState.value = {
+    ...state,
+    submitting: false,
+    error: result.error || '强制删除人员失败',
+  }
 }
 
 async function downloadPersonnelImportTemplate(format = 'xlsx') {
@@ -254,6 +412,13 @@ onMounted(() => {
         <p class="panel-hint">维护工号、姓名、状态、部门和绑定账号关系。</p>
       </div>
       <div class="panel-actions">
+        <div v-if="hasSelectedPersonnel" class="selection-summary" aria-live="polite">
+          <span>已选择</span>
+          <strong>{{ selectedPersonnelCount }}</strong>
+          <span>个人员</span>
+        </div>
+        <button class="btn-danger" :disabled="!hasSelectedPersonnel" @click="handleBatchDeletePersonnel">批量删除</button>
+        <button class="btn-secondary" :disabled="!hasSelectedPersonnel" @click="clearSelectedPersonnel">清空选择</button>
         <button class="btn-secondary" @click="downloadPersonnelImportTemplate('xlsx')">下载模板</button>
         <button class="btn-secondary" @click="showPersonnelImportDialog = true">批量导入</button>
         <button class="btn-primary" @click="openCreateDialog">新增人员</button>
@@ -287,6 +452,45 @@ onMounted(() => {
 
     <div v-if="success" class="alert alert-success">{{ success }}</div>
     <div v-if="error" class="alert alert-error">{{ error }}</div>
+    <div v-if="forceDeletePersonnelState.visible" class="force-delete-card">
+      <div>
+        <h4>强制删除确认</h4>
+        <p>{{ forceDeletePersonnelState.impactText }}</p>
+        <p class="force-delete-warning">强制删除只解绑账号，不停用账号、不删除账号。</p>
+      </div>
+      <label>
+        <span>管理员密码</span>
+        <input
+          v-model="forceDeletePersonnelState.adminPassword"
+          type="password"
+          autocomplete="current-password"
+          placeholder="输入当前管理员密码"
+        >
+      </label>
+      <div v-if="forceDeletePersonnelState.error" class="force-delete-error">
+        {{ forceDeletePersonnelState.error }}
+      </div>
+      <div class="force-delete-actions">
+        <button class="btn-secondary" :disabled="forceDeletePersonnelState.submitting" @click="resetForceDeletePersonnelState">
+          取消
+        </button>
+        <button class="btn-danger" :disabled="forceDeletePersonnelState.submitting" @click="submitForceDeletePersonnel">
+          {{ forceDeletePersonnelState.submitting ? '删除中...' : '确认强制删除' }}
+        </button>
+      </div>
+    </div>
+    <div v-if="batchDeleteResult?.details?.length" class="batch-result-card">
+      <div class="batch-result-title">{{ formatBatchDeleteSummary(batchDeleteResult) }}</div>
+      <ul class="batch-result-list">
+        <li
+          v-for="detail in batchDeleteResult.details"
+          :key="`${detail.personnel_id}-${detail.row}`"
+          :class="detail.status"
+        >
+          {{ detail.employee_no || detail.personnel_id }} / {{ detail.full_name || '-' }}：{{ detail.message }}
+        </li>
+      </ul>
+    </div>
 
     <div class="table-card">
       <div v-if="loading" class="loading-state">加载中...</div>
@@ -295,6 +499,13 @@ onMounted(() => {
         <thead>
           <tr>
             <th></th>
+            <th class="checkbox-col">
+              <input
+                type="checkbox"
+                :checked="allCurrentPersonnelSelected"
+                @change="toggleSelectAllCurrentPersonnel"
+              >
+            </th>
             <th>工号</th>
             <th>姓名</th>
             <th>部门</th>
@@ -311,6 +522,13 @@ onMounted(() => {
                 <button class="action-btn expand-btn" @click="toggleBindings(item.id)">
                   {{ isBindingsExpanded(item.id) ? '收起' : '展开' }}
                 </button>
+              </td>
+              <td class="checkbox-col">
+                <input
+                  type="checkbox"
+                  :checked="selectedPersonnelIds.includes(Number(item.id))"
+                  @change="togglePersonnelSelection(item.id)"
+                >
               </td>
               <td>{{ item.employee_no }}</td>
               <td>{{ item.full_name }}</td>
@@ -332,7 +550,7 @@ onMounted(() => {
               </td>
             </tr>
             <tr v-if="isBindingsExpanded(item.id)" class="bindings-row">
-              <td colspan="8">
+              <td colspan="9">
                 <div v-if="bindingsLoadingByPersonnelId[item.id]" class="bindings-state">加载绑定账号中...</div>
                 <div v-else-if="bindingsErrorByPersonnelId[item.id]" class="bindings-state error">
                   {{ bindingsErrorByPersonnelId[item.id] }}
@@ -409,6 +627,25 @@ onMounted(() => {
 .panel-actions,
 .filter-actions {
   align-items: center;
+  flex-wrap: wrap;
+}
+
+.selection-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 13px;
+  padding: 8px 12px;
+}
+
+.selection-summary strong {
+  color: #1d4ed8;
+  font-size: 18px;
+  line-height: 1;
 }
 
 .filter-grid {
@@ -522,7 +759,8 @@ onMounted(() => {
 }
 
 .btn-primary,
-.btn-secondary {
+.btn-secondary,
+.btn-danger {
   border: none;
   border-radius: 6px;
   cursor: pointer;
@@ -547,6 +785,106 @@ onMounted(() => {
 
 .btn-secondary:hover {
   background: #e5e7eb;
+}
+
+.btn-danger {
+  background: #dc2626;
+  color: white;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #b91c1c;
+}
+
+.btn-danger:disabled,
+.btn-secondary:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.batch-result-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  background: #fafafa;
+  padding: 14px 16px;
+}
+
+.force-delete-card {
+  display: grid;
+  gap: 12px;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  background: #fff7f7;
+  padding: 16px;
+}
+
+.force-delete-card h4 {
+  color: #991b1b;
+  font-size: 15px;
+  margin: 0 0 6px;
+}
+
+.force-delete-card p {
+  color: #374151;
+  font-size: 14px;
+  margin: 0;
+}
+
+.force-delete-warning,
+.force-delete-error {
+  color: #b91c1c;
+  font-size: 13px;
+}
+
+.force-delete-card label {
+  display: grid;
+  gap: 6px;
+  max-width: 360px;
+}
+
+.force-delete-card input {
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.force-delete-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.batch-result-title {
+  color: #1f2937;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.batch-result-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.batch-result-list li {
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: white;
+  border: 1px solid #e5e7eb;
+  color: #374151;
+}
+
+.batch-result-list li.success {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+.batch-result-list li.failed {
+  border-color: #fecaca;
+  background: #fef2f2;
 }
 
 .bindings-row td {

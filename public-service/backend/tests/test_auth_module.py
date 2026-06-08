@@ -566,6 +566,46 @@ def test_require_auth_context_surfaces_db_unavailable(monkeypatch):
     assert exc_info.value.status_code == 503
 
 
+def test_require_auth_context_rejects_active_account_bound_to_disabled_personnel(monkeypatch):
+    monkeypatch.setattr(auth_service_module.auth_service, "decode_token", lambda token: {"user_id": 7, "role": "user"})
+    monkeypatch.setattr(
+        auth_service_module.auth_service,
+        "get_user_by_id",
+        lambda user_id: {
+            "id": user_id,
+            "username": "alice",
+            "role": "user",
+            "user_type": 3,
+            "status": "active",
+            "personnel_id": 17,
+        },
+    )
+    monkeypatch.setattr(
+        auth_service_module.auth_service,
+        "build_disabled_personnel_login_error",
+        lambda user: {
+            "success": False,
+            "error": "账号所属人员已停用，请联系管理员",
+            "code": "PERSONNEL_DISABLED",
+            "data": {
+                "personnel": {
+                    "employee_no": "T2024001",
+                    "full_name": "张三",
+                    "department_display": "磷酸铁锂事业部 / 材料研发部",
+                }
+            },
+        },
+        raising=False,
+    )
+
+    with pytest.raises(AppError) as exc_info:
+        require_auth_context("token-1")
+
+    assert exc_info.value.code == "PERSONNEL_DISABLED"
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.extra_payload["data"]["personnel"]["employee_no"] == "T2024001"
+
+
 def test_auth_service_login_lockout_contract():
     class FakeRepo:
         def __init__(self):
@@ -949,6 +989,7 @@ def test_auth_service_register_rejects_disabled_personnel():
 
     assert result["success"] is False
     assert result["code"] == "PERSONNEL_DISABLED"
+    assert service.status_code_for(result, ok_status=201) == 400
 
 
 def test_auth_service_register_requires_1_to_3_security_questions():
@@ -1895,9 +1936,10 @@ def test_auth_service_login_marks_unbound_user_as_require_personnel_setup():
     assert result["require_personnel_setup"] is True
 
 
-def test_auth_service_login_marks_disabled_personnel_as_require_setup():
+def test_auth_service_login_rejects_disabled_personnel_after_password_is_verified():
     class FakeRepo:
         password_hash = _hash_password("Secret123!")
+        reset_called = False
 
         def get_by_username(self, username):
             assert username == "alice"
@@ -1907,6 +1949,131 @@ def test_auth_service_login_marks_disabled_personnel_as_require_setup():
                 "password_hash": self.password_hash,
                 "role": "user",
                 "user_type": 3,
+                "status": "active",
+                "is_first_login": 0,
+                "must_set_security_questions": 0,
+                "personnel_id": 7,
+            }
+
+        def reset_login_attempts(self, *, user_id: int):
+            self.reset_called = True
+            return 1
+
+        def has_security_questions(self, *, user_id: int):
+            return True
+
+    class FakeDepartments:
+        def describe_user_department(self, **kwargs):
+            return {
+                "primary_department_id": None,
+                "primary_department_name": None,
+                "secondary_department_id": None,
+                "secondary_department_name": None,
+                "tertiary_department_id": None,
+                "tertiary_department_name": None,
+                "department_display": "磷酸铁锂事业部 / 材料研发部",
+                "department_completion_level": "empty",
+                "require_department_setup": False,
+            }
+
+    class FakePersonnel:
+        def describe_user_personnel(self, *, personnel_id: int | None):
+            assert personnel_id == 7
+            return {
+                "personnel_id": 7,
+                "employee_no": "T2024001",
+                "full_name": "张三",
+                "personnel_binding_status": "bound_disabled",
+                "require_personnel_setup": True,
+            }
+
+        def get_personnel_by_id(self, *, personnel_id: int | None):
+            assert personnel_id == 7
+            return {
+                "id": 7,
+                "employee_no": "T2024001",
+                "full_name": "张三",
+                "status": "disabled",
+                "primary_department_id": 1,
+                "secondary_department_id": 11,
+                "tertiary_department_id": None,
+            }
+
+    repo = FakeRepo()
+    service = _build_auth_service_with_personnel(
+        repo=repo,
+        departments=FakeDepartments(),
+        personnel=FakePersonnel(),
+    )
+    result = service.login("alice", "Secret123!")
+
+    assert result["success"] is False
+    assert result["code"] == "PERSONNEL_DISABLED"
+    assert result["http_status"] == 403
+    assert service.status_code_for(result, ok_status=200) == 403
+    assert result["error"] == "账号所属人员已停用，请联系管理员"
+    assert result["data"]["personnel"] == {
+        "employee_no": "T2024001",
+        "full_name": "张三",
+        "department_display": "磷酸铁锂事业部 / 材料研发部",
+    }
+    assert repo.reset_called is False
+
+
+def test_auth_service_login_does_not_disclose_disabled_personnel_when_password_is_wrong():
+    class FakeRepo:
+        password_hash = _hash_password("Secret123!")
+
+        def get_by_username(self, username):
+            return {
+                "id": 9,
+                "username": "alice",
+                "password_hash": self.password_hash,
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+                "is_first_login": 0,
+                "must_set_security_questions": 0,
+                "personnel_id": 7,
+            }
+
+        def increment_login_attempts(self, *, user_id: int, lock_threshold: int, lock_minutes: int):
+            return {"failed_login_attempts": 1}
+
+    class FakeDepartments:
+        def describe_user_department(self, **kwargs):
+            raise AssertionError("department details must not be loaded before password verification")
+
+    class FakePersonnel:
+        def describe_user_personnel(self, *, personnel_id: int | None):
+            raise AssertionError("personnel details must not be loaded before password verification")
+
+        def get_personnel_by_id(self, *, personnel_id: int | None):
+            raise AssertionError("personnel details must not be loaded before password verification")
+
+    service = _build_auth_service_with_personnel(
+        repo=FakeRepo(),
+        departments=FakeDepartments(),
+        personnel=FakePersonnel(),
+    )
+    result = service.login("alice", "WrongPassword1!")
+
+    assert result["success"] is False
+    assert result["code"] == "INVALID_CREDENTIALS"
+    assert "data" not in result
+
+
+def test_auth_service_login_allows_admin_bound_to_disabled_personnel():
+    class FakeRepo:
+        password_hash = _hash_password("Secret123!")
+
+        def get_by_username(self, username):
+            return {
+                "id": 1,
+                "username": "admin",
+                "password_hash": self.password_hash,
+                "role": "admin",
+                "user_type": 1,
                 "status": "active",
                 "is_first_login": 0,
                 "must_set_security_questions": 0,
@@ -1928,13 +2095,13 @@ def test_auth_service_login_marks_disabled_personnel_as_require_setup():
                 "secondary_department_name": None,
                 "tertiary_department_id": None,
                 "tertiary_department_name": None,
+                "department_display": "未填写",
                 "department_completion_level": "empty",
-                "require_department_setup": False,
+                "require_department_setup": True,
             }
 
     class FakePersonnel:
         def describe_user_personnel(self, *, personnel_id: int | None):
-            assert personnel_id == 7
             return {
                 "personnel_id": 7,
                 "employee_no": "T2024001",
@@ -1943,17 +2110,19 @@ def test_auth_service_login_marks_disabled_personnel_as_require_setup():
                 "require_personnel_setup": True,
             }
 
+        def get_personnel_by_id(self, *, personnel_id: int | None):
+            raise AssertionError("admin should not be blocked by personnel status")
+
     service = _build_auth_service_with_personnel(
         repo=FakeRepo(),
         departments=FakeDepartments(),
         personnel=FakePersonnel(),
     )
-    result = service.login("alice", "Secret123!")
+    result = service.login("admin", "Secret123!")
 
     assert result["success"] is True
-    assert result["data"]["user"]["employee_no"] == "T2024001"
-    assert result["data"]["user"]["personnel_binding_status"] == "bound_disabled"
-    assert result["require_personnel_setup"] is True
+    assert result["data"]["user"]["role"] == "admin"
+    assert result["data"]["user"]["require_personnel_setup"] is False
 
 
 def test_auth_service_get_user_info_exposes_bound_active_personnel_payload():

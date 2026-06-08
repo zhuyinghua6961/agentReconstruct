@@ -121,6 +121,33 @@ test('PersonnelManagementPanel lazy loads bindings when expanding a personnel ro
   assert.match(panelSource, /getPersonnelBindings/)
 })
 
+test('PersonnelManagementPanel supports selecting and batch deleting personnel', () => {
+  assert.match(panelSource, /selectedPersonnelIds/)
+  assert.match(panelSource, /allCurrentPersonnelSelected/)
+  assert.match(panelSource, /toggleSelectAllCurrentPersonnel/)
+  assert.match(panelSource, /handleBatchDeletePersonnel/)
+  assert.match(panelSource, /batchDeletePersonnel/)
+  assert.match(panelSource, /批量删除/)
+  assert.match(panelSource, /batchDeleteResult/)
+  assert.match(adminServiceSource, /batchDeletePersonnel/)
+  assert.match(adminServiceSource, /personnel\/batch-delete/)
+})
+
+test('PersonnelManagementPanel upgrades binding delete failures to password-confirmed force delete', () => {
+  assert.match(panelSource, /forceDeletePersonnelState/)
+  assert.match(panelSource, /adminPassword/)
+  assert.match(panelSource, /PERSONNEL_HAS_BINDINGS/)
+  assert.match(panelSource, /submitForceDeletePersonnel/)
+  assert.match(panelSource, /forceDeletePersonnel/)
+  assert.match(panelSource, /batchForceDeletePersonnel/)
+  assert.match(panelSource, /将解绑/)
+  assert.match(panelSource, /下次登录需要重新绑定人员/)
+  assert.match(adminServiceSource, /forceDeletePersonnel\(/)
+  assert.match(adminServiceSource, /personnel\/\$\{personnelId\}\/force-delete/)
+  assert.match(adminServiceSource, /batchForceDeletePersonnel\(/)
+  assert.match(adminServiceSource, /personnel\/batch-force-delete/)
+})
+
 test('PersonnelLookupSelect supports keyword search and active-only selection', () => {
   assert.match(lookupSource, /keyword/)
   assert.match(lookupSource, /fetchOptions\(nextKeyword = keyword\.value, \{ pageSize = 20/)
@@ -142,6 +169,7 @@ test('admin service exposes personnel management APIs', () => {
   assert.match(adminServiceSource, /updatePersonnel\(/)
   assert.match(adminServiceSource, /updatePersonnelStatus\(/)
   assert.match(adminServiceSource, /deletePersonnel\(/)
+  assert.match(adminServiceSource, /batchDeletePersonnel\(/)
   assert.match(adminServiceSource, /getPersonnelBindings\(/)
   assert.match(adminServiceSource, /batchImportPersonnel\(/)
   assert.match(adminServiceSource, /downloadPersonnelImportTemplate\(/)

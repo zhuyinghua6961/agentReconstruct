@@ -28,3 +28,16 @@ class PersonnelUpdateRequest(BaseModel):
 
 class PersonnelStatusUpdateRequest(BaseModel):
     status: Literal["active", "disabled"] | str = Field(default="active")
+
+
+class PersonnelBatchDeleteRequest(BaseModel):
+    personnel_ids: list[int] = Field(default_factory=list)
+
+
+class PersonnelForceDeleteRequest(BaseModel):
+    admin_password: str = Field(default="")
+
+
+class PersonnelBatchForceDeleteRequest(BaseModel):
+    personnel_ids: list[int] = Field(default_factory=list)
+    admin_password: str = Field(default="")
