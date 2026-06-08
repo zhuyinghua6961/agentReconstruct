@@ -157,6 +157,7 @@ function submit() {
 
         <div class="form-group form-group-full">
           <span>部门信息</span>
+          <p class="field-hint">一级部门必选，二级和三级部门可按实际管理层级留空。</p>
           <DepartmentSelector
             :tree="departmentTree"
             :primary-id="form.primary_department_id"

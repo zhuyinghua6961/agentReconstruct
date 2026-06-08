@@ -423,6 +423,20 @@ export const adminApi = {
     })
   },
 
+  async getPrimaryDirectDepartmentUsers(primaryId) {
+    const token = readStoredToken()
+    return fetchWithErrorHandling(`${API_BASE}/departments/primary/${primaryId}/direct-users`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+  },
+
+  async getSecondaryDirectDepartmentUsers(secondaryId) {
+    const token = readStoredToken()
+    return fetchWithErrorHandling(`${API_BASE}/departments/secondary/${secondaryId}/direct-users`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+  },
+
   async getSecondaryLegacyDepartmentUsers(secondaryId) {
     const token = readStoredToken()
     return fetchWithErrorHandling(`${API_BASE}/departments/secondary/${secondaryId}/legacy-users`, {

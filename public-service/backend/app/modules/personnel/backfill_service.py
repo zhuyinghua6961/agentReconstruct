@@ -28,10 +28,11 @@ class PersonnelDepartmentBackfillService:
 
     @classmethod
     def _is_complete_department_triplet(cls, candidate: dict[str, Any]) -> bool:
-        return all(
-            cls._normalize_optional_int(candidate.get(key)) is not None
-            for key in ("primary_department_id", "secondary_department_id", "tertiary_department_id")
-        )
+        if cls._normalize_optional_int(candidate.get("primary_department_id")) is None:
+            return False
+        if cls._normalize_optional_int(candidate.get("tertiary_department_id")) is not None:
+            return cls._normalize_optional_int(candidate.get("secondary_department_id")) is not None
+        return True
 
     def _build_department_preview(self, candidate: dict[str, Any]) -> dict[str, Any]:
         describe = getattr(self._departments, "describe_user_department", None)

@@ -270,7 +270,7 @@ function selectSearchMatch(match) {
         <label>{{ tertiaryLabel }}</label>
         <select
           :value="normalizedTertiaryId ?? ''"
-          :disabled="disabled || !selectedSecondaryItem || !selectedSecondaryState.selectable"
+          :disabled="disabled || !selectedSecondaryItem || !selectedSecondaryState.selectable || !filteredTertiaryItems.length"
           @change="handleTertiaryChange($event.target.value)"
         >
           <option value="">
@@ -280,8 +280,10 @@ function selectSearchMatch(match) {
                 : !selectedSecondaryItem
                   ? '请先选择二级部门'
                   : !selectedSecondaryState.selectable
-                    ? '当前二级部门暂无可选三级部门'
-                    : '请选择三级部门'
+                    ? '当前二级部门不可选'
+                    : !filteredTertiaryItems.length
+                      ? '三级部门可留空'
+                      : '请选择三级部门'
             }}
           </option>
           <option
@@ -296,7 +298,7 @@ function selectSearchMatch(match) {
           v-if="selectedSecondaryItem && selectedSecondaryState.selectable && !filteredTertiaryItems.length"
           class="secondary-empty"
         >
-          当前二级部门下暂无匹配的三级部门
+          当前二级部门下暂无三级部门，可直接绑定到二级部门
         </p>
       </div>
     </div>

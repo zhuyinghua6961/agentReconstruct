@@ -10,6 +10,7 @@ from app.core.db import Database
 
 
 REMARKS_UNSET = object()
+FIELD_UNSET = object()
 
 
 class PersonnelRepository:
@@ -347,9 +348,9 @@ class PersonnelRepository:
         personnel_id: int,
         full_name: str | None = None,
         verification_code_hash: str | None = None,
-        primary_department_id: int | None = None,
-        secondary_department_id: int | None = None,
-        tertiary_department_id: int | None = None,
+        primary_department_id: int | None | object = FIELD_UNSET,
+        secondary_department_id: int | None | object = FIELD_UNSET,
+        tertiary_department_id: int | None | object = FIELD_UNSET,
         remarks: object = REMARKS_UNSET,
         status: str | None = None,
     ) -> int:
@@ -361,15 +362,15 @@ class PersonnelRepository:
         if verification_code_hash is not None:
             sets.append("verification_code_hash = %s")
             params.append(str(verification_code_hash or ""))
-        if primary_department_id is not None:
+        if primary_department_id is not FIELD_UNSET:
             sets.append("primary_department_id = %s")
-            params.append(int(primary_department_id))
-        if secondary_department_id is not None:
+            params.append(int(primary_department_id) if primary_department_id is not None else None)
+        if secondary_department_id is not FIELD_UNSET:
             sets.append("secondary_department_id = %s")
-            params.append(int(secondary_department_id))
-        if tertiary_department_id is not None:
+            params.append(int(secondary_department_id) if secondary_department_id is not None else None)
+        if tertiary_department_id is not FIELD_UNSET:
             sets.append("tertiary_department_id = %s")
-            params.append(int(tertiary_department_id))
+            params.append(int(tertiary_department_id) if tertiary_department_id is not None else None)
         if remarks is not REMARKS_UNSET:
             sets.append("remarks = %s")
             params.append(self._clean_text(remarks) or None)
@@ -466,9 +467,9 @@ class PersonnelRepository:
         personnel_id: int,
         full_name: str | None = None,
         verification_code_hash: str | None = None,
-        primary_department_id: int | None = None,
-        secondary_department_id: int | None = None,
-        tertiary_department_id: int | None = None,
+        primary_department_id: int | None | object = FIELD_UNSET,
+        secondary_department_id: int | None | object = FIELD_UNSET,
+        tertiary_department_id: int | None | object = FIELD_UNSET,
         remarks: object = REMARKS_UNSET,
         status: str | None = None,
         sync_bound_users: bool = False,
@@ -481,15 +482,15 @@ class PersonnelRepository:
         if verification_code_hash is not None:
             sets.append("verification_code_hash = %s")
             params.append(str(verification_code_hash or ""))
-        if primary_department_id is not None:
+        if primary_department_id is not FIELD_UNSET:
             sets.append("primary_department_id = %s")
-            params.append(int(primary_department_id))
-        if secondary_department_id is not None:
+            params.append(int(primary_department_id) if primary_department_id is not None else None)
+        if secondary_department_id is not FIELD_UNSET:
             sets.append("secondary_department_id = %s")
-            params.append(int(secondary_department_id))
-        if tertiary_department_id is not None:
+            params.append(int(secondary_department_id) if secondary_department_id is not None else None)
+        if tertiary_department_id is not FIELD_UNSET:
             sets.append("tertiary_department_id = %s")
-            params.append(int(tertiary_department_id))
+            params.append(int(tertiary_department_id) if tertiary_department_id is not None else None)
         if remarks is not REMARKS_UNSET:
             sets.append("remarks = %s")
             params.append(self._clean_text(remarks) or None)
@@ -517,9 +518,9 @@ class PersonnelRepository:
                         self._sync_user_departments_for_personnel_cursor(
                             cursor=cursor,
                             personnel_id=int(personnel_id),
-                            primary_department_id=primary_department_id,
-                            secondary_department_id=secondary_department_id,
-                            tertiary_department_id=tertiary_department_id,
+                            primary_department_id=None if primary_department_id is FIELD_UNSET else primary_department_id,
+                            secondary_department_id=None if secondary_department_id is FIELD_UNSET else secondary_department_id,
+                            tertiary_department_id=None if tertiary_department_id is FIELD_UNSET else tertiary_department_id,
                         )
                 conn.commit()
                 return updated_count

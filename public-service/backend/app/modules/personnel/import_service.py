@@ -22,11 +22,11 @@ REQUIRED_COLUMN_ALIASES = {
     "employee_no": ("工号", "employee_no"),
     "full_name": ("姓名", "full_name"),
     "primary_department_name": ("一级部门名称", "一级部门", "primary_department_name"),
-    "secondary_department_name": ("二级部门名称", "二级部门", "secondary_department_name"),
-    "tertiary_department_name": ("三级部门名称", "三级部门", "tertiary_department_name"),
     "verification_code": ("校验码", "verification_code"),
 }
 OPTIONAL_COLUMN_ALIASES = {
+    "secondary_department_name": ("二级部门名称", "二级部门", "secondary_department_name"),
+    "tertiary_department_name": ("三级部门名称", "三级部门", "tertiary_department_name"),
     "remarks": ("备注", "remarks"),
     "status": ("状态", "status"),
 }
@@ -78,8 +78,9 @@ class PersonnelImportService:
         secondary_department_name_col: str,
         tertiary_department_name_col: str,
         remarks_col: str | None,
-    ) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
+    ) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None, dict[str, int]]:
         validated_rows: list[dict[str, Any]] = []
+        created_departments = {"primary": 0, "secondary": 0, "tertiary": 0, "total": 0}
         for index, row in enumerate(items):
             line_no = index + 2
             employee_no = self._clean_text(row.get(employee_no_col))
@@ -92,38 +93,55 @@ class PersonnelImportService:
             remarks = self._clean_text(row.get(remarks_col)) if remarks_col else REMARKS_UNSET
 
             if not employee_no:
-                return None, {"success": False, "error": f"第 {line_no} 行工号为空", "code": "VALIDATION_ERROR"}
+                return None, {"success": False, "error": f"第 {line_no} 行工号为空", "code": "VALIDATION_ERROR"}, created_departments
             if not full_name:
-                return None, {"success": False, "error": f"第 {line_no} 行姓名为空", "code": "VALIDATION_ERROR"}
+                return None, {"success": False, "error": f"第 {line_no} 行姓名为空", "code": "VALIDATION_ERROR"}, created_departments
             if not verification_code:
-                return None, {"success": False, "error": f"第 {line_no} 行校验码为空", "code": "VALIDATION_ERROR"}
+                return None, {"success": False, "error": f"第 {line_no} 行校验码为空", "code": "VALIDATION_ERROR"}, created_departments
             if status not in VALID_STATUSES:
                 return None, {
                     "success": False,
                     "error": f"第 {line_no} 行状态必须是 active/disabled 或 启用/停用",
                     "code": "VALIDATION_ERROR",
-                }
-            if not primary_department_name or not secondary_department_name or not tertiary_department_name:
+                }, created_departments
+            if not primary_department_name:
                 return None, {
                     "success": False,
-                    "error": f"第 {line_no} 行一级、二级和三级部门名称不能为空",
+                    "error": f"第 {line_no} 行一级部门名称不能为空",
                     "code": "VALIDATION_ERROR",
-                }
+                }, created_departments
+            if tertiary_department_name and not secondary_department_name:
+                return None, {
+                    "success": False,
+                    "error": f"第 {line_no} 行三级部门名称不能在二级部门为空时填写",
+                    "code": "VALIDATION_ERROR",
+                }, created_departments
 
-            resolved = self._departments.resolve_by_names(
+            resolver = getattr(self._departments, "resolve_or_create_by_names", None)
+            if not callable(resolver):
+                resolver = getattr(self._departments, "resolve_by_names")
+            resolved = resolver(
                 primary_name=primary_department_name,
                 secondary_name=secondary_department_name,
                 tertiary_name=tertiary_department_name,
                 active_only=True,
-                allow_legacy_two_level=False,
+                allow_legacy_two_level=True,
             )
             if not resolved.get("success"):
                 return None, {
                     "success": False,
                     "error": f"第 {line_no} 行{resolved.get('error') or '部门解析失败'}",
                     "code": str(resolved.get("code") or "VALIDATION_ERROR"),
-                }
+                }, created_departments
             department_data = resolved.get("data") if isinstance(resolved.get("data"), dict) else {}
+            row_created_departments = (
+                department_data.get("created_departments")
+                if isinstance(department_data.get("created_departments"), dict)
+                else {}
+            )
+            for key in ("primary", "secondary", "tertiary"):
+                created_departments[key] += int(row_created_departments.get(key) or 0)
+            created_departments["total"] = sum(created_departments[key] for key in ("primary", "secondary", "tertiary"))
 
             validated_rows.append(
                 {
@@ -139,7 +157,7 @@ class PersonnelImportService:
                 }
             )
 
-        return validated_rows, None
+        return validated_rows, None, created_departments
 
     def import_personnel(self, *, file_bytes: bytes, filename: str) -> dict[str, Any]:
         filename = self._clean_text(filename)
@@ -172,8 +190,8 @@ class PersonnelImportService:
         verification_code_col = columns["verification_code"]
         status_col = columns.get("status")
         primary_department_name_col = columns["primary_department_name"]
-        secondary_department_name_col = columns["secondary_department_name"]
-        tertiary_department_name_col = columns["tertiary_department_name"]
+        secondary_department_name_col = columns.get("secondary_department_name") or ""
+        tertiary_department_name_col = columns.get("tertiary_department_name") or ""
         remarks_col = columns.get("remarks")
 
         seen_rows: dict[str, list[int]] = {}
@@ -192,7 +210,7 @@ class PersonnelImportService:
                 "code": "VALIDATION_ERROR",
             }
 
-        validated_rows, validation_error = self._validate_rows(
+        validated_rows, validation_error, created_departments = self._validate_rows(
             items=rows["items"],
             employee_no_col=employee_no_col,
             full_name_col=full_name_col,
@@ -248,6 +266,10 @@ class PersonnelImportService:
                     "updated": updated,
                     "skipped": skipped,
                     "failed": 0,
+                    "created_departments_total": int(created_departments.get("total") or 0),
+                    "created_primary_departments": int(created_departments.get("primary") or 0),
+                    "created_secondary_departments": int(created_departments.get("secondary") or 0),
+                    "created_tertiary_departments": int(created_departments.get("tertiary") or 0),
                 },
                 "details": details,
             },
@@ -285,8 +307,9 @@ class PersonnelImportService:
 
         headers = TEMPLATE_COLUMNS
         rows = [
-            ["T2024001", "张三", "计算机学院", "软件工程系", "智能软件实验室", "ABC123", "示例备注"],
-            ["T2024002", "李四", "化学学院", "材料系", "高分子实验室", "XYZ789", ""],
+            ["T2024001", "张三", "计算机学院", "", "", "ABC123", "一级部门必填，二级和三级部门可按实际管理层级留空"],
+            ["T2024002", "李四", "化学学院", "材料系", "", "XYZ789", "绑定到二级部门"],
+            ["T2024003", "王五", "计算机学院", "软件工程系", "智能软件实验室", "LMN456", "绑定到三级部门"],
         ]
 
         if fmt == "csv":

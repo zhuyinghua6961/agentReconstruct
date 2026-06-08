@@ -33,6 +33,7 @@ test('PersonnelManagementPanel renders account list filters and status filter', 
 test('PersonnelEditorDialog reuses DepartmentSelector with searchable department selection', () => {
   assert.match(editorSource, /DepartmentSelector/)
   assert.match(editorSource, /searchPlaceholder/)
+  assert.match(editorSource, /一级部门必选，二级和三级部门可按实际管理层级留空/)
   assert.match(editorSource, /primary_department_id/)
   assert.match(editorSource, /secondary_department_id/)
   assert.match(editorSource, /tertiary_department_id/)
@@ -80,6 +81,8 @@ test('PersonnelManagementPanel wires batch import and template download', () => 
   assert.match(batchImportSource, /校验码/)
   assert.match(batchImportSource, /兼容旧英文列名/)
   assert.match(batchImportSource, /工号作为匹配键/)
+  assert.match(batchImportSource, /一级部门必填/)
+  assert.match(batchImportSource, /二级、三级部门可留空/)
   assert.match(batchImportSource, /内容一致会显示跳过/)
   assert.match(batchImportSource, /其他信息变化会显示更新/)
   assert.match(batchImportSource, /工号变化会作为新人员创建/)
@@ -101,6 +104,13 @@ test('Personnel import result dialog supports created updated summary and status
   assert.match(importResultSource, /一级部门|department_display/)
   assert.match(importResultSource, /二级部门|secondary_department_name/)
   assert.match(importResultSource, /三级部门|tertiary_department_name/)
+  assert.match(importResultSource, /自动创建部门/)
+  assert.match(importResultSource, /created_departments_total/)
+})
+
+test('Personnel batch import documents automatic department creation behavior', () => {
+  assert.match(batchImportSource, /部门不存在时会自动创建/)
+  assert.match(batchImportSource, /停用部门不会自动启用/)
 })
 
 test('PersonnelManagementPanel lazy loads bindings when expanding a personnel row', () => {

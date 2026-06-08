@@ -28,8 +28,8 @@ class AuthRepositoryProtocol(Protocol):
         username: str,
         password_hash: str,
         primary_department_id: int,
-        secondary_department_id: int,
-        tertiary_department_id: int,
+        secondary_department_id: int | None,
+        tertiary_department_id: int | None,
         personnel_id: int,
         security_question_items: list[dict[str, Any]],
         user_type: int = 2,
@@ -378,12 +378,7 @@ class AuthService:
     def _department_payload_is_complete(payload: dict[str, Any] | None) -> bool:
         if not isinstance(payload, dict):
             return False
-        triplet = (
-            payload.get("primary_department_id"),
-            payload.get("secondary_department_id"),
-            payload.get("tertiary_department_id"),
-        )
-        return all(item is not None for item in triplet) and not bool(payload.get("require_department_setup"))
+        return payload.get("primary_department_id") is not None and not bool(payload.get("require_department_setup"))
 
     def _resolve_department_from_personnel_record(self, *, personnel_record: dict[str, Any] | None) -> dict[str, Any]:
         payload = self._describe_department_from_mapping(personnel_record)
@@ -795,9 +790,17 @@ class AuthService:
             user_id = self._repo.create_registered_user(
                 username=normalized_username,
                 password_hash=password_hash,
-                primary_department_id=int(department_data.get("primary_department_id") or 0),
-                secondary_department_id=int(department_data.get("secondary_department_id") or 0),
-                tertiary_department_id=int(department_data.get("tertiary_department_id") or 0),
+                primary_department_id=int(department_data.get("primary_department_id")),
+                secondary_department_id=(
+                    int(department_data.get("secondary_department_id"))
+                    if department_data.get("secondary_department_id") is not None
+                    else None
+                ),
+                tertiary_department_id=(
+                    int(department_data.get("tertiary_department_id"))
+                    if department_data.get("tertiary_department_id") is not None
+                    else None
+                ),
                 personnel_id=personnel_id,
                 security_question_items=list(security_question_validation.get("data") or []),
                 user_type=2,

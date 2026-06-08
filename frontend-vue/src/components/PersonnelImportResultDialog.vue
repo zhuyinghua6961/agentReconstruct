@@ -27,6 +27,12 @@ const skippedCount = computed(() => getPersonnelImportSkippedCount(summary.value
 const failedCount = computed(() => Number(summary.value?.failed || 0))
 const totalCount = computed(() => Number(summary.value?.total || details.value.length || 0))
 const issueCount = computed(() => failedCount.value + skippedCount.value)
+const createdDepartmentsTotal = computed(() => Number(summary.value?.created_departments_total || 0))
+const createdDepartmentBreakdown = computed(() => ({
+  primary: Number(summary.value?.created_primary_departments || 0),
+  secondary: Number(summary.value?.created_secondary_departments || 0),
+  tertiary: Number(summary.value?.created_tertiary_departments || 0),
+}))
 
 const filteredDetails = computed(() => {
   return filterPersonnelImportDetails(details.value, filterStatus.value)
@@ -116,6 +122,13 @@ function close() {
           <div class="summary-item skipped">
             <span class="summary-label">跳过</span>
             <span class="summary-value">{{ skippedCount }}</span>
+          </div>
+          <div v-if="createdDepartmentsTotal > 0" class="summary-item departments">
+            <span class="summary-label">自动创建部门</span>
+            <span class="summary-value">{{ createdDepartmentsTotal }}</span>
+            <span class="summary-hint">
+              一级 {{ createdDepartmentBreakdown.primary }} / 二级 {{ createdDepartmentBreakdown.secondary }} / 三级 {{ createdDepartmentBreakdown.tertiary }}
+            </span>
           </div>
         </div>
 
@@ -327,10 +340,19 @@ function close() {
 }
 
 .summary-value {
+  display: block;
   color: #111827;
   font-size: 26px;
   font-weight: 700;
   line-height: 1;
+}
+
+.summary-hint {
+  display: block;
+  margin-top: 8px;
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .summary-item.success .summary-value {
@@ -343,6 +365,10 @@ function close() {
 
 .summary-item.skipped .summary-value {
   color: #b45309;
+}
+
+.summary-item.departments .summary-value {
+  color: #0369a1;
 }
 
 .result-toolbar {

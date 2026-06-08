@@ -174,11 +174,13 @@ test('DepartmentManagementPanel renders collapsible primary department sections'
   assert.match(panelSource, /isPrimaryExpanded\(primary\.id\)/)
 })
 
-test('admin service exposes tertiary and legacy department user query api', () => {
+test('admin service exposes direct and tertiary department user query api', () => {
   assert.match(adminServiceSource, /getTertiaryDepartmentUsers/)
   assert.match(adminServiceSource, /departments\/tertiary\/\$\{tertiaryId\}\/users/)
-  assert.match(adminServiceSource, /getSecondaryLegacyDepartmentUsers/)
-  assert.match(adminServiceSource, /legacy-users/)
+  assert.match(adminServiceSource, /getPrimaryDirectDepartmentUsers/)
+  assert.match(adminServiceSource, /departments\/primary\/\$\{primaryId\}\/direct-users/)
+  assert.match(adminServiceSource, /getSecondaryDirectDepartmentUsers/)
+  assert.match(adminServiceSource, /departments\/secondary\/\$\{secondaryId\}\/direct-users/)
 })
 
 test('DepartmentManagementPanel renders collapsible secondary and tertiary sections with user counts', () => {
@@ -186,12 +188,15 @@ test('DepartmentManagementPanel renders collapsible secondary and tertiary secti
   assert.match(panelSource, /toggleSecondary/)
   assert.match(panelSource, /isSecondaryExpanded/)
   assert.match(panelSource, /secondary\.tertiary_count/)
-  assert.match(panelSource, /legacy_user_count/)
-  assert.match(panelSource, /未补全三级部门用户/)
+  assert.match(panelSource, /direct_user_count/)
+  assert.match(panelSource, /直属一级部门用户/)
+  assert.match(panelSource, /直属二级部门用户/)
+  assert.doesNotMatch(panelSource, /未补全三级部门用户/)
+  assert.doesNotMatch(panelSource, /未补全三级/)
   assert.match(panelSource, /tertiary\.user_count/)
 })
 
-test('DepartmentManagementPanel lazy loads tertiary and legacy users with local loading and error states', () => {
+test('DepartmentManagementPanel lazy loads direct and tertiary users with local loading and error states', () => {
   assert.match(panelSource, /createDepartmentUsersRuntime/)
   assert.match(panelSource, /loadDepartmentUsers/)
   assert.match(panelSource, /departmentUsersById/)

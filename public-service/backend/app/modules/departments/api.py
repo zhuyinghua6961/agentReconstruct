@@ -114,6 +114,17 @@ def delete_secondary(
     return _respond(department_service.delete_secondary(secondary_id=secondary_id), ok_status=200)
 
 
+@router.get("/primary/{primary_id}/direct-users")
+def get_primary_direct_users(
+    primary_id: int,
+    _context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(
+        department_service.list_primary_direct_users(primary_id=primary_id),
+        ok_status=200,
+    )
+
+
 @router.get("/secondary/{secondary_id}/users")
 def get_secondary_users(
     secondary_id: int,
@@ -121,6 +132,17 @@ def get_secondary_users(
 ):
     return _respond(
         department_service.list_secondary_users(secondary_id=secondary_id),
+        ok_status=200,
+    )
+
+
+@router.get("/secondary/{secondary_id}/direct-users")
+def get_secondary_direct_users(
+    secondary_id: int,
+    _context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(
+        department_service.list_secondary_direct_users(secondary_id=secondary_id),
         ok_status=200,
     )
 

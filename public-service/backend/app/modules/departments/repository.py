@@ -127,7 +127,28 @@ class DepartmentRepository:
 
         user_count_select = "0 AS secondary_user_count"
         user_count_join = ""
-        if self.has_user_column("secondary_department_id"):
+        primary_direct_user_count_select = "0 AS primary_direct_user_count"
+        primary_direct_user_count_join = ""
+        secondary_direct_user_count_select = "0 AS secondary_direct_user_count"
+        secondary_direct_user_count_join = ""
+        has_primary_user_column = self.has_user_column("primary_department_id")
+        has_secondary_user_column = self.has_user_column("secondary_department_id")
+        has_tertiary_user_column = self.has_user_column("tertiary_department_id")
+
+        if has_primary_user_column:
+            primary_direct_user_count_select = "COALESCE(pu.direct_user_count, 0) AS primary_direct_user_count"
+            secondary_null_clause = "AND secondary_department_id IS NULL" if has_secondary_user_column else ""
+            primary_direct_user_count_join = """
+            LEFT JOIN (
+                SELECT primary_department_id, COUNT(*) AS direct_user_count
+                FROM users
+                WHERE primary_department_id IS NOT NULL
+                  {secondary_null_clause}
+                GROUP BY primary_department_id
+            ) pu
+                ON pu.primary_department_id = p.id
+            """.format(secondary_null_clause=secondary_null_clause)
+        if has_secondary_user_column:
             user_count_select = "COALESCE(u.user_count, 0) AS secondary_user_count"
             user_count_join = """
             LEFT JOIN (
@@ -138,6 +159,18 @@ class DepartmentRepository:
             ) u
                 ON u.secondary_department_id = s.id
             """
+            secondary_direct_user_count_select = "COALESCE(sdu.direct_user_count, 0) AS secondary_direct_user_count"
+            tertiary_null_clause = "AND tertiary_department_id IS NULL" if has_tertiary_user_column else ""
+            secondary_direct_user_count_join = """
+            LEFT JOIN (
+                SELECT secondary_department_id, COUNT(*) AS direct_user_count
+                FROM users
+                WHERE secondary_department_id IS NOT NULL
+                  {tertiary_null_clause}
+                GROUP BY secondary_department_id
+            ) sdu
+                ON sdu.secondary_department_id = s.id
+            """.format(tertiary_null_clause=tertiary_null_clause)
 
         rows = self._execute_query(
             f"""
@@ -148,11 +181,15 @@ class DepartmentRepository:
                 s.id AS secondary_id,
                 s.name AS secondary_name,
                 s.status AS secondary_status,
-                {user_count_select}
+                {primary_direct_user_count_select},
+                {user_count_select},
+                {secondary_direct_user_count_select}
             FROM primary_departments p
             LEFT JOIN secondary_departments s
                 ON s.primary_department_id = p.id{secondary_join_filter}
+            {primary_direct_user_count_join}
             {user_count_join}
+            {secondary_direct_user_count_join}
             {primary_where_clause}
             ORDER BY p.id ASC, s.id ASC
             """
@@ -169,6 +206,7 @@ class DepartmentRepository:
                     "primary_id": primary_id,
                     "primary_name": row["primary_name"],
                     "primary_status": row["primary_status"],
+                    "direct_user_count": int(row.get("primary_direct_user_count") or 0),
                     "secondary_items": [],
                 }
                 primary_index[primary_id] = primary_item
@@ -184,7 +222,8 @@ class DepartmentRepository:
                     "name": row["secondary_name"],
                     "status": row["secondary_status"],
                     "user_count": int(row.get("secondary_user_count") or 0),
-                    "legacy_user_count": 0,
+                    "direct_user_count": int(row.get("secondary_direct_user_count", row.get("secondary_legacy_user_count")) or 0),
+                    "legacy_user_count": int(row.get("secondary_legacy_user_count", row.get("secondary_direct_user_count")) or 0),
                     "tertiary_items": [],
                 }
             )
@@ -202,12 +241,31 @@ class DepartmentRepository:
 
         secondary_user_count_select = "0 AS secondary_user_count"
         secondary_user_count_join = ""
-        secondary_legacy_user_count_select = "0 AS secondary_legacy_user_count"
-        secondary_legacy_user_count_join = ""
+        primary_direct_user_count_select = "0 AS primary_direct_user_count"
+        primary_direct_user_count_join = ""
+        secondary_direct_user_count_select = "0 AS secondary_direct_user_count"
+        secondary_direct_user_count_join = ""
         tertiary_user_count_select = "0 AS tertiary_user_count"
         tertiary_user_count_join = ""
 
-        if self.has_user_column("secondary_department_id"):
+        has_primary_user_column = self.has_user_column("primary_department_id")
+        has_secondary_user_column = self.has_user_column("secondary_department_id")
+        has_tertiary_user_column = self.has_user_column("tertiary_department_id")
+
+        if has_primary_user_column:
+            primary_direct_user_count_select = "COALESCE(pu.direct_user_count, 0) AS primary_direct_user_count"
+            secondary_null_clause = "AND secondary_department_id IS NULL" if has_secondary_user_column else ""
+            primary_direct_user_count_join = """
+            LEFT JOIN (
+                SELECT primary_department_id, COUNT(*) AS direct_user_count
+                FROM users
+                WHERE primary_department_id IS NOT NULL
+                  {secondary_null_clause}
+                GROUP BY primary_department_id
+            ) pu
+                ON pu.primary_department_id = p.id
+            """.format(secondary_null_clause=secondary_null_clause)
+        if has_secondary_user_column:
             secondary_user_count_select = "COALESCE(su.user_count, 0) AS secondary_user_count"
             secondary_user_count_join = """
             LEFT JOIN (
@@ -218,20 +276,28 @@ class DepartmentRepository:
             ) su
                 ON su.secondary_department_id = s.id
             """
-            if self.has_user_column("tertiary_department_id"):
-                secondary_legacy_user_count_select = "COALESCE(sl.legacy_user_count, 0) AS secondary_legacy_user_count"
-                secondary_legacy_user_count_join = """
+            secondary_direct_user_count_select = "COALESCE(sdu.direct_user_count, 0) AS secondary_direct_user_count"
+            if has_tertiary_user_column:
+                secondary_direct_user_count_join = """
                 LEFT JOIN (
-                    SELECT secondary_department_id, COUNT(*) AS legacy_user_count
+                    SELECT secondary_department_id, COUNT(*) AS direct_user_count
                     FROM users
                     WHERE secondary_department_id IS NOT NULL
                       AND tertiary_department_id IS NULL
                     GROUP BY secondary_department_id
-                ) sl
-                    ON sl.secondary_department_id = s.id
+                ) sdu
+                    ON sdu.secondary_department_id = s.id
                 """
             else:
-                secondary_legacy_user_count_select = "COALESCE(su.user_count, 0) AS secondary_legacy_user_count"
+                secondary_direct_user_count_join = """
+                LEFT JOIN (
+                    SELECT secondary_department_id, COUNT(*) AS direct_user_count
+                    FROM users
+                    WHERE secondary_department_id IS NOT NULL
+                    GROUP BY secondary_department_id
+                ) sdu
+                    ON sdu.secondary_department_id = s.id
+                """
         if self.has_user_column("tertiary_department_id"):
             tertiary_user_count_select = "COALESCE(tu.user_count, 0) AS tertiary_user_count"
             tertiary_user_count_join = """
@@ -253,8 +319,9 @@ class DepartmentRepository:
                 s.id AS secondary_id,
                 s.name AS secondary_name,
                 s.status AS secondary_status,
+                {primary_direct_user_count_select},
                 {secondary_user_count_select},
-                {secondary_legacy_user_count_select},
+                {secondary_direct_user_count_select},
                 t.id AS tertiary_id,
                 t.secondary_department_id AS tertiary_secondary_department_id,
                 t.name AS tertiary_name,
@@ -265,8 +332,9 @@ class DepartmentRepository:
                 ON s.primary_department_id = p.id{secondary_join_filter}
             LEFT JOIN tertiary_departments t
                 ON t.secondary_department_id = s.id{tertiary_join_filter}
+            {primary_direct_user_count_join}
             {secondary_user_count_join}
-            {secondary_legacy_user_count_join}
+            {secondary_direct_user_count_join}
             {tertiary_user_count_join}
             {primary_where_clause}
             ORDER BY p.id ASC, s.id ASC, t.id ASC
@@ -285,6 +353,7 @@ class DepartmentRepository:
                     "primary_id": primary_id,
                     "primary_name": row["primary_name"],
                     "primary_status": row["primary_status"],
+                    "direct_user_count": int(row.get("primary_direct_user_count") or 0),
                     "secondary_items": [],
                 }
                 primary_index[primary_id] = primary_item
@@ -302,7 +371,8 @@ class DepartmentRepository:
                     "name": row["secondary_name"],
                     "status": row["secondary_status"],
                     "user_count": int(row.get("secondary_user_count") or 0),
-                    "legacy_user_count": int(row.get("secondary_legacy_user_count") or 0),
+                    "direct_user_count": int(row.get("secondary_direct_user_count", row.get("secondary_legacy_user_count")) or 0),
+                    "legacy_user_count": int(row.get("secondary_legacy_user_count", row.get("secondary_direct_user_count")) or 0),
                     "tertiary_items": [],
                 }
                 secondary_index[secondary_key] = secondary_item
@@ -436,7 +506,29 @@ class DepartmentRepository:
             (int(tertiary_id),),
         )
 
-    def list_legacy_users_by_secondary_department(self, *, secondary_id: int) -> list[dict[str, Any]]:
+    def list_direct_users_by_primary_department(self, *, primary_id: int) -> list[dict[str, Any]]:
+        if not self.has_user_column("primary_department_id"):
+            return []
+
+        fields = ["id", "username", "role", "status"]
+        if self.has_user_column("user_type"):
+            fields.insert(3, "user_type")
+
+        where_clause = "primary_department_id = %s"
+        if self.has_user_column("secondary_department_id"):
+            where_clause += " AND secondary_department_id IS NULL"
+
+        return self._execute_query(
+            f"""
+            SELECT {", ".join(fields)}
+            FROM users
+            WHERE {where_clause}
+            ORDER BY username ASC, id ASC
+            """,
+            (int(primary_id),),
+        )
+
+    def list_direct_users_by_secondary_department(self, *, secondary_id: int) -> list[dict[str, Any]]:
         if not self.has_user_column("secondary_department_id"):
             return []
 
@@ -457,6 +549,9 @@ class DepartmentRepository:
             """,
             (int(secondary_id),),
         )
+
+    def list_legacy_users_by_secondary_department(self, *, secondary_id: int) -> list[dict[str, Any]]:
+        return self.list_direct_users_by_secondary_department(secondary_id=secondary_id)
 
     def count_secondary_departments_by_primary(self, *, primary_id: int) -> int:
         return self._count_rows(

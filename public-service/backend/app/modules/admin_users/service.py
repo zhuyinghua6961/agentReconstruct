@@ -341,8 +341,8 @@ class AdminUsersService:
                 tertiary_department_id=record.get("tertiary_department_id"),
             )
             if (
-                any(item is None for item in self._department_triplet_from_mapping(record))
-                or not isinstance(department_payload, dict)
+                not isinstance(department_payload, dict)
+                or department_payload.get("primary_department_id") is None
                 or bool(department_payload.get("require_department_setup"))
             ):
                 return {

@@ -189,7 +189,7 @@ class PersonnelService:
             tertiary_department_id=tertiary_department_id,
             require_active=True,
             allow_empty=False,
-            allow_legacy_two_level=False,
+            allow_legacy_two_level=True,
         )
 
     def _sync_bound_user_departments(

@@ -52,7 +52,7 @@ class _FakeThreeLevelDepartments:
             "tertiary_department_id": 111,
             "require_active": True,
             "allow_empty": False,
-            "allow_legacy_two_level": False,
+            "allow_legacy_two_level": True,
         }
         return {"success": True, "data": _department_payload()}
 
@@ -69,7 +69,7 @@ class _FakeThreeLevelDepartments:
             "secondary_name": "软件工程系",
             "tertiary_name": "智能软件实验室",
             "active_only": True,
-            "allow_legacy_two_level": False,
+            "allow_legacy_two_level": True,
         }
         return {"success": True, "data": _department_payload()}
 
@@ -1313,7 +1313,7 @@ def test_create_personnel_requires_complete_three_level_department():
                 "tertiary_department_id": None,
                 "require_active": True,
                 "allow_empty": False,
-                "allow_legacy_two_level": False,
+                "allow_legacy_two_level": True,
             }
             return {"success": False, "error": "请选择一级、二级和三级部门", "code": "DEPARTMENT_REQUIRED"}
 
@@ -1331,6 +1331,95 @@ def test_create_personnel_requires_complete_three_level_department():
 
     assert result["success"] is False
     assert result["code"] == "DEPARTMENT_REQUIRED"
+
+
+def test_create_personnel_accepts_primary_direct_department():
+    module_spec = find_module_spec("app.modules.personnel.service")
+    assert module_spec is not None
+
+    from app.modules.personnel.service import PersonnelService
+
+    class FakeRepository:
+        def __init__(self) -> None:
+            self.created = None
+
+        def get_by_employee_no(self, employee_no: str):
+            return None
+
+        def create_personnel(self, **kwargs):
+            self.created = kwargs
+            return 9
+
+        def get_by_id(self, personnel_id: int):
+            return {
+                "id": personnel_id,
+                "employee_no": "T2024001",
+                "full_name": "张三",
+                "status": "active",
+                "remarks": None,
+                "primary_department_id": 1,
+                "secondary_department_id": None,
+                "tertiary_department_id": None,
+                "binding_count": 0,
+                "created_at": None,
+                "updated_at": None,
+            }
+
+    class FakeDepartments:
+        def validate_department_selection(self, **kwargs):
+            assert kwargs == {
+                "primary_department_id": 1,
+                "secondary_department_id": None,
+                "tertiary_department_id": None,
+                "require_active": True,
+                "allow_empty": False,
+                "allow_legacy_two_level": True,
+            }
+            return {
+                "success": True,
+                "data": {
+                    "primary_department_id": 1,
+                    "primary_department_name": "计算机学院",
+                    "secondary_department_id": None,
+                    "secondary_department_name": None,
+                    "tertiary_department_id": None,
+                    "tertiary_department_name": None,
+                    "department_display": "计算机学院",
+                    "department_completion_level": "primary_complete",
+                    "require_department_setup": False,
+                },
+            }
+
+        def describe_user_department(self, **kwargs):
+            return {
+                "primary_department_id": kwargs["primary_department_id"],
+                "primary_department_name": "计算机学院",
+                "secondary_department_id": kwargs["secondary_department_id"],
+                "secondary_department_name": None,
+                "tertiary_department_id": kwargs["tertiary_department_id"],
+                "tertiary_department_name": None,
+                "department_display": "计算机学院",
+                "department_completion_level": "primary_complete",
+                "require_department_setup": False,
+            }
+
+    repo = FakeRepository()
+    service = PersonnelService(repository=repo, department_service=FakeDepartments(), users_repo=object())
+    result = service.create_personnel(
+        employee_no="T2024001",
+        full_name="张三",
+        verification_code="ABC123",
+        primary_department_id=1,
+        secondary_department_id=None,
+        tertiary_department_id=None,
+        status="active",
+    )
+
+    assert result["success"] is True
+    assert repo.created["primary_department_id"] == 1
+    assert repo.created["secondary_department_id"] is None
+    assert repo.created["tertiary_department_id"] is None
+    assert result["data"]["department_display"] == "计算机学院"
 
 
 def test_update_personnel_syncs_all_bound_users_when_department_changes():
@@ -1383,7 +1472,7 @@ def test_update_personnel_syncs_all_bound_users_when_department_changes():
                 "tertiary_department_id": 111,
                 "require_active": True,
                 "allow_empty": False,
-                "allow_legacy_two_level": False,
+                "allow_legacy_two_level": True,
             }
             return {
                 "success": True,
@@ -1443,6 +1532,81 @@ def test_update_personnel_syncs_all_bound_users_when_department_changes():
     assert users_repo.synced == []
 
 
+def test_personnel_repository_update_and_sync_can_clear_lower_department_levels():
+    from app.modules.personnel.repository import PersonnelRepository
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.executed: list[tuple[str, tuple]] = []
+            self.rowcount = 1
+
+        def execute(self, query: str, params: tuple = ()):
+            self.executed.append((query, params))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeConnection:
+        def __init__(self, cursor: FakeCursor) -> None:
+            self.cursor_obj = cursor
+
+        def begin(self):
+            return None
+
+        def commit(self):
+            return None
+
+        def rollback(self):
+            return None
+
+        def cursor(self):
+            return self.cursor_obj
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeDatabase:
+        def __init__(self) -> None:
+            self.cursor = FakeCursor()
+
+        def connection(self):
+            return FakeConnection(self.cursor)
+
+    db = FakeDatabase()
+    repo = PersonnelRepository(database=db)
+    repo.has_table = lambda table_name: table_name == "users"
+    repo.has_user_column = lambda column_name: column_name in {
+        "personnel_id",
+        "primary_department_id",
+        "secondary_department_id",
+        "tertiary_department_id",
+    }
+
+    result = repo.update_personnel_and_sync_bound_users(
+        personnel_id=9,
+        full_name="张三",
+        primary_department_id=1,
+        secondary_department_id=None,
+        tertiary_department_id=None,
+        sync_bound_users=True,
+    )
+
+    assert result == 1
+    update_sql, update_params = db.cursor.executed[0]
+    sync_sql, sync_params = db.cursor.executed[1]
+    assert "secondary_department_id = %s" in update_sql
+    assert "tertiary_department_id = %s" in update_sql
+    assert update_params[2] is None
+    assert update_params[3] is None
+    assert sync_params == (1, None, None, 9)
+
+
 def test_import_personnel_requires_department_name_columns_and_syncs_existing_personnel():
     module_spec = find_module_spec("app.modules.personnel.import_service")
     assert module_spec is not None
@@ -1475,13 +1639,13 @@ def test_import_personnel_requires_department_name_columns_and_syncs_existing_pe
             return "hashed-code"
 
     class FakeDepartments:
-        def resolve_by_names(self, **kwargs):
+        def resolve_or_create_by_names(self, **kwargs):
             assert kwargs == {
                 "primary_name": "计算机学院",
                 "secondary_name": "软件工程系",
                 "tertiary_name": "智能软件实验室",
                 "active_only": True,
-                "allow_legacy_two_level": False,
+                "allow_legacy_two_level": True,
             }
             return {
                 "success": True,
@@ -1493,6 +1657,7 @@ def test_import_personnel_requires_department_name_columns_and_syncs_existing_pe
                     "secondary_department_name": "软件工程系",
                     "tertiary_department_name": "智能软件实验室",
                     "department_display": "计算机学院 / 软件工程系 / 智能软件实验室",
+                    "created_departments": {"primary": 0, "secondary": 0, "tertiary": 0, "total": 0},
                 },
             }
 
@@ -1524,6 +1689,190 @@ def test_import_personnel_requires_department_name_columns_and_syncs_existing_pe
             "tertiary_department_id": 111,
         }
     ]
+
+
+def test_import_personnel_allows_primary_only_department_names():
+    module_spec = find_module_spec("app.modules.personnel.import_service")
+    assert module_spec is not None
+
+    from app.modules.personnel.import_service import PersonnelImportService
+
+    class FakeRepository:
+        def import_personnel_rows(self, *, rows: list[dict], sync_bound_users: bool):
+            self.rows = rows
+            self.sync_bound_users = sync_bound_users
+            return {
+                "created": 1,
+                "updated": 0,
+                "skipped": 0,
+                "details": [],
+            }
+
+    class FakeService:
+        def hash_verification_code(self, verification_code: str) -> str:
+            assert verification_code == "ABC123"
+            return "hashed-code"
+
+    class FakeDepartments:
+        def resolve_or_create_by_names(self, **kwargs):
+            assert kwargs == {
+                "primary_name": "计算机学院",
+                "secondary_name": "",
+                "tertiary_name": "",
+                "active_only": True,
+                "allow_legacy_two_level": True,
+            }
+            return {
+                "success": True,
+                "data": {
+                    "primary_department_id": 1,
+                    "secondary_department_id": None,
+                    "tertiary_department_id": None,
+                    "department_display": "计算机学院",
+                    "department_completion_level": "primary_complete",
+                    "require_department_setup": False,
+                    "created_departments": {"primary": 0, "secondary": 0, "tertiary": 0, "total": 0},
+                },
+            }
+
+    csv_content = "\n".join(
+        [
+            "工号,姓名,校验码,状态,一级部门,二级部门,三级部门,备注",
+            "T2024001,张三,ABC123,active,计算机学院,,,",
+        ]
+    ).encode("utf-8")
+
+    repo = FakeRepository()
+    service = PersonnelImportService(repository=repo, service=FakeService(), department_service=FakeDepartments())
+    result = service.import_personnel(file_bytes=csv_content, filename="personnel.csv")
+
+    assert result["success"] is True
+    assert repo.sync_bound_users is True
+    assert repo.rows[0]["primary_department_id"] == 1
+    assert repo.rows[0]["secondary_department_id"] is None
+    assert repo.rows[0]["tertiary_department_id"] is None
+    assert result["data"]["summary"]["created_departments_total"] == 0
+
+
+def test_import_personnel_auto_creates_missing_departments_and_reports_summary():
+    module_spec = find_module_spec("app.modules.personnel.import_service")
+    assert module_spec is not None
+
+    from app.modules.personnel.import_service import PersonnelImportService
+
+    class FakeRepository:
+        def import_personnel_rows(self, *, rows: list[dict], sync_bound_users: bool):
+            self.rows = rows
+            self.sync_bound_users = sync_bound_users
+            return {"created": len(rows), "updated": 0, "skipped": 0, "details": []}
+
+    class FakeService:
+        def hash_verification_code(self, verification_code: str) -> str:
+            return f"hashed-{verification_code}"
+
+    class FakeDepartments:
+        def __init__(self):
+            self.calls: list[dict] = []
+            self.created_paths: set[tuple[str, str, str]] = set()
+
+        def resolve_or_create_by_names(self, **kwargs):
+            self.calls.append(kwargs)
+            path = (kwargs["primary_name"], kwargs["secondary_name"], kwargs["tertiary_name"])
+            created = {"primary": 0, "secondary": 0, "tertiary": 0, "total": 0}
+            if path not in self.created_paths:
+                self.created_paths.add(path)
+                created = {"primary": 1, "secondary": 1, "tertiary": 1, "total": 3}
+            return {
+                "success": True,
+                "data": {
+                    "primary_department_id": 101,
+                    "secondary_department_id": 102,
+                    "tertiary_department_id": 103,
+                    "department_display": "新能源事业部 / 电芯研发部 / 材料实验室",
+                    "created_departments": created,
+                },
+            }
+
+    csv_content = "\n".join(
+        [
+            "工号,姓名,校验码,状态,一级部门,二级部门,三级部门,备注",
+            "T2024001,张三,ABC123,active,新能源事业部,电芯研发部,材料实验室,",
+            "T2024002,李四,ABC124,active,新能源事业部,电芯研发部,材料实验室,",
+        ]
+    ).encode("utf-8")
+
+    repo = FakeRepository()
+    departments = FakeDepartments()
+    service = PersonnelImportService(repository=repo, service=FakeService(), department_service=departments)
+    result = service.import_personnel(file_bytes=csv_content, filename="personnel.csv")
+
+    assert result["success"] is True
+    assert result["data"]["summary"]["created"] == 2
+    assert result["data"]["summary"]["created_departments_total"] == 3
+    assert result["data"]["summary"]["created_primary_departments"] == 1
+    assert result["data"]["summary"]["created_secondary_departments"] == 1
+    assert result["data"]["summary"]["created_tertiary_departments"] == 1
+    assert len(departments.calls) == 2
+    assert repo.rows[0]["primary_department_id"] == 101
+    assert repo.rows[1]["tertiary_department_id"] == 103
+
+
+def test_import_personnel_fails_when_existing_department_is_disabled():
+    module_spec = find_module_spec("app.modules.personnel.import_service")
+    assert module_spec is not None
+
+    from app.modules.personnel.import_service import PersonnelImportService
+
+    class FakeRepository:
+        def import_personnel_rows(self, **kwargs):
+            raise AssertionError("import should stop during department validation")
+
+    class FakeDepartments:
+        def resolve_or_create_by_names(self, **kwargs):
+            return {"success": False, "error": "部门已停用，无法选择", "code": "DEPARTMENT_DISABLED"}
+
+    csv_content = "\n".join(
+        [
+            "工号,姓名,校验码,状态,一级部门,二级部门,三级部门,备注",
+            "T2024001,张三,ABC123,active,停用学院,,,",
+        ]
+    ).encode("utf-8")
+
+    service = PersonnelImportService(repository=FakeRepository(), service=object(), department_service=FakeDepartments())
+    result = service.import_personnel(file_bytes=csv_content, filename="personnel.csv")
+
+    assert result["success"] is False
+    assert result["code"] == "DEPARTMENT_DISABLED"
+    assert "部门已停用" in result["error"]
+
+
+def test_import_personnel_rejects_tertiary_name_without_secondary_name():
+    module_spec = find_module_spec("app.modules.personnel.import_service")
+    assert module_spec is not None
+
+    from app.modules.personnel.import_service import PersonnelImportService
+
+    class FakeRepository:
+        def import_personnel_rows(self, **kwargs):
+            raise AssertionError("import should stop during validation")
+
+    class FakeDepartments:
+        def resolve_or_create_by_names(self, **kwargs):
+            raise AssertionError("department resolver should not be called for invalid hierarchy")
+
+    csv_content = "\n".join(
+        [
+            "工号,姓名,校验码,状态,一级部门,二级部门,三级部门,备注",
+            "T2024001,张三,ABC123,active,计算机学院,,智能软件实验室,",
+        ]
+    ).encode("utf-8")
+
+    service = PersonnelImportService(repository=FakeRepository(), service=object(), department_service=FakeDepartments())
+    result = service.import_personnel(file_bytes=csv_content, filename="personnel.csv")
+
+    assert result["success"] is False
+    assert result["code"] == "VALIDATION_ERROR"
+    assert "三级部门名称不能在二级部门为空时填写" in result["error"]
 
 
 def test_personnel_payload_includes_department_display_fields():

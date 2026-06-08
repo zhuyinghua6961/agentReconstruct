@@ -148,7 +148,7 @@ function requestClose() {
             <button class="template-btn" @click="downloadTemplate('xlsx')">下载 Excel 模板</button>
             <button class="template-btn" @click="downloadTemplate('csv')">下载 CSV 模板</button>
           </div>
-          <p class="hint">模板列为工号、姓名、一级部门、二级部门、三级部门、校验码、备注；系统同时兼容旧英文列名，导入后人员状态默认启用。</p>
+          <p class="hint">模板列为工号、姓名、一级部门、二级部门、三级部门、校验码、备注；一级部门必填，二级、三级部门可留空；部门不存在时会自动创建，停用部门不会自动启用；系统同时兼容旧英文列名，导入后人员状态默认启用。</p>
         </div>
 
         <div class="upload-section">
@@ -187,7 +187,9 @@ function requestClose() {
         <div class="info-section">
           <p class="info-title">导入说明：</p>
           <ul class="info-list">
-            <li>工号、姓名、一级部门、二级部门、三级部门、校验码必填。</li>
+            <li>工号、姓名、一级部门、校验码必填；二级部门和三级部门可按实际管理层级留空。</li>
+            <li>部门不存在时会自动创建对应的一级、二级或三级部门。</li>
+            <li>停用部门不会自动启用，导入到停用部门会失败。</li>
             <li>也兼容旧列名 employee_no、full_name、primary_department_name、secondary_department_name、tertiary_department_name、verification_code。</li>
             <li>备注可留空，用于记录补充说明。</li>
             <li>模板不包含状态列，新导入和更新的人员状态默认启用。</li>

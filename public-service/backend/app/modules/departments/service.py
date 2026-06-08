@@ -128,6 +128,24 @@ class DepartmentService:
             return "超级用户"
         return "普通用户"
 
+    def _build_user_items(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": int(row["id"]),
+                "username": row["username"],
+                "user_type": self._user_type_code(
+                    user_type=row.get("user_type"),
+                    role=row.get("role"),
+                ),
+                "user_type_label": self._user_type_label(
+                    user_type=row.get("user_type"),
+                    role=row.get("role"),
+                ),
+                "status": self._normalize_status(row.get("status")),
+            }
+            for row in rows
+        ]
+
     def _build_primary_payload(self, primary: dict[str, Any]) -> dict[str, Any]:
         return {
             "id": int(primary["id"]),
@@ -231,7 +249,8 @@ class DepartmentService:
                             "status": child_status,
                             "effective_status": effective_status,
                             "user_count": int(secondary.get("user_count") or 0),
-                            "legacy_user_count": int(secondary.get("legacy_user_count") or 0),
+                            "direct_user_count": int(secondary.get("direct_user_count", secondary.get("legacy_user_count")) or 0),
+                            "legacy_user_count": int(secondary.get("legacy_user_count", secondary.get("direct_user_count")) or 0),
                             "tertiary_count": len(tertiary_items),
                             "tertiary_items": tertiary_items,
                         }
@@ -241,6 +260,7 @@ class DepartmentService:
                         "id": int(row["primary_id"]),
                         "name": row["primary_name"],
                         "status": primary_status,
+                        "direct_user_count": int(row.get("direct_user_count") or row.get("primary_direct_user_count") or 0),
                         "secondary_items": secondary_items,
                     }
                 )
@@ -259,22 +279,7 @@ class DepartmentService:
             primary_id = int(secondary["primary_department_id"])
             primary = self._repository.get_primary_by_id(primary_id)
             rows = self._repository.list_users_by_secondary_department(secondary_id=int(secondary["id"]))
-            users = [
-                {
-                    "id": int(row["id"]),
-                    "username": row["username"],
-                    "user_type": self._user_type_code(
-                        user_type=row.get("user_type"),
-                        role=row.get("role"),
-                    ),
-                    "user_type_label": self._user_type_label(
-                        user_type=row.get("user_type"),
-                        role=row.get("role"),
-                    ),
-                    "status": self._normalize_status(row.get("status")),
-                }
-                for row in rows
-            ]
+            users = self._build_user_items(rows)
             return {
                 "success": True,
                 "data": {
@@ -299,23 +304,11 @@ class DepartmentService:
 
             primary_id = int(secondary["primary_department_id"])
             primary = self._repository.get_primary_by_id(primary_id)
-            rows = self._repository.list_legacy_users_by_secondary_department(secondary_id=int(secondary["id"]))
-            users = [
-                {
-                    "id": int(row["id"]),
-                    "username": row["username"],
-                    "user_type": self._user_type_code(
-                        user_type=row.get("user_type"),
-                        role=row.get("role"),
-                    ),
-                    "user_type_label": self._user_type_label(
-                        user_type=row.get("user_type"),
-                        role=row.get("role"),
-                    ),
-                    "status": self._normalize_status(row.get("status")),
-                }
-                for row in rows
-            ]
+            getter = getattr(self._repository, "list_direct_users_by_secondary_department", None)
+            if not callable(getter):
+                getter = getattr(self._repository, "list_legacy_users_by_secondary_department", None)
+            rows = getter(secondary_id=int(secondary["id"])) if callable(getter) else []
+            users = self._build_user_items(rows)
             return {
                 "success": True,
                 "data": {
@@ -332,6 +325,53 @@ class DepartmentService:
                 return self._db_error(exc)
             return {"success": False, "error": "获取部门遗留用户失败", "code": "FETCH_ERROR"}
 
+    def list_primary_direct_users(self, *, primary_id: int) -> dict[str, Any]:
+        try:
+            primary = self._repository.get_primary_by_id(int(primary_id))
+            if not primary:
+                return {"success": False, "error": "一级部门不存在", "code": "PRIMARY_DEPARTMENT_NOT_FOUND"}
+            rows = self._repository.list_direct_users_by_primary_department(primary_id=int(primary["id"]))
+            users = self._build_user_items(rows)
+            return {
+                "success": True,
+                "data": {
+                    "primary_department_id": int(primary["id"]),
+                    "primary_department_name": primary.get("name"),
+                    "user_count": len(users),
+                    "users": users,
+                },
+            }
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "获取一级部门直属用户失败", "code": "FETCH_ERROR"}
+
+    def list_secondary_direct_users(self, *, secondary_id: int) -> dict[str, Any]:
+        try:
+            secondary = self._repository.get_secondary_by_id(int(secondary_id))
+            if not secondary:
+                return {"success": False, "error": "二级部门不存在", "code": "SECONDARY_DEPARTMENT_NOT_FOUND"}
+
+            primary_id = int(secondary["primary_department_id"])
+            primary = self._repository.get_primary_by_id(primary_id)
+            rows = self._repository.list_direct_users_by_secondary_department(secondary_id=int(secondary["id"]))
+            users = self._build_user_items(rows)
+            return {
+                "success": True,
+                "data": {
+                    "secondary_department_id": int(secondary["id"]),
+                    "primary_department_id": primary_id,
+                    "primary_department_name": (primary or {}).get("name"),
+                    "secondary_department_name": secondary.get("name"),
+                    "user_count": len(users),
+                    "users": users,
+                },
+            }
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "获取二级部门直属用户失败", "code": "FETCH_ERROR"}
+
     def list_tertiary_users(self, *, tertiary_id: int) -> dict[str, Any]:
         try:
             tertiary = self._get_tertiary_by_id(int(tertiary_id))
@@ -342,22 +382,7 @@ class DepartmentService:
             secondary = self._repository.get_secondary_by_id(secondary_id)
             primary = self._repository.get_primary_by_id(int((secondary or {}).get("primary_department_id") or 0)) if secondary else None
             rows = self._repository.list_users_by_tertiary_department(tertiary_id=int(tertiary["id"]))
-            users = [
-                {
-                    "id": int(row["id"]),
-                    "username": row["username"],
-                    "user_type": self._user_type_code(
-                        user_type=row.get("user_type"),
-                        role=row.get("role"),
-                    ),
-                    "user_type_label": self._user_type_label(
-                        user_type=row.get("user_type"),
-                        role=row.get("role"),
-                    ),
-                    "status": self._normalize_status(row.get("status")),
-                }
-                for row in rows
-            ]
+            users = self._build_user_items(rows)
             return {
                 "success": True,
                 "data": {
@@ -390,8 +415,8 @@ class DepartmentService:
                                 {
                                     "id": int(secondary["id"]),
                                     "name": secondary["name"],
-                                    "selectable": bool(secondary.get("tertiary_items")),
-                                    "disabled_reason": None if secondary.get("tertiary_items") else "暂无三级部门，请联系管理员维护",
+                                    "selectable": True,
+                                    "disabled_reason": None,
                                     "tertiary_items": [
                                         {
                                             "id": int(tertiary["id"]),
@@ -442,9 +467,17 @@ class DepartmentService:
             and tertiary is not None
             and int(tertiary.get("secondary_department_id") or 0) == int(secondary.get("id") or 0)
         )
+        primary_only_valid = (
+            primary_id is not None
+            and secondary_id is None
+            and tertiary_id is None
+            and primary is not None
+        )
 
         if primary_id is None and secondary_id is None and tertiary_id is None:
             completion_level = "empty"
+        elif primary_only_valid:
+            completion_level = "primary_complete"
         elif secondary_relation_valid and tertiary_id is None:
             completion_level = "legacy_two_level_complete"
         elif tertiary_relation_valid:
@@ -453,7 +486,9 @@ class DepartmentService:
             completion_level = "invalid_partial"
 
         effective_status = None
-        if completion_level == "legacy_two_level_complete":
+        if completion_level == "primary_complete":
+            effective_status = primary_status
+        elif completion_level == "legacy_two_level_complete":
             effective_status = self._effective_status(
                 primary_status=primary_status,
                 secondary_status=secondary_status,
@@ -512,12 +547,26 @@ class DepartmentService:
                 )}
             return {"success": False, "error": "请选择一级、二级和三级部门", "code": "DEPARTMENT_REQUIRED"}
 
-        if primary_id is None or secondary_id is None:
-            return {"success": False, "error": "一级和二级部门必须同时填写", "code": "DEPARTMENT_REQUIRED"}
+        if primary_id is None:
+            return {"success": False, "error": "请选择一级部门", "code": "DEPARTMENT_REQUIRED"}
 
         primary = self._repository.get_primary_by_id(primary_id)
         if not primary:
             return {"success": False, "error": "一级部门不存在", "code": "PRIMARY_DEPARTMENT_NOT_FOUND"}
+
+        if require_active and str(primary.get("status") or "").strip().lower() != "active":
+            return {"success": False, "error": "部门已停用，无法选择", "code": "DEPARTMENT_DISABLED"}
+
+        if secondary_id is None:
+            if tertiary_id is not None:
+                return {"success": False, "error": "填写三级部门时必须选择二级部门", "code": "DEPARTMENT_REQUIRED"}
+            if not allow_legacy_two_level:
+                return {"success": False, "error": "一级、二级和三级部门必须同时填写", "code": "DEPARTMENT_REQUIRED"}
+            return {"success": True, "data": self.describe_user_department(
+                primary_department_id=primary_id,
+                secondary_department_id=None,
+                tertiary_department_id=None,
+            )}
 
         secondary = self._repository.get_secondary_by_id(secondary_id)
         if not secondary:
@@ -526,10 +575,7 @@ class DepartmentService:
         if int(secondary.get("primary_department_id") or 0) != primary_id:
             return {"success": False, "error": "二级部门不属于所选一级部门", "code": "DEPARTMENT_RELATION_INVALID"}
 
-        if require_active and (
-            str(primary.get("status") or "").strip().lower() != "active"
-            or str(secondary.get("status") or "").strip().lower() != "active"
-        ):
+        if require_active and str(secondary.get("status") or "").strip().lower() != "active":
             return {"success": False, "error": "部门已停用，无法选择", "code": "DEPARTMENT_DISABLED"}
 
         if tertiary_id is None:
@@ -569,12 +615,29 @@ class DepartmentService:
         primary_text = self.clean_text(primary_name)
         secondary_text = self.clean_text(secondary_name)
         tertiary_text = self.clean_text(tertiary_name)
-        if not primary_text or not secondary_text:
-            return {"success": False, "error": "一级和二级部门必须同时填写", "code": "DEPARTMENT_REQUIRED"}
+        if not primary_text:
+            return {"success": False, "error": "一级部门不能为空", "code": "DEPARTMENT_REQUIRED"}
+        if tertiary_text and not secondary_text:
+            return {"success": False, "error": "三级部门名称不能在二级部门为空时填写", "code": "DEPARTMENT_REQUIRED"}
 
         primary = self._repository.get_primary_by_name(primary_text)
         if not primary:
             return {"success": False, "error": "一级部门不存在", "code": "PRIMARY_DEPARTMENT_NOT_FOUND"}
+
+        if active_only and str(primary.get("status") or "").strip().lower() != "active":
+            return {"success": False, "error": "部门已停用，无法选择", "code": "DEPARTMENT_DISABLED"}
+
+        if not secondary_text:
+            if not allow_legacy_two_level:
+                return {"success": False, "error": "一级、二级和三级部门必须同时填写", "code": "DEPARTMENT_REQUIRED"}
+            return {
+                "success": True,
+                "data": self.describe_user_department(
+                    primary_department_id=int(primary["id"]),
+                    secondary_department_id=None,
+                    tertiary_department_id=None,
+                ),
+            }
 
         secondary = self._repository.get_secondary_by_name(
             primary_department_id=int(primary["id"]),
@@ -586,10 +649,7 @@ class DepartmentService:
         if not tertiary_text:
             if not allow_legacy_two_level:
                 return {"success": False, "error": "一级、二级和三级部门必须同时填写", "code": "DEPARTMENT_REQUIRED"}
-            if active_only and (
-                str(primary.get("status") or "").strip().lower() != "active"
-                or str(secondary.get("status") or "").strip().lower() != "active"
-            ):
+            if active_only and str(secondary.get("status") or "").strip().lower() != "active":
                 return {"success": False, "error": "部门已停用，无法选择", "code": "DEPARTMENT_DISABLED"}
             return {
                 "success": True,
@@ -608,8 +668,7 @@ class DepartmentService:
             return {"success": False, "error": "三级部门不存在", "code": "TERTIARY_DEPARTMENT_NOT_FOUND"}
 
         if active_only and (
-            str(primary.get("status") or "").strip().lower() != "active"
-            or str(secondary.get("status") or "").strip().lower() != "active"
+            str(secondary.get("status") or "").strip().lower() != "active"
             or str(tertiary.get("status") or "").strip().lower() != "active"
         ):
             return {"success": False, "error": "部门已停用，无法选择", "code": "DEPARTMENT_DISABLED"}
@@ -622,6 +681,126 @@ class DepartmentService:
                 tertiary_department_id=int(tertiary["id"]),
             ),
         }
+
+    def resolve_or_create_by_names(
+        self,
+        *,
+        primary_name: str,
+        secondary_name: str,
+        tertiary_name: str | None = None,
+        active_only: bool,
+        allow_legacy_two_level: bool = True,
+    ) -> dict[str, Any]:
+        primary_text = self.clean_text(primary_name)
+        secondary_text = self.clean_text(secondary_name)
+        tertiary_text = self.clean_text(tertiary_name)
+        created_departments = {"primary": 0, "secondary": 0, "tertiary": 0, "total": 0}
+
+        if not primary_text:
+            return {"success": False, "error": "一级部门不能为空", "code": "DEPARTMENT_REQUIRED"}
+        if tertiary_text and not secondary_text:
+            return {"success": False, "error": "三级部门名称不能在二级部门为空时填写", "code": "DEPARTMENT_REQUIRED"}
+
+        try:
+            primary = self._repository.get_primary_by_name(primary_text)
+            if not primary:
+                primary_id = self._repository.create_primary(name=primary_text)
+                primary = self._repository.get_primary_by_id(int(primary_id)) or {
+                    "id": int(primary_id),
+                    "name": primary_text,
+                    "status": "active",
+                }
+                created_departments["primary"] = 1
+            if active_only and str(primary.get("status") or "").strip().lower() != "active":
+                return {"success": False, "error": "部门已停用，无法选择", "code": "DEPARTMENT_DISABLED"}
+
+            primary_id = int(primary["id"])
+            if not secondary_text:
+                if not allow_legacy_two_level:
+                    return {"success": False, "error": "一级、二级和三级部门必须同时填写", "code": "DEPARTMENT_REQUIRED"}
+                data = self.describe_user_department(
+                    primary_department_id=primary_id,
+                    secondary_department_id=None,
+                    tertiary_department_id=None,
+                )
+                created_departments["total"] = sum(
+                    created_departments[key] for key in ("primary", "secondary", "tertiary")
+                )
+                return {"success": True, "data": {**data, "created_departments": created_departments}}
+
+            secondary = self._repository.get_secondary_by_name(
+                primary_department_id=primary_id,
+                name=secondary_text,
+            )
+            if not secondary:
+                secondary_id = self._repository.create_secondary(
+                    primary_department_id=primary_id,
+                    name=secondary_text,
+                )
+                secondary = self._repository.get_secondary_by_id(int(secondary_id)) or {
+                    "id": int(secondary_id),
+                    "primary_department_id": primary_id,
+                    "name": secondary_text,
+                    "status": "active",
+                }
+                created_departments["secondary"] = 1
+            if active_only and str(secondary.get("status") or "").strip().lower() != "active":
+                return {"success": False, "error": "部门已停用，无法选择", "code": "DEPARTMENT_DISABLED"}
+
+            secondary_id = int(secondary["id"])
+            if not tertiary_text:
+                if not allow_legacy_two_level:
+                    return {"success": False, "error": "一级、二级和三级部门必须同时填写", "code": "DEPARTMENT_REQUIRED"}
+                data = self.describe_user_department(
+                    primary_department_id=primary_id,
+                    secondary_department_id=secondary_id,
+                    tertiary_department_id=None,
+                )
+                created_departments["total"] = sum(
+                    created_departments[key] for key in ("primary", "secondary", "tertiary")
+                )
+                return {"success": True, "data": {**data, "created_departments": created_departments}}
+
+            tertiary = self._get_tertiary_by_name(
+                secondary_department_id=secondary_id,
+                name=tertiary_text,
+            )
+            if not tertiary:
+                tertiary_id = self._repository.create_tertiary(
+                    secondary_department_id=secondary_id,
+                    name=tertiary_text,
+                )
+                tertiary = self._get_tertiary_by_id(int(tertiary_id)) or {
+                    "id": int(tertiary_id),
+                    "secondary_department_id": secondary_id,
+                    "name": tertiary_text,
+                    "status": "active",
+                }
+                created_departments["tertiary"] = 1
+            if active_only and str(tertiary.get("status") or "").strip().lower() != "active":
+                return {"success": False, "error": "部门已停用，无法选择", "code": "DEPARTMENT_DISABLED"}
+
+            data = self.describe_user_department(
+                primary_department_id=primary_id,
+                secondary_department_id=secondary_id,
+                tertiary_department_id=int(tertiary["id"]),
+            )
+            created_departments["total"] = sum(
+                created_departments[key] for key in ("primary", "secondary", "tertiary")
+            )
+            return {"success": True, "data": {**data, "created_departments": created_departments}}
+        except Exception as exc:
+            if self._duplicate_error(exc):
+                return self.resolve_by_names(
+                    primary_name=primary_text,
+                    secondary_name=secondary_text,
+                    tertiary_name=tertiary_text,
+                    active_only=active_only,
+                    allow_legacy_two_level=allow_legacy_two_level,
+                )
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "部门解析或创建失败", "code": "CREATE_ERROR"}
 
     def create_primary(self, *, name: str) -> dict[str, Any]:
         primary_name = self.clean_text(name)

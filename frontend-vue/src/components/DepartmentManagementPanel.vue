@@ -5,7 +5,7 @@ import DepartmentBatchImportDialog from './DepartmentBatchImportDialog.vue'
 import DepartmentCreateDialog from './DepartmentCreateDialog.vue'
 import DepartmentImportResultDialog from './DepartmentImportResultDialog.vue'
 import { createDepartmentUsersRuntime } from '../utils/departmentSecondaryUsersRuntime'
-import { buildDepartmentRenderTree } from '../utils/departmentManagementTreeModel'
+import { buildDepartmentRenderPrimary } from '../utils/departmentManagementTreeModel'
 
 const emit = defineEmits(['updated'])
 
@@ -19,15 +19,20 @@ const showDepartmentImportResultDialog = ref(false)
 const departmentImportResult = ref(null)
 const expandedPrimaryIds = ref([])
 const expandedSecondaryIds = ref([])
-const LEGACY_PENDING_NODE_LABEL = '未补全三级部门用户'
+const DIRECT_SECONDARY_NODE_LABEL = '直属二级部门用户'
 
 const departmentUsersRuntime = createDepartmentUsersRuntime({
   requestUsers: (nodeKey) => {
-    if (String(nodeKey).startsWith('legacy-secondary-')) {
-      const secondaryId = Number(String(nodeKey).replace('legacy-secondary-', ''))
-      return adminApi.getSecondaryLegacyDepartmentUsers(secondaryId)
+    const normalizedKey = String(nodeKey)
+    if (normalizedKey.startsWith('direct-primary-')) {
+      const primaryId = Number(normalizedKey.replace('direct-primary-', ''))
+      return adminApi.getPrimaryDirectDepartmentUsers(primaryId)
     }
-    return adminApi.getTertiaryDepartmentUsers(Number(nodeKey))
+    if (normalizedKey.startsWith('direct-secondary-')) {
+      const secondaryId = Number(normalizedKey.replace('direct-secondary-', ''))
+      return adminApi.getSecondaryDirectDepartmentUsers(secondaryId)
+    }
+    return adminApi.getTertiaryDepartmentUsers(Number(normalizedKey))
   },
 })
 const expandedDepartmentNodeIds = departmentUsersRuntime.expandedIds
@@ -36,10 +41,7 @@ const departmentUsersLoadingById = departmentUsersRuntime.loadingById
 const departmentUsersErrorById = departmentUsersRuntime.errorById
 
 const departmentRenderTree = computed(() => (
-  (Array.isArray(departmentTree.value) ? departmentTree.value : []).map(primary => ({
-    ...primary,
-    renderSecondaryItems: buildDepartmentRenderTree(primary.secondary_items),
-  }))
+  (Array.isArray(departmentTree.value) ? departmentTree.value : []).map(primary => buildDepartmentRenderPrimary(primary))
 ))
 
 function setSuccess(message) {
@@ -93,6 +95,35 @@ function toggleSecondary(secondaryId) {
 
 function isDepartmentNodeExpanded(nodeKey) {
   return departmentUsersRuntime.isExpanded(nodeKey)
+}
+
+function primaryDirectNodeKey(primary) {
+  return `direct-primary-${primary.id}`
+}
+
+function isDirectDepartmentNode(node) {
+  return node?.nodeType === 'primary_direct' || node?.nodeType === 'secondary_direct'
+}
+
+function departmentNodeStatusClass(node) {
+  if (isDirectDepartmentNode(node)) {
+    return 'active'
+  }
+  return node?.effectiveStatus || 'active'
+}
+
+function departmentNodeStatusLabel(node) {
+  if (isDirectDepartmentNode(node)) {
+    return '直属'
+  }
+  return node?.effectiveStatus === 'active' ? '可选' : '已停用'
+}
+
+function departmentNodeName(node) {
+  if (node?.nodeType === 'secondary_direct') {
+    return DIRECT_SECONDARY_NODE_LABEL
+  }
+  return node?.name || ''
 }
 
 async function toggleDepartmentUsers(nodeKey) {
@@ -281,6 +312,69 @@ onMounted(() => {
         </div>
 
         <div v-if="isPrimaryExpanded(primary.id)" class="primary-body">
+          <div v-if="primary.direct_user_count > 0" class="tertiary-list primary-direct-list">
+            <div class="tertiary-item">
+              <div class="secondary-header tertiary-header">
+                <div class="secondary-main">
+                  <button
+                    type="button"
+                    class="collapse-toggle"
+                    :aria-expanded="isDepartmentNodeExpanded(primaryDirectNodeKey(primary))"
+                    @click="toggleDepartmentUsers(primaryDirectNodeKey(primary))"
+                  >
+                    {{ isDepartmentNodeExpanded(primaryDirectNodeKey(primary)) ? 'v' : '>' }}
+                  </button>
+                  <div
+                    class="secondary-summary"
+                    role="button"
+                    tabindex="0"
+                    @click="toggleDepartmentUsers(primaryDirectNodeKey(primary))"
+                    @keydown.enter.prevent="toggleDepartmentUsers(primaryDirectNodeKey(primary))"
+                    @keydown.space.prevent="toggleDepartmentUsers(primaryDirectNodeKey(primary))"
+                  >
+                    <div class="secondary-title">
+                      <span class="secondary-name">直属一级部门用户</span>
+                      <span class="status-badge active">直属</span>
+                    </div>
+                    <span class="secondary-count">{{ primary.direct_user_count }} 人</span>
+                  </div>
+                </div>
+              </div>
+
+              <div v-if="isDepartmentNodeExpanded(primaryDirectNodeKey(primary))" class="secondary-body">
+                <div v-if="departmentUsersLoadingById[primaryDirectNodeKey(primary)]" class="secondary-users-state">
+                  加载用户中...
+                </div>
+                <div
+                  v-else-if="departmentUsersErrorById[primaryDirectNodeKey(primary)]"
+                  class="secondary-users-state secondary-users-error"
+                >
+                  <span>{{ departmentUsersErrorById[primaryDirectNodeKey(primary)] }}</span>
+                  <button class="action-btn" @click="loadDepartmentUsers(primaryDirectNodeKey(primary), { force: true })">重试</button>
+                </div>
+                <div v-else-if="departmentUsersById[primaryDirectNodeKey(primary)]?.length" class="secondary-users">
+                  <div class="secondary-users-head">
+                    <span>用户名</span>
+                    <span>用户类型</span>
+                    <span>状态</span>
+                  </div>
+                  <div
+                    v-for="user in departmentUsersById[primaryDirectNodeKey(primary)]"
+                    :key="user.id"
+                    class="secondary-user-row"
+                  >
+                    <span>{{ user.username }}</span>
+                    <span>{{ user.user_type_label }}</span>
+                    <span class="status-badge" :class="user.status">
+                      {{ user.status === 'active' ? '启用中' : '已停用' }}
+                    </span>
+                  </div>
+                </div>
+                <p v-else class="secondary-users-state">暂无用户</p>
+              </div>
+            </div>
+          </div>
+
           <div v-if="primary.renderSecondaryItems?.length" class="secondary-list">
             <div
               v-for="secondary in primary.renderSecondaryItems"
@@ -317,8 +411,8 @@ onMounted(() => {
                   </div>
                 </div>
                 <div class="secondary-meta">
-                  <span v-if="secondary.legacy_user_count > 0" class="meta-text">
-                    其中 {{ secondary.legacy_user_count }} 人未补全三级
+                  <span v-if="secondary.direct_user_count > 0" class="meta-text">
+                    直属二级 {{ secondary.direct_user_count }} 人
                   </span>
                   <div class="actions">
                     <button class="action-btn" @click="handleRenameSecondary(secondary.raw)">改名</button>
@@ -354,13 +448,13 @@ onMounted(() => {
                         >
                           <div class="secondary-title">
                             <span class="secondary-name">
-                              {{ tertiary.nodeType === 'legacy_pending' ? LEGACY_PENDING_NODE_LABEL : tertiary.name }}
+                              {{ departmentNodeName(tertiary) }}
                             </span>
                             <span
                               class="status-badge"
-                              :class="tertiary.nodeType === 'legacy_pending' ? 'disabled' : tertiary.effectiveStatus"
+                              :class="departmentNodeStatusClass(tertiary)"
                             >
-                              {{ tertiary.nodeType === 'legacy_pending' ? '待补全' : (tertiary.effectiveStatus === 'active' ? '可选' : '已停用') }}
+                              {{ departmentNodeStatusLabel(tertiary) }}
                             </span>
                           </div>
                           <span class="secondary-count">{{ tertiary.user_count }} 人</span>

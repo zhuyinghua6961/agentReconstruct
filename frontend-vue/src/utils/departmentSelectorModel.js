@@ -40,10 +40,10 @@ export function buildSearchMatches(tree, keyword) {
 
 export function buildSecondarySelectionState(secondary) {
   const tertiaryItems = secondaryTertiaryItems(secondary)
-  const selectable = secondary?.selectable !== false && tertiaryItems.length > 0
+  const selectable = Boolean(secondary)
   return {
     selectable,
-    disabledReason: selectable ? '' : String(secondary?.disabled_reason || '暂无三级部门，请联系管理员维护'),
+    disabledReason: selectable ? '' : String(secondary?.disabled_reason || ''),
     tertiaryItems,
   }
 }

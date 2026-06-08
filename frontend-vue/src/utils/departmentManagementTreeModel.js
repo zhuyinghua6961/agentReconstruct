@@ -6,17 +6,17 @@ function normalizeCount(value) {
 export function buildDepartmentRenderTree(secondaryItems) {
   return (Array.isArray(secondaryItems) ? secondaryItems : []).map((secondary) => {
     const children = []
-    const legacyUserCount = normalizeCount(secondary?.legacy_user_count)
+    const directUserCount = normalizeCount(secondary?.direct_user_count ?? secondary?.legacy_user_count)
 
-    if (legacyUserCount > 0) {
+    if (directUserCount > 0) {
       children.push({
-        id: `legacy-secondary-${secondary.id}`,
-        nodeKey: `legacy-secondary-${secondary.id}`,
-        nodeType: 'legacy_pending',
-        node_type: 'legacy_pending',
-        name: '未补全三级部门用户',
-        userCount: legacyUserCount,
-        user_count: legacyUserCount,
+        id: `direct-secondary-${secondary.id}`,
+        nodeKey: `direct-secondary-${secondary.id}`,
+        nodeType: 'secondary_direct',
+        node_type: 'secondary_direct',
+        name: '直属二级部门用户',
+        userCount: directUserCount,
+        user_count: directUserCount,
         status: 'active',
         secondaryId: secondary.id,
       })
@@ -50,10 +50,43 @@ export function buildDepartmentRenderTree(secondaryItems) {
       tertiary_count: normalizeCount(secondary.tertiary_count || children.filter(item => item.nodeType === 'tertiary').length),
       userCount: normalizeCount(secondary.user_count),
       user_count: normalizeCount(secondary.user_count),
-      legacyUserCount,
-      legacy_user_count: legacyUserCount,
+      directUserCount,
+      direct_user_count: directUserCount,
+      legacyUserCount: directUserCount,
+      legacy_user_count: directUserCount,
       children,
       raw: secondary,
     }
   })
+}
+
+export function buildDepartmentRenderPrimary(primary) {
+  const children = []
+  const directUserCount = normalizeCount(primary?.direct_user_count ?? primary?.primary_direct_user_count)
+  const renderSecondaryItems = buildDepartmentRenderTree(primary?.secondary_items)
+
+  if (directUserCount > 0) {
+    children.push({
+      id: `direct-primary-${primary.id}`,
+      nodeKey: `direct-primary-${primary.id}`,
+      nodeType: 'primary_direct',
+      node_type: 'primary_direct',
+      name: '直属一级部门用户',
+      userCount: directUserCount,
+      user_count: directUserCount,
+      status: 'active',
+      primaryId: primary.id,
+    })
+  }
+
+  return {
+    ...(primary || {}),
+    directUserCount,
+    direct_user_count: directUserCount,
+    renderSecondaryItems,
+    children: [
+      ...children,
+      ...renderSecondaryItems,
+    ],
+  }
 }

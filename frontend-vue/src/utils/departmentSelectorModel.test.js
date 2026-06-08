@@ -39,10 +39,10 @@ test('buildSearchMatches returns full tertiary paths only', () => {
   ])
 })
 
-test('buildSecondarySelectionState keeps secondary without tertiary visible but unselectable', () => {
+test('buildSecondarySelectionState allows secondary without tertiary options', () => {
   const state = buildSecondarySelectionState(tree[0].secondary_items[1])
-  assert.equal(state.selectable, false)
-  assert.match(state.disabledReason, /暂无三级部门/)
+  assert.equal(state.selectable, true)
+  assert.equal(state.disabledReason, '')
 })
 
 test('selectSearchMatch fills all three ids from one full-path result', () => {

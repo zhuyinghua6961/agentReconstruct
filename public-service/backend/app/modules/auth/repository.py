@@ -184,8 +184,8 @@ class AuthRepository:
         username: str,
         password_hash: str,
         primary_department_id: int,
-        secondary_department_id: int,
-        tertiary_department_id: int,
+        secondary_department_id: int | None,
+        tertiary_department_id: int | None,
         personnel_id: int,
         security_question_items: list[dict[str, Any]],
         user_type: int = 2,
@@ -224,9 +224,9 @@ class AuthRepository:
         columns.append("primary_department_id")
         values.append(int(primary_department_id))
         columns.append("secondary_department_id")
-        values.append(int(secondary_department_id))
+        values.append(int(secondary_department_id) if secondary_department_id is not None else None)
         columns.append("tertiary_department_id")
-        values.append(int(tertiary_department_id))
+        values.append(int(tertiary_department_id) if tertiary_department_id is not None else None)
         if self.has_column("password_updated_at"):
             columns.append("password_updated_at")
             values.append("NOW_FUNC_PLACEHOLDER")

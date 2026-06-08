@@ -1270,6 +1270,97 @@ def test_admin_bind_rejects_disabled_personnel():
     assert service.status_code_for(result, ok_status=200) == 400
 
 
+def test_admin_bind_accepts_primary_direct_personnel():
+    class FakeUsers:
+        def __init__(self):
+            self.bound = None
+
+        def get_by_id(self, user_id):
+            return {
+                "id": 7,
+                "username": "alice",
+                "role": "user",
+                "user_type": 3,
+                "status": "active",
+                "personnel_id": None,
+                "primary_department_id": None,
+                "secondary_department_id": None,
+                "tertiary_department_id": None,
+                "created_at": None,
+            }
+
+        def bind_user_personnel_with_departments(
+            self,
+            *,
+            user_id: int,
+            personnel_id: int,
+            primary_department_id: int | None,
+            secondary_department_id: int | None,
+            tertiary_department_id: int | None = None,
+        ):
+            self.bound = {
+                "user_id": user_id,
+                "personnel_id": personnel_id,
+                "primary_department_id": primary_department_id,
+                "secondary_department_id": secondary_department_id,
+                "tertiary_department_id": tertiary_department_id,
+            }
+            return 1
+
+    class FakeDepartments:
+        def describe_user_department(self, **kwargs):
+            return {
+                "primary_department_id": kwargs.get("primary_department_id"),
+                "primary_department_name": "计算机学院",
+                "secondary_department_id": kwargs.get("secondary_department_id"),
+                "secondary_department_name": None,
+                "tertiary_department_id": kwargs.get("tertiary_department_id"),
+                "tertiary_department_name": None,
+                "department_completion_level": "primary_complete",
+                "department_display": "计算机学院",
+                "require_department_setup": False,
+            }
+
+    class FakePersonnel:
+        def get_personnel_by_id(self, *, personnel_id: int | None):
+            assert personnel_id == 9
+            return {
+                "id": 9,
+                "employee_no": "T2024001",
+                "full_name": "张三",
+                "status": "active",
+                "primary_department_id": 1,
+                "secondary_department_id": None,
+                "tertiary_department_id": None,
+            }
+
+        def describe_user_personnel(self, *, personnel_id: int | None):
+            assert personnel_id == 9
+            return {
+                "personnel_id": 9,
+                "employee_no": "T2024001",
+                "full_name": "张三",
+                "personnel_binding_status": "bound_active",
+                "require_personnel_setup": False,
+            }
+
+    users = FakeUsers()
+    service = admin_users_service.__class__(users_repo=users, department_service=FakeDepartments())
+    service._personnel = FakePersonnel()
+
+    result = service.update_user_personnel_binding(target_user_id=7, actor_user_id=1, personnel_id=9)
+
+    assert result["success"] is True
+    assert users.bound == {
+        "user_id": 7,
+        "personnel_id": 9,
+        "primary_department_id": 1,
+        "secondary_department_id": None,
+        "tertiary_department_id": None,
+    }
+    assert result["data"]["department_display"] == "计算机学院"
+
+
 def test_admin_unbind_user_sets_require_personnel_setup_again():
     class FakeUsers:
         def __init__(self):

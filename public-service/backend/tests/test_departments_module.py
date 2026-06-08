@@ -162,7 +162,7 @@ def test_department_repository_admin_tree_includes_secondary_and_tertiary_counts
     assert tree[0]["secondary_items"][0]["tertiary_items"][0]["user_count"] == 5
 
 
-def test_department_service_selectable_tree_keeps_secondary_without_tertiary_but_marks_unselectable():
+def test_department_service_selectable_tree_allows_secondary_without_tertiary():
     class FakeRepository:
         def list_department_tree(self, *, include_disabled: bool):
             assert include_disabled is False
@@ -186,8 +186,8 @@ def test_department_service_selectable_tree_keeps_secondary_without_tertiary_but
     result = service.get_selectable_tree()
 
     secondary = result["data"]["items"][0]["secondary_items"][0]
-    assert secondary["selectable"] is False
-    assert "暂无三级部门" in secondary["disabled_reason"]
+    assert secondary["selectable"] is True
+    assert secondary["disabled_reason"] is None
 
 
 def test_department_service_describes_legacy_two_level_user_without_forcing_completion():
@@ -220,6 +220,190 @@ def test_department_service_describes_legacy_two_level_user_without_forcing_comp
 
     assert result["department_completion_level"] == "legacy_two_level_complete"
     assert result["require_department_setup"] is False
+
+
+def test_department_service_describes_primary_direct_user_without_forcing_completion():
+    class FakeRepository:
+        def get_primary_by_id(self, primary_id: int):
+            if primary_id == 1:
+                return {"id": 1, "name": "计算机学院", "status": "active"}
+            return None
+
+        def get_secondary_by_id(self, secondary_id: int):
+            return None
+
+        def get_tertiary_by_id(self, tertiary_id: int):
+            return None
+
+    service = DepartmentService(repository=FakeRepository())
+
+    result = service.describe_user_department(
+        primary_department_id=1,
+        secondary_department_id=None,
+        tertiary_department_id=None,
+    )
+
+    assert result["department_display"] == "计算机学院"
+    assert result["department_completion_level"] == "primary_complete"
+    assert result["require_department_setup"] is False
+
+
+def test_department_service_validates_primary_only_selection_when_partial_levels_allowed():
+    class FakeRepository:
+        def get_primary_by_id(self, primary_id: int):
+            if primary_id == 1:
+                return {"id": 1, "name": "计算机学院", "status": "active"}
+            return None
+
+        def get_secondary_by_id(self, secondary_id: int):
+            return None
+
+        def get_tertiary_by_id(self, tertiary_id: int):
+            return None
+
+    service = DepartmentService(repository=FakeRepository())
+
+    result = service.validate_department_selection(
+        primary_department_id=1,
+        secondary_department_id=None,
+        tertiary_department_id=None,
+        require_active=True,
+        allow_empty=False,
+        allow_legacy_two_level=True,
+    )
+
+    assert result["success"] is True
+    assert result["data"]["primary_department_id"] == 1
+    assert result["data"]["secondary_department_id"] is None
+    assert result["data"]["require_department_setup"] is False
+
+
+def test_department_service_resolves_primary_only_name_when_partial_levels_allowed():
+    class FakeRepository:
+        def get_primary_by_name(self, name: str):
+            if name == "计算机学院":
+                return {"id": 1, "name": "计算机学院", "status": "active"}
+            return None
+
+        def get_primary_by_id(self, primary_id: int):
+            if primary_id == 1:
+                return {"id": 1, "name": "计算机学院", "status": "active"}
+            return None
+
+        def get_secondary_by_id(self, secondary_id: int):
+            return None
+
+        def get_tertiary_by_id(self, tertiary_id: int):
+            return None
+
+    service = DepartmentService(repository=FakeRepository())
+
+    result = service.resolve_by_names(
+        primary_name="计算机学院",
+        secondary_name="",
+        tertiary_name="",
+        active_only=True,
+        allow_legacy_two_level=True,
+    )
+
+    assert result["success"] is True
+    assert result["data"]["primary_department_id"] == 1
+    assert result["data"]["secondary_department_id"] is None
+
+
+def test_department_service_resolves_or_creates_missing_department_path():
+    class FakeRepository:
+        def __init__(self):
+            self.primary_by_name: dict[str, dict] = {}
+            self.secondary_by_key: dict[tuple[int, str], dict] = {}
+            self.tertiary_by_key: dict[tuple[int, str], dict] = {}
+
+        def get_primary_by_name(self, name: str):
+            return self.primary_by_name.get(name)
+
+        def get_primary_by_id(self, primary_id: int):
+            for primary in self.primary_by_name.values():
+                if primary["id"] == primary_id:
+                    return primary
+            return None
+
+        def create_primary(self, *, name: str):
+            primary = {"id": 1, "name": name, "status": "active"}
+            self.primary_by_name[name] = primary
+            return primary["id"]
+
+        def get_secondary_by_name(self, *, primary_department_id: int, name: str):
+            return self.secondary_by_key.get((primary_department_id, name))
+
+        def get_secondary_by_id(self, secondary_id: int):
+            for secondary in self.secondary_by_key.values():
+                if secondary["id"] == secondary_id:
+                    return secondary
+            return None
+
+        def create_secondary(self, *, primary_department_id: int, name: str):
+            secondary = {
+                "id": 11,
+                "primary_department_id": primary_department_id,
+                "name": name,
+                "status": "active",
+            }
+            self.secondary_by_key[(primary_department_id, name)] = secondary
+            return secondary["id"]
+
+        def get_tertiary_by_name(self, *, secondary_department_id: int, name: str):
+            return self.tertiary_by_key.get((secondary_department_id, name))
+
+        def get_tertiary_by_id(self, tertiary_id: int):
+            for tertiary in self.tertiary_by_key.values():
+                if tertiary["id"] == tertiary_id:
+                    return tertiary
+            return None
+
+        def create_tertiary(self, *, secondary_department_id: int, name: str):
+            tertiary = {"id": 111, "secondary_department_id": secondary_department_id, "name": name, "status": "active"}
+            self.tertiary_by_key[(secondary_department_id, name)] = tertiary
+            return tertiary["id"]
+
+    service = DepartmentService(repository=FakeRepository())
+
+    result = service.resolve_or_create_by_names(
+        primary_name="新能源事业部",
+        secondary_name="电芯研发部",
+        tertiary_name="材料实验室",
+        active_only=True,
+        allow_legacy_two_level=True,
+    )
+
+    assert result["success"] is True
+    assert result["data"]["primary_department_id"] == 1
+    assert result["data"]["secondary_department_id"] == 11
+    assert result["data"]["tertiary_department_id"] == 111
+    assert result["data"]["created_departments"] == {
+        "primary": 1,
+        "secondary": 1,
+        "tertiary": 1,
+        "total": 3,
+    }
+
+
+def test_department_service_resolve_or_create_rejects_disabled_existing_department():
+    class FakeRepository:
+        def get_primary_by_name(self, name: str):
+            return {"id": 1, "name": name, "status": "disabled"}
+
+    service = DepartmentService(repository=FakeRepository())
+
+    result = service.resolve_or_create_by_names(
+        primary_name="计算机学院",
+        secondary_name="",
+        tertiary_name="",
+        active_only=True,
+        allow_legacy_two_level=True,
+    )
+
+    assert result["success"] is False
+    assert result["code"] == "DEPARTMENT_DISABLED"
 
 
 def test_auth_repository_select_user_fields_include_department_columns_when_present():
@@ -501,6 +685,52 @@ def test_admin_secondary_legacy_users_route_contract(monkeypatch):
     )
 
     response = department_api_module.get_secondary_legacy_users(
+        11,
+        AuthContext(user_id=1, role="admin", username="admin"),
+    )
+
+    assert response.status_code == 200
+    assert _decode(response)["data"]["secondary_department_id"] == 11
+
+
+def test_admin_primary_direct_users_route_contract(monkeypatch):
+    monkeypatch.setattr(
+        department_service.department_service,
+        "list_primary_direct_users",
+        lambda *, primary_id: {
+            "success": True,
+            "data": {
+                "primary_department_id": primary_id,
+                "user_count": 0,
+                "users": [],
+            },
+        },
+    )
+
+    response = department_api_module.get_primary_direct_users(
+        1,
+        AuthContext(user_id=1, role="admin", username="admin"),
+    )
+
+    assert response.status_code == 200
+    assert _decode(response)["data"]["primary_department_id"] == 1
+
+
+def test_admin_secondary_direct_users_route_contract(monkeypatch):
+    monkeypatch.setattr(
+        department_service.department_service,
+        "list_secondary_direct_users",
+        lambda *, secondary_id: {
+            "success": True,
+            "data": {
+                "secondary_department_id": secondary_id,
+                "user_count": 0,
+                "users": [],
+            },
+        },
+    )
+
+    response = department_api_module.get_secondary_direct_users(
         11,
         AuthContext(user_id=1, role="admin", username="admin"),
     )
@@ -1659,6 +1889,59 @@ def test_department_service_lists_all_users_for_secondary_department():
     assert result["data"]["users"][0]["user_type_label"] == "普通用户"
     assert result["data"]["users"][1]["user_type_label"] == "超级用户"
     assert result["data"]["users"][1]["status"] == "disabled"
+
+
+def test_department_service_lists_primary_direct_users():
+    class FakeRepository:
+        def get_primary_by_id(self, primary_id: int):
+            if primary_id == 1:
+                return {"id": 1, "name": "计算机学院", "status": "active"}
+            return None
+
+        def list_direct_users_by_primary_department(self, *, primary_id: int):
+            assert primary_id == 1
+            return [
+                {"id": 7, "username": "alice", "role": "user", "user_type": 3, "status": "active"},
+            ]
+
+    service = DepartmentService(repository=FakeRepository())
+
+    result = service.list_primary_direct_users(primary_id=1)
+
+    assert result["success"] is True
+    assert result["data"]["primary_department_id"] == 1
+    assert result["data"]["primary_department_name"] == "计算机学院"
+    assert result["data"]["user_count"] == 1
+    assert result["data"]["users"][0]["username"] == "alice"
+
+
+def test_department_service_lists_secondary_direct_users():
+    class FakeRepository:
+        def get_secondary_by_id(self, secondary_id: int):
+            if secondary_id == 11:
+                return {"id": 11, "primary_department_id": 1, "name": "软件工程系", "status": "active"}
+            return None
+
+        def get_primary_by_id(self, primary_id: int):
+            if primary_id == 1:
+                return {"id": 1, "name": "计算机学院", "status": "active"}
+            return None
+
+        def list_direct_users_by_secondary_department(self, *, secondary_id: int):
+            assert secondary_id == 11
+            return [
+                {"id": 8, "username": "bob", "role": "user", "user_type": 3, "status": "active"},
+            ]
+
+    service = DepartmentService(repository=FakeRepository())
+
+    result = service.list_secondary_direct_users(secondary_id=11)
+
+    assert result["success"] is True
+    assert result["data"]["secondary_department_id"] == 11
+    assert result["data"]["primary_department_name"] == "计算机学院"
+    assert result["data"]["secondary_department_name"] == "软件工程系"
+    assert result["data"]["users"][0]["username"] == "bob"
 
 
 def test_department_service_lists_all_users_for_tertiary_department():
