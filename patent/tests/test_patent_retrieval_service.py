@@ -2969,6 +2969,48 @@ def test_stage2_c_graph_candidates_do_not_hard_filter_strong_vector_candidates(m
     )
 
 
+def test_stage2_c_graph_seed_keyword_is_not_treated_as_explicit_id(monkeypatch):
+    monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE2_C_PATENT_SCORING_ENABLED", "true")
+    monkeypatch.setenv("PATENT_STAGE2_C_GLOBAL_CHUNK_RECALL_ENABLED", "true")
+
+    service = PatentRetrievalService(
+        catalog_records=_catalog(),
+        identity_registry={"CN123456789A": None, "US20240001234A1": "US20240001234A1"},
+        abstract_vector_search=lambda question, top_k: [
+            {"patent_id": "US20240001234A1", "document": "high compaction LFP preparation abstract", "distance": 0.2},
+        ],
+        chunk_vector_search=lambda question, patent_ids, top_k: [
+            {
+                "patent_id": "US20240001234A1",
+                "document": "高压实 磷酸铁锂 制备 压实密度 前驱体 粒径 碳包覆 辊压 工艺 参数",
+                "source_file": "说明书.txt",
+                "chunk_index": 0,
+                "distance": 0.02,
+            }
+        ],
+    )
+
+    payload = service.targeted_retrieve(
+        retrieval_claims=[
+            {
+                "claim": "优先核验图谱候选专利与结构化实体线索",
+                "keywords": ["CN123456789A"],
+                "filters": {"graph_seeded": True},
+            }
+        ],
+        user_question="如何制备高压实磷酸铁锂",
+        frozen_claim_queries=[["CN123456789A 高压实 磷酸铁锂 制备"]],
+        context={"graph_kb": {"stage2_patent_candidates": ["CN123456789A"]}},
+    )
+
+    assert payload["source_ids"][0] == "US20240001234A1"
+    assert "US20240001234A1" in payload["source_ids"]
+    assert payload["metadata"]["graph_stage2_behavior"] == "seed_boost"
+    assert "US20240001234A1" in payload["metadata"]["stage2_raw_candidate_patent_ids"]
+    assert payload["metadata"].get("stage2_explicit_id_fallback") is not True
+
+
 def test_stage2_c_table_boost_loads_tables_only_for_candidate_pool(monkeypatch):
     monkeypatch.setenv("PATENT_STAGE2_CONVERGENCE_ENABLED", "true")
     monkeypatch.setenv("PATENT_STAGE2_C_PATENT_SCORING_ENABLED", "true")

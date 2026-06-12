@@ -85,6 +85,24 @@ def test_c_explicit_patent_ids_remain_hard_constraints():
     assert [item.patent_id for item in ranked] == ["CN123456789A"]
 
 
+def test_c_graph_seed_claim_ids_can_be_excluded_from_explicit_constraints():
+    hits = [
+        {"patent_id": "CN123456789A", "document": "generic graph evidence", "section_type": "abstract", "score": 0.3, "channel": "graph_candidate", "metadata": {}},
+        {"patent_id": "US20240001234A1", "document": "LiFePO4 压实密度 2.6 g/cm3 制备", "section_type": "description", "score": 0.8, "channel": "chunk_vector_global", "metadata": {}},
+    ]
+    intent = derive_patent_retrieval_intent(
+        user_question="如何制备高压实磷酸铁锂",
+        retrieval_claims=[{"claim": "优先核验图谱候选专利与结构化实体线索", "keywords": ["CN123456789A"]}],
+        graph_context={"stage2_patent_candidates": ["CN123456789A"]},
+        explicit_patent_ids=[],
+    )
+
+    ranked = aggregate_patent_candidates(hits=hits, intent=intent)
+
+    assert {item.patent_id for item in ranked} == {"CN123456789A", "US20240001234A1"}
+    assert ranked[0].patent_id == "US20240001234A1"
+
+
 def test_table_metric_boost_changes_ranking_only_for_candidate_pool():
     hits = [
         {

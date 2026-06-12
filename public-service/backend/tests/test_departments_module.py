@@ -628,12 +628,54 @@ def test_department_routes_registered():
     assert "/api/admin/departments/tertiary" in paths
     assert routes_by_path["/api/admin/departments/tertiary/{tertiary_id}"] == {"PUT", "DELETE"}
     assert "/api/admin/departments/tertiary/{tertiary_id}/users" in paths
+    assert routes_by_path["/api/admin/departments/primary/{primary_id}/status"] == {"PUT"}
+    assert routes_by_path["/api/admin/departments/secondary/{secondary_id}/status"] == {"PUT"}
+    assert routes_by_path["/api/admin/departments/tertiary/{tertiary_id}/status"] == {"PUT"}
     assert "/api/admin/departments/batch-delete" in paths
     assert "/api/admin/departments/batch-import" in paths
     assert "/api/admin/departments/import-template" in paths
-    assert "/api/admin/departments/primary/{primary_id}/status" not in paths
-    assert "/api/admin/departments/secondary/{secondary_id}/status" not in paths
-    assert "/api/admin/departments/tertiary/{tertiary_id}/status" not in paths
+
+
+def test_admin_department_status_routes_contract(monkeypatch):
+    monkeypatch.setattr(
+        department_service.department_service,
+        "update_primary_status",
+        lambda *, primary_id, status: {"success": True, "message": "primary_status_ok", "data": {"id": primary_id, "status": status}},
+    )
+    monkeypatch.setattr(
+        department_service.department_service,
+        "update_secondary_status",
+        lambda *, secondary_id, status: {"success": True, "message": "secondary_status_ok", "data": {"id": secondary_id, "status": status}},
+    )
+    monkeypatch.setattr(
+        department_service.department_service,
+        "update_tertiary_status",
+        lambda *, tertiary_id, status: {"success": True, "message": "tertiary_status_ok", "data": {"id": tertiary_id, "status": status}},
+    )
+
+    context = AuthContext(user_id=1, role="admin", username="admin")
+    primary_resp = department_api_module.update_primary_status(
+        1,
+        department_api_module.DepartmentStatusUpdateRequest(status="disabled"),
+        context,
+    )
+    secondary_resp = department_api_module.update_secondary_status(
+        11,
+        department_api_module.DepartmentStatusUpdateRequest(status="disabled"),
+        context,
+    )
+    tertiary_resp = department_api_module.update_tertiary_status(
+        111,
+        department_api_module.DepartmentStatusUpdateRequest(status="disabled"),
+        context,
+    )
+
+    assert primary_resp.status_code == 200
+    assert _decode(primary_resp)["message"] == "primary_status_ok"
+    assert secondary_resp.status_code == 200
+    assert _decode(secondary_resp)["message"] == "secondary_status_ok"
+    assert tertiary_resp.status_code == 200
+    assert _decode(tertiary_resp)["message"] == "tertiary_status_ok"
 
 
 def test_admin_department_tree_contract(monkeypatch):
@@ -909,6 +951,43 @@ def test_admin_department_batch_delete_route_contract(monkeypatch):
     ]
 
 
+def test_admin_department_batch_status_route_contract(monkeypatch):
+    captured = {}
+
+    def fake_batch_update_department_status(**kwargs):
+        captured.update(kwargs)
+        return {
+            "success": True,
+            "data": {
+                "summary": {"total": 2, "success": 1, "failed": 0, "skipped": 1},
+                "details": [],
+            },
+        }
+
+    monkeypatch.setattr(
+        department_service.department_service,
+        "batch_update_department_status",
+        fake_batch_update_department_status,
+    )
+
+    response = department_api_module.batch_update_department_status(
+        department_api_module.DepartmentBatchStatusUpdateRequest(
+            items=[
+                department_api_module.DepartmentBatchDeleteItem(level="primary", id=1),
+                department_api_module.DepartmentBatchDeleteItem(level="tertiary", id=111),
+            ],
+            status="disabled",
+        ),
+        AuthContext(user_id=1, role="admin", username="admin"),
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        "items": [{"level": "primary", "id": 1}, {"level": "tertiary", "id": 111}],
+        "status": "disabled",
+    }
+
+
 def test_admin_department_force_delete_route_contracts(monkeypatch):
     calls = []
 
@@ -1034,6 +1113,67 @@ def test_department_service_batch_delete_mixed_levels_in_child_first_order():
     assert result["data"]["summary"] == {"total": 4, "success": 3, "failed": 1, "skipped": 0}
     assert result["data"]["details"][0]["level"] == "tertiary"
     assert result["data"]["details"][-1]["code"] == "VALIDATION_ERROR"
+
+
+def test_department_service_batch_status_updates_skips_fails_and_deduplicates():
+    class FakeRepository:
+        def __init__(self) -> None:
+            self.primary = {1: {"id": 1, "name": "一级1", "status": "active"}}
+            self.secondary = {11: {"id": 11, "primary_department_id": 1, "name": "二级11", "status": "disabled"}}
+            self.tertiary = {111: {"id": 111, "secondary_department_id": 11, "name": "三级111", "status": "active"}}
+            self.updated = []
+
+        def get_primary_by_id(self, primary_id: int):
+            return self.primary.get(primary_id)
+
+        def get_secondary_by_id(self, secondary_id: int):
+            return self.secondary.get(secondary_id)
+
+        def get_tertiary_by_id(self, tertiary_id: int):
+            return self.tertiary.get(tertiary_id)
+
+        def update_primary_status(self, *, primary_id: int, status: str):
+            self.updated.append(("primary", primary_id, status))
+            self.primary[primary_id]["status"] = status
+            return 1
+
+        def update_secondary_status(self, *, secondary_id: int, status: str):
+            self.updated.append(("secondary", secondary_id, status))
+            self.secondary[secondary_id]["status"] = status
+            return 1
+
+        def update_tertiary_status(self, *, tertiary_id: int, status: str):
+            self.updated.append(("tertiary", tertiary_id, status))
+            self.tertiary[tertiary_id]["status"] = status
+            return 1
+
+    repo = FakeRepository()
+    service = DepartmentService(repository=repo)
+
+    result = service.batch_update_department_status(
+        items=[
+            {"level": "primary", "id": 1},
+            {"level": "secondary", "id": 11},
+            {"level": "tertiary", "id": 111},
+            {"level": "secondary", "id": 11},
+            {"level": "bad", "id": 99},
+            {"level": "primary", "id": 404},
+        ],
+        status="disabled",
+    )
+
+    assert result["success"] is True
+    assert result["data"]["summary"] == {"total": 5, "success": 2, "failed": 2, "skipped": 1}
+    assert repo.updated == [("primary", 1, "disabled"), ("tertiary", 111, "disabled")]
+    assert [detail["status"] for detail in result["data"]["details"]] == [
+        "success",
+        "skipped",
+        "success",
+        "failed",
+        "failed",
+    ]
+    assert result["data"]["details"][3]["code"] == "VALIDATION_ERROR"
+    assert result["data"]["details"][4]["code"] == "PRIMARY_DEPARTMENT_NOT_FOUND"
 
 
 def test_department_service_deletes_empty_tertiary_department():
@@ -1299,6 +1439,74 @@ def test_department_import_updates_existing_statuses_and_preserves_omitted_rows(
     assert service._repository.secondary_by_key[(2, "材料系")]["status"] == "active"
 
 
+def test_department_import_reports_existing_status_updates_with_changed_fields():
+    class FakeRepository:
+        def __init__(self) -> None:
+            self.primary_by_id = {
+                1: {"id": 1, "name": "计算机学院", "status": "disabled"},
+            }
+            self.primary_by_name = {item["name"]: item for item in self.primary_by_id.values()}
+            self.secondary_by_id = {
+                11: {"id": 11, "primary_department_id": 1, "name": "软件工程系", "status": "disabled"},
+            }
+            self.secondary_by_key = {
+                (item["primary_department_id"], item["name"]): item
+                for item in self.secondary_by_id.values()
+            }
+            self.tertiary_by_id = {
+                111: {"id": 111, "secondary_department_id": 11, "name": "智能软件实验室", "status": "disabled"},
+            }
+            self.tertiary_by_key = {
+                (item["secondary_department_id"], item["name"]): item
+                for item in self.tertiary_by_id.values()
+            }
+
+        def get_primary_by_name(self, name: str):
+            return self.primary_by_name.get(name)
+
+        def create_primary(self, *, name: str):
+            raise AssertionError("existing primary should not be created")
+
+        def update_primary_status(self, *, primary_id: int, status: str):
+            self.primary_by_id[primary_id]["status"] = status
+            return 1
+
+        def get_secondary_by_name(self, *, primary_department_id: int, name: str):
+            return self.secondary_by_key.get((primary_department_id, name))
+
+        def create_secondary(self, *, primary_department_id: int, name: str):
+            raise AssertionError("existing secondary should not be created")
+
+        def update_secondary_status(self, *, secondary_id: int, status: str):
+            self.secondary_by_id[secondary_id]["status"] = status
+            return 1
+
+        def get_tertiary_by_name(self, *, secondary_department_id: int, name: str):
+            return self.tertiary_by_key.get((secondary_department_id, name))
+
+        def create_tertiary(self, *, secondary_department_id: int, name: str):
+            raise AssertionError("existing tertiary should not be created")
+
+        def update_tertiary_status(self, *, tertiary_id: int, status: str):
+            self.tertiary_by_id[tertiary_id]["status"] = status
+            return 1
+
+    service = DepartmentImportService(repository=FakeRepository())
+    result = service.import_departments(
+        file_bytes=(
+            b"primary_department_name,primary_status,secondary_department_name,secondary_status,tertiary_department_name,tertiary_status\n"
+            b"\xe8\xae\xa1\xe7\xae\x97\xe6\x9c\xba\xe5\xad\xa6\xe9\x99\xa2,active,\xe8\xbd\xaf\xe4\xbb\xb6\xe5\xb7\xa5\xe7\xa8\x8b\xe7\xb3\xbb,active,\xe6\x99\xba\xe8\x83\xbd\xe8\xbd\xaf\xe4\xbb\xb6\xe5\xae\x9e\xe9\xaa\x8c\xe5\xae\xa4,active\n"
+        ),
+        filename="departments.csv",
+    )
+
+    assert result["success"] is True
+    assert result["data"]["summary"] == {"total": 1, "success": 0, "updated": 1, "failed": 0, "skipped": 0}
+    assert result["data"]["details"][0]["status"] == "updated"
+    assert result["data"]["details"][0]["updated_fields"] == ["一级状态", "二级状态", "三级状态"]
+    assert result["data"]["details"][0]["message"] == "已更新一级状态、二级状态、三级状态"
+
+
 def test_department_import_skips_existing_unchanged_department_path():
     class FakeRepository:
         def __init__(self) -> None:
@@ -1370,7 +1578,7 @@ def test_department_import_skips_existing_unchanged_department_path():
     )
 
     assert result["success"] is True
-    assert result["data"]["summary"] == {"total": 1, "success": 0, "failed": 0, "skipped": 1}
+    assert result["data"]["summary"] == {"total": 1, "success": 0, "updated": 0, "failed": 0, "skipped": 1}
     assert result["data"]["details"][0]["status"] == "skipped"
     assert "已存在且未变化" in result["data"]["details"][0]["reason"]
     assert repo.create_calls == 0
@@ -1538,7 +1746,7 @@ def test_department_import_marks_tertiary_creation_failure_failed_and_continues(
     )
 
     assert result["success"] is True
-    assert result["data"]["summary"] == {"total": 2, "success": 1, "failed": 1, "skipped": 0}
+    assert result["data"]["summary"] == {"total": 2, "success": 1, "updated": 0, "failed": 1, "skipped": 0}
     assert result["data"]["details"][0]["status"] == "failed"
     assert "三级部门创建失败" in result["data"]["details"][0]["reason"]
     assert result["data"]["details"][1]["status"] == "success"

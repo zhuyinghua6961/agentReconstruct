@@ -481,15 +481,15 @@ def test_public_proxy_registers_department_delete_methods_without_status_routes(
     }
 
     assert methods_by_path["/api/admin/departments/primary/{primary_id}"] == {"PUT", "DELETE"}
+    assert methods_by_path["/api/admin/departments/primary/{primary_id}/status"] == {"PUT"}
     assert methods_by_path["/api/admin/departments/primary/{primary_id}/direct-users"] == {"GET"}
     assert methods_by_path["/api/admin/departments/secondary/{secondary_id}"] == {"PUT", "DELETE"}
+    assert methods_by_path["/api/admin/departments/secondary/{secondary_id}/status"] == {"PUT"}
     assert methods_by_path["/api/admin/departments/secondary/{secondary_id}/direct-users"] == {"GET"}
     assert methods_by_path["/api/admin/departments/tertiary/{tertiary_id}"] == {"PUT", "DELETE"}
+    assert methods_by_path["/api/admin/departments/tertiary/{tertiary_id}/status"] == {"PUT"}
     assert methods_by_path["/api/admin/departments/{level}/{department_id}/force-delete"] == {"POST"}
     assert methods_by_path["/api/admin/departments/batch-force-delete"] == {"POST"}
-    assert "/api/admin/departments/primary/{primary_id}/status" not in methods_by_path
-    assert "/api/admin/departments/secondary/{secondary_id}/status" not in methods_by_path
-    assert "/api/admin/departments/tertiary/{tertiary_id}/status" not in methods_by_path
 
 
 def test_public_proxy_keeps_auth_register_routes_in_api_and_v1_parity():

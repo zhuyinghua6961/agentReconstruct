@@ -23,6 +23,16 @@ def _disabled_personnel_error(user: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _disabled_department_error(user: dict[str, Any]) -> dict[str, Any] | None:
+    build_error = getattr(auth_service_module.auth_service, "build_disabled_department_login_error", None)
+    if not callable(build_error):
+        return None
+    result = build_error(user)
+    if isinstance(result, dict) and not result.get("success") and result.get("code") == "DEPARTMENT_DISABLED":
+        return result
+    return None
+
+
 def get_bearer_token(
     authorization: str | None = Header(default=None, alias="Authorization"),
     token: str | None = Query(default=None),
@@ -54,6 +64,8 @@ def get_optional_auth_context(token: str | None = Depends(get_bearer_token)) -> 
     if not user or str(user.get("status") or "") != "active":
         return None
     if _disabled_personnel_error(user):
+        return None
+    if _disabled_department_error(user):
         return None
     return AuthContext(
         user_id=user_id,
@@ -88,6 +100,16 @@ def require_auth_context(token: str | None = Depends(get_bearer_token)) -> AuthC
             details=None,
         )
         exc.extra_payload = {"data": disabled_personnel_error.get("data")}
+        raise exc
+    disabled_department_error = _disabled_department_error(user)
+    if disabled_department_error:
+        exc = AppError(
+            message=str(disabled_department_error.get("error") or "账号所属部门已停用，请联系管理员"),
+            code="DEPARTMENT_DISABLED",
+            status_code=403,
+            details=None,
+        )
+        exc.extra_payload = {"data": disabled_department_error.get("data")}
         raise exc
     return AuthContext(
         user_id=user_id,

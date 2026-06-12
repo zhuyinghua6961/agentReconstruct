@@ -19,6 +19,36 @@ const summary = computed(() => props.result?.summary || {})
 const details = computed(() => props.result?.details || [])
 const duration = computed(() => props.result?.duration || 0)
 const updatedCount = computed(() => Number(summary.value?.updated || 0))
+const resultColumns = computed(() => {
+  const sample = details.value.find(item => item && typeof item === 'object') || {}
+  if ('department_name' in sample || 'level_name' in sample || 'level' in sample) {
+    return [
+      { key: 'row', label: '序号', getValue: (item, index) => item.row ?? index + 1 },
+      { key: 'level_name', label: '层级', getValue: item => item.level_name || getDepartmentLevelText(item.level) },
+      { key: 'department_name', label: '部门', getValue: item => item.department_name || '-' },
+      { key: 'status', label: '状态', type: 'status', getValue: item => item.status },
+      { key: 'message', label: '消息', getValue: item => item.message || item.reason || '' },
+      { key: 'id', label: '部门ID', getValue: item => item.id || '-' }
+    ]
+  }
+  if ('employee_no' in sample || 'full_name' in sample || 'personnel_id' in sample) {
+    return [
+      { key: 'row', label: '序号', getValue: (item, index) => item.row ?? index + 1 },
+      { key: 'employee_no', label: '工号', getValue: item => item.employee_no || '-' },
+      { key: 'full_name', label: '姓名', getValue: item => item.full_name || '-' },
+      { key: 'status', label: '状态', type: 'status', getValue: item => item.status },
+      { key: 'message', label: '消息', getValue: item => item.message || item.reason || '' },
+      { key: 'personnel_id', label: '人员ID', getValue: item => item.personnel_id || '-' }
+    ]
+  }
+  return [
+    { key: 'row', label: '序号', getValue: (item, index) => item.row ?? item.user_id ?? index + 1 },
+    { key: 'username', label: '用户名', getValue: item => item.username || '-' },
+    { key: 'status', label: '状态', type: 'status', getValue: item => item.status },
+    { key: 'message', label: '消息', getValue: item => item.message || item.reason || '' },
+    { key: 'user_id', label: '用户ID', getValue: item => item.user_id || '-' }
+  ]
+})
 
 // 筛选后的详细结果
 const filteredDetails = computed(() => {
@@ -50,6 +80,36 @@ function getStatusText(status) {
   return texts[status] || status
 }
 
+function getDepartmentLevelText(level) {
+  const texts = {
+    primary: '一级部门',
+    secondary: '二级部门',
+    tertiary: '三级部门'
+  }
+  return texts[level] || level || '-'
+}
+
+function getColumnValue(item, column, index) {
+  return column.getValue ? column.getValue(item, index) : item[column.key]
+}
+
+function getDetailKey(item, index) {
+  return [
+    item.row,
+    item.user_id,
+    item.personnel_id,
+    item.id,
+    item.username,
+    item.employee_no,
+    item.department_name,
+    index
+  ].filter(value => value !== undefined && value !== null && value !== '').join('-')
+}
+
+function escapeCsvCell(value) {
+  return `"${String(value ?? '').replace(/"/g, '""')}"`
+}
+
 // 下载失败记录
 function downloadFailedRecords() {
   const failedRecords = details.value.filter(item => item.status === 'failed' || item.status === 'skipped')
@@ -59,17 +119,17 @@ function downloadFailedRecords() {
   }
   
   // 生成CSV内容
-  const headers = ['行号', '用户名', '状态', '错误信息']
-  const rows = failedRecords.map(record => [
-    record.row ?? record.user_id ?? '',
-    record.username,
-    getStatusText(record.status),
-    record.message || record.reason || ''
-  ])
+  const headers = resultColumns.value.map(column => column.label)
+  const rows = failedRecords.map((record, index) => resultColumns.value.map((column) => {
+    if (column.type === 'status') {
+      return getStatusText(record.status)
+    }
+    return getColumnValue(record, column, index)
+  }))
   
   const csvContent = [
     headers.join(','),
-    ...rows.map(row => row.map(cell => `"${cell}"`).join(','))
+    ...rows.map(row => row.map(escapeCsvCell).join(','))
   ].join('\n')
   
   // 下载文件
@@ -189,24 +249,19 @@ function close() {
           <table v-else class="results-table">
             <thead>
               <tr>
-                <th>序号</th>
-                <th>用户名</th>
-                <th>状态</th>
-                <th>消息</th>
-                <th>用户ID</th>
+                <th v-for="column in resultColumns" :key="column.key">{{ column.label }}</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="(item, index) in filteredDetails" :key="item.row || item.user_id || `${item.username}-${index}`">
-                <td>{{ item.row || index + 1 }}</td>
-                <td>{{ item.username }}</td>
-                <td>
-                  <span class="status-badge" :class="getStatusClass(item.status)">
-                    {{ getStatusText(item.status) }}
+              <tr v-for="(item, index) in filteredDetails" :key="getDetailKey(item, index)">
+                <td v-for="column in resultColumns" :key="column.key">
+                  <span v-if="column.type === 'status'" class="status-badge" :class="getStatusClass(item.status)">
+                    {{ getStatusText(getColumnValue(item, column, index)) }}
                   </span>
+                  <template v-else>
+                    {{ getColumnValue(item, column, index) }}
+                  </template>
                 </td>
-                <td>{{ item.message || item.reason || '' }}</td>
-                <td>{{ item.user_id || '-' }}</td>
               </tr>
             </tbody>
           </table>

@@ -44,6 +44,11 @@ class DepartmentBatchDeleteRequest(BaseModel):
     items: list[DepartmentBatchDeleteItem] = Field(default_factory=list)
 
 
+class DepartmentBatchStatusUpdateRequest(BaseModel):
+    items: list[DepartmentBatchDeleteItem] = Field(default_factory=list)
+    status: Literal["active", "disabled"] | str = Field(default="active")
+
+
 class DepartmentForceDeleteRequest(BaseModel):
     admin_password: str = Field(default="")
 

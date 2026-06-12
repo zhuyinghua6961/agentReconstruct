@@ -14,9 +14,11 @@ from app.modules.departments.schemas import (
     DepartmentBatchDeleteItem,
     DepartmentBatchDeleteRequest,
     DepartmentBatchForceDeleteRequest,
+    DepartmentBatchStatusUpdateRequest,
     DepartmentForceDeleteRequest,
     PrimaryDepartmentCreateRequest,
     PrimaryDepartmentRenameRequest,
+    DepartmentStatusUpdateRequest,
     SecondaryDepartmentCreateRequest,
     SecondaryDepartmentRenameRequest,
     TertiaryDepartmentCreateRequest,
@@ -90,6 +92,18 @@ def delete_primary(
     return _respond(department_service.delete_primary(primary_id=primary_id), ok_status=200)
 
 
+@router.put("/primary/{primary_id}/status")
+def update_primary_status(
+    primary_id: int,
+    payload: DepartmentStatusUpdateRequest,
+    _context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(
+        department_service.update_primary_status(primary_id=primary_id, status=payload.status),
+        ok_status=200,
+    )
+
+
 @router.post("/batch-delete")
 def batch_delete_departments(
     payload: DepartmentBatchDeleteRequest,
@@ -98,6 +112,20 @@ def batch_delete_departments(
     return _respond(
         department_service.batch_delete_departments(
             items=[item.model_dump() if hasattr(item, "model_dump") else item.dict() for item in payload.items]
+        ),
+        ok_status=200,
+    )
+
+
+@router.post("/batch-status")
+def batch_update_department_status(
+    payload: DepartmentBatchStatusUpdateRequest,
+    _context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(
+        department_service.batch_update_department_status(
+            items=[item.model_dump() if hasattr(item, "model_dump") else item.dict() for item in payload.items],
+            status=payload.status,
         ),
         ok_status=200,
     )
@@ -144,6 +172,18 @@ def delete_secondary(
     _context: AuthContext = Depends(require_admin_context),
 ):
     return _respond(department_service.delete_secondary(secondary_id=secondary_id), ok_status=200)
+
+
+@router.put("/secondary/{secondary_id}/status")
+def update_secondary_status(
+    secondary_id: int,
+    payload: DepartmentStatusUpdateRequest,
+    _context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(
+        department_service.update_secondary_status(secondary_id=secondary_id, status=payload.status),
+        ok_status=200,
+    )
 
 
 @router.get("/primary/{primary_id}/direct-users")
@@ -216,6 +256,18 @@ def delete_tertiary(
     _context: AuthContext = Depends(require_admin_context),
 ):
     return _respond(department_service.delete_tertiary(tertiary_id=tertiary_id), ok_status=200)
+
+
+@router.put("/tertiary/{tertiary_id}/status")
+def update_tertiary_status(
+    tertiary_id: int,
+    payload: DepartmentStatusUpdateRequest,
+    _context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(
+        department_service.update_tertiary_status(tertiary_id=tertiary_id, status=payload.status),
+        ok_status=200,
+    )
 
 
 @router.get("/tertiary/{tertiary_id}/users")

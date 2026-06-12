@@ -1,6 +1,9 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import { adminApi } from '../services/admin'
+import DepartmentSelector from './DepartmentSelector.vue'
+import ForceDeleteConfirmDialog from './ForceDeleteConfirmDialog.vue'
+import ImportResultDialog from './ImportResultDialog.vue'
 import PersonnelBatchImportDialog from './PersonnelBatchImportDialog.vue'
 import PersonnelEditorDialog from './PersonnelEditorDialog.vue'
 import PersonnelImportResultDialog from './PersonnelImportResultDialog.vue'
@@ -12,7 +15,9 @@ const error = ref('')
 const success = ref('')
 const personnelItems = ref([])
 const selectedPersonnelIds = ref([])
-const batchDeleteResult = ref(null)
+const showBatchOperationResultDialog = ref(false)
+const batchOperationResultTitle = ref('批量操作结果')
+const batchOperationResult = ref(null)
 const searchEmployeeNo = ref('')
 const searchFullName = ref('')
 const statusFilter = ref('')
@@ -29,6 +34,13 @@ const selectedPersonnel = ref(null)
 const personnelSubmitting = ref(false)
 const selectableDepartmentTree = ref([])
 const departmentOptionsLoading = ref(false)
+const showBatchDepartmentDialog = ref(false)
+const batchDepartmentSubmitting = ref(false)
+const batchDepartmentForm = ref({
+  primary_department_id: null,
+  secondary_department_id: null,
+  tertiary_department_id: null,
+})
 const forceDeletePersonnelState = ref({
   visible: false,
   mode: 'single',
@@ -104,6 +116,12 @@ function clearSelectedPersonnel() {
 function formatBatchDeleteSummary(result) {
   const summary = result?.summary || {}
   return `批量删除完成：成功 ${summary.success || 0} 条，失败 ${summary.failed || 0} 条`
+}
+
+function openBatchOperationResult(title, resultData) {
+  batchOperationResultTitle.value = title
+  batchOperationResult.value = resultData
+  showBatchOperationResultDialog.value = true
 }
 
 function resetForceDeletePersonnelState() {
@@ -329,7 +347,6 @@ async function handleDeletePersonnel(item) {
 
 async function handleBatchDeletePersonnel() {
   error.value = ''
-  batchDeleteResult.value = null
   if (!hasSelectedPersonnel.value) {
     error.value = '请至少选择一个人员'
     return
@@ -339,17 +356,86 @@ async function handleBatchDeletePersonnel() {
   }
   const result = await adminApi.batchDeletePersonnel(selectedPersonnelIds.value)
   if (result.success) {
-    batchDeleteResult.value = result.data
-    setSuccess(formatBatchDeleteSummary(result.data))
     openBatchForceDeletePersonnel(result.data?.details)
-    if (!forceDeletePersonnelState.value.visible) {
-      clearSelectedPersonnel()
+    if (forceDeletePersonnelState.value.visible) {
+      await fetchPersonnel()
+      emit('updated')
+      return
     }
+    openBatchOperationResult('批量删除人员结果', result.data)
+    setSuccess(formatBatchDeleteSummary(result.data))
+    clearSelectedPersonnel()
     await fetchPersonnel()
     emit('updated')
     return
   }
   error.value = result.error || '批量删除人员失败'
+}
+
+async function handleBatchUpdatePersonnelStatus(status) {
+  error.value = ''
+  if (!hasSelectedPersonnel.value) {
+    error.value = '请至少选择一个人员'
+    return
+  }
+  const actionText = status === 'disabled' ? '停用' : '启用'
+  if (!window.confirm(`确定批量${actionText}选中的 ${selectedPersonnelCount.value} 个人员吗？已是目标状态的人员会显示跳过。`)) {
+    return
+  }
+  const result = await adminApi.batchUpdatePersonnelStatus(selectedPersonnelIds.value, status)
+  if (result.success) {
+    openBatchOperationResult(`批量${actionText}人员结果`, result.data)
+    setSuccess(`批量${actionText}人员完成`)
+    clearSelectedPersonnel()
+    await fetchPersonnel()
+    emit('updated')
+    return
+  }
+  error.value = result.error || `批量${actionText}人员失败`
+}
+
+function resetBatchDepartmentForm() {
+  batchDepartmentForm.value = {
+    primary_department_id: null,
+    secondary_department_id: null,
+    tertiary_department_id: null,
+  }
+}
+
+function openBatchDepartmentDialog() {
+  error.value = ''
+  if (!hasSelectedPersonnel.value) {
+    error.value = '请至少选择一个人员'
+    return
+  }
+  resetBatchDepartmentForm()
+  showBatchDepartmentDialog.value = true
+}
+
+async function submitBatchDepartmentUpdate() {
+  error.value = ''
+  if (!hasSelectedPersonnel.value) {
+    showBatchDepartmentDialog.value = false
+    error.value = '请至少选择一个人员'
+    return
+  }
+  if (!batchDepartmentForm.value.primary_department_id) {
+    error.value = '请选择一级部门'
+    return
+  }
+  batchDepartmentSubmitting.value = true
+  const result = await adminApi.batchUpdatePersonnelDepartment(selectedPersonnelIds.value, batchDepartmentForm.value)
+  batchDepartmentSubmitting.value = false
+  if (result.success) {
+    showBatchDepartmentDialog.value = false
+    openBatchOperationResult('批量修改人员部门结果', result.data)
+    setSuccess('批量修改人员部门完成')
+    clearSelectedPersonnel()
+    await fetchPersonnel()
+    emit('updated')
+    return
+  }
+  error.value = result.error || '批量修改人员部门失败'
 }
 
 async function submitForceDeletePersonnel() {
@@ -365,7 +451,7 @@ async function submitForceDeletePersonnel() {
     : await adminApi.forceDeletePersonnel(state.ids[0], adminPassword)
   if (result.success) {
     if (state.mode === 'batch') {
-      batchDeleteResult.value = result.data
+      openBatchOperationResult('批量强制删除人员结果', result.data)
     }
     setSuccess(result.message || '强制删除完成')
     expandedPersonnelIds.value = expandedPersonnelIds.value.filter(id => !state.ids.includes(Number(id)))
@@ -417,6 +503,9 @@ onMounted(() => {
           <strong>{{ selectedPersonnelCount }}</strong>
           <span>个人员</span>
         </div>
+        <button class="btn-secondary" :disabled="!hasSelectedPersonnel" @click="handleBatchUpdatePersonnelStatus('active')">批量启用</button>
+        <button class="btn-secondary" :disabled="!hasSelectedPersonnel" @click="handleBatchUpdatePersonnelStatus('disabled')">批量停用</button>
+        <button class="btn-secondary" :disabled="!hasSelectedPersonnel" @click="openBatchDepartmentDialog">批量修改部门</button>
         <button class="btn-danger" :disabled="!hasSelectedPersonnel" @click="handleBatchDeletePersonnel">批量删除</button>
         <button class="btn-secondary" :disabled="!hasSelectedPersonnel" @click="clearSelectedPersonnel">清空选择</button>
         <button class="btn-secondary" @click="downloadPersonnelImportTemplate('xlsx')">下载模板</button>
@@ -452,46 +541,6 @@ onMounted(() => {
 
     <div v-if="success" class="alert alert-success">{{ success }}</div>
     <div v-if="error" class="alert alert-error">{{ error }}</div>
-    <div v-if="forceDeletePersonnelState.visible" class="force-delete-card">
-      <div>
-        <h4>强制删除确认</h4>
-        <p>{{ forceDeletePersonnelState.impactText }}</p>
-        <p class="force-delete-warning">强制删除只解绑账号，不停用账号、不删除账号。</p>
-      </div>
-      <label>
-        <span>管理员密码</span>
-        <input
-          v-model="forceDeletePersonnelState.adminPassword"
-          type="password"
-          autocomplete="current-password"
-          placeholder="输入当前管理员密码"
-        >
-      </label>
-      <div v-if="forceDeletePersonnelState.error" class="force-delete-error">
-        {{ forceDeletePersonnelState.error }}
-      </div>
-      <div class="force-delete-actions">
-        <button class="btn-secondary" :disabled="forceDeletePersonnelState.submitting" @click="resetForceDeletePersonnelState">
-          取消
-        </button>
-        <button class="btn-danger" :disabled="forceDeletePersonnelState.submitting" @click="submitForceDeletePersonnel">
-          {{ forceDeletePersonnelState.submitting ? '删除中...' : '确认强制删除' }}
-        </button>
-      </div>
-    </div>
-    <div v-if="batchDeleteResult?.details?.length" class="batch-result-card">
-      <div class="batch-result-title">{{ formatBatchDeleteSummary(batchDeleteResult) }}</div>
-      <ul class="batch-result-list">
-        <li
-          v-for="detail in batchDeleteResult.details"
-          :key="`${detail.personnel_id}-${detail.row}`"
-          :class="detail.status"
-        >
-          {{ detail.employee_no || detail.personnel_id }} / {{ detail.full_name || '-' }}：{{ detail.message }}
-        </li>
-      </ul>
-    </div>
-
     <div class="table-card">
       <div v-if="loading" class="loading-state">加载中...</div>
       <div v-else-if="!personnelItems.length" class="empty-state">暂无人员数据</div>
@@ -546,7 +595,7 @@ onMounted(() => {
                   {{ item.personnel_record_status === 'active' ? '停用' : '启用' }}
                 </button>
                 <button class="action-btn" @click="toggleBindings(item.id)">查看绑定</button>
-                <button class="action-btn btn-danger" @click="handleDeletePersonnel(item)">删除</button>
+                <button class="action-btn action-btn-danger-soft" @click="handleDeletePersonnel(item)">删除</button>
               </td>
             </tr>
             <tr v-if="isBindingsExpanded(item.id)" class="bindings-row">
@@ -588,6 +637,54 @@ onMounted(() => {
       :result="personnelImportResult"
       @close="showPersonnelImportResultDialog = false"
     />
+    <ForceDeleteConfirmDialog
+      :show="forceDeletePersonnelState.visible"
+      title="强制删除人员"
+      :impact-text="forceDeletePersonnelState.impactText"
+      warning-text="强制删除只解绑账号，不停用账号、不删除账号。"
+      :password="forceDeletePersonnelState.adminPassword"
+      :submitting="forceDeletePersonnelState.submitting"
+      :error="forceDeletePersonnelState.error"
+      @update:password="forceDeletePersonnelState.adminPassword = $event"
+      @cancel="resetForceDeletePersonnelState"
+      @confirm="submitForceDeletePersonnel"
+    />
+    <div v-if="showBatchDepartmentDialog" class="modal-overlay" @click.self="showBatchDepartmentDialog = false">
+      <div class="batch-department-modal">
+        <div class="modal-header">
+          <h3>批量修改部门</h3>
+          <button class="close-btn" type="button" @click="showBatchDepartmentDialog = false">x</button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-hint">
+            将选中的 {{ selectedPersonnelCount }} 个人员统一调整到所选部门。一级部门必选，二级和三级可按实际管理层级留空。
+          </p>
+          <DepartmentSelector
+            :tree="selectableDepartmentTree"
+            :primary-id="batchDepartmentForm.primary_department_id"
+            :secondary-id="batchDepartmentForm.secondary_department_id"
+            :tertiary-id="batchDepartmentForm.tertiary_department_id"
+            :disabled="batchDepartmentSubmitting || departmentOptionsLoading"
+            search-placeholder="搜索目标部门"
+            @update:primary-id="batchDepartmentForm.primary_department_id = $event"
+            @update:secondary-id="batchDepartmentForm.secondary_department_id = $event"
+            @update:tertiary-id="batchDepartmentForm.tertiary_department_id = $event"
+          />
+        </div>
+        <div class="modal-footer">
+          <button class="btn-secondary" :disabled="batchDepartmentSubmitting" @click="showBatchDepartmentDialog = false">取消</button>
+          <button class="btn-primary" :disabled="batchDepartmentSubmitting" @click="submitBatchDepartmentUpdate">
+            {{ batchDepartmentSubmitting ? '提交中...' : '确认修改' }}
+          </button>
+        </div>
+      </div>
+    </div>
+    <ImportResultDialog
+      :show="showBatchOperationResultDialog"
+      :result="batchOperationResult"
+      :title="batchOperationResultTitle"
+      @close="showBatchOperationResultDialog = false"
+    />
   </section>
 </template>
 
@@ -596,6 +693,77 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(17, 24, 39, 0.45);
+}
+
+.batch-department-modal {
+  width: min(720px, calc(100vw - 32px));
+  max-height: 90vh;
+  overflow-y: auto;
+  border-radius: 8px;
+  background: white;
+  box-shadow: 0 20px 30px rgba(15, 23, 42, 0.18);
+}
+
+.modal-header,
+.modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 20px;
+}
+
+.modal-header {
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.modal-header h3 {
+  margin: 0;
+  color: #111827;
+  font-size: 18px;
+}
+
+.modal-body {
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+}
+
+.modal-hint {
+  margin: 0;
+  color: #4b5563;
+  font-size: 14px;
+}
+
+.modal-footer {
+  justify-content: flex-end;
+  border-top: 1px solid #e5e7eb;
+}
+
+.close-btn {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #6b7280;
+  cursor: pointer;
+  font-size: 20px;
+}
+
+.close-btn:hover {
+  background: #f3f4f6;
+  color: #111827;
 }
 
 .panel-header,
@@ -749,12 +917,13 @@ onMounted(() => {
   background: #f9fafb;
 }
 
-.action-btn.btn-danger {
+.action-btn-danger-soft {
   border-color: #fecaca;
   color: #b91c1c;
+  background: #fffaf9;
 }
 
-.action-btn.btn-danger:hover {
+.action-btn-danger-soft:hover {
   background: #fef2f2;
 }
 
@@ -800,91 +969,6 @@ onMounted(() => {
 .btn-secondary:disabled {
   cursor: not-allowed;
   opacity: 0.6;
-}
-
-.batch-result-card {
-  border: 1px solid #e5e7eb;
-  border-radius: 12px;
-  background: #fafafa;
-  padding: 14px 16px;
-}
-
-.force-delete-card {
-  display: grid;
-  gap: 12px;
-  border: 1px solid #fecaca;
-  border-radius: 8px;
-  background: #fff7f7;
-  padding: 16px;
-}
-
-.force-delete-card h4 {
-  color: #991b1b;
-  font-size: 15px;
-  margin: 0 0 6px;
-}
-
-.force-delete-card p {
-  color: #374151;
-  font-size: 14px;
-  margin: 0;
-}
-
-.force-delete-warning,
-.force-delete-error {
-  color: #b91c1c;
-  font-size: 13px;
-}
-
-.force-delete-card label {
-  display: grid;
-  gap: 6px;
-  max-width: 360px;
-}
-
-.force-delete-card input {
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  padding: 10px 12px;
-}
-
-.force-delete-actions {
-  display: flex;
-  gap: 10px;
-  justify-content: flex-end;
-}
-
-.batch-result-title {
-  color: #1f2937;
-  font-size: 14px;
-  font-weight: 600;
-  margin-bottom: 10px;
-}
-
-.batch-result-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 8px;
-}
-
-.batch-result-list li {
-  border-radius: 8px;
-  padding: 10px 12px;
-  background: white;
-  border: 1px solid #e5e7eb;
-  color: #374151;
-}
-
-.batch-result-list li.success {
-  border-color: #bbf7d0;
-  background: #f0fdf4;
-}
-
-.batch-result-list li.failed {
-  border-color: #fecaca;
-  background: #fef2f2;
 }
 
 .bindings-row td {

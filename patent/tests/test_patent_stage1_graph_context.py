@@ -83,6 +83,21 @@ def test_stage1_planner_unavailable_fallback_seeds_from_graph_payload():
     assert result["retrieval_plan"].candidate_recall_queries
 
 
+def test_stage1_graph_seed_does_not_create_explicit_patent_id_when_question_has_no_id():
+    result = run_stage1_pre_answer_and_planning(
+        user_question="如何制备高压实磷酸铁锂",
+        client=None,
+        model="",
+        logger=_Logger(),
+        conversation_context=_graph_context(),
+    )
+
+    assert result["fallback"] == "planner_unavailable"
+    assert result["retrieval_claims"]
+    assert result["retrieval_plan"].explicit_patent_ids == []
+    assert "CN100355122C" in result["retrieval_plan"].candidate_recall_queries[0]
+
+
 def test_stage1_json_parse_failed_fallback_seeds_from_graph_payload():
     client = _ResponseFormatRejectingClient("not-json")
 

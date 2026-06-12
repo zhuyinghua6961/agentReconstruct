@@ -16,6 +16,7 @@ const filterStatus = ref('all')
 const summary = computed(() => props.result?.summary || {})
 const details = computed(() => props.result?.details || [])
 const duration = computed(() => props.result?.duration || 0)
+const updatedCount = computed(() => Number(summary.value?.updated || 0))
 
 const filteredDetails = computed(() => {
   if (filterStatus.value === 'all') {
@@ -27,6 +28,7 @@ const filteredDetails = computed(() => {
 function getStatusClass(status) {
   const classes = {
     success: 'status-success',
+    updated: 'status-updated',
     failed: 'status-failed',
     skipped: 'status-skipped'
   }
@@ -36,6 +38,7 @@ function getStatusClass(status) {
 function getStatusText(status) {
   const texts = {
     success: '成功',
+    updated: '更新',
     failed: '失败',
     skipped: '跳过'
   }
@@ -100,6 +103,10 @@ function close() {
               <span class="summary-label">成功</span>
               <span class="summary-value">{{ summary.success || 0 }}</span>
             </div>
+            <div class="summary-item updated">
+              <span class="summary-label">更新</span>
+              <span class="summary-value">{{ updatedCount }}</span>
+            </div>
             <div class="summary-item failed">
               <span class="summary-label">失败</span>
               <span class="summary-value">{{ summary.failed || 0 }}</span>
@@ -122,6 +129,14 @@ function close() {
             </button>
             <button class="filter-btn" :class="{ active: filterStatus === 'success' }" @click="filterStatus = 'success'">
               成功 ({{ summary.success || 0 }})
+            </button>
+            <button
+              v-if="updatedCount > 0"
+              class="filter-btn"
+              :class="{ active: filterStatus === 'updated' }"
+              @click="filterStatus = 'updated'"
+            >
+              更新 ({{ updatedCount }})
             </button>
             <button class="filter-btn" :class="{ active: filterStatus === 'failed' }" @click="filterStatus = 'failed'">
               失败 ({{ summary.failed || 0 }})
@@ -284,6 +299,10 @@ function close() {
   color: #16a34a;
 }
 
+.summary-item.updated .summary-value {
+  color: #2563eb;
+}
+
 .summary-item.failed .summary-value {
   color: #dc2626;
 }
@@ -360,6 +379,11 @@ function close() {
 .status-success {
   background: #dcfce7;
   color: #166534;
+}
+
+.status-updated {
+  background: #dbeafe;
+  color: #1d4ed8;
 }
 
 .status-failed {

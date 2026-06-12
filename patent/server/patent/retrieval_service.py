@@ -90,6 +90,37 @@ def _numeric_distances(values: list[Any]) -> list[float]:
     return out
 
 
+def _explicit_patent_ids_from_user_question(user_question: str) -> list[str]:
+    return [
+        item
+        for item in dict.fromkeys(_IDENTIFIER_RE.findall(str(user_question or "").upper()))
+        if item
+    ]
+
+
+def _explicit_patent_ids_from_claims(retrieval_claims: list[Any]) -> list[str]:
+    parts: list[str] = []
+    for claim in list(retrieval_claims or []):
+        filters = dict(getattr(claim, "filters", {}) or {}) if not isinstance(claim, dict) else dict(claim.get("filters") or {})
+        if bool(filters.get("graph_seeded")):
+            continue
+        claim_text = getattr(claim, "claim", "") if not isinstance(claim, dict) else claim.get("claim", "")
+        keywords = getattr(claim, "keywords", []) if not isinstance(claim, dict) else claim.get("keywords", [])
+        parts.append(" ".join([str(claim_text or ""), *[str(keyword) for keyword in list(keywords or [])]]))
+    return [
+        item
+        for item in dict.fromkeys(_IDENTIFIER_RE.findall(" ".join(parts).upper()))
+        if item
+    ]
+
+
+def _explicit_patent_ids_for_hard_constraint(user_question: str, retrieval_claims: list[Any]) -> list[str]:
+    return list(dict.fromkeys([
+        *_explicit_patent_ids_from_user_question(user_question),
+        *_explicit_patent_ids_from_claims(retrieval_claims),
+    ]))
+
+
 def _distance_summary(values: list[Any]) -> dict[str, Any]:
     nums = _numeric_distances(values)
     if not nums:
@@ -1246,7 +1277,7 @@ class PatentRetrievalService:
         selected_matches = list(merged_matches)
         explicit_patent_ids = [
             self._normalize_patent_id(item)
-            for item in self._retrieval_plan_from_claims(retrieval_claims, user_question=user_question).get("explicit_patent_ids", [])
+            for item in _explicit_patent_ids_for_hard_constraint(user_question, retrieval_claims)
             if self._normalize_patent_id(item)
         ]
         explicit_id_fallback = False
@@ -2180,6 +2211,7 @@ class PatentRetrievalService:
             user_question=user_question,
             retrieval_claims=retrieval_claims,
             graph_context=graph_controls,
+            explicit_patent_ids=_explicit_patent_ids_for_hard_constraint(user_question, retrieval_claims),
         )
         ranked = aggregate_patent_candidates(
             hits=hits,

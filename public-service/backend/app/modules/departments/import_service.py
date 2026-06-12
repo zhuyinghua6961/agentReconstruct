@@ -75,6 +75,7 @@ class DepartmentImportService:
 
         details: list[dict[str, Any]] = []
         success_count = 0
+        updated_count = 0
         failed_count = 0
         skipped_count = 0
         primary_status_seen: dict[str, str] = {}
@@ -176,29 +177,53 @@ class DepartmentImportService:
                     )
                     continue
 
-                primary_id = self._upsert_primary(name=primary_name, status=primary_status)
-                secondary_id = self._upsert_secondary(
+                created_any = False
+                updated_fields: list[str] = []
+                primary_result = self._upsert_primary(name=primary_name, status=primary_status)
+                primary_id = primary_result["id"]
+                created_any = created_any or primary_result["created"]
+                updated_fields.extend(primary_result["updated_fields"])
+
+                secondary_result = self._upsert_secondary(
                     primary_department_id=primary_id,
                     name=secondary_name,
                     status=secondary_status,
                 )
+                secondary_id = secondary_result["id"]
+                created_any = created_any or secondary_result["created"]
+                updated_fields.extend(secondary_result["updated_fields"])
+
                 tertiary_id = None
                 if tertiary_name and tertiary_status:
-                    tertiary_id = self._upsert_tertiary(
+                    tertiary_result = self._upsert_tertiary(
                         secondary_department_id=secondary_id,
                         name=tertiary_name,
                         status=tertiary_status,
                     )
-                success_count += 1
-                details.append(
-                    {
-                        **detail,
-                        "status": "success",
-                        "primary_department_id": primary_id,
-                        "secondary_department_id": secondary_id,
-                        "tertiary_department_id": tertiary_id,
-                    }
-                )
+                    tertiary_id = tertiary_result["id"]
+                    created_any = created_any or tertiary_result["created"]
+                    updated_fields.extend(tertiary_result["updated_fields"])
+
+                if created_any:
+                    success_count += 1
+                    row_status = "success"
+                    message = f"新增成功，已更新{'、'.join(updated_fields)}" if updated_fields else "新增成功"
+                else:
+                    updated_count += 1
+                    row_status = "updated"
+                    message = f"已更新{'、'.join(updated_fields)}" if updated_fields else "已更新"
+
+                row_detail = {
+                    **detail,
+                    "status": row_status,
+                    "message": message,
+                    "primary_department_id": primary_id,
+                    "secondary_department_id": secondary_id,
+                    "tertiary_department_id": tertiary_id,
+                }
+                if updated_fields:
+                    row_detail["updated_fields"] = updated_fields
+                details.append(row_detail)
             except Exception as exc:
                 if _is_db_unavailable_error(exc):
                     return {"success": False, "error": str(exc), "code": "DB_UNAVAILABLE"}
@@ -218,7 +243,7 @@ class DepartmentImportService:
                 )
                 continue
 
-        total = success_count + failed_count + skipped_count
+        total = success_count + updated_count + failed_count + skipped_count
         return {
             "success": True,
             "message": "批量导入完成",
@@ -226,6 +251,7 @@ class DepartmentImportService:
                 "summary": {
                     "total": total,
                     "success": success_count,
+                    "updated": updated_count,
                     "failed": failed_count,
                     "skipped": skipped_count,
                 },
@@ -298,46 +324,52 @@ class DepartmentImportService:
 
         return True, primary_id, secondary_id, int(tertiary["id"])
 
-    def _upsert_primary(self, *, name: str, status: str) -> int:
+    def _upsert_primary(self, *, name: str, status: str) -> dict[str, Any]:
         primary = self._repository.get_primary_by_name(name)
         if primary:
             primary_id = int(primary["id"])
+            updated_fields: list[str] = []
             if self._clean_text(primary.get("status")).lower() != status:
                 self._repository.update_primary_status(primary_id=primary_id, status=status)
-            return primary_id
+                updated_fields.append("一级状态")
+            return {"id": primary_id, "created": False, "updated_fields": updated_fields}
 
         primary_id = int(self._repository.create_primary(name=name))
         if status != "active":
             self._repository.update_primary_status(primary_id=primary_id, status=status)
-        return primary_id
+        return {"id": primary_id, "created": True, "updated_fields": []}
 
-    def _upsert_secondary(self, *, primary_department_id: int, name: str, status: str) -> int:
+    def _upsert_secondary(self, *, primary_department_id: int, name: str, status: str) -> dict[str, Any]:
         secondary = self._repository.get_secondary_by_name(primary_department_id=primary_department_id, name=name)
         if secondary:
             secondary_id = int(secondary["id"])
+            updated_fields: list[str] = []
             if self._clean_text(secondary.get("status")).lower() != status:
                 self._repository.update_secondary_status(secondary_id=secondary_id, status=status)
-            return secondary_id
+                updated_fields.append("二级状态")
+            return {"id": secondary_id, "created": False, "updated_fields": updated_fields}
 
         secondary_id = int(self._repository.create_secondary(primary_department_id=primary_department_id, name=name))
         if status != "active":
             self._repository.update_secondary_status(secondary_id=secondary_id, status=status)
-        return secondary_id
+        return {"id": secondary_id, "created": True, "updated_fields": []}
 
-    def _upsert_tertiary(self, *, secondary_department_id: int, name: str, status: str) -> int:
+    def _upsert_tertiary(self, *, secondary_department_id: int, name: str, status: str) -> dict[str, Any]:
         tertiary = self._repository.get_tertiary_by_name(secondary_department_id=secondary_department_id, name=name)
         if tertiary:
             tertiary_id = int(tertiary["id"])
+            updated_fields: list[str] = []
             if self._clean_text(tertiary.get("status")).lower() != status:
                 self._repository.update_tertiary_status(tertiary_id=tertiary_id, status=status)
-            return tertiary_id
+                updated_fields.append("三级状态")
+            return {"id": tertiary_id, "created": False, "updated_fields": updated_fields}
 
         tertiary_id = int(self._repository.create_tertiary(secondary_department_id=secondary_department_id, name=name))
         if tertiary_id <= 0:
             raise RuntimeError("三级部门创建失败")
         if status != "active":
             self._repository.update_tertiary_status(tertiary_id=tertiary_id, status=status)
-        return tertiary_id
+        return {"id": tertiary_id, "created": True, "updated_fields": []}
 
 
 department_import_service = DepartmentImportService()

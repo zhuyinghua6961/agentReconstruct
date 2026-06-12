@@ -136,6 +136,38 @@ class PersonnelRepository:
             str(existing.get("verification_code_hash") or ""),
         )
 
+    def _get_import_updated_fields(
+        self,
+        *,
+        existing: dict[str, Any],
+        full_name: str,
+        verification_code: object,
+        primary_department_id: object,
+        secondary_department_id: object,
+        tertiary_department_id: object,
+        status: str,
+        remarks: object,
+    ) -> list[str]:
+        fields: list[str] = []
+        if self._clean_text(existing.get("full_name")) != full_name:
+            fields.append("姓名")
+        if not self._verify_verification_code(
+            str(verification_code or ""),
+            str(existing.get("verification_code_hash") or ""),
+        ):
+            fields.append("校验码")
+        if self._normalize_optional_int(existing.get("primary_department_id")) != self._normalize_optional_int(primary_department_id):
+            fields.append("一级部门")
+        if self._normalize_optional_int(existing.get("secondary_department_id")) != self._normalize_optional_int(secondary_department_id):
+            fields.append("二级部门")
+        if self._normalize_optional_int(existing.get("tertiary_department_id")) != self._normalize_optional_int(tertiary_department_id):
+            fields.append("三级部门")
+        if self._clean_text(existing.get("status")).lower() != status:
+            fields.append("状态")
+        if remarks is not REMARKS_UNSET and (self._clean_text(existing.get("remarks")) or None) != (self._clean_text(remarks) or None):
+            fields.append("备注")
+        return fields
+
     def _personnel_filters(
         self,
         *,
@@ -787,9 +819,10 @@ class PersonnelRepository:
         )
         existing = cursor.fetchone() or None
         if existing:
+            existing_dict = dict(existing)
             current_personnel_id = int(existing["id"])
             if self._is_import_row_unchanged(
-                existing=dict(existing),
+                existing=existing_dict,
                 full_name=full_name,
                 verification_code=verification_code,
                 primary_department_id=primary_department_id,
@@ -807,6 +840,16 @@ class PersonnelRepository:
                     "message": "人员已存在且未变化",
                 }
 
+            updated_fields = self._get_import_updated_fields(
+                existing=existing_dict,
+                full_name=full_name,
+                verification_code=verification_code,
+                primary_department_id=primary_department_id,
+                secondary_department_id=secondary_department_id,
+                tertiary_department_id=tertiary_department_id,
+                status=status,
+                remarks=remarks,
+            )
             update_sets = [
                 "full_name = %s",
                 "verification_code_hash = %s",
@@ -849,6 +892,8 @@ class PersonnelRepository:
                 "full_name": full_name,
                 "personnel_record_status": status,
                 "status": "updated",
+                "updated_fields": updated_fields,
+                "message": f"已更新{'、'.join(updated_fields)}" if updated_fields else "已更新",
             }
 
         cursor.execute(

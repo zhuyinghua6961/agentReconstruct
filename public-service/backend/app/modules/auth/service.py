@@ -289,6 +289,8 @@ class AuthService:
             return 404
         if code in {"ACCOUNT_DISABLED"}:
             return 403
+        if code in {"DEPARTMENT_DISABLED"} and int(result.get("http_status") or 0) == 403:
+            return 403
         if code in {"PERMISSION_DENIED"}:
             return 403
         if code in {"ACCOUNT_LOCKED", "ACCOUNT_LOCKED_DUE_TO_FAILURES"}:
@@ -412,6 +414,38 @@ class AuthService:
             "success": False,
             "error": "账号所属人员已停用，请联系管理员",
             "code": "PERSONNEL_DISABLED",
+            "http_status": 403,
+            "data": {"personnel": personnel_payload},
+        }
+
+    def _department_disabled_payload(self, *, user: dict[str, Any]) -> dict[str, Any] | None:
+        if self._is_admin_user(user):
+            return None
+        personnel_id = user.get("personnel_id")
+        if personnel_id is None:
+            return None
+        record = self._get_personnel_record(personnel_id=personnel_id)
+        if not isinstance(record, dict):
+            return None
+        if str(record.get("status") or "").strip().lower() != "active":
+            return None
+        department = self._describe_department_from_mapping(record)
+        if str(department.get("department_effective_status") or "").strip().lower() != "disabled":
+            return None
+        return {
+            "employee_no": str(record.get("employee_no") or ""),
+            "full_name": str(record.get("full_name") or ""),
+            "department_display": str(department.get("department_display") or "未填写"),
+        }
+
+    def build_disabled_department_login_error(self, user: dict[str, Any]) -> dict[str, Any] | None:
+        personnel_payload = self._department_disabled_payload(user=user)
+        if not personnel_payload:
+            return None
+        return {
+            "success": False,
+            "error": "账号所属部门已停用，请联系管理员",
+            "code": "DEPARTMENT_DISABLED",
             "http_status": 403,
             "data": {"personnel": personnel_payload},
         }
@@ -938,6 +972,10 @@ class AuthService:
             disabled_personnel_error = self.build_disabled_personnel_login_error(user)
             if disabled_personnel_error:
                 return disabled_personnel_error
+
+            disabled_department_error = self.build_disabled_department_login_error(user)
+            if disabled_department_error:
+                return disabled_department_error
 
             self._repo.reset_login_attempts(user_id=int(user["id"]))
             token = self._tokens.issue_access_token(user_id=int(user["id"]), role=str(user["role"]))

@@ -11,8 +11,10 @@ from app.core.deps import AuthContext
 from app.modules.auth.deps import require_admin_context
 from app.modules.personnel.import_service import personnel_import_service
 from app.modules.personnel.schemas import (
+    PersonnelBatchDepartmentUpdateRequest,
     PersonnelBatchDeleteRequest,
     PersonnelBatchForceDeleteRequest,
+    PersonnelBatchStatusUpdateRequest,
     PersonnelCreateRequest,
     PersonnelForceDeleteRequest,
     PersonnelStatusUpdateRequest,
@@ -110,6 +112,36 @@ def batch_delete_personnel(
 ):
     return _respond(
         personnel_service.batch_delete_personnel(personnel_ids=payload.personnel_ids),
+        ok_status=200,
+    )
+
+
+@router.post("/batch-status")
+def batch_update_personnel_status(
+    payload: PersonnelBatchStatusUpdateRequest,
+    _context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(
+        personnel_service.batch_update_personnel_status(
+            personnel_ids=payload.personnel_ids,
+            status=payload.status,
+        ),
+        ok_status=200,
+    )
+
+
+@router.post("/batch-department")
+def batch_update_personnel_department(
+    payload: PersonnelBatchDepartmentUpdateRequest,
+    _context: AuthContext = Depends(require_admin_context),
+):
+    return _respond(
+        personnel_service.batch_update_personnel_department(
+            personnel_ids=payload.personnel_ids,
+            primary_department_id=payload.primary_department_id,
+            secondary_department_id=payload.secondary_department_id,
+            tertiary_department_id=payload.tertiary_department_id,
+        ),
         ok_status=200,
     )
 

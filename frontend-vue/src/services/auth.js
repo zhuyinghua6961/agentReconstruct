@@ -52,6 +52,18 @@ function formatDisabledPersonnelMessage(error) {
   return ['账号所属人员已停用，请联系管理员', ...details].join('\n')
 }
 
+function formatDisabledDepartmentMessage(error) {
+  const personnel = error?.data?.personnel || {}
+  const employeeNo = String(personnel.employee_no || '').trim()
+  const fullName = String(personnel.full_name || '').trim()
+  const departmentDisplay = String(personnel.department_display || '').trim()
+  const details = []
+  if (employeeNo) details.push(`工号：${employeeNo}`)
+  if (fullName) details.push(`姓名：${fullName}`)
+  if (departmentDisplay) details.push(`部门：${departmentDisplay}`)
+  return ['账号所属部门已停用，请联系管理员', ...details].join('\n')
+}
+
 // 全局错误处理函数
 function handleAuthError(error, response) {
   // 检查是否是账号停用错误
@@ -71,6 +83,13 @@ function handleAuthError(error, response) {
   if (error.code === 'PERSONNEL_DISABLED') {
     clearStoredAuth()
     alert(formatDisabledPersonnelMessage(error))
+    window.location.href = '/login'
+    return
+  }
+
+  if (error.code === 'DEPARTMENT_DISABLED') {
+    clearStoredAuth()
+    alert(formatDisabledDepartmentMessage(error))
     window.location.href = '/login'
     return
   }

@@ -21,16 +21,20 @@ def test_route_table_patterns_include_department_routes():
         "/api/admin/departments/tree",
         "/api/admin/departments/primary",
         "/api/admin/departments/primary/{primary_id}",
+        "/api/admin/departments/primary/{primary_id}/status",
         "/api/admin/departments/primary/{primary_id}/direct-users",
         "/api/admin/departments/secondary",
         "/api/admin/departments/secondary/{secondary_id}",
+        "/api/admin/departments/secondary/{secondary_id}/status",
         "/api/admin/departments/secondary/{secondary_id}/direct-users",
         "/api/admin/departments/secondary/{secondary_id}/users",
         "/api/admin/departments/secondary/{secondary_id}/legacy-users",
         "/api/admin/departments/tertiary",
         "/api/admin/departments/tertiary/{tertiary_id}",
+        "/api/admin/departments/tertiary/{tertiary_id}/status",
         "/api/admin/departments/tertiary/{tertiary_id}/users",
         "/api/admin/departments/batch-delete",
+        "/api/admin/departments/batch-status",
         "/api/admin/departments/{level}/{department_id}/force-delete",
         "/api/admin/departments/batch-force-delete",
         "/api/admin/departments/batch-import",
@@ -38,9 +42,6 @@ def test_route_table_patterns_include_department_routes():
     }
 
     assert expected.issubset(set(PUBLIC_ROUTE_PATTERNS))
-    assert "/api/admin/departments/primary/{primary_id}/status" not in PUBLIC_ROUTE_PATTERNS
-    assert "/api/admin/departments/secondary/{secondary_id}/status" not in PUBLIC_ROUTE_PATTERNS
-    assert "/api/admin/departments/tertiary/{tertiary_id}/status" not in PUBLIC_ROUTE_PATTERNS
 
 
 def test_auth_register_routes_keep_api_and_v1_parity():
@@ -82,6 +83,8 @@ def test_route_table_patterns_include_personnel_routes():
         "/api/admin/personnel/{personnel_id}/status",
         "/api/admin/personnel/{personnel_id}/bindings",
         "/api/admin/personnel/batch-delete",
+        "/api/admin/personnel/batch-status",
+        "/api/admin/personnel/batch-department",
         "/api/admin/personnel/{personnel_id}/force-delete",
         "/api/admin/personnel/batch-force-delete",
         "/api/admin/personnel/batch-import",

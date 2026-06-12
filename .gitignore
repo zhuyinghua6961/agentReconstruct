@@ -36,8 +36,9 @@ archive/frontend-vue-legacy/
 archive/*legacy*/
 fastQA/logs/
 highThinkingQA/vectordb/
+highThinkingQA/resource/runtime/
 resource/logs/
-
+测试导入数据*/
 # Deploy local env and release artifacts
 deploy/.env
 deploy/*.tar

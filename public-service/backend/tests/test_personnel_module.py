@@ -576,6 +576,116 @@ def test_personnel_repository_import_rows_skips_existing_unchanged_record():
     assert connection.commit_called == 1
 
 
+def test_personnel_repository_import_rows_reports_updated_fields_for_existing_record():
+    module_spec = find_module_spec("app.modules.personnel.repository")
+    assert module_spec is not None
+
+    from app.modules.personnel.repository import PersonnelRepository
+    from app.modules.personnel.service import PersonnelService
+
+    old_verification_code_hash = PersonnelService.hash_verification_code("OLD123")
+    new_verification_code_hash = PersonnelService.hash_verification_code("NEW456")
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.update_calls = 0
+            self.updated_params = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, query, params=()):
+            query_text = " ".join(str(query).split())
+            if query_text.startswith("SAVEPOINT") or query_text.startswith("ROLLBACK TO SAVEPOINT") or query_text.startswith("RELEASE SAVEPOINT"):
+                return
+            if "SELECT id" in query_text and "FROM personnel_records" in query_text:
+                return
+            if "UPDATE personnel_records" in query_text:
+                self.update_calls += 1
+                self.updated_params = params
+                return
+            if "INSERT INTO personnel_records" in query_text:
+                raise AssertionError("existing personnel should not be inserted")
+            raise AssertionError(f"unexpected query: {query_text}")
+
+        def fetchone(self):
+            return {
+                "id": 9,
+                "full_name": "张三",
+                "verification_code_hash": old_verification_code_hash,
+                "primary_department_id": 1,
+                "secondary_department_id": 11,
+                "tertiary_department_id": 111,
+                "status": "active",
+                "remarks": "原备注",
+            }
+
+    class FakeConnection:
+        def __init__(self) -> None:
+            self.cursor_instance = FakeCursor()
+
+        def begin(self):
+            return None
+
+        def commit(self):
+            return None
+
+        def rollback(self):
+            return None
+
+        def cursor(self):
+            return self.cursor_instance
+
+    class FakeConnectionManager:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def __enter__(self):
+            return self._connection
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeDatabase:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def connection(self):
+            return FakeConnectionManager(self._connection)
+
+    connection = FakeConnection()
+    repo = PersonnelRepository(database=FakeDatabase(connection))
+
+    result = repo.import_personnel_rows(
+        rows=[
+            {
+                "line_no": 2,
+                "employee_no": "T2024001",
+                "full_name": "李四",
+                "verification_code": "NEW456",
+                "verification_code_hash": new_verification_code_hash,
+                "primary_department_id": 1,
+                "secondary_department_id": None,
+                "tertiary_department_id": None,
+                "status": "disabled",
+                "remarks": "新备注",
+            },
+        ]
+    )
+
+    detail = result["details"][0]
+    assert result["updated"] == 1
+    assert detail["status"] == "updated"
+    assert detail["updated_fields"] == ["姓名", "校验码", "二级部门", "三级部门", "状态", "备注"]
+    assert detail["message"] == "已更新姓名、校验码、二级部门、三级部门、状态、备注"
+    assert connection.cursor_instance.update_calls == 1
+    assert connection.cursor_instance.updated_params[0] == "李四"
+    assert connection.cursor_instance.updated_params[1] == new_verification_code_hash
+
+
 def test_personnel_routes_registered():
     paths = {route.path for route in app.routes if hasattr(route, "path")}
 
@@ -986,6 +1096,159 @@ def test_personnel_service_batch_delete_partially_succeeds_and_deduplicates():
     assert [detail["status"] for detail in result["data"]["details"]] == ["success", "failed", "failed"]
     assert result["data"]["details"][1]["code"] == "PERSONNEL_HAS_BINDINGS"
     assert result["data"]["details"][2]["code"] == "PERSONNEL_NOT_FOUND"
+
+
+def test_personnel_service_batch_status_updates_skips_and_fails():
+    from app.modules.personnel.service import PersonnelService
+
+    class FakeRepository:
+        def __init__(self) -> None:
+            self.records = {
+                9: {
+                    "id": 9,
+                    "employee_no": "T2024001",
+                    "full_name": "张三",
+                    "status": "active",
+                    "binding_count": 0,
+                    "created_at": None,
+                    "updated_at": None,
+                },
+                10: {
+                    "id": 10,
+                    "employee_no": "T2024002",
+                    "full_name": "李四",
+                    "status": "disabled",
+                    "binding_count": 1,
+                    "created_at": None,
+                    "updated_at": None,
+                },
+            }
+            self.updated = []
+
+        def get_by_id(self, personnel_id: int):
+            record = self.records.get(int(personnel_id))
+            return dict(record) if record else None
+
+        def update_personnel_status(self, *, personnel_id: int, status: str):
+            self.updated.append((personnel_id, status))
+            self.records[int(personnel_id)]["status"] = status
+            return 1
+
+    repo = FakeRepository()
+    service = PersonnelService(repository=repo)
+
+    result = service.batch_update_personnel_status(personnel_ids=[9, 10, 404, 9], status="disabled")
+
+    assert result["success"] is True
+    assert result["data"]["summary"] == {"total": 3, "success": 1, "failed": 1, "skipped": 1}
+    assert repo.updated == [(9, "disabled")]
+    assert [detail["status"] for detail in result["data"]["details"]] == ["success", "skipped", "failed"]
+    assert result["data"]["details"][2]["code"] == "PERSONNEL_NOT_FOUND"
+
+
+def test_personnel_service_batch_department_updates_skips_and_syncs_bound_users():
+    from app.modules.personnel.service import PersonnelService
+
+    class FakeRepository:
+        def __init__(self) -> None:
+            self.records = {
+                9: {
+                    "id": 9,
+                    "employee_no": "T2024001",
+                    "full_name": "张三",
+                    "status": "active",
+                    "primary_department_id": 2,
+                    "secondary_department_id": 21,
+                    "tertiary_department_id": 211,
+                    "binding_count": 2,
+                    "created_at": None,
+                    "updated_at": None,
+                },
+                10: {
+                    "id": 10,
+                    "employee_no": "T2024002",
+                    "full_name": "李四",
+                    "status": "active",
+                    "primary_department_id": 1,
+                    "secondary_department_id": None,
+                    "tertiary_department_id": None,
+                    "binding_count": 0,
+                    "created_at": None,
+                    "updated_at": None,
+                },
+            }
+            self.updated_payloads = []
+
+        def get_by_id(self, personnel_id: int):
+            record = self.records.get(int(personnel_id))
+            return dict(record) if record else None
+
+        def update_personnel_and_sync_bound_users(self, **kwargs):
+            self.updated_payloads.append(kwargs)
+            record = self.records[int(kwargs["personnel_id"])]
+            record.update(
+                {
+                    "primary_department_id": kwargs["primary_department_id"],
+                    "secondary_department_id": kwargs["secondary_department_id"],
+                    "tertiary_department_id": kwargs["tertiary_department_id"],
+                }
+            )
+            return 1
+
+    class FakeDepartments:
+        def validate_department_selection(self, **kwargs):
+            assert kwargs == {
+                "primary_department_id": 1,
+                "secondary_department_id": None,
+                "tertiary_department_id": None,
+                "require_active": True,
+                "allow_empty": False,
+                "allow_legacy_two_level": True,
+            }
+            return {
+                "success": True,
+                "data": {
+                    "primary_department_id": 1,
+                    "primary_department_name": "计算机学院",
+                    "secondary_department_id": None,
+                    "secondary_department_name": None,
+                    "tertiary_department_id": None,
+                    "tertiary_department_name": None,
+                    "department_display": "计算机学院",
+                    "department_completion_level": "primary",
+                    "require_department_setup": False,
+                },
+            }
+
+        def describe_user_department(self, **kwargs):
+            return {
+                "primary_department_id": kwargs["primary_department_id"],
+                "primary_department_name": "计算机学院",
+                "secondary_department_id": kwargs["secondary_department_id"],
+                "secondary_department_name": None,
+                "tertiary_department_id": kwargs["tertiary_department_id"],
+                "tertiary_department_name": None,
+                "department_display": "计算机学院",
+                "department_completion_level": "primary",
+                "require_department_setup": False,
+            }
+
+    repo = FakeRepository()
+    service = PersonnelService(repository=repo, department_service=FakeDepartments())
+
+    result = service.batch_update_personnel_department(
+        personnel_ids=[9, 10, 404, 9],
+        primary_department_id=1,
+        secondary_department_id=None,
+        tertiary_department_id=None,
+    )
+
+    assert result["success"] is True
+    assert result["data"]["summary"] == {"total": 3, "success": 1, "failed": 1, "skipped": 1}
+    assert repo.updated_payloads[0]["personnel_id"] == 9
+    assert repo.updated_payloads[0]["sync_bound_users"] is True
+    assert [detail["status"] for detail in result["data"]["details"]] == ["success", "skipped", "failed"]
+    assert result["data"]["details"][0]["department_display"] == "计算机学院"
 
 
 def test_personnel_import_marks_duplicate_employee_no_rows_failed_and_continues():
@@ -1542,6 +1805,65 @@ def test_personnel_admin_routes_registered(monkeypatch):
 
     assert batch_delete_response.status_code == 200
     assert batch_calls == [{"personnel_ids": [9, 10]}]
+
+    batch_update_calls = []
+
+    def fake_batch_update_personnel_status(**kwargs):
+        batch_update_calls.append(kwargs)
+        return {
+            "success": True,
+            "data": {
+                "summary": {"total": 2, "success": 1, "failed": 0, "skipped": 1},
+                "details": [],
+            },
+        }
+
+    def fake_batch_update_personnel_department(**kwargs):
+        batch_update_calls.append(kwargs)
+        return {
+            "success": True,
+            "data": {
+                "summary": {"total": 2, "success": 2, "failed": 0, "skipped": 0},
+                "details": [],
+            },
+        }
+
+    monkeypatch.setattr(
+        personnel_service_module.personnel_service,
+        "batch_update_personnel_status",
+        fake_batch_update_personnel_status,
+    )
+    monkeypatch.setattr(
+        personnel_service_module.personnel_service,
+        "batch_update_personnel_department",
+        fake_batch_update_personnel_department,
+    )
+
+    batch_status_response = personnel_api_module.batch_update_personnel_status(
+        payload=personnel_api_module.PersonnelBatchStatusUpdateRequest(personnel_ids=[9, 10], status="disabled"),
+        _context=AuthContext(user_id=1, role="admin", username="admin"),
+    )
+    batch_department_response = personnel_api_module.batch_update_personnel_department(
+        payload=personnel_api_module.PersonnelBatchDepartmentUpdateRequest(
+            personnel_ids=[9, 10],
+            primary_department_id=1,
+            secondary_department_id=None,
+            tertiary_department_id=None,
+        ),
+        _context=AuthContext(user_id=1, role="admin", username="admin"),
+    )
+
+    assert batch_status_response.status_code == 200
+    assert batch_department_response.status_code == 200
+    assert batch_update_calls == [
+        {"personnel_ids": [9, 10], "status": "disabled"},
+        {
+            "personnel_ids": [9, 10],
+            "primary_department_id": 1,
+            "secondary_department_id": None,
+            "tertiary_department_id": None,
+        },
+    ]
 
     force_calls = []
 

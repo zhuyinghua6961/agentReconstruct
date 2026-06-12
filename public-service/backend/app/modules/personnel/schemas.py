@@ -34,6 +34,18 @@ class PersonnelBatchDeleteRequest(BaseModel):
     personnel_ids: list[int] = Field(default_factory=list)
 
 
+class PersonnelBatchStatusUpdateRequest(BaseModel):
+    personnel_ids: list[int] = Field(default_factory=list)
+    status: Literal["active", "disabled"] | str = Field(default="active")
+
+
+class PersonnelBatchDepartmentUpdateRequest(BaseModel):
+    personnel_ids: list[int] = Field(default_factory=list)
+    primary_department_id: int | None = Field(default=None)
+    secondary_department_id: int | None = Field(default=None)
+    tertiary_department_id: int | None = Field(default=None)
+
+
 class PersonnelForceDeleteRequest(BaseModel):
     admin_password: str = Field(default="")
 

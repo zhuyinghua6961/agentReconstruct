@@ -1,8 +1,19 @@
-export function getPersonnelImportSuccessCount(summary = {}) {
+export function getPersonnelImportCreatedCount(summary = {}) {
+  if (typeof summary?.created === 'number') {
+    return summary.created
+  }
   if (typeof summary?.success === 'number') {
     return summary.success
   }
-  return Number(summary?.created || 0) + Number(summary?.updated || 0)
+  return 0
+}
+
+export function getPersonnelImportSuccessCount(summary = {}) {
+  return getPersonnelImportCreatedCount(summary)
+}
+
+export function getPersonnelImportUpdatedCount(summary = {}) {
+  return Number(summary?.updated || 0)
 }
 
 export function getPersonnelImportSkippedCount(summary = {}) {
@@ -11,8 +22,11 @@ export function getPersonnelImportSkippedCount(summary = {}) {
 
 export function normalizePersonnelImportResultStatus(status) {
   const normalized = String(status || '').trim().toLowerCase()
-  if (normalized === 'created' || normalized === 'updated' || normalized === 'success') {
-    return 'success'
+  if (normalized === 'created' || normalized === 'success') {
+    return 'created'
+  }
+  if (normalized === 'updated') {
+    return 'updated'
   }
   if (normalized === 'failed' || normalized === 'skipped') {
     return normalized
@@ -31,7 +45,7 @@ export function getPersonnelImportStatusClass(status) {
   return {
     success: 'status-success',
     created: 'status-success',
-    updated: 'status-success',
+    updated: 'status-updated',
     failed: 'status-failed',
     skipped: 'status-skipped',
   }[status] || ''

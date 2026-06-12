@@ -4,6 +4,8 @@ import { adminApi } from '../services/admin'
 import DepartmentBatchImportDialog from './DepartmentBatchImportDialog.vue'
 import DepartmentCreateDialog from './DepartmentCreateDialog.vue'
 import DepartmentImportResultDialog from './DepartmentImportResultDialog.vue'
+import ForceDeleteConfirmDialog from './ForceDeleteConfirmDialog.vue'
+import ImportResultDialog from './ImportResultDialog.vue'
 import { createDepartmentUsersRuntime } from '../utils/departmentSecondaryUsersRuntime'
 import { buildDepartmentRenderPrimary } from '../utils/departmentManagementTreeModel'
 
@@ -20,7 +22,9 @@ const departmentImportResult = ref(null)
 const expandedPrimaryIds = ref([])
 const expandedSecondaryIds = ref([])
 const selectedDepartmentItems = ref([])
-const departmentBatchDeleteResult = ref(null)
+const showDepartmentBatchOperationResultDialog = ref(false)
+const departmentBatchOperationResultTitle = ref('批量操作结果')
+const departmentBatchOperationResult = ref(null)
 const forceDeleteDepartmentState = ref({
   visible: false,
   mode: 'single',
@@ -223,6 +227,12 @@ function formatDepartmentBatchDeleteSummary(result) {
   return `批量删除完成：成功 ${summary.success || 0} 条，失败 ${summary.failed || 0} 条`
 }
 
+function openDepartmentBatchOperationResult(title, resultData) {
+  departmentBatchOperationResultTitle.value = title
+  departmentBatchOperationResult.value = resultData
+  showDepartmentBatchOperationResultDialog.value = true
+}
+
 function resetForceDeleteDepartmentState() {
   forceDeleteDepartmentState.value = {
     visible: false,
@@ -321,6 +331,21 @@ async function applyDepartmentDelete(requestDelete, successMessage, errorMessage
   error.value = result.error || errorMessage
 }
 
+async function handleTogglePrimaryStatus(primary) {
+  const targetStatus = primary.status === 'active' ? 'disabled' : 'active'
+  const actionText = targetStatus === 'disabled' ? '停用' : '启用'
+  if (!window.confirm(`确定要${actionText}一级部门 ${primary.name} 吗？`)) {
+    return
+  }
+  const result = await adminApi.updatePrimaryDepartmentStatus(primary.id, targetStatus)
+  if (result.success) {
+    setSuccess(`一级部门已${actionText}`)
+    await refreshDepartmentChanges()
+    return
+  }
+  error.value = result.error || `一级部门${actionText}失败`
+}
+
 async function handleDeletePrimary(item) {
   if (!window.confirm(`确定要删除一级部门 ${item.name} 吗？仅没有二级部门、账号和人员绑定的部门可以删除。`)) {
     return
@@ -346,6 +371,21 @@ async function handleRenameSecondary(secondary) {
     return
   }
   error.value = result.error || '更新二级部门失败'
+}
+
+async function handleToggleSecondaryStatus(secondary) {
+  const targetStatus = secondary.status === 'active' ? 'disabled' : 'active'
+  const actionText = targetStatus === 'disabled' ? '停用' : '启用'
+  if (!window.confirm(`确定要${actionText}二级部门 ${secondary.name} 吗？`)) {
+    return
+  }
+  const result = await adminApi.updateSecondaryDepartmentStatus(secondary.id, targetStatus)
+  if (result.success) {
+    setSuccess(`二级部门已${actionText}`)
+    await refreshDepartmentChanges()
+    return
+  }
+  error.value = result.error || `二级部门${actionText}失败`
 }
 
 async function handleDeleteSecondary(secondary) {
@@ -375,6 +415,22 @@ async function handleRenameTertiary(tertiary) {
   error.value = result.error || '更新三级部门失败'
 }
 
+async function handleToggleTertiaryStatus(tertiary) {
+  const targetStatus = tertiary.status === 'active' ? 'disabled' : 'active'
+  const actionText = targetStatus === 'disabled' ? '停用' : '启用'
+  if (!window.confirm(`确定要${actionText}三级部门 ${tertiary.name} 吗？`)) {
+    return
+  }
+  const tertiaryId = tertiary.tertiary_id || tertiary.id
+  const result = await adminApi.updateTertiaryDepartmentStatus(tertiaryId, targetStatus)
+  if (result.success) {
+    setSuccess(`三级部门已${actionText}`)
+    await refreshDepartmentChanges()
+    return
+  }
+  error.value = result.error || `三级部门${actionText}失败`
+}
+
 async function handleDeleteTertiary(tertiary) {
   if (!window.confirm(`确定要删除三级部门 ${tertiary.name} 吗？仅没有账号和人员绑定的部门可以删除。`)) {
     return
@@ -389,7 +445,6 @@ async function handleDeleteTertiary(tertiary) {
 
 async function handleBatchDeleteDepartments() {
   error.value = ''
-  departmentBatchDeleteResult.value = null
   if (!hasSelectedDepartments.value) {
     error.value = '请至少选择一个部门'
     return
@@ -400,16 +455,40 @@ async function handleBatchDeleteDepartments() {
   const payload = selectedDepartmentItems.value.map(item => ({ level: item.level, id: item.id }))
   const result = await adminApi.batchDeleteDepartments(payload)
   if (result.success) {
-    departmentBatchDeleteResult.value = result.data
-    setSuccess(formatDepartmentBatchDeleteSummary(result.data))
     openBatchForceDeleteDepartments(result.data?.details)
-    if (!forceDeleteDepartmentState.value.visible) {
-      clearSelectedDepartments()
+    if (forceDeleteDepartmentState.value.visible) {
+      await refreshDepartmentChanges()
+      return
     }
+    openDepartmentBatchOperationResult('批量删除部门结果', result.data)
+    setSuccess(formatDepartmentBatchDeleteSummary(result.data))
+    clearSelectedDepartments()
     await refreshDepartmentChanges()
     return
   }
   error.value = result.error || '批量删除部门失败'
+}
+
+async function handleBatchUpdateDepartmentStatus(status) {
+  error.value = ''
+  if (!hasSelectedDepartments.value) {
+    error.value = '请至少选择一个部门'
+    return
+  }
+  const actionText = status === 'disabled' ? '停用' : '启用'
+  if (!window.confirm(`确定批量${actionText}选中的 ${selectedDepartmentCount.value} 个部门吗？只会修改所选部门本身，已是目标状态的部门会显示跳过。`)) {
+    return
+  }
+  const payload = selectedDepartmentItems.value.map(item => ({ level: item.level, id: item.id }))
+  const result = await adminApi.batchUpdateDepartmentStatus(payload, status)
+  if (result.success) {
+    openDepartmentBatchOperationResult('批量启停部门结果', result.data)
+    setSuccess(`批量${actionText}部门完成`)
+    clearSelectedDepartments()
+    await refreshDepartmentChanges()
+    return
+  }
+  error.value = result.error || `批量${actionText}部门失败`
 }
 
 async function submitForceDeleteDepartment() {
@@ -425,7 +504,7 @@ async function submitForceDeleteDepartment() {
     : await adminApi.forceDeleteDepartment(state.item.level, state.item.id, adminPassword)
   if (result.success) {
     if (state.mode === 'batch') {
-      departmentBatchDeleteResult.value = result.data
+      openDepartmentBatchOperationResult('批量强制删除部门结果', result.data)
     }
     setSuccess(result.message || '强制删除部门完成')
     clearSelectedDepartments()
@@ -460,7 +539,7 @@ async function handleDepartmentImportSuccess(result) {
   departmentImportResult.value = result
   showDepartmentImportResultDialog.value = true
   setSuccess(
-    `部门导入完成：成功 ${summary.success || 0} 条，失败 ${summary.failed || 0} 条，跳过 ${summary.skipped || 0} 条`
+    `部门导入完成：成功 ${summary.success || 0} 条，更新 ${summary.updated || 0} 条，失败 ${summary.failed || 0} 条，跳过 ${summary.skipped || 0} 条`
   )
   await fetchDepartmentTree()
   emit('updated')
@@ -484,6 +563,8 @@ onMounted(() => {
           <strong>{{ selectedDepartmentCount }}</strong>
           <span>个部门</span>
         </div>
+        <button class="action-btn" :disabled="!hasSelectedDepartments" @click="handleBatchUpdateDepartmentStatus('active')">批量启用部门</button>
+        <button class="action-btn" :disabled="!hasSelectedDepartments" @click="handleBatchUpdateDepartmentStatus('disabled')">批量停用部门</button>
         <button class="danger-btn" :disabled="!hasSelectedDepartments" @click="handleBatchDeleteDepartments">批量删除部门</button>
         <button class="action-btn" :disabled="!hasSelectedDepartments" @click="clearSelectedDepartments">清空选择</button>
         <button class="refresh-btn" @click="fetchDepartmentTree">刷新</button>
@@ -494,47 +575,6 @@ onMounted(() => {
 
     <div v-if="success" class="alert alert-success">{{ success }}</div>
     <div v-if="error" class="alert alert-error">{{ error }}</div>
-    <div v-if="forceDeleteDepartmentState.visible" class="force-delete-card">
-      <div>
-        <h4>强制删除确认</h4>
-        <p>{{ forceDeleteDepartmentState.impactText }}</p>
-        <p class="force-delete-warning">强制删除不删除人员、不删除账号，只清空相关人员和账号部门。</p>
-      </div>
-      <label>
-        <span>管理员密码</span>
-        <input
-          v-model="forceDeleteDepartmentState.adminPassword"
-          type="password"
-          autocomplete="current-password"
-          placeholder="输入当前管理员密码"
-        >
-      </label>
-      <div v-if="forceDeleteDepartmentState.error" class="force-delete-error">
-        {{ forceDeleteDepartmentState.error }}
-      </div>
-      <div class="force-delete-actions">
-        <button class="action-btn" :disabled="forceDeleteDepartmentState.submitting" @click="resetForceDeleteDepartmentState">
-          取消
-        </button>
-        <button class="danger-btn" :disabled="forceDeleteDepartmentState.submitting" @click="submitForceDeleteDepartment">
-          {{ forceDeleteDepartmentState.submitting ? '删除中...' : '确认强制删除' }}
-        </button>
-      </div>
-    </div>
-    <div v-if="departmentBatchDeleteResult?.details?.length" class="batch-result-card">
-      <div class="batch-result-title">{{ formatDepartmentBatchDeleteSummary(departmentBatchDeleteResult) }}</div>
-      <ul class="batch-result-list">
-        <li
-          v-for="detail in departmentBatchDeleteResult.details"
-          :key="`${detail.level}-${detail.id}-${detail.row}`"
-          :class="detail.status"
-        >
-          {{ detail.level_name || departmentLevelText(detail.level) }} /
-          {{ detail.department_name || detail.id }}：{{ detail.message }}
-        </li>
-      </ul>
-    </div>
-
     <div v-if="loading" class="loading">加载中...</div>
 
     <div v-else class="department-tree">
@@ -578,6 +618,9 @@ onMounted(() => {
           </div>
           <div class="actions">
             <button class="action-btn" @click="handleRenamePrimary(primary)">改名</button>
+            <button class="action-btn" @click="handleTogglePrimaryStatus(primary)">
+              {{ primary.status === 'active' ? '停用' : '启用' }}
+            </button>
             <button class="action-btn danger-btn" @click="handleDeletePrimary(primary)">删除</button>
           </div>
         </div>
@@ -694,6 +737,9 @@ onMounted(() => {
                   </span>
                   <div class="actions">
                     <button class="action-btn" @click="handleRenameSecondary(secondary.raw)">改名</button>
+                    <button class="action-btn" @click="handleToggleSecondaryStatus(secondary.raw)">
+                      {{ secondary.status === 'active' ? '停用' : '启用' }}
+                    </button>
                     <button class="action-btn danger-btn" @click="handleDeleteSecondary(secondary.raw)">删除</button>
                   </div>
                 </div>
@@ -748,6 +794,9 @@ onMounted(() => {
                       </div>
                       <div class="actions" v-if="tertiary.nodeType === 'tertiary'">
                         <button class="action-btn" @click="handleRenameTertiary(tertiary)">改名</button>
+                        <button class="action-btn" @click="handleToggleTertiaryStatus(tertiary)">
+                          {{ tertiary.status === 'active' ? '停用' : '启用' }}
+                        </button>
                         <button class="action-btn danger-btn" @click="handleDeleteTertiary(tertiary)">删除</button>
                       </div>
                     </div>
@@ -811,6 +860,24 @@ onMounted(() => {
       :show="showDepartmentImportResultDialog"
       :result="departmentImportResult"
       @close="showDepartmentImportResultDialog = false"
+    />
+    <ForceDeleteConfirmDialog
+      :show="forceDeleteDepartmentState.visible"
+      title="强制删除部门"
+      :impact-text="forceDeleteDepartmentState.impactText"
+      warning-text="强制删除不删除人员、不删除账号，只清空相关人员和账号部门。"
+      :password="forceDeleteDepartmentState.adminPassword"
+      :submitting="forceDeleteDepartmentState.submitting"
+      :error="forceDeleteDepartmentState.error"
+      @update:password="forceDeleteDepartmentState.adminPassword = $event"
+      @cancel="resetForceDeleteDepartmentState"
+      @confirm="submitForceDeleteDepartment"
+    />
+    <ImportResultDialog
+      :show="showDepartmentBatchOperationResultDialog"
+      :result="departmentBatchOperationResult"
+      :title="departmentBatchOperationResultTitle"
+      @close="showDepartmentBatchOperationResultDialog = false"
     />
   </section>
 </template>
@@ -886,7 +953,6 @@ onMounted(() => {
   border: 1px solid #fecaca;
   border-radius: 8px;
   background: white;
-  border-color: #fecaca;
   color: #dc2626;
   cursor: pointer;
   padding: 8px 14px;
@@ -912,93 +978,6 @@ onMounted(() => {
   color: #1d4ed8;
   font-size: 18px;
   line-height: 1;
-}
-
-.force-delete-card {
-  display: grid;
-  gap: 12px;
-  border: 1px solid #fecaca;
-  border-radius: 8px;
-  background: #fff7f7;
-  margin-bottom: 16px;
-  padding: 16px;
-}
-
-.force-delete-card h4 {
-  color: #991b1b;
-  font-size: 15px;
-  margin: 0 0 6px;
-}
-
-.force-delete-card p {
-  color: #374151;
-  font-size: 14px;
-  margin: 0;
-}
-
-.force-delete-warning,
-.force-delete-error {
-  color: #b91c1c;
-  font-size: 13px;
-}
-
-.force-delete-card label {
-  display: grid;
-  gap: 6px;
-  max-width: 360px;
-}
-
-.force-delete-card input {
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  padding: 10px 12px;
-}
-
-.force-delete-actions {
-  display: flex;
-  gap: 10px;
-  justify-content: flex-end;
-}
-
-.batch-result-card {
-  border: 1px solid #e5e7eb;
-  border-radius: 12px;
-  background: #fafafa;
-  margin-bottom: 16px;
-  padding: 14px 16px;
-}
-
-.batch-result-title {
-  color: #1f2937;
-  font-size: 14px;
-  font-weight: 600;
-  margin-bottom: 10px;
-}
-
-.batch-result-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 8px;
-}
-
-.batch-result-list li {
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  background: white;
-  color: #374151;
-  padding: 10px 12px;
-}
-
-.batch-result-list li.success {
-  border-color: #bbf7d0;
-  background: #f0fdf4;
-}
-
-.batch-result-list li.failed {
-  border-color: #fecaca;
-  background: #fef2f2;
 }
 
 .alert {

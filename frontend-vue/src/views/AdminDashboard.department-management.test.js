@@ -13,12 +13,34 @@ function readSource(relativePath) {
   return readFileSync(fullPath, 'utf8')
 }
 
+function sourceBlockAfter(source, marker) {
+  const markerIndex = source.indexOf(marker)
+  if (markerIndex === -1) {
+    return ''
+  }
+  const blockStart = source.indexOf('{', markerIndex)
+  if (blockStart === -1) {
+    return ''
+  }
+  let depth = 0
+  for (let index = blockStart; index < source.length; index += 1) {
+    const char = source[index]
+    if (char === '{') depth += 1
+    if (char === '}') depth -= 1
+    if (depth === 0) {
+      return source.slice(blockStart, index + 1)
+    }
+  }
+  return ''
+}
+
 const adminSource = readSource(['AdminDashboard.vue'])
 const batchImportSource = readSource(['..', 'components', 'BatchImportDialog.vue'])
 const importResultSource = readSource(['..', 'components', 'ImportResultDialog.vue'])
 const departmentBatchImportSource = readSource(['..', 'components', 'DepartmentBatchImportDialog.vue'])
 const departmentCreateSource = readSource(['..', 'components', 'DepartmentCreateDialog.vue'])
 const departmentImportResultSource = readSource(['..', 'components', 'DepartmentImportResultDialog.vue'])
+const forceDeleteDialogSource = readSource(['..', 'components', 'ForceDeleteConfirmDialog.vue'])
 const panelSource = readSource(['..', 'components', 'DepartmentManagementPanel.vue'])
 const adminServiceSource = readSource(['..', 'services', 'admin.js'])
 const runtimeSource = readSource(['..', 'utils', 'departmentSecondaryUsersRuntime.js'])
@@ -90,6 +112,14 @@ test('DepartmentBatchImportDialog documents status columns', () => {
   assert.match(departmentBatchImportSource, /disabled/)
 })
 
+test('Department import result dialog supports updated rows and summary', () => {
+  assert.match(departmentImportResultSource, /updatedCount/)
+  assert.match(departmentImportResultSource, /updated/)
+  assert.match(departmentImportResultSource, /status-updated/)
+  assert.match(departmentImportResultSource, /summary\.value\?\.updated/)
+  assert.match(panelSource, /summary\.updated/)
+})
+
 test('DepartmentBatchImportDialog guards closing during upload and resets file input', () => {
   assert.match(departmentBatchImportSource, /function requestClose\(\)/)
   assert.match(departmentBatchImportSource, /if \(uploading\.value\)/)
@@ -121,42 +151,53 @@ test('DepartmentManagementPanel uses one dialog entry for department creation', 
   assert.doesNotMatch(panelSource, /class="create-secondary"/)
 })
 
-test('DepartmentManagementPanel exposes delete actions instead of department status toggles', () => {
+test('DepartmentManagementPanel exposes delete and status actions for departments', () => {
   assert.match(adminServiceSource, /deletePrimaryDepartment/)
   assert.match(adminServiceSource, /deleteSecondaryDepartment/)
   assert.match(adminServiceSource, /deleteTertiaryDepartment/)
+  assert.match(adminServiceSource, /updatePrimaryDepartmentStatus/)
+  assert.match(adminServiceSource, /updateSecondaryDepartmentStatus/)
+  assert.match(adminServiceSource, /updateTertiaryDepartmentStatus/)
   assert.match(panelSource, /handleDeletePrimary/)
   assert.match(panelSource, /handleDeleteSecondary/)
   assert.match(panelSource, /handleDeleteTertiary/)
+  assert.match(panelSource, /handleTogglePrimaryStatus/)
+  assert.match(panelSource, /handleToggleSecondaryStatus/)
+  assert.match(panelSource, /handleToggleTertiaryStatus/)
   assert.match(panelSource, />删除</)
-  assert.doesNotMatch(panelSource, /handleTogglePrimaryStatus/)
-  assert.doesNotMatch(panelSource, /handleToggleSecondaryStatus/)
-  assert.doesNotMatch(panelSource, /handleToggleTertiaryStatus/)
-  assert.doesNotMatch(panelSource, /updatePrimaryDepartmentStatus/)
-  assert.doesNotMatch(panelSource, /updateSecondaryDepartmentStatus/)
-  assert.doesNotMatch(panelSource, /updateTertiaryDepartmentStatus/)
-  assert.doesNotMatch(adminServiceSource, /updatePrimaryDepartmentStatus/)
-  assert.doesNotMatch(adminServiceSource, /updateSecondaryDepartmentStatus/)
-  assert.doesNotMatch(adminServiceSource, /updateTertiaryDepartmentStatus/)
 })
 
 test('DepartmentManagementPanel supports selecting mixed department levels for batch delete', () => {
   assert.match(adminServiceSource, /batchDeleteDepartments/)
   assert.match(adminServiceSource, /departments\/batch-delete/)
+  assert.match(adminServiceSource, /batchUpdateDepartmentStatus/)
+  assert.match(adminServiceSource, /departments\/batch-status/)
   assert.match(panelSource, /selectedDepartmentItems/)
   assert.match(panelSource, /departmentSelectionKey/)
   assert.match(panelSource, /collectSelectableDepartments/)
   assert.match(panelSource, /toggleDepartmentSelection/)
   assert.match(panelSource, /handleBatchDeleteDepartments/)
+  assert.match(panelSource, /handleBatchUpdateDepartmentStatus/)
   assert.match(panelSource, /批量删除部门/)
+  assert.match(panelSource, /批量启用部门/)
+  assert.match(panelSource, /批量停用部门/)
+  assert.match(panelSource, /批量启停部门结果/)
   assert.match(panelSource, /仅无下级、无账号\/人员绑定的部门可删除/)
   assert.match(panelSource, /department-checkbox/)
   assert.match(panelSource, /primary/)
   assert.match(panelSource, /secondary/)
   assert.match(panelSource, /tertiary/)
+  assert.match(panelSource, /ImportResultDialog/)
+  assert.match(panelSource, /departmentBatchOperationResult/)
+  assert.match(panelSource, /openDepartmentBatchOperationResult/)
+  assert.match(panelSource, /批量删除部门结果/)
+  assert.match(panelSource, /批量强制删除部门结果/)
+  assert.doesNotMatch(panelSource, /departmentBatchDeleteResult/)
+  assert.doesNotMatch(panelSource, /batch-result-card/)
 })
 
 test('DepartmentManagementPanel upgrades in-use delete failures to password-confirmed force delete', () => {
+  assert.match(panelSource, /ForceDeleteConfirmDialog/)
   assert.match(panelSource, /forceDeleteDepartmentState/)
   assert.match(panelSource, /adminPassword/)
   assert.match(panelSource, /DEPARTMENT_IN_USE/)
@@ -165,10 +206,30 @@ test('DepartmentManagementPanel upgrades in-use delete failures to password-conf
   assert.match(panelSource, /batchForceDeleteDepartments/)
   assert.match(panelSource, /将删除下级部门/)
   assert.match(panelSource, /清空相关人员和账号部门/)
+  assert.doesNotMatch(panelSource, /class="force-delete-card"/)
   assert.match(adminServiceSource, /forceDeleteDepartment\(/)
   assert.match(adminServiceSource, /departments\/\$\{level\}\/\$\{departmentId\}\/force-delete/)
   assert.match(adminServiceSource, /batchForceDeleteDepartments\(/)
   assert.match(adminServiceSource, /departments\/batch-force-delete/)
+})
+
+test('Department batch delete waits for force-delete password before showing force result', () => {
+  assert.match(
+    panelSource,
+    /openBatchForceDeleteDepartments\(result\.data\?\.details\)[\s\S]*if \(forceDeleteDepartmentState\.value\.visible\) \{[\s\S]*await refreshDepartmentChanges\(\)[\s\S]*return[\s\S]*\}[\s\S]*openDepartmentBatchOperationResult\('批量删除部门结果', result\.data\)/,
+  )
+  const forceDeleteBranch = sourceBlockAfter(panelSource, 'if (forceDeleteDepartmentState.value.visible)')
+  assert.doesNotMatch(forceDeleteBranch, /setSuccess\(/)
+})
+
+test('ForceDeleteConfirmDialog renders department force delete confirmation as a modal', () => {
+  assert.match(forceDeleteDialogSource, /class="modal-overlay"/)
+  assert.match(forceDeleteDialogSource, /role="dialog"/)
+  assert.match(forceDeleteDialogSource, /管理员密码/)
+  assert.match(forceDeleteDialogSource, /type="password"/)
+  assert.match(forceDeleteDialogSource, /确认强制删除/)
+  assert.match(forceDeleteDialogSource, /emit\('confirm'/)
+  assert.match(forceDeleteDialogSource, /emit\('cancel'/)
 })
 
 test('DepartmentCreateDialog supports existing and new parent choices with ordered creation api calls', () => {

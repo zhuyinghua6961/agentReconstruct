@@ -33,6 +33,16 @@ test('Login renders disabled account and disabled personnel errors as Chinese me
   assert.match(loginSource, /department_display/)
 })
 
+test('Login renders disabled department errors without entering department setup flow', () => {
+  assert.match(loginSource, /DEPARTMENT_DISABLED/)
+  assert.match(loginSource, /账号所属部门已停用，请联系管理员/)
+  assert.match(loginSource, /disabledDepartmentPersonnel/)
+  assert.match(loginSource, /employee_no/)
+  assert.match(loginSource, /full_name/)
+  assert.match(loginSource, /department_display/)
+  assert.doesNotMatch(loginSource, /DEPARTMENT_DISABLED[\s\S]{0,240}params\.set\('department', 'required'\)/)
+})
+
 test('UserProfile renders department section as read-only personnel-sourced information', () => {
   assert.match(profileSource, /部门信息/)
   assert.match(profileSource, /部门由人员信息统一维护|联系管理员在人员表维护/)

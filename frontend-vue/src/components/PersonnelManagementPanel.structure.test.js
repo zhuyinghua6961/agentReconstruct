@@ -14,11 +14,34 @@ function readSource(filename) {
   return readFileSync(fullPath, 'utf8')
 }
 
+function sourceBlockAfter(source, marker) {
+  const markerIndex = source.indexOf(marker)
+  if (markerIndex === -1) {
+    return ''
+  }
+  const blockStart = source.indexOf('{', markerIndex)
+  if (blockStart === -1) {
+    return ''
+  }
+  let depth = 0
+  for (let index = blockStart; index < source.length; index += 1) {
+    const char = source[index]
+    if (char === '{') depth += 1
+    if (char === '}') depth -= 1
+    if (depth === 0) {
+      return source.slice(blockStart, index + 1)
+    }
+  }
+  return ''
+}
+
 const panelSource = readSource('PersonnelManagementPanel.vue')
 const editorSource = readSource('PersonnelEditorDialog.vue')
 const lookupSource = readSource('PersonnelLookupSelect.vue')
 const batchImportSource = readSource('PersonnelBatchImportDialog.vue')
 const importResultSource = readSource('PersonnelImportResultDialog.vue')
+const operationResultSource = readSource('ImportResultDialog.vue')
+const forceDeleteDialogSource = readSource('ForceDeleteConfirmDialog.vue')
 const adminServiceSource = readSource('../services/admin.js')
 
 test('PersonnelManagementPanel renders account list filters and status filter', () => {
@@ -53,7 +76,7 @@ test('PersonnelManagementPanel exposes create edit status and bindings actions',
 test('PersonnelManagementPanel aligns personnel table controls with account list styling', () => {
   assert.match(panelSource, /getPersonnelStatusText/)
   assert.match(panelSource, /status-badge/)
-  assert.match(panelSource, /class="action-btn"/)
+  assert.match(panelSource, /action-btn-danger-soft/)
   assert.match(panelSource, /\.personnel-table th\s*\{[^}]*background:\s*#f9fafb/s)
   assert.match(panelSource, /\.action-btn\s*\{[^}]*border:\s*1px solid #d1d5db/s)
   assert.doesNotMatch(panelSource, /class="link-btn"/)
@@ -98,7 +121,8 @@ test('PersonnelManagementPanel shows personnel department display in list rows',
 })
 
 test('Personnel import result dialog supports created updated summary and statuses', () => {
-  assert.match(importResultSource, /getPersonnelImportSuccessCount/)
+  assert.match(importResultSource, /getPersonnelImportCreatedCount/)
+  assert.match(importResultSource, /getPersonnelImportUpdatedCount/)
   assert.match(importResultSource, /filterPersonnelImportDetails/)
   assert.match(importResultSource, /getPersonnelImportResultText/)
   assert.match(importResultSource, /一级部门|department_display/)
@@ -106,11 +130,24 @@ test('Personnel import result dialog supports created updated summary and status
   assert.match(importResultSource, /三级部门|tertiary_department_name/)
   assert.match(importResultSource, /自动创建部门/)
   assert.match(importResultSource, /created_departments_total/)
+  assert.match(importResultSource, /updatedCount/)
+  assert.match(importResultSource, /status-updated/)
 })
 
 test('Personnel batch import documents automatic department creation behavior', () => {
   assert.match(batchImportSource, /部门不存在时会自动创建/)
   assert.match(batchImportSource, /停用部门不会自动启用/)
+})
+
+test('Personnel batch import dialog matches polished account import controls', () => {
+  assert.match(batchImportSource, /class="icon">📊/)
+  assert.match(batchImportSource, /class="icon">📄/)
+  assert.match(batchImportSource, /\.template-buttons\s*\{[^}]*display:\s*flex/s)
+  assert.match(batchImportSource, /\.template-btn\s*\{[^}]*flex:\s*1/s)
+  assert.match(batchImportSource, /\.upload-icon\s*\{[^}]*font-size:\s*48px/s)
+  assert.match(batchImportSource, /\.info-section\s*\{[^}]*background:\s*#eff6ff/s)
+  assert.match(batchImportSource, /\.btn-primary:disabled\s*\{[^}]*background:\s*#d1d5db/s)
+  assert.doesNotMatch(batchImportSource, /template-buttons,\s*\n\.info-list/)
 })
 
 test('PersonnelManagementPanel lazy loads bindings when expanding a personnel row', () => {
@@ -128,12 +165,44 @@ test('PersonnelManagementPanel supports selecting and batch deleting personnel',
   assert.match(panelSource, /handleBatchDeletePersonnel/)
   assert.match(panelSource, /batchDeletePersonnel/)
   assert.match(panelSource, /批量删除/)
-  assert.match(panelSource, /batchDeleteResult/)
+  assert.match(panelSource, /ImportResultDialog/)
+  assert.match(panelSource, /batchOperationResult/)
+  assert.match(panelSource, /openBatchOperationResult/)
+  assert.match(panelSource, /批量删除人员结果/)
+  assert.match(panelSource, /批量强制删除人员结果/)
+  assert.doesNotMatch(panelSource, /batchDeleteResult/)
+  assert.doesNotMatch(panelSource, /batch-result-card/)
   assert.match(adminServiceSource, /batchDeletePersonnel/)
   assert.match(adminServiceSource, /personnel\/batch-delete/)
 })
 
+test('PersonnelManagementPanel supports batch status and department updates', () => {
+  assert.match(panelSource, /handleBatchUpdatePersonnelStatus/)
+  assert.match(panelSource, /openBatchDepartmentDialog/)
+  assert.match(panelSource, /submitBatchDepartmentUpdate/)
+  assert.match(panelSource, /batchUpdatePersonnelStatus/)
+  assert.match(panelSource, /batchUpdatePersonnelDepartment/)
+  assert.match(panelSource, /批量启用/)
+  assert.match(panelSource, /批量停用/)
+  assert.match(panelSource, /批量修改部门/)
+  assert.match(panelSource, /批量修改人员部门结果/)
+  assert.match(panelSource, /DepartmentSelector/)
+  assert.match(adminServiceSource, /batchUpdatePersonnelStatus\(/)
+  assert.match(adminServiceSource, /personnel\/batch-status/)
+  assert.match(adminServiceSource, /batchUpdatePersonnelDepartment\(/)
+  assert.match(adminServiceSource, /personnel\/batch-department/)
+})
+
+test('generic operation result dialog adapts personnel and department batch detail columns', () => {
+  assert.match(operationResultSource, /resultColumns/)
+  assert.match(operationResultSource, /employee_no/)
+  assert.match(operationResultSource, /full_name/)
+  assert.match(operationResultSource, /department_name/)
+  assert.match(operationResultSource, /level_name/)
+})
+
 test('PersonnelManagementPanel upgrades binding delete failures to password-confirmed force delete', () => {
+  assert.match(panelSource, /ForceDeleteConfirmDialog/)
   assert.match(panelSource, /forceDeletePersonnelState/)
   assert.match(panelSource, /adminPassword/)
   assert.match(panelSource, /PERSONNEL_HAS_BINDINGS/)
@@ -142,10 +211,30 @@ test('PersonnelManagementPanel upgrades binding delete failures to password-conf
   assert.match(panelSource, /batchForceDeletePersonnel/)
   assert.match(panelSource, /将解绑/)
   assert.match(panelSource, /下次登录需要重新绑定人员/)
+  assert.doesNotMatch(panelSource, /class="force-delete-card"/)
   assert.match(adminServiceSource, /forceDeletePersonnel\(/)
   assert.match(adminServiceSource, /personnel\/\$\{personnelId\}\/force-delete/)
   assert.match(adminServiceSource, /batchForceDeletePersonnel\(/)
   assert.match(adminServiceSource, /personnel\/batch-force-delete/)
+})
+
+test('Personnel batch delete waits for force-delete password before showing force result', () => {
+  assert.match(
+    panelSource,
+    /openBatchForceDeletePersonnel\(result\.data\?\.details\)[\s\S]*if \(forceDeletePersonnelState\.value\.visible\) \{[\s\S]*await fetchPersonnel\(\)[\s\S]*emit\('updated'\)[\s\S]*return[\s\S]*\}[\s\S]*openBatchOperationResult\('批量删除人员结果', result\.data\)/,
+  )
+  const forceDeleteBranch = sourceBlockAfter(panelSource, 'if (forceDeletePersonnelState.value.visible)')
+  assert.doesNotMatch(forceDeleteBranch, /setSuccess\(/)
+})
+
+test('ForceDeleteConfirmDialog renders administrator password confirmation as a modal', () => {
+  assert.match(forceDeleteDialogSource, /class="modal-overlay"/)
+  assert.match(forceDeleteDialogSource, /role="dialog"/)
+  assert.match(forceDeleteDialogSource, /管理员密码/)
+  assert.match(forceDeleteDialogSource, /type="password"/)
+  assert.match(forceDeleteDialogSource, /确认强制删除/)
+  assert.match(forceDeleteDialogSource, /emit\('confirm'/)
+  assert.match(forceDeleteDialogSource, /emit\('cancel'/)
 })
 
 test('PersonnelLookupSelect supports keyword search and active-only selection', () => {

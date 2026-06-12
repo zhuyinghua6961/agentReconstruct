@@ -43,6 +43,7 @@ def derive_patent_retrieval_intent(
     user_question: str,
     retrieval_claims: list[Any],
     graph_context: dict[str, Any] | None,
+    explicit_patent_ids: list[str] | None = None,
 ) -> PatentRetrievalIntent:
     text = " ".join(
         [
@@ -65,7 +66,10 @@ def derive_patent_retrieval_intent(
             metric_units.append("%")
         elif "c-rate" in normalized or normalized.endswith("c"):
             metric_units.append("c")
-    explicit_ids = [_normalize_id(item) for item in _IDENTIFIER_RE.findall(text.upper())]
+    if explicit_patent_ids is None:
+        explicit_ids = [_normalize_id(item) for item in _IDENTIFIER_RE.findall(text.upper())]
+    else:
+        explicit_ids = [_normalize_id(item) for item in list(explicit_patent_ids or [])]
     graph_ids = [_normalize_id(item) for item in list((graph_context or {}).get("stage2_patent_candidates") or (graph_context or {}).get("candidate_patent_ids") or [])]
     entities = [token for token in _tokens(text) if token not in {metric.lower() for metric in metrics}]
     return PatentRetrievalIntent(

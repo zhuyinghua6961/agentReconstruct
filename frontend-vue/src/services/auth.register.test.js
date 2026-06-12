@@ -134,6 +134,18 @@ test('global service error handlers handle disabled personnel with personnel det
   }
 })
 
+test('global service error handlers handle disabled departments with personnel details', () => {
+  for (const source of [apiServiceSource, adminServiceSource, authServiceSource]) {
+    assert.match(source, /DEPARTMENT_DISABLED/)
+    assert.match(source, /账号所属部门已停用，请联系管理员/)
+    assert.match(source, /employee_no/)
+    assert.match(source, /full_name/)
+    assert.match(source, /department_display/)
+    assert.match(source, /clearStoredAuth\(\)/)
+    assert.match(source, /window\.location\.href = '\/login'/)
+  }
+})
+
 test('registerAuth strips confirmPassword fields before posting to backend', async () => {
   const originalFetch = global.fetch
 

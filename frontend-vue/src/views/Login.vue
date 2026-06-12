@@ -16,6 +16,7 @@ const showSetupWarning = ref(false)
 const setupWarningTitle = ref('首次登录')
 const setupWarningText = ref('为了您的账号安全，请立即修改密码')
 const disabledPersonnel = ref(null)
+const disabledDepartmentPersonnel = ref(null)
 
 function normalizeDisabledPersonnel(result) {
   const personnel = result?.data?.personnel || {}
@@ -32,6 +33,7 @@ async function handleLogin() {
   showAccountLocked.value = false
   showSetupWarning.value = false
   disabledPersonnel.value = null
+  disabledDepartmentPersonnel.value = null
   
   if (!username.value || !password.value) {
     error.value = '请输入用户名和密码'
@@ -141,6 +143,10 @@ function handleLoginError(result) {
     error.value = '账号所属人员已停用，请联系管理员'
     disabledPersonnel.value = normalizeDisabledPersonnel(result)
   }
+  else if (result.code === 'DEPARTMENT_DISABLED') {
+    error.value = '账号所属部门已停用，请联系管理员'
+    disabledDepartmentPersonnel.value = normalizeDisabledPersonnel(result)
+  }
   // 其他错误
   else {
     error.value = result.error
@@ -196,6 +202,21 @@ function goToChangePassword() {
           <div v-if="disabledPersonnel.department_display" class="disabled-personnel-row">
             <span>部门</span>
             <strong>{{ disabledPersonnel.department_display }}</strong>
+          </div>
+        </div>
+
+        <div v-if="disabledDepartmentPersonnel" class="disabled-personnel-card">
+          <div v-if="disabledDepartmentPersonnel.employee_no" class="disabled-personnel-row">
+            <span>工号</span>
+            <strong>{{ disabledDepartmentPersonnel.employee_no }}</strong>
+          </div>
+          <div v-if="disabledDepartmentPersonnel.full_name" class="disabled-personnel-row">
+            <span>姓名</span>
+            <strong>{{ disabledDepartmentPersonnel.full_name }}</strong>
+          </div>
+          <div v-if="disabledDepartmentPersonnel.department_display" class="disabled-personnel-row">
+            <span>部门</span>
+            <strong>{{ disabledDepartmentPersonnel.department_display }}</strong>
           </div>
         </div>
         

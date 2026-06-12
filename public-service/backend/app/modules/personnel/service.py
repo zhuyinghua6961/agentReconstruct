@@ -145,6 +145,21 @@ class PersonnelService:
             return {"success": False, "error": "管理员密码不正确", "code": "ADMIN_PASSWORD_INVALID"}
         return None
 
+    @staticmethod
+    def _normalize_unique_ids(raw_ids: list[int]) -> list[int]:
+        normalized_ids: list[int] = []
+        seen: set[int] = set()
+        for item in list(raw_ids or []):
+            try:
+                parsed = int(item)
+            except Exception:
+                continue
+            if parsed <= 0 or parsed in seen:
+                continue
+            seen.add(parsed)
+            normalized_ids.append(parsed)
+        return normalized_ids
+
     def _describe_personnel_department(self, record: dict[str, Any] | None) -> dict[str, Any]:
         primary_department_id, secondary_department_id, tertiary_department_id = self._department_triplet_from_mapping(record)
         if primary_department_id is None and secondary_department_id is None and tertiary_department_id is None:
@@ -517,6 +532,222 @@ class PersonnelService:
             if _is_db_unavailable_error(exc):
                 return self._db_error(exc)
             return {"success": False, "error": "删除人员失败", "code": "DELETE_ERROR"}
+
+    def batch_update_personnel_status(self, *, personnel_ids: list[int], status: str) -> dict[str, Any]:
+        status_value = self.clean_text(status).lower()
+        if not self._valid_status(status_value):
+            return {"success": False, "error": "状态必须是 active 或 disabled", "code": "STATUS_INVALID"}
+        try:
+            normalized_ids = self._normalize_unique_ids(personnel_ids)
+            if not normalized_ids:
+                return {"success": False, "error": "请选择至少一个人员", "code": "VALIDATION_ERROR"}
+
+            details: list[dict[str, Any]] = []
+            success_count = 0
+            failed_count = 0
+            skipped_count = 0
+
+            for index, personnel_id in enumerate(normalized_ids, start=1):
+                record = self._repository.get_by_id(personnel_id)
+                if not record:
+                    failed_count += 1
+                    details.append(
+                        {
+                            "row": index,
+                            "personnel_id": personnel_id,
+                            "employee_no": "",
+                            "full_name": "",
+                            "status": "failed",
+                            "code": "PERSONNEL_NOT_FOUND",
+                            "message": "人员不存在",
+                        }
+                    )
+                    continue
+
+                employee_no = str(record.get("employee_no") or "")
+                full_name = str(record.get("full_name") or "")
+                current_status = self.clean_text(record.get("status")).lower() or "active"
+                if current_status == status_value:
+                    skipped_count += 1
+                    details.append(
+                        {
+                            "row": index,
+                            "personnel_id": personnel_id,
+                            "employee_no": employee_no,
+                            "full_name": full_name,
+                            "status": "skipped",
+                            "message": "状态未变化，已跳过",
+                        }
+                    )
+                    continue
+
+                updated_count = self._repository.update_personnel_status(personnel_id=personnel_id, status=status_value)
+                if updated_count <= 0:
+                    failed_count += 1
+                    details.append(
+                        {
+                            "row": index,
+                            "personnel_id": personnel_id,
+                            "employee_no": employee_no,
+                            "full_name": full_name,
+                            "status": "failed",
+                            "code": "UPDATE_ERROR",
+                            "message": "状态更新失败",
+                        }
+                    )
+                    continue
+
+                success_count += 1
+                details.append(
+                    {
+                        "row": index,
+                        "personnel_id": personnel_id,
+                        "employee_no": employee_no,
+                        "full_name": full_name,
+                        "status": "success",
+                        "message": "状态更新成功",
+                    }
+                )
+
+            return {
+                "success": True,
+                "message": "批量更新人员状态完成",
+                "data": {
+                    "summary": {
+                        "total": len(normalized_ids),
+                        "success": success_count,
+                        "failed": failed_count,
+                        "skipped": skipped_count,
+                    },
+                    "details": details,
+                },
+            }
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "批量更新人员状态失败", "code": "BATCH_UPDATE_ERROR"}
+
+    def batch_update_personnel_department(
+        self,
+        *,
+        personnel_ids: list[int],
+        primary_department_id: int | None,
+        secondary_department_id: int | None = None,
+        tertiary_department_id: int | None = None,
+    ) -> dict[str, Any]:
+        try:
+            normalized_ids = self._normalize_unique_ids(personnel_ids)
+            if not normalized_ids:
+                return {"success": False, "error": "请选择至少一个人员", "code": "VALIDATION_ERROR"}
+
+            department_validation = self._validate_personnel_department(
+                primary_department_id=primary_department_id,
+                secondary_department_id=secondary_department_id,
+                tertiary_department_id=tertiary_department_id,
+            )
+            if not department_validation.get("success"):
+                return department_validation
+            department_data = department_validation.get("data") if isinstance(department_validation.get("data"), dict) else {}
+            next_triplet = self._department_triplet_from_mapping(department_data)
+            department_display = str(department_data.get("department_display") or "")
+
+            details: list[dict[str, Any]] = []
+            success_count = 0
+            failed_count = 0
+            skipped_count = 0
+
+            for index, personnel_id in enumerate(normalized_ids, start=1):
+                record = self._repository.get_by_id(personnel_id)
+                if not record:
+                    failed_count += 1
+                    details.append(
+                        {
+                            "row": index,
+                            "personnel_id": personnel_id,
+                            "employee_no": "",
+                            "full_name": "",
+                            "status": "failed",
+                            "code": "PERSONNEL_NOT_FOUND",
+                            "message": "人员不存在",
+                        }
+                    )
+                    continue
+
+                employee_no = str(record.get("employee_no") or "")
+                full_name = str(record.get("full_name") or "")
+                previous_triplet = self._department_triplet_from_mapping(record)
+                if previous_triplet == next_triplet:
+                    skipped_count += 1
+                    details.append(
+                        {
+                            "row": index,
+                            "personnel_id": personnel_id,
+                            "employee_no": employee_no,
+                            "full_name": full_name,
+                            "status": "skipped",
+                            "message": "部门未变化，已跳过",
+                            "department_display": department_display,
+                        }
+                    )
+                    continue
+
+                update_payload = {
+                    "personnel_id": personnel_id,
+                    "primary_department_id": department_data.get("primary_department_id"),
+                    "secondary_department_id": department_data.get("secondary_department_id"),
+                    "tertiary_department_id": department_data.get("tertiary_department_id"),
+                }
+                atomic_update = getattr(self._repository, "update_personnel_and_sync_bound_users", None)
+                if callable(atomic_update):
+                    updated_count = atomic_update(**update_payload, sync_bound_users=True)
+                else:
+                    updated_count = self._repository.update_personnel(**update_payload)
+                    self._sync_bound_user_departments(personnel_id=personnel_id, department_data=department_data)
+                if updated_count <= 0:
+                    failed_count += 1
+                    details.append(
+                        {
+                            "row": index,
+                            "personnel_id": personnel_id,
+                            "employee_no": employee_no,
+                            "full_name": full_name,
+                            "status": "failed",
+                            "code": "UPDATE_ERROR",
+                            "message": "部门更新失败",
+                        }
+                    )
+                    continue
+
+                success_count += 1
+                details.append(
+                    {
+                        "row": index,
+                        "personnel_id": personnel_id,
+                        "employee_no": employee_no,
+                        "full_name": full_name,
+                        "status": "success",
+                        "message": "部门更新成功",
+                        "department_display": department_display,
+                    }
+                )
+
+            return {
+                "success": True,
+                "message": "批量修改人员部门完成",
+                "data": {
+                    "summary": {
+                        "total": len(normalized_ids),
+                        "success": success_count,
+                        "failed": failed_count,
+                        "skipped": skipped_count,
+                    },
+                    "details": details,
+                },
+            }
+        except Exception as exc:
+            if _is_db_unavailable_error(exc):
+                return self._db_error(exc)
+            return {"success": False, "error": "批量修改人员部门失败", "code": "BATCH_UPDATE_ERROR"}
 
     def force_delete_personnel(self, *, personnel_id: int, actor_user_id: int, admin_password: str) -> dict[str, Any]:
         password_error = self._validate_force_delete_password(

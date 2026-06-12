@@ -964,6 +964,143 @@ class DepartmentService:
             },
         }
 
+    def batch_update_department_status(self, *, items: list[dict[str, Any]], status: str) -> dict[str, Any]:
+        status_value = self.clean_text(status).lower()
+        if not self._valid_status(status_value):
+            return {"success": False, "error": "状态必须是 active 或 disabled", "code": "VALIDATION_ERROR"}
+        level_names = {"primary": "一级部门", "secondary": "二级部门", "tertiary": "三级部门"}
+        not_found_codes = {
+            "primary": "PRIMARY_DEPARTMENT_NOT_FOUND",
+            "secondary": "SECONDARY_DEPARTMENT_NOT_FOUND",
+            "tertiary": "TERTIARY_DEPARTMENT_NOT_FOUND",
+        }
+        raw_items = list(items or [])
+        if not raw_items:
+            return {"success": False, "error": "请选择至少一个部门", "code": "VALIDATION_ERROR"}
+
+        normalized_items: list[dict[str, Any]] = []
+        seen: set[tuple[str, int]] = set()
+        for raw_index, raw_item in enumerate(raw_items, start=1):
+            getter = raw_item.get if isinstance(raw_item, dict) else lambda key, default=None: getattr(raw_item, key, default)
+            level = self.clean_text(getter("level", "")).lower()
+            try:
+                department_id = int(getter("id", 0))
+            except Exception:
+                department_id = 0
+            key = (level or "__invalid__", department_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            if level not in level_names or department_id <= 0:
+                normalized_items.append({"row": raw_index, "level": level, "id": department_id, "invalid": True})
+                continue
+            normalized_items.append({"row": raw_index, "level": level, "id": department_id})
+
+        if not normalized_items:
+            return {"success": False, "error": "请选择至少一个部门", "code": "VALIDATION_ERROR"}
+
+        def run_update(level: str, department_id: int) -> int:
+            if level == "primary":
+                return self._repository.update_primary_status(primary_id=department_id, status=status_value)
+            if level == "secondary":
+                return self._repository.update_secondary_status(secondary_id=department_id, status=status_value)
+            return self._repository.update_tertiary_status(tertiary_id=department_id, status=status_value)
+
+        details: list[dict[str, Any]] = []
+        success_count = 0
+        failed_count = 0
+        skipped_count = 0
+
+        for item in normalized_items:
+            if item.get("invalid"):
+                failed_count += 1
+                details.append(
+                    {
+                        "row": item["row"],
+                        "level": item["level"],
+                        "id": item["id"],
+                        "department_name": "",
+                        "status": "failed",
+                        "code": "VALIDATION_ERROR",
+                        "message": "部门层级或 ID 无效",
+                    }
+                )
+                continue
+            record = self._load_department_for_level(level=item["level"], department_id=int(item["id"]))
+            department_name = str((record or {}).get("name") or "")
+            if not record:
+                failed_count += 1
+                details.append(
+                    {
+                        "row": item["row"],
+                        "level": item["level"],
+                        "level_name": level_names[item["level"]],
+                        "id": item["id"],
+                        "department_name": department_name,
+                        "status": "failed",
+                        "code": not_found_codes[item["level"]],
+                        "message": "部门不存在",
+                    }
+                )
+                continue
+            current_status = self._normalize_status(record.get("status"))
+            if current_status == status_value:
+                skipped_count += 1
+                details.append(
+                    {
+                        "row": item["row"],
+                        "level": item["level"],
+                        "level_name": level_names[item["level"]],
+                        "id": item["id"],
+                        "department_name": department_name,
+                        "status": "skipped",
+                        "message": "状态未变化，已跳过",
+                    }
+                )
+                continue
+            updated_count = run_update(item["level"], int(item["id"]))
+            if updated_count <= 0:
+                failed_count += 1
+                details.append(
+                    {
+                        "row": item["row"],
+                        "level": item["level"],
+                        "level_name": level_names[item["level"]],
+                        "id": item["id"],
+                        "department_name": department_name,
+                        "status": "failed",
+                        "code": "UPDATE_ERROR",
+                        "message": "状态更新失败",
+                    }
+                )
+                continue
+            success_count += 1
+            details.append(
+                {
+                    "row": item["row"],
+                    "level": item["level"],
+                    "level_name": level_names[item["level"]],
+                    "id": item["id"],
+                    "department_name": department_name,
+                    "status": "success",
+                    "message": "状态更新成功",
+                }
+            )
+
+        return {
+            "success": True,
+            "message": "批量更新部门状态完成",
+            "data": {
+                "summary": {
+                    "total": len(normalized_items),
+                    "success": success_count,
+                    "failed": failed_count,
+                    "skipped": skipped_count,
+                },
+                "details": details,
+            },
+        }
+
     def _load_department_for_level(self, *, level: str, department_id: int) -> dict[str, Any] | None:
         if level == "primary":
             return self._repository.get_primary_by_id(department_id)

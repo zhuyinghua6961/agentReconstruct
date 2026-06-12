@@ -1,11 +1,12 @@
 <script setup>
 import { computed, ref } from 'vue'
 import {
+  getPersonnelImportCreatedCount,
   filterPersonnelImportDetails,
   getPersonnelImportResultText,
   getPersonnelImportSkippedCount,
+  getPersonnelImportUpdatedCount,
   getPersonnelImportStatusClass,
-  getPersonnelImportSuccessCount,
 } from '../utils/personnelImportResult'
 
 const props = defineProps({
@@ -22,7 +23,8 @@ const filterStatus = ref('all')
 const summary = computed(() => props.result?.summary || {})
 const details = computed(() => props.result?.details || [])
 const duration = computed(() => props.result?.duration || 0)
-const successCount = computed(() => getPersonnelImportSuccessCount(summary.value))
+const createdCount = computed(() => getPersonnelImportCreatedCount(summary.value))
+const updatedCount = computed(() => getPersonnelImportUpdatedCount(summary.value))
 const skippedCount = computed(() => getPersonnelImportSkippedCount(summary.value))
 const failedCount = computed(() => Number(summary.value?.failed || 0))
 const totalCount = computed(() => Number(summary.value?.total || details.value.length || 0))
@@ -40,7 +42,8 @@ const filteredDetails = computed(() => {
 
 const filterOptions = computed(() => [
   { value: 'all', label: '全部', count: details.value.length },
-  { value: 'success', label: '成功', count: successCount.value },
+  { value: 'created', label: '新增', count: createdCount.value },
+  { value: 'updated', label: '更新', count: updatedCount.value },
   { value: 'failed', label: '失败', count: failedCount.value },
   { value: 'skipped', label: '跳过', count: skippedCount.value },
 ])
@@ -99,7 +102,7 @@ function close() {
           <div>
             <p class="result-title">{{ resultTitle }}</p>
             <p class="result-subtitle">
-              本次共处理 {{ totalCount }} 条记录，成功 {{ successCount }} 条
+              本次共处理 {{ totalCount }} 条记录，新增 {{ createdCount }} 条，更新 {{ updatedCount }} 条
               <template v-if="issueCount > 0">，需关注 {{ issueCount }} 条</template>
             </p>
           </div>
@@ -112,8 +115,12 @@ function close() {
             <span class="summary-value">{{ totalCount }}</span>
           </div>
           <div class="summary-item success">
-            <span class="summary-label">成功</span>
-            <span class="summary-value">{{ successCount }}</span>
+            <span class="summary-label">新增</span>
+            <span class="summary-value">{{ createdCount }}</span>
+          </div>
+          <div class="summary-item updated">
+            <span class="summary-label">更新</span>
+            <span class="summary-value">{{ updatedCount }}</span>
           </div>
           <div class="summary-item failed">
             <span class="summary-label">失败</span>
@@ -359,6 +366,10 @@ function close() {
   color: #15803d;
 }
 
+.summary-item.updated .summary-value {
+  color: #2563eb;
+}
+
 .summary-item.failed .summary-value {
   color: #dc2626;
 }
@@ -491,6 +502,11 @@ function close() {
 .status-success {
   background: #dcfce7;
   color: #166534;
+}
+
+.status-updated {
+  background: #dbeafe;
+  color: #1d4ed8;
 }
 
 .status-failed {

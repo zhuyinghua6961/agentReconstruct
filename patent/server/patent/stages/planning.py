@@ -395,13 +395,12 @@ def _merge_claim_filters(claims: list[PatentRetrievalClaim]) -> dict[str, Any]:
 
 
 def _retrieval_plan_from_claims(claims: list[PatentRetrievalClaim], *, question: str) -> PatentRetrievalPlan:
-    explicit_patent_ids = list(dict.fromkeys(
-        _extract_patent_ids(question)
-        + _extract_patent_ids(" ".join(
-            " ".join([claim.claim, *claim.keywords]).strip()
-            for claim in claims
-        ))
-    ))
+    explicit_claim_text = " ".join(
+        " ".join([claim.claim, *claim.keywords]).strip()
+        for claim in claims
+        if not bool(dict(claim.filters or {}).get("graph_seeded"))
+    )
+    explicit_patent_ids = list(dict.fromkeys(_extract_patent_ids(question) + _extract_patent_ids(explicit_claim_text)))
     candidate_recall_queries: list[str] = []
     evidence_localization_queries: list[str] = []
     preferred_sections: list[str] = []
