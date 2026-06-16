@@ -172,6 +172,66 @@ def _request_body(**overrides):
     return payload
 
 
+class _ConversationFilesStub:
+    def __init__(self, rows):
+        self._rows = rows
+
+    async def list_files(self, *, conversation_id, request=None):
+        _ = conversation_id, request
+        return list(self._rows)
+
+
+def test_create_task_short_circuits_file_not_ready_without_side_effects():
+    original_files = app.state.conversation_file_service
+    app.state.conversation_file_service = _ConversationFilesStub(
+        [
+            ConversationFileRow(
+                file_id=44,
+                file_type="pdf",
+                file_name="processing.pdf",
+                parse_status="uploaded",
+                index_status="pending",
+                processing_stage="indexing",
+                display_no=1,
+            )
+        ]
+    )
+    precheck_calls: list[str] = []
+    create_turn_calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/internal/quota/grants/precheck":
+            precheck_calls.append(path)
+            raise AssertionError("quota precheck should not run for blocked file status")
+        if path.endswith("/create-turn"):
+            create_turn_calls.append(path)
+            raise AssertionError("create-turn should not run for blocked file status")
+        return httpx.Response(200, json={"status": "ok", "path": path})
+
+    _set_task_transport(handler)
+    client = TestClient(app)
+    try:
+        response = client.post(
+            "/api/v1/tasks",
+            json=_request_body(
+                question="请总结这篇文献",
+                pdf_context={"selected_ids": [44]},
+            ),
+        )
+    finally:
+        app.state.conversation_file_service = original_files
+
+    assert response.status_code == 409
+    payload = response.json()
+    assert payload["code"] == "FILE_NOT_READY"
+    assert payload["retriable"] is True
+    assert payload["detail"]["selected_file_ids"] == [44]
+    assert precheck_calls == []
+    assert create_turn_calls == []
+    assert app.state.execution_queue_status_store.list_requests() == []
+
+
 def _queued_task_record(**overrides):
     record = {
         "request_id": "req_task_default",

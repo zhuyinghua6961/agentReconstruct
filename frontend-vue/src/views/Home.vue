@@ -489,11 +489,21 @@ function getTerminalMessageTitle(message) {
 }
 
 function getTerminalMessageDetail(message) {
+  const metadata = (message?.metadata && typeof message.metadata === 'object') ? message.metadata : {}
   const failureMessage = String(
     message?.failureMessage
     || message?.metadata?.failure_message
     || ''
   ).trim()
+  const presentation = buildRoutingErrorPresentation({
+    code: metadata?.error_code || metadata?.code || '',
+    error: metadata?.error_name || metadata?.error || '',
+    message: failureMessage || metadata?.error_message || '',
+    metadata,
+  })
+  if (presentation.kind === 'markdown' && String(presentation.markdown || '').trim()) {
+    return presentation.markdown
+  }
   if (failureMessage) return failureMessage
   const state = getTerminalMessageState(message)
   if (state === 'failed') return '这次回答没有成功完成，你可以稍后重试。'
@@ -1203,7 +1213,8 @@ function applyGatewayEvent(chatId, data, runtime = getStreamRuntime(chatId)) {
     const mergedMeta = mergeRoutingMetadata(existingMeta, data)
     const errorText = String(data.message || data.error || '处理失败')
     const presentation = buildRoutingErrorPresentation({
-      code: data.code,
+      code: data.code || (String(data.error || '').trim().toLowerCase() === 'execution_file_unavailable' ? 'EXECUTION_FILE_UNAVAILABLE' : ''),
+      error: data.error,
       message: errorText,
       metadata: mergedMeta,
       data: data.data,
@@ -1394,7 +1405,17 @@ const visibleConversationFiles = computed(() => {
 
 const visibleConversationFileCount = computed(() => visibleConversationFiles.value.length)
 const hasVisibleConversationFiles = computed(() => visibleConversationFileCount.value > 0)
-const hasSelectableConversationFiles = computed(() => mergedAndSortedFiles.value.length > 0)
+const hasSelectableConversationFiles = computed(() =>
+  mergedAndSortedFiles.value.some((file) => isFileReadyForQa(file))
+)
+
+const fileSelectionSendBlockReason = computed(() => {
+  if (selectedFileIds.value.length === 0) return ''
+  if (hasSelectedNonReadyFiles()) {
+    return '已选文件仍在处理中，请等待状态变为「就绪」后再提问。'
+  }
+  return ''
+})
 
 function isDraftFileItem(file) {
   return String(file?.type || '').startsWith('draft-')
@@ -1428,6 +1449,11 @@ function isFileSelected(fileId) {
 function toggleFileSelection(fileId) {
   const id = Number(fileId || 0)
   if (!id) return
+  const file = findConversationFileById(id)
+  if (file && !isFileReadyForQa(file)) {
+    alert('文件仍在处理中，请等待状态变为「就绪」后再选择。')
+    return
+  }
   const idx = selectedFileIds.value.indexOf(id)
   if (idx >= 0) {
     selectedFileIds.value.splice(idx, 1)
@@ -1438,6 +1464,7 @@ function toggleFileSelection(fileId) {
 
 function selectAllFiles() {
   selectedFileIds.value = mergedAndSortedFiles.value
+    .filter((item) => isFileReadyForQa(item))
     .map(item => Number(item?.file_id || 0))
     .filter(id => id > 0)
 }
@@ -1453,6 +1480,27 @@ function clearPendingDraftFiles() {
 function clearDraftChatState() {
   clearSelectedFiles()
   clearPendingDraftFiles()
+}
+
+function isFileReadyForQa(file) {
+  return normalizeFileStage(file) === 'ready'
+}
+
+function findConversationFileById(fileId) {
+  const id = Number(fileId || 0)
+  if (!id) return null
+  return mergedAndSortedFiles.value.find((file) => Number(file?.file_id || 0) === id) || null
+}
+
+function hasSelectedNonReadyFiles() {
+  return selectedFileIds.value.some((fileId) => {
+    const file = findConversationFileById(fileId)
+    return file && !isFileReadyForQa(file)
+  })
+}
+
+function getFileSelectionSendBlockReason() {
+  return String(fileSelectionSendBlockReason.value || '').trim()
 }
 
 function normalizeFileStage(file) {
@@ -1917,7 +1965,24 @@ async function sendTaskMessage(requestedChatId) {
     }
     if (result.reason === 'task_create_failed') {
       console.error('[task-create] 创建任务失败:', result.error)
-      alert(String(result?.error?.payload?.message || result?.error?.message || '创建任务失败'))
+      const errorPayload = result?.error?.payload && typeof result.error.payload === 'object'
+        ? result.error.payload
+        : {}
+      const presentation = buildRoutingErrorPresentation({
+        code: String(errorPayload?.code || result?.error?.code || '').trim(),
+        error: String(errorPayload?.error || result?.error?.message || '').trim(),
+        message: String(errorPayload?.message || result?.error?.message || '创建任务失败').trim(),
+        metadata: {
+          route: errorPayload?.route,
+          selected_file_ids: Array.isArray(errorPayload?.detail?.selected_file_ids)
+            ? errorPayload.detail.selected_file_ids
+            : [],
+        },
+      })
+      const alertText = presentation.kind === 'markdown'
+        ? presentation.markdown
+        : String(errorPayload?.message || result?.error?.message || '创建任务失败')
+      alert(alertText)
     }
   }
   return result
@@ -2072,6 +2137,12 @@ async function sendLegacyMessage(requestedChatId) {
 async function sendMessage() {
   if (!canSend.value) {
     if (isCurrentChatBusy.value) stopStreaming(store.currentChatId)
+    return
+  }
+
+  const selectionBlockReason = getFileSelectionSendBlockReason()
+  if (selectionBlockReason) {
+    alert(selectionBlockReason)
     return
   }
 
@@ -2593,7 +2664,10 @@ watch(
           <div class="pdf-list-actions">
             <button class="pdf-action-btn" @click="selectAllFiles" :disabled="!hasSelectableConversationFiles">全选</button>
             <button class="pdf-action-btn" @click="clearSelectedFiles" :disabled="!hasSelectableConversationFiles && selectedFileIds.length === 0">清空</button>
-            <span class="pdf-select-tip">已选 {{ selectedFileIds.length }} 个（不选则使用知识库问答）</span>
+            <span class="pdf-select-tip">
+              已选 {{ selectedFileIds.length }} 个（不选则使用知识库问答）
+              <template v-if="fileSelectionSendBlockReason"> · {{ fileSelectionSendBlockReason }}</template>
+            </span>
           </div>
         </div>
         <div v-show="!fileListCollapsed" class="pdf-list-items">
@@ -2603,14 +2677,16 @@ watch(
               class="pdf-list-item"
               :class="{
                 selected: !isDraftFileItem(file) && isFileSelected(file.file_id),
-                'pdf-list-item-draft': isDraftFileItem(file)
+                'pdf-list-item-draft': isDraftFileItem(file),
+                'pdf-list-item-not-ready': !isDraftFileItem(file) && !isFileReadyForQa(file)
               }"
-              @click="!isDraftFileItem(file) && toggleFileSelection(file.file_id)"
+              @click="!isDraftFileItem(file) && isFileReadyForQa(file) && toggleFileSelection(file.file_id)"
             >
-              <label v-if="!isDraftFileItem(file)" class="file-select-wrap" title="选择文件参与本轮问答" @click.stop>
+              <label v-if="!isDraftFileItem(file)" class="file-select-wrap" :title="isFileReadyForQa(file) ? '选择文件参与本轮问答' : '文件处理中，请等待就绪'" @click.stop>
                 <input
                   type="checkbox"
                   :checked="isFileSelected(file.file_id)"
+                  :disabled="!isFileReadyForQa(file)"
                   @change="toggleFileSelection(file.file_id)"
                 >
               </label>

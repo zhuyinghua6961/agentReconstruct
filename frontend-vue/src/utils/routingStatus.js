@@ -99,8 +99,21 @@ export function mergeRoutingMetadata(existingMeta = {}, event = {}) {
   return metadata
 }
 
-export function buildRoutingErrorMarkdown({ code = '', message = '', metadata = {} } = {}) {
-  const normalizedCode = String(code || '').trim().toUpperCase()
+function normalizeRoutingErrorCode({ code = '', error = '', metadata = {} } = {}) {
+  const normalizedCode = String(code || metadata?.error_code || '').trim().toUpperCase()
+  if (normalizedCode) return normalizedCode
+  const errorName = String(error || metadata?.error_name || '').trim().toLowerCase()
+  if (errorName === 'execution_file_unavailable') return 'EXECUTION_FILE_UNAVAILABLE'
+  if (errorName === 'file_not_ready') return 'FILE_NOT_READY'
+  if (errorName === 'file_processing_failed') return 'FILE_PROCESSING_FAILED'
+  if (errorName === 'file_not_found') return 'FILE_NOT_FOUND'
+  if (errorName === 'storage_ref_missing') return 'FILE_STORAGE_REF_MISSING'
+  if (errorName === 'storage_ref_not_minio') return 'FILE_STORAGE_REF_NOT_MINIO'
+  return String(errorName || '').trim().toUpperCase()
+}
+
+export function buildRoutingErrorMarkdown({ code = '', message = '', metadata = {}, error = '' } = {}) {
+  const normalizedCode = normalizeRoutingErrorCode({ code, error, metadata })
   const normalizedMessage = String(message || '').trim() || '处理失败'
   const routeLabel = getRouteModeLabel(metadata?.route)
   const selectedIds = Array.isArray(metadata?.selected_file_ids) ? metadata.selected_file_ids.filter(Boolean) : []
@@ -146,6 +159,30 @@ export function buildRoutingErrorMarkdown({ code = '', message = '', metadata = 
     return lines.join('\n')
   }
 
+  if (normalizedCode === 'EXECUTION_FILE_UNAVAILABLE') {
+    lines.push('系统暂时无法读取所选文件，当前不能开始文件问答。', '', normalizedMessage)
+    if (routeLabel) lines.push('', `当前路由：${routeLabel}`)
+    if (selectedIds.length > 0) lines.push(`已选文件：${selectedIds.map((id) => `#${id}`).join('、')}`)
+    lines.push('', '建议：等待文件状态变为“就绪”后重新提问；若仍失败，请重新上传文件。')
+    return lines.join('\n')
+  }
+
+  if (normalizedCode === 'FILE_STORAGE_REF_MISSING') {
+    lines.push('所选文件缺少可执行的存储引用。', '', normalizedMessage)
+    if (routeLabel) lines.push('', `当前路由：${routeLabel}`)
+    if (selectedIds.length > 0) lines.push(`已选文件：${selectedIds.map((id) => `#${id}`).join('、')}`)
+    lines.push('', '建议：重新上传文件，或刷新会话后重试。')
+    return lines.join('\n')
+  }
+
+  if (normalizedCode === 'FILE_STORAGE_REF_NOT_MINIO') {
+    lines.push('所选文件的存储格式当前不可用于问答。', '', normalizedMessage)
+    if (routeLabel) lines.push('', `当前路由：${routeLabel}`)
+    if (selectedIds.length > 0) lines.push(`已选文件：${selectedIds.map((id) => `#${id}`).join('、')}`)
+    lines.push('', '建议：重新上传文件后再试。')
+    return lines.join('\n')
+  }
+
   lines.push('处理失败', '', normalizedMessage)
   if (routeLabel) lines.push('', `当前路由：${routeLabel}`)
   return lines.join('\n')
@@ -160,12 +197,13 @@ function resolveChatQuotaFeatureTitle(metadata = {}, data = {}) {
   return '普通问答'
 }
 
-export function buildRoutingErrorPresentation({ code = '', message = '', metadata = {}, data = null } = {}) {
-  if (isQuotaBlockingErrorCode(code)) {
+export function buildRoutingErrorPresentation({ code = '', message = '', metadata = {}, data = null, error = '' } = {}) {
+  const normalizedCode = normalizeRoutingErrorCode({ code, error, metadata })
+  if (isQuotaBlockingErrorCode(normalizedCode)) {
     return {
       kind: 'quota_card',
       card: buildQuotaErrorCardModel({
-        code,
+        code: normalizedCode,
         message,
         data,
         featureTitle: resolveChatQuotaFeatureTitle(metadata, data || {}),
@@ -175,6 +213,6 @@ export function buildRoutingErrorPresentation({ code = '', message = '', metadat
 
   return {
     kind: 'markdown',
-    markdown: buildRoutingErrorMarkdown({ code, message, metadata }),
+    markdown: buildRoutingErrorMarkdown({ code: normalizedCode, message, metadata, error }),
   }
 }

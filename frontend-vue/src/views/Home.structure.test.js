@@ -421,3 +421,13 @@ test('Home scopes graph kb markdown styles through deep selectors instead of glo
   assertNoGlobalMessageContentSelector('li')
   assertNoGlobalMessageContentSelector('\\.doi-link')
 })
+
+test('Home blocks file QA until selected files are ready', () => {
+  assert.match(source, /function isFileReadyForQa\(file\)/)
+  assert.match(source, /function hasSelectedNonReadyFiles\(\)/)
+  assert.match(source, /const fileSelectionSendBlockReason = computed\(/)
+  assert.match(source, /filter\(\(item\) => isFileReadyForQa\(item\)\)/)
+  assert.match(source, /:disabled="!isFileReadyForQa\(file\)"/)
+  assert.match(source, /const selectionBlockReason = getFileSelectionSendBlockReason\(\)/)
+  assert.match(source, /buildRoutingErrorPresentation\(\{[\s\S]*code: String\(errorPayload\?\.code/s)
+})

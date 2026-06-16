@@ -13,6 +13,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.models.ask import AskRequest
 from app.providers.conversation_files.base import ConversationFileProviderError
+from app.services.file_route_gates import file_status_json_response as _file_status_json_response
+from app.services.file_route_gates import route_context_payload as _route_context_payload
 from app.services.proxy import ProxyService, StreamingProxyHandle
 from app.services.quota_proxy import QuotaProxyResult, QuotaProxyService
 from app.services.sse_frames import SSEFrameBuffer, parse_sse_json_frame
@@ -79,18 +81,6 @@ def _normalized_payload(*, payload: AskRequest, route_decision, file_context, tr
         "classifier_used": route_decision.classifier_used,
         "trace_id": trace_id,
         "options": payload.options,
-    }
-
-
-def _route_context_payload(route_decision) -> dict:
-    return {
-        "source_scope": route_decision.source_scope,
-        "selected_file_ids": list(route_decision.selected_file_ids or []),
-        "strategy": route_decision.strategy,
-        "file_selection": dict(route_decision.file_selection or {}),
-        "route_reasons": list(route_decision.route_reasons or []),
-        "route_confidence": route_decision.route_confidence,
-        "classifier_used": route_decision.classifier_used,
     }
 
 
@@ -434,31 +424,8 @@ def _clarification_stream(*, trace_id: str, route_decision) -> StreamingResponse
     )
 
 
-def _file_status_http_code(status_code: str) -> int:
-    if status_code == "FILE_NOT_FOUND":
-        return 404
-    return 409
-
-
 def _file_status_json(*, trace_id: str, route_decision) -> JSONResponse:
-    return JSONResponse(
-        status_code=_file_status_http_code(route_decision.status_code),
-        content={
-            "success": False,
-            "code": route_decision.status_code,
-            "error": route_decision.status_error or "file_state_blocked",
-            "message": route_decision.status_message or route_decision.status_code,
-            "trace_id": trace_id,
-            "requested_mode": route_decision.requested_mode,
-            "actual_mode": route_decision.actual_mode,
-            "route": route_decision.route,
-            "retriable": route_decision.status_retriable,
-            "detail": {
-                **dict(route_decision.status_detail or {}),
-                **_route_context_payload(route_decision),
-            },
-        },
-    )
+    return _file_status_json_response(trace_id=trace_id, route_decision=route_decision)
 
 
 def _file_status_stream(*, trace_id: str, route_decision) -> StreamingResponse:

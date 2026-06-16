@@ -112,7 +112,7 @@ async function fetchWithErrorHandling(url, options = {}) {
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
     handleApiError(payload, response);
-    const error = new Error(payload?.error || `HTTP ${response.status}`);
+    const error = new Error(payload?.message || payload?.error || `HTTP ${response.status}`);
     error.status = Number(response.status || 0);
     error.code = payload?.code || '';
     error.payload = payload;

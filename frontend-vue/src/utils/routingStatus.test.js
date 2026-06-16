@@ -85,6 +85,40 @@ test('buildRoutingErrorMarkdown formats file-not-ready status with retry guidanc
   assert.match(markdown, /等待文件状态变为“就绪”后再重试/)
 })
 
+test('buildRoutingErrorMarkdown formats execution_file_unavailable with retry and reupload guidance', () => {
+  const markdown = buildRoutingErrorMarkdown({
+    error: 'execution_file_unavailable',
+    message: 'uploaded file is not ready for direct reading yet',
+    metadata: {
+      route: 'pdf_qa',
+      selected_file_ids: [15],
+    },
+  })
+
+  assert.match(markdown, /系统暂时无法读取所选文件/)
+  assert.match(markdown, /已选文件：#15/)
+  assert.match(markdown, /等待文件状态变为“就绪”后重新提问/)
+  assert.match(markdown, /重新上传文件/)
+})
+
+test('buildRoutingErrorMarkdown formats storage ref errors with reupload guidance', () => {
+  const missingRef = buildRoutingErrorMarkdown({
+    code: 'FILE_STORAGE_REF_MISSING',
+    message: '文件 sample.pdf 缺少可执行的 MinIO 存储引用',
+    metadata: { route: 'pdf_qa', selected_file_ids: [9] },
+  })
+  assert.match(missingRef, /缺少可执行的存储引用/)
+  assert.match(missingRef, /重新上传文件/)
+
+  const notMinio = buildRoutingErrorMarkdown({
+    code: 'FILE_STORAGE_REF_NOT_MINIO',
+    message: '文件 sample.pdf 存储格式不可用',
+    metadata: { route: 'pdf_qa', selected_file_ids: [9] },
+  })
+  assert.match(notMinio, /存储格式当前不可用于问答/)
+  assert.match(notMinio, /重新上传文件后再试/)
+})
+
 test('buildRoutingErrorPresentation returns quota card model for chat quota failures', () => {
   const presentation = buildRoutingErrorPresentation({
     code: 'QUOTA_EXCEEDED',

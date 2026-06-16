@@ -20,6 +20,7 @@ from fastapi.responses import StreamingResponse
 
 from app.core.auth import AuthContext
 from app.models.ask import AskRequest
+from app.services.file_route_gates import file_status_json_response
 from app.services.execution_admission import (
     AdmissionExecutionOutcome,
     ExecutionAdmissionDispatcher,
@@ -334,6 +335,10 @@ class QATaskService:
                 route_status_code=route_status_code,
                 route_status_message=str(getattr(route_decision, "status_message", "") or "").strip()[:160],
                 route_status_retriable=bool(getattr(route_decision, "status_retriable", False)),
+            )
+            return file_status_json_response(
+                trace_id=f"task_gate_{uuid4().hex}",
+                route_decision=route_decision,
             )
         self._assert_route_enabled(route_decision)
         lock_manager = getattr(self.app.state, "distributed_lock_manager", None)
