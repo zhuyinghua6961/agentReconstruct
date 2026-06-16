@@ -88,17 +88,17 @@ def test_pdf_files_exist_but_plain_question_stays_kb():
     assert decision.selected_file_ids == []
 
 
-def test_selected_files_only_do_not_direct_route_plain_question():
+def test_selected_files_route_plain_question_to_file_qa():
     decision = resolver.resolve(
         question="磷酸铁锂电压范围是多少？",
         pdf_context={"selected_ids": [11]},
         available_files=[PDF],
     )
 
-    assert decision.route == "kb_qa"
-    assert decision.turn_mode == "kb_only"
+    assert decision.route == "pdf_qa"
+    assert decision.turn_mode == "file_only"
     assert decision.selected_file_ids == [11]
-    assert decision.strategy == "selected_ids_no_file_intent"
+    assert decision.strategy == "explicit_selection"
 
 
 def test_selected_files_with_explicit_file_action_routes_to_file_qa():
@@ -184,18 +184,18 @@ def test_gateway_records_storage_ref_missing_metric(monkeypatch):
     ) == 1
 
 
-def test_doi_lookup_with_singular_literature_word_stays_kb_with_available_files():
+def test_doi_lookup_with_selected_files_routes_to_file_scope():
     decision = resolver.resolve(
         question="10.1021/jp1005692 这篇文献是什么？",
         pdf_context={"selected_ids": [11, 22]},
         available_files=[PDF, PDF_2],
     )
 
-    assert decision.route == "kb_qa"
-    assert decision.turn_mode == "kb_only"
+    assert decision.route == "pdf_qa"
+    assert decision.turn_mode == "file_only"
     assert decision.needs_clarification is False
     assert decision.selected_file_ids == [11, 22]
-    assert decision.strategy == "selected_ids_no_file_intent"
+    assert decision.strategy == "explicit_selection"
 
 
 def test_classifier_is_not_called_for_deterministic_explicit_route():
@@ -242,8 +242,8 @@ def test_classifier_is_called_for_ambiguity_cases_only():
         available_files=[PDF],
     )
 
-    assert decision.route == "kb_qa"
-    assert len(classifier.calls) == 1
+    assert decision.route == "pdf_qa"
+    assert classifier.calls == []
 
 
 def test_classifier_is_not_called_for_plain_kb_questions_when_only_available_files_exist():
@@ -292,7 +292,7 @@ def test_classifier_low_confidence_falls_back_to_rule_default():
         available_files=[PDF],
     )
 
-    assert decision.route == "kb_qa"
+    assert decision.route == "pdf_qa"
     assert decision.classifier_used is False
 
 
@@ -319,7 +319,7 @@ def test_classifier_high_confidence_can_choose_pdf_route():
     assert decision.route == "pdf_qa"
     assert decision.turn_mode == "file_only"
     assert decision.selected_file_ids == [11]
-    assert decision.classifier_used is True
+    assert decision.classifier_used is False
 
 
 def test_classifier_mid_conflict_file_route_does_not_override_rule_layer():
@@ -342,7 +342,7 @@ def test_classifier_mid_conflict_file_route_does_not_override_rule_layer():
         available_files=[PDF],
     )
 
-    assert decision.route == "kb_qa"
+    assert decision.route == "pdf_qa"
     assert decision.classifier_used is False
 
 
@@ -366,10 +366,10 @@ def test_classifier_high_confidence_can_choose_hybrid_route():
         available_files=[PDF],
     )
 
-    assert decision.route == "hybrid_qa"
-    assert decision.turn_mode == "mixed"
-    assert decision.allow_kb_verification is True
-    assert decision.classifier_used is True
+    assert decision.route == "pdf_qa"
+    assert decision.turn_mode == "file_only"
+    assert decision.allow_kb_verification is False
+    assert decision.classifier_used is False
 
 
 def test_selected_files_with_non_deictic_file_action_routes_to_file_qa():
@@ -382,7 +382,7 @@ def test_selected_files_with_non_deictic_file_action_routes_to_file_qa():
     assert decision.route == "pdf_qa"
     assert decision.turn_mode == "file_only"
     assert decision.selected_file_ids == [11, 22]
-    assert decision.strategy == "selected_scope"
+    assert decision.strategy == "explicit_selection"
 
 
 def test_selected_files_with_action_target_pattern_routes_to_file_qa():
@@ -395,10 +395,10 @@ def test_selected_files_with_action_target_pattern_routes_to_file_qa():
     assert decision.route == "pdf_qa"
     assert decision.turn_mode == "file_only"
     assert decision.selected_file_ids == [11, 22]
-    assert decision.strategy == "selected_scope"
+    assert decision.strategy == "explicit_selection"
 
 
-def test_explicit_ref_uses_display_order_reference_universe():
+def test_explicit_ref_without_selection_stays_kb():
     decision = resolver.resolve(
         question="#1",
         pdf_context={"all_available_ids": [11, 22]},
@@ -422,11 +422,11 @@ def test_explicit_ref_uses_display_order_reference_universe():
         ],
     )
 
-    assert decision.route == "pdf_qa"
-    assert decision.selected_file_ids == [22]
+    assert decision.route == "kb_qa"
+    assert decision.selected_file_ids == []
 
 
-def test_ordinal_ref_uses_display_order_reference_universe():
+def test_ordinal_ref_without_selection_stays_kb():
     decision = resolver.resolve(
         question="前 2 个文件",
         pdf_context={"all_available_ids": [11, 22, 33]},
@@ -458,14 +458,14 @@ def test_ordinal_ref_uses_display_order_reference_universe():
         ],
     )
 
-    assert decision.route == "hybrid_qa" or decision.route == "pdf_qa"
-    assert decision.selected_file_ids == [22, 33]
+    assert decision.route == "kb_qa"
+    assert decision.selected_file_ids == []
 
 
-def test_explicit_ref_to_processing_file_returns_file_not_ready_status():
+def test_selected_processing_file_returns_file_not_ready_status():
     decision = resolver.resolve(
-        question="#1",
-        pdf_context={"all_available_ids": [44]},
+        question="电压范围是多少？",
+        pdf_context={"selected_ids": [44]},
         available_files=[PROCESSING_PDF],
     )
 
@@ -477,10 +477,10 @@ def test_explicit_ref_to_processing_file_returns_file_not_ready_status():
     assert decision.status_retriable is True
 
 
-def test_explicit_ref_to_failed_file_returns_processing_failed_status():
+def test_selected_failed_file_returns_processing_failed_status():
     decision = resolver.resolve(
-        question="#1",
-        pdf_context={"all_available_ids": [55]},
+        question="电压范围是多少？",
+        pdf_context={"selected_ids": [55]},
         available_files=[FAILED_PDF],
     )
 
@@ -492,7 +492,7 @@ def test_explicit_ref_to_failed_file_returns_processing_failed_status():
     assert decision.status_retriable is False
 
 
-def test_explicit_ref_without_metadata_requires_clarification():
+def test_explicit_ref_without_selection_stays_kb_without_clarification():
     decision = resolver.resolve(
         question="#1",
         pdf_context={"all_available_ids": [77]},
@@ -501,12 +501,11 @@ def test_explicit_ref_without_metadata_requires_clarification():
 
     assert decision.route == "kb_qa"
     assert decision.turn_mode == "kb_only"
-    assert decision.needs_clarification is True
-    assert decision.status_code == ""
-    assert decision.selected_file_ids == [77]
+    assert decision.needs_clarification is False
+    assert decision.selected_file_ids == []
 
 
-def test_out_of_range_ordinal_ref_requires_clarification():
+def test_out_of_range_ordinal_ref_without_selection_stays_kb():
     decision = resolver.resolve(
         question="第 3 个文件",
         pdf_context={"all_available_ids": [11, 22]},
@@ -515,11 +514,10 @@ def test_out_of_range_ordinal_ref_requires_clarification():
 
     assert decision.route == "kb_qa"
     assert decision.turn_mode == "kb_only"
-    assert decision.needs_clarification is True
-    assert decision.status_code == ""
+    assert decision.needs_clarification is False
 
 
-def test_out_of_range_reverse_ordinal_ref_requires_clarification():
+def test_out_of_range_reverse_ordinal_ref_without_selection_stays_kb():
     decision = resolver.resolve(
         question="倒数第 3 个文件",
         pdf_context={"all_available_ids": [11, 22]},
@@ -528,11 +526,10 @@ def test_out_of_range_reverse_ordinal_ref_requires_clarification():
 
     assert decision.route == "kb_qa"
     assert decision.turn_mode == "kb_only"
-    assert decision.needs_clarification is True
-    assert decision.status_code == ""
+    assert decision.needs_clarification is False
 
 
-def test_multiple_table_candidates_include_candidate_summary_in_clarification():
+def test_multiple_selected_tables_route_without_clarification():
     table_2 = ConversationFileRow(
         file_id=34,
         file_type="excel",
@@ -546,9 +543,10 @@ def test_multiple_table_candidates_include_candidate_summary_in_clarification():
         available_files=[TABLE, table_2],
     )
 
-    assert decision.needs_clarification is True
-    assert decision.strategy == "clarify_required"
-    assert [candidate["file_id"] for candidate in decision.clarify_candidates] == [33, 34]
+    assert decision.needs_clarification is False
+    assert decision.route == "tabular_qa"
+    assert decision.strategy == "explicit_selection"
+    assert decision.selected_file_ids == [33, 34]
 
 
 def test_selected_files_with_explicit_mixed_intent_routes_to_hybrid():
@@ -573,7 +571,7 @@ def test_selected_files_with_non_deictic_mixed_intent_routes_to_mixed_path():
     assert decision.route == "pdf_qa"
     assert decision.turn_mode == "mixed"
     assert decision.selected_file_ids == [11, 22]
-    assert decision.strategy == "selected_scope"
+    assert decision.strategy == "explicit_selection"
     assert decision.allow_kb_verification is True
 
 
@@ -587,7 +585,7 @@ def test_selected_files_with_action_target_mixed_question_routes_to_mixed_path()
     assert decision.route == "pdf_qa"
     assert decision.turn_mode == "mixed"
     assert decision.selected_file_ids == [11]
-    assert decision.strategy == "selected_scope"
+    assert decision.strategy == "explicit_selection"
     assert decision.allow_kb_verification is True
 
 
@@ -604,21 +602,21 @@ def test_selected_scope_does_not_route_generic_file_topic_questions():
             available_files=[PDF, PDF_2],
         )
 
-        assert decision.route == "kb_qa"
-        assert decision.turn_mode == "kb_only"
-        assert decision.strategy == "selected_ids_no_file_intent"
+        assert decision.route == "pdf_qa"
+        assert decision.turn_mode == "file_only"
+        assert decision.strategy == "explicit_selection"
 
 
-def test_selected_scope_does_not_route_generic_file_topic_with_single_selected_file():
+def test_selected_scope_routes_generic_file_topic_when_files_are_selected():
     decision = resolver.resolve(
         question="如何分析论文的实验设计？",
         pdf_context={"selected_ids": [11]},
         available_files=[PDF],
     )
 
-    assert decision.route == "kb_qa"
-    assert decision.turn_mode == "kb_only"
-    assert decision.strategy == "selected_ids_no_file_intent"
+    assert decision.route == "pdf_qa"
+    assert decision.turn_mode == "file_only"
+    assert decision.strategy == "explicit_selection"
 
 
 def test_invalid_selected_ids_do_not_direct_route_selected_scope_actions():
@@ -666,10 +664,10 @@ def test_invalid_selected_ids_do_not_force_table_reference_route():
         available_files=[TABLE],
     )
 
-    assert decision.route == "tabular_qa"
-    assert decision.turn_mode == "file_only"
-    assert decision.selected_file_ids == [33]
-    assert decision.strategy == "single_candidate"
+    assert decision.route == "kb_qa"
+    assert decision.turn_mode == "kb_only"
+    assert decision.needs_clarification is True
+    assert decision.strategy == "clarify_required"
 
 
 def test_single_token_table_words_do_not_route_pdf_turns_to_tabular():
@@ -696,16 +694,16 @@ def test_explicit_table_operations_route_selected_table_to_tabular():
     assert decision.selected_file_ids == [33]
 
 
-def test_explicit_table_operations_filter_out_pdf_candidates():
+def test_explicit_table_operations_with_pdf_and_table_selection_route_hybrid():
     decision = resolver.resolve(
         question="按电压列筛选并输出前 5 行",
         pdf_context={"selected_ids": [11, 33]},
         available_files=[PDF, TABLE],
     )
 
-    assert decision.route == "tabular_qa"
+    assert decision.route == "hybrid_qa"
     assert decision.turn_mode == "file_only"
-    assert decision.selected_file_ids == [33]
+    assert decision.selected_file_ids == [11, 33]
 
 
 def test_structured_table_patterns_do_not_route_when_no_table_candidates_exist():
@@ -729,7 +727,7 @@ def test_invalid_newly_uploaded_ids_do_not_force_latest_upload_route():
 
     assert decision.route == "kb_qa"
     assert decision.turn_mode == "kb_only"
-    assert decision.strategy == "clarify_required"
+    assert decision.strategy == "none"
 
 
 def test_latest_file_phrase_does_not_trigger_latest_upload_reuse():
@@ -756,19 +754,19 @@ def test_last_focus_requires_real_route_name_not_generic_mode_words():
 
     assert decision.route == "kb_qa"
     assert decision.turn_mode == "kb_only"
-    assert decision.strategy == "clarify_required"
+    assert decision.strategy == "none"
 
 
-def test_selected_scope_mixed_rule_does_not_route_generic_mixed_questions():
+def test_selected_scope_mixed_rule_routes_generic_mixed_questions_when_selected():
     decision = resolver.resolve(
         question="结合知识库分析文献综述应该怎么写",
         pdf_context={"selected_ids": [11, 22]},
         available_files=[PDF, PDF_2],
     )
 
-    assert decision.route == "kb_qa"
-    assert decision.turn_mode == "kb_only"
-    assert decision.strategy == "selected_ids_no_file_intent"
+    assert decision.route == "pdf_qa"
+    assert decision.turn_mode == "mixed"
+    assert decision.strategy == "explicit_selection"
 
 
 def test_selected_scope_action_pattern_does_not_match_generic_suffix_questions():
@@ -783,13 +781,13 @@ def test_selected_scope_action_pattern_does_not_match_generic_suffix_questions()
         available_files=[PDF, PDF_2],
     )
 
-    assert plain.route == "kb_qa"
-    assert plain.turn_mode == "kb_only"
-    assert mixed.route == "kb_qa"
-    assert mixed.turn_mode == "kb_only"
+    assert plain.route == "pdf_qa"
+    assert plain.turn_mode == "file_only"
+    assert mixed.route == "pdf_qa"
+    assert mixed.turn_mode == "mixed"
 
 
-def test_selected_scope_reference_meta_questions_do_not_direct_route():
+def test_selected_scope_reference_meta_questions_route_when_selected():
     plain = resolver.resolve(
         question="应该怎么总结所选文件？",
         pdf_context={"selected_ids": [11, 22]},
@@ -801,13 +799,13 @@ def test_selected_scope_reference_meta_questions_do_not_direct_route():
         available_files=[PDF, PDF_2],
     )
 
-    assert plain.route == "kb_qa"
-    assert plain.turn_mode == "kb_only"
-    assert mixed.route == "kb_qa"
-    assert mixed.turn_mode == "kb_only"
+    assert plain.route == "pdf_qa"
+    assert plain.turn_mode == "file_only"
+    assert mixed.route == "pdf_qa"
+    assert mixed.turn_mode == "mixed"
 
 
-def test_invalid_selected_ids_selected_scope_meta_questions_stay_kb_only():
+def test_invalid_selected_ids_selected_scope_meta_questions_require_clarification():
     decision = resolver.resolve(
         question="请说明所选文件上传失败怎么处理",
         pdf_context={"selected_ids": [999], "all_available_ids": [11, 22]},
@@ -816,8 +814,8 @@ def test_invalid_selected_ids_selected_scope_meta_questions_stay_kb_only():
 
     assert decision.route == "kb_qa"
     assert decision.turn_mode == "kb_only"
-    assert decision.needs_clarification is False
-    assert decision.strategy == "selected_ids_no_file_intent"
+    assert decision.needs_clarification is True
+    assert decision.strategy == "clarify_required"
 
 
 def test_last_focus_without_deictic_reference_does_not_force_file_route():
@@ -836,7 +834,7 @@ def test_last_focus_without_deictic_reference_does_not_force_file_route():
     assert decision.selected_file_ids == []
 
 
-def test_valid_deictic_last_focus_reuse_routes_to_file():
+def test_deictic_last_focus_without_selection_stays_kb():
     decision = resolver.resolve(
         question="请继续总结这篇文献",
         pdf_context={
@@ -847,9 +845,9 @@ def test_valid_deictic_last_focus_reuse_routes_to_file():
         available_files=[PDF, PDF_2],
     )
 
-    assert decision.route == "pdf_qa"
-    assert decision.selected_file_ids == [22]
-    assert decision.strategy == "last_focus"
+    assert decision.route == "kb_qa"
+    assert decision.selected_file_ids == []
+    assert decision.strategy == "none"
 
 
 def test_invalid_last_focus_reuse_does_not_force_file_route():
@@ -881,7 +879,7 @@ def test_last_turn_route_alone_does_not_force_route():
     assert decision.turn_mode == "kb_only"
 
 
-def test_newly_uploaded_is_only_reused_for_latest_upload_language():
+def test_newly_uploaded_without_selection_stays_kb():
     plain = resolver.resolve(
         question="请总结这篇文献",
         pdf_context={
@@ -899,8 +897,7 @@ def test_newly_uploaded_is_only_reused_for_latest_upload_language():
         available_files=[PDF, PDF_2],
     )
 
-    assert plain.needs_clarification is True
-    assert plain.selected_file_ids == [11, 22]
-    assert latest.route == "pdf_qa"
-    assert latest.selected_file_ids == [22]
-    assert latest.strategy == "latest_new_upload"
+    assert plain.route == "kb_qa"
+    assert plain.needs_clarification is False
+    assert latest.route == "kb_qa"
+    assert latest.selected_file_ids == []

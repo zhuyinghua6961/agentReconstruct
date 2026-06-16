@@ -24,6 +24,43 @@ from app.services.file_qa_helpers import (
 _LOGGER = logging.getLogger("fastqa.file_routes")
 
 
+def _describe_file_items_for_log(files: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        file_id = item.get("file_id")
+        file_type = str(item.get("file_type") or "").strip().lower() or "?"
+        has_local = bool(str(item.get("local_path") or "").strip())
+        has_minio = str(item.get("storage_ref") or "").strip().startswith("minio://")
+        storage_error = str(item.get("storage_error") or "").strip()
+        chunk = f"{file_id}:{file_type}:local={int(has_local)}:minio={int(has_minio)}"
+        if storage_error:
+            chunk = f"{chunk}:storage_error={storage_error[:48]}"
+        parts.append(chunk)
+    if not parts:
+        return "files=none"
+    return f"files=[{';'.join(parts)}]"
+
+
+def _log_pdf_route_blocked(
+    *,
+    logger: Any,
+    reason: str,
+    trace_id: str = "",
+    **fields: Any,
+) -> None:
+    target = logger if logger is not None else _LOGGER
+    parts = [f"reason={reason}"]
+    if trace_id:
+        parts.append(f"trace_id={trace_id}")
+    for key, value in fields.items():
+        if value is None:
+            continue
+        parts.append(f"{key}={value}")
+    target.warning("fastqa pdf route blocked %s", " ".join(parts))
+
+
 class FileRouteRuntimeError(RuntimeError):
     pass
 
@@ -261,6 +298,14 @@ def iter_pdf_route_events(
         ),
         logger=logger,
     )
+    trace_id = str(getattr(adapted_request, "trace_id", "") or "").strip()
+    if logger is not None:
+        logger.info(
+            "fastqa pdf route materialized conversation_id=%s trace_id=%s %s",
+            getattr(adapted_request, "conversation_id", None),
+            trace_id or "-",
+            _describe_file_items_for_log(list(execution_files)),
+        )
     pdf_files = [
         item
         for item in execution_files
@@ -282,6 +327,17 @@ def iter_pdf_route_events(
                 source_family="upload_pdf",
                 result="direct_pdf_path_blocked",
             )
+        _log_pdf_route_blocked(
+            logger=logger,
+            reason="materialized_pdf_not_readable",
+            trace_id=trace_id,
+            conversation_id=getattr(adapted_request, "conversation_id", None),
+            pdf_count=len(pdf_files),
+            readable_pdf_count=len(readable_pdf_files),
+            strict_minio_only=True,
+            direct_pdf_path_blocked=bool(direct_pdf_path),
+            files=_describe_file_items_for_log(list(pdf_files)),
+        )
         yield {
             "type": "error",
             "error": "execution_file_unavailable",
@@ -295,6 +351,13 @@ def iter_pdf_route_events(
             source_family="upload_pdf",
             result="direct_pdf_path_blocked",
         )
+        _log_pdf_route_blocked(
+            logger=logger,
+            reason="direct_pdf_path_blocked",
+            trace_id=trace_id,
+            conversation_id=getattr(adapted_request, "conversation_id", None),
+            direct_pdf_path_present=True,
+        )
         yield {
             "type": "error",
             "error": "execution_file_unavailable",
@@ -307,6 +370,14 @@ def iter_pdf_route_events(
         or ""
     ).strip()
     if pdf_files and not pdf_path:
+        _log_pdf_route_blocked(
+            logger=logger,
+            reason="pdf_path_missing_after_materialize",
+            trace_id=trace_id,
+            conversation_id=getattr(adapted_request, "conversation_id", None),
+            pdf_count=len(pdf_files),
+            files=_describe_file_items_for_log(list(pdf_files)),
+        )
         yield {
             "type": "error",
             "error": "execution_file_unavailable",
@@ -314,6 +385,12 @@ def iter_pdf_route_events(
         }
         return
     if not pdf_path and not pdf_files:
+        _log_pdf_route_blocked(
+            logger=logger,
+            reason="no_pdf_source",
+            trace_id=trace_id,
+            conversation_id=getattr(adapted_request, "conversation_id", None),
+        )
         yield {"type": "error", "error": "pdf_path_missing", "message": "PDF branch selected but no readable PDF source is available"}
         return
 

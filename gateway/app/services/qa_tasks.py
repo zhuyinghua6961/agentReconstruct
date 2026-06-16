@@ -68,6 +68,44 @@ def _task_events_debug_enabled() -> bool:
     return _is_truthy_env_flag(os.getenv("GATEWAY_TASK_EVENTS_DEBUG"))
 
 
+def _summarize_files_for_log(files: list[dict[str, Any]] | None, *, label: str = "files") -> str:
+    parts: list[str] = []
+    for item in list(files or []):
+        if not isinstance(item, dict):
+            continue
+        file_id = item.get("file_id")
+        file_type = str(item.get("file_type") or "").strip().lower() or "?"
+        parse_status = str(item.get("parse_status") or "").strip().lower() or "-"
+        index_status = str(item.get("index_status") or "").strip().lower() or "-"
+        stage = str(item.get("processing_stage") or "").strip().lower() or "-"
+        has_local = bool(str(item.get("local_path") or "").strip())
+        has_minio = str(item.get("storage_ref") or "").strip().startswith("minio://")
+        storage_error = str(item.get("storage_error") or "").strip()
+        chunk = (
+            f"{file_id}:{file_type}:parse={parse_status}:index={index_status}:stage={stage}"
+            f":local={int(has_local)}:minio={int(has_minio)}"
+        )
+        if storage_error:
+            chunk = f"{chunk}:storage_error={storage_error[:48]}"
+        parts.append(chunk)
+    if not parts:
+        return f"{label}=none"
+    return f"{label}=[{';'.join(parts)}]"
+
+
+def _execution_snapshot_file_log(request: dict[str, Any]) -> str:
+    snapshot = dict(request.get("execution_snapshot") or {})
+    execution_summary = _summarize_files_for_log(
+        list(snapshot.get("execution_files") or request.get("execution_files") or []),
+        label="execution_files",
+    )
+    used_summary = _summarize_files_for_log(
+        list(snapshot.get("used_files") or []),
+        label="used_files",
+    )
+    return f"{execution_summary} {used_summary}"
+
+
 def _summarize_public_event_batch(events: list[dict[str, Any]]) -> dict[str, Any]:
     first = events[0] if events else None
     last = events[-1] if events else None
@@ -265,6 +303,7 @@ class QATaskService:
         conversation_id = self._require_positive_int(bound_payload.conversation_id, detail="task_conversation_id_required")
         user_id = self._require_positive_int(bound_payload.user_id, detail="task_user_id_required")
         route_decision, file_context = await self._resolve_route(bound_payload)
+        route_status_code = str(getattr(route_decision, "status_code", "") or "").strip()
         _log_task_event(
             "task create accepted",
             conversation_id=conversation_id,
@@ -272,8 +311,30 @@ class QATaskService:
             requested_mode=bound_payload.requested_mode,
             actual_mode=route_decision.actual_mode,
             route=route_decision.route,
+            strategy=getattr(route_decision, "strategy", None),
+            selected_file_ids=list(getattr(route_decision, "selected_file_ids", None) or []),
+            route_status_code=route_status_code or "-",
+            route_status_error=str(getattr(route_decision, "status_error", "") or "").strip() or "-",
+            execution_files=_summarize_files_for_log(
+                list(getattr(route_decision, "execution_files", None) or []),
+                label="execution_files",
+            ),
+            used_files=_summarize_files_for_log(
+                list(getattr(file_context, "used_files", None) or []),
+                label="used_files",
+            ),
             elapsed_ms=round((time.perf_counter() - started) * 1000, 3),
         )
+        if route_status_code:
+            _log_task_event(
+                "task create route gate present",
+                conversation_id=conversation_id,
+                user_id=user_id,
+                route=route_decision.route,
+                route_status_code=route_status_code,
+                route_status_message=str(getattr(route_decision, "status_message", "") or "").strip()[:160],
+                route_status_retriable=bool(getattr(route_decision, "status_retriable", False)),
+            )
         self._assert_route_enabled(route_decision)
         lock_manager = getattr(self.app.state, "distributed_lock_manager", None)
         lock_handle = None
@@ -447,6 +508,16 @@ class QATaskService:
                     requested_mode=bound_payload.requested_mode,
                     actual_mode=route_decision.actual_mode,
                     route=route_decision.route,
+                    selected_file_ids=list(route_decision.selected_file_ids or []),
+                    route_status_code=route_status_code or "-",
+                    execution_files=_summarize_files_for_log(
+                        list(route_decision.execution_files or []),
+                        label="execution_files",
+                    ),
+                    used_files=_summarize_files_for_log(
+                        list(file_context.used_files or []),
+                        label="used_files",
+                    ),
                     elapsed_ms=round((time.perf_counter() - started) * 1000, 3),
                 )
             except httpx.HTTPStatusError as exc:
@@ -1159,7 +1230,25 @@ class QATaskService:
             now_epoch=time.time(),
         )
         if claim.outcome != "claimed":
+            _log_task_event(
+                "task immediate dispatch skipped",
+                task_id=task_id,
+                conversation_id=record.get("conversation_id"),
+                route=record.get("route"),
+                outcome=claim.outcome,
+                reason=claim.reason or "-",
+                owner_id=owner_id,
+            )
             return
+
+        _log_task_event(
+            "task immediate dispatch started",
+            task_id=task_id,
+            conversation_id=record.get("conversation_id"),
+            route=record.get("route"),
+            owner_id=owner_id,
+            dispatch_attempts=(claim.request or {}).get("dispatch_attempts"),
+        )
 
         worker = ExecutionAdmissionWorker(
             dispatcher=dispatcher,
@@ -1704,6 +1793,16 @@ class GatewayTaskExecutor:
         if not request_id:
             return AdmissionExecutionOutcome(outcome="failed", reason="task_request_id_missing", terminal_status="failed")
         execute_started = time.perf_counter()
+        _log_task_event(
+            "task execute begin",
+            request_id=request_id,
+            conversation_id=request.get("conversation_id"),
+            actual_mode=request.get("actual_mode"),
+            route=request.get("route"),
+            owner_id=str(lease.get("owner_id") or request.get("lease_owner_id") or "").strip() or "-",
+            selected_file_ids=list(request.get("selected_file_ids") or []),
+            file_context=_execution_snapshot_file_log(request),
+        )
         internal_request = self._build_internal_request(
             trace_id=request_id,
             actual_mode=request.get("actual_mode"),
@@ -1763,13 +1862,24 @@ class GatewayTaskExecutor:
             cancel_event.set()
             self._unregister_live_handle(request_id)
             return terminalized
+        upstream_payload = self._upstream_payload(request)
+        _log_task_event(
+            "task upstream open begin",
+            request_id=request_id,
+            conversation_id=request.get("conversation_id"),
+            actual_mode=request.get("actual_mode"),
+            route=request.get("route"),
+            backend=getattr(target, "name", None) or str(request.get("actual_mode") or ""),
+            upstream_path=path,
+            file_context=_execution_snapshot_file_log(request),
+        )
         try:
             handle = await self._await_with_cancel(
                 self.proxy_service.open_json_stream(
                     request=internal_request,
                     target=target,
                     path=path,
-                    payload=self._upstream_payload(request),
+                    payload=upstream_payload,
                 ),
                 cancel_event=cancel_event,
                 request_id=request_id,
@@ -1779,6 +1889,16 @@ class GatewayTaskExecutor:
             self._unregister_live_handle(request_id)
             return self._cancelled_execution_outcome(request_id)
         except Exception as exc:
+            _log_task_event(
+                "task upstream open failed",
+                request_id=request_id,
+                conversation_id=request.get("conversation_id"),
+                route=request.get("route"),
+                backend=getattr(target, "name", None) or str(request.get("actual_mode") or ""),
+                error_type=exc.__class__.__name__,
+                error=str(exc)[:200],
+                elapsed_ms=round((time.perf_counter() - execute_started) * 1000, 3),
+            )
             self._unregister_live_handle(request_id)
             await self._terminalize_failure(
                 request=request,
@@ -1793,6 +1913,15 @@ class GatewayTaskExecutor:
             await handle.upstream.aclose()
             await handle.client.aclose()
             reason = body.decode("utf-8", errors="ignore") or "upstream_error"
+            _log_task_event(
+                "task upstream non-sse error",
+                request_id=request_id,
+                conversation_id=request.get("conversation_id"),
+                route=request.get("route"),
+                status_code=handle.status_code,
+                reason=reason[:200],
+                elapsed_ms=round((time.perf_counter() - execute_started) * 1000, 3),
+            )
             self._unregister_live_handle(request_id)
             await self._terminalize_failure(
                 request=request,
@@ -2074,6 +2203,16 @@ class GatewayTaskExecutor:
                         )
                     if event_type == "error":
                         reason = str(payload.get("message") or payload.get("error") or "upstream_error")
+                        _log_task_event(
+                            "task upstream error frame",
+                            request_id=request_id,
+                            conversation_id=request.get("conversation_id"),
+                            route=request.get("route"),
+                            error_code=str(payload.get("error") or payload.get("code") or "").strip() or "-",
+                            message=reason[:200],
+                            last_seq=latest_seq,
+                            elapsed_ms=round((time.perf_counter() - execute_started) * 1000, 3),
+                        )
                         self._runtime_observe_progress(
                             live_runtime,
                             status="running",
@@ -2243,6 +2382,15 @@ class GatewayTaskExecutor:
         steps: list[dict[str, Any]] | None = None,
         ) -> None:
         failure_payload = {"message": str(reason or "execution_failed"), "error": str(reason or "execution_failed")}
+        _log_task_event(
+            "task terminal failure",
+            request_id=str(request.get("request_id") or ""),
+            conversation_id=request.get("conversation_id"),
+            route=request.get("route"),
+            last_seq=max(0, int(last_seq)),
+            reason=str(reason or "execution_failed")[:200],
+            file_context=_execution_snapshot_file_log(request),
+        )
         terminal_write_succeeded = False
         try:
             await self.conversation_persistence_service.terminal_task_assistant(

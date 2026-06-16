@@ -125,6 +125,34 @@ def _json_request_body(request: httpx.Request) -> dict:
     return json.loads(raw) if raw else {}
 
 
+def _ready_pdf(*, file_id: int = 11, file_name: str = "battery-paper.pdf") -> ConversationFileRow:
+    return ConversationFileRow(
+        file_id=file_id,
+        file_type="pdf",
+        file_name=file_name,
+        storage_ref=f"minio://agentcode/uploads/{file_name}",
+    )
+
+
+def _ready_table(*, file_id: int = 33, file_name: str = "cells.xlsx", file_meta=None) -> ConversationFileRow:
+    return ConversationFileRow(
+        file_id=file_id,
+        file_type="excel",
+        file_name=file_name,
+        storage_ref=f"minio://agentcode/uploads/{file_name}",
+        file_meta=file_meta or {"columns": ["电芯编号", "开路电压_V", "供应商"]},
+    )
+
+
+def _ready_csv(*, file_id: int = 21, file_name: str = "assignee-table.csv") -> ConversationFileRow:
+    return ConversationFileRow(
+        file_id=file_id,
+        file_type="csv",
+        file_name=file_name,
+        storage_ref=f"minio://agentcode/uploads/{file_name}",
+    )
+
+
 def test_mode_ask_calls_internal_quota_precheck_and_finalize_for_plain_question(monkeypatch):
     monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
     calls = []
@@ -170,7 +198,7 @@ def test_mode_ask_calls_internal_quota_precheck_and_finalize_for_plain_question(
 def test_mode_ask_routes_file_question_to_file_qa_quota(monkeypatch):
     monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
     original = app.state.conversation_file_service
-    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
+    app.state.conversation_file_service = _ConversationFilesStub([_ready_pdf()])
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -362,7 +390,7 @@ def test_mode_ask_stream_appends_quota_warning_when_finalize_fails(monkeypatch):
 def test_mode_patent_inflight_request_does_not_block_fast_quota_flow(monkeypatch):
     monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
     original_files = app.state.conversation_file_service
-    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
+    app.state.conversation_file_service = _ConversationFilesStub([_ready_pdf()])
     patent_upstream_started = threading.Event()
     release_patent_upstream = threading.Event()
     fast_completed = threading.Event()
@@ -404,7 +432,6 @@ def test_mode_patent_inflight_request_does_not_block_fast_quota_flow(monkeypatch
                     "requested_mode": "patent",
                     "conversation_id": 210,
                     "user_id": 42,
-                    "pdf_context": {"selected_ids": [11]},
                 },
             )
         except Exception as exc:
@@ -530,9 +557,8 @@ def test_mode_ask_stream_appends_not_found_quota_warning_when_finalize_returns_n
                 "requested_mode": "patent",
                 "conversation_id": 11,
                 "user_id": 42,
-                "pdf_context": {"selected_ids": [11]},
             },
-            [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")],
+            [_ready_pdf()],
             "kb_qa",
             "ask_query",
         ),
@@ -546,7 +572,7 @@ def test_mode_ask_stream_appends_not_found_quota_warning_when_finalize_returns_n
                 "user_id": 42,
                 "pdf_context": {"selected_ids": [11]},
             },
-            [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")],
+            [_ready_pdf()],
             "pdf_qa",
             "file_qa",
         ),
@@ -560,7 +586,7 @@ def test_mode_ask_stream_appends_not_found_quota_warning_when_finalize_returns_n
                 "user_id": 42,
                 "pdf_context": {"selected_ids": [21]},
             },
-            [ConversationFileRow(file_id=21, file_type="csv", file_name="assignee-table.csv")],
+            [_ready_csv()],
             "tabular_qa",
             "file_qa",
         ),
@@ -574,7 +600,7 @@ def test_mode_ask_stream_appends_not_found_quota_warning_when_finalize_returns_n
                 "user_id": 42,
                 "pdf_context": {"selected_ids": [11]},
             },
-            [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")],
+            [_ready_pdf()],
             "hybrid_qa",
             "file_qa",
         ),
@@ -586,9 +612,8 @@ def test_mode_ask_stream_appends_not_found_quota_warning_when_finalize_returns_n
                 "requested_mode": "patent",
                 "conversation_id": 15,
                 "user_id": 42,
-                "pdf_context": {"selected_ids": [11]},
             },
-            [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")],
+            [_ready_pdf()],
             "kb_qa",
             "ask_query",
         ),
@@ -602,7 +627,7 @@ def test_mode_ask_stream_appends_not_found_quota_warning_when_finalize_returns_n
                 "user_id": 42,
                 "pdf_context": {"selected_ids": [11]},
             },
-            [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")],
+            [_ready_pdf()],
             "pdf_qa",
             "file_qa",
         ),
@@ -616,7 +641,7 @@ def test_mode_ask_stream_appends_not_found_quota_warning_when_finalize_returns_n
                 "user_id": 42,
                 "pdf_context": {"selected_ids": [21]},
             },
-            [ConversationFileRow(file_id=21, file_type="csv", file_name="assignee-table.csv")],
+            [_ready_csv()],
             "tabular_qa",
             "file_qa",
         ),
@@ -630,7 +655,7 @@ def test_mode_ask_stream_appends_not_found_quota_warning_when_finalize_returns_n
                 "user_id": 42,
                 "pdf_context": {"selected_ids": [11]},
             },
-            [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")],
+            [_ready_pdf()],
             "hybrid_qa",
             "file_qa",
         ),
@@ -702,7 +727,7 @@ def test_mode_patent_routes_map_to_canonical_quota_buckets(
 def test_mode_patent_skips_quota_calls_for_missing_or_invalid_user_id(monkeypatch, request_path, user_id):
     monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
     original_files = app.state.conversation_file_service
-    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
+    app.state.conversation_file_service = _ConversationFilesStub([_ready_pdf()])
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -757,9 +782,8 @@ def test_mode_patent_skips_quota_calls_for_missing_or_invalid_user_id(monkeypatc
                 "requested_mode": "patent",
                 "conversation_id": 21,
                 "user_id": 42,
-                "pdf_context": {"selected_ids": [11]},
             },
-            [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")],
+            [_ready_pdf()],
             "kb_qa",
             "ask_query",
         ),
@@ -772,7 +796,7 @@ def test_mode_patent_skips_quota_calls_for_missing_or_invalid_user_id(monkeypatc
                 "user_id": 42,
                 "pdf_context": {"selected_ids": [11]},
             },
-            [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")],
+            [_ready_pdf()],
             "pdf_qa",
             "file_qa",
         ),
@@ -828,9 +852,8 @@ def test_mode_ask_patent_sync_surfaces_canonical_quota_payload(monkeypatch, labe
                 "requested_mode": "patent",
                 "conversation_id": 23,
                 "user_id": 42,
-                "pdf_context": {"selected_ids": [11]},
             },
-            [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")],
+            [_ready_pdf()],
             "kb_qa",
             "ask_query",
         ),
@@ -843,7 +866,7 @@ def test_mode_ask_patent_sync_surfaces_canonical_quota_payload(monkeypatch, labe
                 "user_id": 42,
                 "pdf_context": {"selected_ids": [11]},
             },
-            [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")],
+            [_ready_pdf()],
             "pdf_qa",
             "file_qa",
         ),
@@ -902,7 +925,7 @@ def test_mode_ask_patent_stream_done_event_surfaces_canonical_quota_payload(
 def test_mode_ask_patent_aborts_quota_when_upstream_payload_is_unsuccessful(monkeypatch):
     monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
     original_files = app.state.conversation_file_service
-    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
+    app.state.conversation_file_service = _ConversationFilesStub([_ready_pdf()])
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -926,7 +949,6 @@ def test_mode_ask_patent_aborts_quota_when_upstream_payload_is_unsuccessful(monk
                     "requested_mode": "patent",
                     "conversation_id": 25,
                     "user_id": 42,
-                    "pdf_context": {"selected_ids": [11]},
                 },
             )
     finally:
@@ -941,7 +963,7 @@ def test_mode_ask_patent_aborts_quota_when_upstream_payload_is_unsuccessful(monk
 def test_mode_ask_patent_aborts_quota_when_upstream_payload_has_error_field(monkeypatch):
     monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
     original_files = app.state.conversation_file_service
-    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
+    app.state.conversation_file_service = _ConversationFilesStub([_ready_pdf()])
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -965,7 +987,6 @@ def test_mode_ask_patent_aborts_quota_when_upstream_payload_has_error_field(monk
                     "requested_mode": "patent",
                     "conversation_id": 251,
                     "user_id": 42,
-                    "pdf_context": {"selected_ids": [11]},
                 },
             )
     finally:
@@ -980,7 +1001,7 @@ def test_mode_ask_patent_aborts_quota_when_upstream_payload_has_error_field(monk
 def test_mode_ask_patent_stream_aborts_quota_when_done_event_never_arrives(monkeypatch):
     monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
     original_files = app.state.conversation_file_service
-    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
+    app.state.conversation_file_service = _ConversationFilesStub([_ready_pdf()])
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1012,7 +1033,6 @@ def test_mode_ask_patent_stream_aborts_quota_when_done_event_never_arrives(monke
                     "requested_mode": "patent",
                     "conversation_id": 26,
                     "user_id": 42,
-                    "pdf_context": {"selected_ids": [11]},
                 },
             ) as response:
                 body = b"".join(response.iter_bytes())
@@ -1028,7 +1048,7 @@ def test_mode_ask_patent_stream_aborts_quota_when_done_event_never_arrives(monke
 def test_mode_ask_patent_stream_aborts_quota_when_upstream_returns_http_error(monkeypatch):
     monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
     original_files = app.state.conversation_file_service
-    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
+    app.state.conversation_file_service = _ConversationFilesStub([_ready_pdf()])
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1053,7 +1073,6 @@ def test_mode_ask_patent_stream_aborts_quota_when_upstream_returns_http_error(mo
                     "requested_mode": "patent",
                     "conversation_id": 261,
                     "user_id": 42,
-                    "pdf_context": {"selected_ids": [11]},
                 },
             ) as response:
                 body = b"".join(response.iter_bytes())
@@ -1069,7 +1088,7 @@ def test_mode_ask_patent_stream_aborts_quota_when_upstream_returns_http_error(mo
 def test_mode_ask_patent_stream_aborts_quota_when_upstream_emits_error_event(monkeypatch):
     monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
     original_files = app.state.conversation_file_service
-    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
+    app.state.conversation_file_service = _ConversationFilesStub([_ready_pdf()])
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1101,7 +1120,6 @@ def test_mode_ask_patent_stream_aborts_quota_when_upstream_emits_error_event(mon
                     "requested_mode": "patent",
                     "conversation_id": 262,
                     "user_id": 42,
-                    "pdf_context": {"selected_ids": [11]},
                 },
             ) as response:
                 body = b"".join(response.iter_bytes())
@@ -1118,7 +1136,7 @@ def test_mode_ask_patent_stream_aborts_quota_when_upstream_emits_error_event(mon
 def test_mode_ask_patent_stream_does_not_count_when_error_event_precedes_done(monkeypatch):
     monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
     original_files = app.state.conversation_file_service
-    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
+    app.state.conversation_file_service = _ConversationFilesStub([_ready_pdf()])
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1151,7 +1169,6 @@ def test_mode_ask_patent_stream_does_not_count_when_error_event_precedes_done(mo
                     "requested_mode": "patent",
                     "conversation_id": 263,
                     "user_id": 42,
-                    "pdf_context": {"selected_ids": [11]},
                 },
             ) as response:
                 body = b"".join(response.iter_bytes())
@@ -1168,7 +1185,7 @@ def test_mode_ask_patent_stream_does_not_count_when_error_event_precedes_done(mo
 def test_mode_ask_patent_keeps_success_response_when_finalize_fails(monkeypatch):
     monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
     original_files = app.state.conversation_file_service
-    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
+    app.state.conversation_file_service = _ConversationFilesStub([_ready_pdf()])
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/internal/quota/grants/precheck":
@@ -1189,7 +1206,6 @@ def test_mode_ask_patent_keeps_success_response_when_finalize_fails(monkeypatch)
                     "requested_mode": "patent",
                     "conversation_id": 27,
                     "user_id": 42,
-                    "pdf_context": {"selected_ids": [11]},
                 },
             )
     finally:
@@ -1205,7 +1221,7 @@ def test_mode_ask_patent_keeps_success_response_when_finalize_fails(monkeypatch)
 def test_mode_ask_patent_stream_appends_quota_warning_when_finalize_fails(monkeypatch):
     monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
     original_files = app.state.conversation_file_service
-    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
+    app.state.conversation_file_service = _ConversationFilesStub([_ready_pdf()])
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/internal/quota/grants/precheck":
@@ -1234,7 +1250,6 @@ def test_mode_ask_patent_stream_appends_quota_warning_when_finalize_fails(monkey
                     "requested_mode": "patent",
                     "conversation_id": 28,
                     "user_id": 42,
-                    "pdf_context": {"selected_ids": [11]},
                 },
             ) as response:
                 body = b"".join(response.iter_bytes())
@@ -1252,7 +1267,7 @@ def test_mode_ask_patent_kb_route_ignores_disabled_file_gate_and_still_counts_qu
     monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
     original_files = app.state.conversation_file_service
     original_settings = app.state.settings
-    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
+    app.state.conversation_file_service = _ConversationFilesStub([_ready_pdf()])
     app.state.settings = replace(original_settings, patent_file_routes_enabled=False)
     calls = []
 
@@ -1278,7 +1293,6 @@ def test_mode_ask_patent_kb_route_ignores_disabled_file_gate_and_still_counts_qu
                     "requested_mode": "patent",
                     "conversation_id": 29,
                     "user_id": 42,
-                    "pdf_context": {"selected_ids": [11]},
                 },
             )
     finally:
@@ -1299,8 +1313,8 @@ def test_mode_ask_clarification_skips_quota_calls(monkeypatch):
     original = app.state.conversation_file_service
     app.state.conversation_file_service = _ConversationFilesStub(
         [
-            ConversationFileRow(file_id=11, file_type="pdf", file_name="solid-state-review.pdf"),
-            ConversationFileRow(file_id=22, file_type="pdf", file_name="battery-paper.pdf"),
+            _ready_pdf(file_id=11, file_name="solid-state-review.pdf"),
+            _ready_pdf(file_id=22, file_name="battery-paper.pdf"),
         ]
     )
     calls = []
@@ -1319,7 +1333,7 @@ def test_mode_ask_clarification_skips_quota_calls(monkeypatch):
                     "requested_mode": "thinking",
                     "conversation_id": 12,
                     "user_id": 42,
-                    "pdf_context": {"selected_ids": [11, 22]},
+                    "pdf_context": {"selected_ids": [999]},
                 },
             )
     finally:
@@ -1597,7 +1611,7 @@ def test_mode_ask_stream_aborts_quota_when_done_event_never_arrives(monkeypatch)
 def test_mode_ask_stream_routes_file_question_to_file_qa_quota(monkeypatch):
     monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
     original = app.state.conversation_file_service
-    app.state.conversation_file_service = _ConversationFilesStub([ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")])
+    app.state.conversation_file_service = _ConversationFilesStub([_ready_pdf()])
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1883,7 +1897,6 @@ def test_mode_ask_routes_plain_question_to_requested_backend():
             json={
                 "question": "磷酸铁锂电压范围是多少？",
                 "requested_mode": "thinking",
-                "pdf_context": {"selected_ids": [11]},
             },
         )
 
@@ -1939,7 +1952,7 @@ def test_mode_ask_routes_file_question_to_fast_backend():
     original = app.state.conversation_file_service
     original_persistence = app.state.conversation_persistence_service
     app.state.conversation_file_service = _ConversationFilesStub(
-        [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")]
+        [_ready_pdf()]
     )
     fake_persistence = _FakeConversationPersistenceService()
     app.state.conversation_persistence_service = fake_persistence
@@ -1984,16 +1997,12 @@ def test_mode_ask_routes_file_question_to_fast_backend():
     assert response.headers["x-gateway-backend"] == "fast"
 
 
-def test_mode_ask_keeps_requested_backend_for_plain_question_with_selected_scope():
+def test_mode_ask_routes_plain_question_with_selected_scope_to_fast_backend():
     original = app.state.conversation_file_service
     original_persistence = app.state.conversation_persistence_service
     app.state.conversation_file_service = _ConversationFilesStub(
         [
-            ConversationFileRow(
-                file_id=11,
-                file_type="pdf",
-                file_name="battery-paper.pdf",
-            )
+            _ready_pdf()
         ]
     )
     fake_persistence = _FakeConversationPersistenceService()
@@ -2022,29 +2031,24 @@ def test_mode_ask_keeps_requested_backend_for_plain_question_with_selected_scope
         app.state.conversation_persistence_service = original_persistence
 
     assert response.status_code == 200
-    assert captured["url"].endswith("/api/thinking/ask")
-    assert captured["body"]["actual_mode"] == "thinking"
-    assert captured["body"]["route"] == "kb_qa"
-    assert captured["body"]["source_scope"] == "kb"
-    assert captured["body"]["selected_file_ids"] == []
-    assert captured["body"]["file_selection"] == {}
-    assert captured["body"]["strategy"] == "none"
-    assert captured["body"]["execution_files"] == []
-    assert "NO_FILE_INTENT" in captured["body"]["route_reasons"]
+    assert captured["url"].endswith("/api/fast/ask")
+    assert captured["body"]["actual_mode"] == "fast"
+    assert captured["body"]["route"] == "pdf_qa"
+    assert captured["body"]["source_scope"] == "pdf"
+    assert captured["body"]["selected_file_ids"] == [11]
+    assert captured["body"]["strategy"] == "explicit_selection"
+    assert captured["body"]["execution_files"]
+    assert "EXPLICIT_SELECTED_FILES" in captured["body"]["route_reasons"]
     assert fake_persistence.user_calls == []
     assert fake_persistence.assistant_calls == []
-    assert response.headers["x-gateway-backend"] == "thinking"
+    assert response.headers["x-gateway-backend"] == "fast"
 
 
-def test_mode_ask_doi_lookup_with_single_selected_file_stays_kb_route():
+def test_mode_ask_doi_lookup_with_single_selected_file_routes_to_file_scope():
     original = app.state.conversation_file_service
     app.state.conversation_file_service = _ConversationFilesStub(
         [
-            ConversationFileRow(
-                file_id=11,
-                file_type="pdf",
-                file_name="battery-paper.pdf",
-            )
+            _ready_pdf()
         ]
     )
     captured = {}
@@ -2072,21 +2076,20 @@ def test_mode_ask_doi_lookup_with_single_selected_file_stays_kb_route():
     assert response.status_code == 200
     assert captured["url"].endswith("/api/fast/ask")
     assert captured["body"]["actual_mode"] == "fast"
-    assert captured["body"]["route"] == "kb_qa"
-    assert captured["body"]["source_scope"] == "kb"
-    assert captured["body"]["turn_mode"] == "kb_only"
+    assert captured["body"]["route"] == "pdf_qa"
+    assert captured["body"]["source_scope"] == "pdf"
+    assert captured["body"]["turn_mode"] == "file_only"
     assert captured["body"]["needs_clarification"] is False
-    assert captured["body"]["selected_file_ids"] == []
-    assert captured["body"]["file_selection"] == {}
-    assert captured["body"]["execution_files"] == []
+    assert captured["body"]["selected_file_ids"] == [11]
+    assert captured["body"]["execution_files"]
 
 
-def test_mode_ask_doi_lookup_with_multiple_selected_files_does_not_clarify():
+def test_mode_ask_doi_lookup_with_multiple_selected_files_routes_to_file_scope():
     original = app.state.conversation_file_service
     app.state.conversation_file_service = _ConversationFilesStub(
         [
-            ConversationFileRow(file_id=11, file_type="pdf", file_name="solid-state-review.pdf"),
-            ConversationFileRow(file_id=22, file_type="pdf", file_name="battery-paper.pdf"),
+            _ready_pdf(file_id=11, file_name="solid-state-review.pdf"),
+            _ready_pdf(file_id=22, file_name="battery-paper.pdf"),
         ]
     )
     captured = {}
@@ -2113,23 +2116,18 @@ def test_mode_ask_doi_lookup_with_multiple_selected_files_does_not_clarify():
 
     assert response.status_code == 200
     assert captured["url"].endswith("/api/fast/ask")
-    assert captured["body"]["route"] == "kb_qa"
-    assert captured["body"]["source_scope"] == "kb"
+    assert captured["body"]["route"] == "pdf_qa"
+    assert captured["body"]["source_scope"] == "pdf"
     assert captured["body"]["needs_clarification"] is False
-    assert captured["body"]["selected_file_ids"] == []
-    assert captured["body"]["file_selection"] == {}
-    assert captured["body"]["execution_files"] == []
+    assert captured["body"]["selected_file_ids"] == [11, 22]
+    assert captured["body"]["execution_files"]
 
 
 def test_mode_ask_keeps_patent_backend_for_plain_question_with_selected_scope_without_forwarding_file_fields():
     original = app.state.conversation_file_service
     app.state.conversation_file_service = _ConversationFilesStub(
         [
-            ConversationFileRow(
-                file_id=11,
-                file_type="pdf",
-                file_name="battery-paper.pdf",
-            )
+            _ready_pdf()
         ]
     )
     captured = {}
@@ -2157,13 +2155,11 @@ def test_mode_ask_keeps_patent_backend_for_plain_question_with_selected_scope_wi
     assert response.status_code == 200
     assert captured["url"].endswith("/api/patent/ask")
     assert captured["body"]["actual_mode"] == "patent"
-    assert captured["body"]["route"] == "kb_qa"
-    assert captured["body"]["source_scope"] == "kb"
-    assert captured["body"]["used_files"] == []
-    assert captured["body"]["execution_files"] == []
-    assert captured["body"]["selected_file_ids"] == []
-    assert captured["body"]["file_selection"] == {}
-    assert captured["body"]["strategy"] == "none"
+    assert captured["body"]["route"] == "pdf_qa"
+    assert captured["body"]["source_scope"] == "pdf"
+    assert captured["body"]["execution_files"]
+    assert captured["body"]["selected_file_ids"] == [11]
+    assert captured["body"]["strategy"] == "explicit_selection"
     assert response.headers["x-gateway-backend"] == "patent"
 
 def test_mode_ask_routes_mixed_question_to_fast_backend():
@@ -2171,11 +2167,7 @@ def test_mode_ask_routes_mixed_question_to_fast_backend():
     original_persistence = app.state.conversation_persistence_service
     app.state.conversation_file_service = _ConversationFilesStub(
         [
-            ConversationFileRow(
-                file_id=11,
-                file_type="pdf",
-                file_name="battery-paper.pdf",
-            )
+            _ready_pdf()
         ]
     )
     fake_persistence = _FakeConversationPersistenceService()
@@ -2222,11 +2214,7 @@ def test_mode_ask_routes_patent_file_question_to_patent_backend():
     original_settings = app.state.settings
     app.state.conversation_file_service = _ConversationFilesStub(
         [
-            ConversationFileRow(
-                file_id=11,
-                file_type="pdf",
-                file_name="battery-paper.pdf",
-            )
+            _ready_pdf()
         ]
     )
     app.state.settings = replace(original_settings, patent_file_routes_enabled=True)
@@ -2269,11 +2257,7 @@ def test_mode_ask_routes_patent_mixed_question_to_patent_backend():
     original_settings = app.state.settings
     app.state.conversation_file_service = _ConversationFilesStub(
         [
-            ConversationFileRow(
-                file_id=11,
-                file_type="pdf",
-                file_name="battery-paper.pdf",
-            )
+            _ready_pdf()
         ]
     )
     app.state.settings = replace(original_settings, patent_file_routes_enabled=True)
@@ -2317,11 +2301,7 @@ def test_mode_ask_patent_file_route_is_open_by_default():
     original_settings = app.state.settings
     app.state.conversation_file_service = _ConversationFilesStub(
         [
-            ConversationFileRow(
-                file_id=11,
-                file_type="pdf",
-                file_name="battery-paper.pdf",
-            )
+            _ready_pdf()
         ]
     )
     captured = {}
@@ -2362,11 +2342,7 @@ def test_mode_ask_patent_file_route_returns_gated_error_when_disabled():
     original_settings = app.state.settings
     app.state.conversation_file_service = _ConversationFilesStub(
         [
-            ConversationFileRow(
-                file_id=11,
-                file_type="pdf",
-                file_name="battery-paper.pdf",
-            )
+            _ready_pdf()
         ]
     )
     app.state.settings = replace(original_settings, patent_file_routes_enabled=False)
@@ -2438,7 +2414,7 @@ def test_v1_ask_stream_alias_is_removed():
 def test_mode_ask_stream_routes_file_question_to_fast_backend():
     original = app.state.conversation_file_service
     app.state.conversation_file_service = _ConversationFilesStub(
-        [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")]
+        [_ready_pdf()]
     )
     calls = []
 
@@ -2481,7 +2457,7 @@ def test_mode_ask_stream_patent_file_route_returns_gated_error_when_disabled():
     original_files = app.state.conversation_file_service
     original_settings = app.state.settings
     app.state.conversation_file_service = _ConversationFilesStub(
-        [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")]
+        [_ready_pdf()]
     )
     app.state.settings = replace(original_settings, patent_file_routes_enabled=False)
     calls = []
@@ -2525,7 +2501,7 @@ def test_mode_ask_stream_routes_patent_mixed_question_to_patent_backend():
     original = app.state.conversation_file_service
     original_settings = app.state.settings
     app.state.conversation_file_service = _ConversationFilesStub(
-        [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")]
+        [_ready_pdf()]
     )
     app.state.settings = replace(original_settings, patent_file_routes_enabled=True)
     calls = []
@@ -2578,8 +2554,8 @@ def test_mode_ask_stream_patent_preserves_structured_content_fields_and_capabili
     original_settings = app.state.settings
     app.state.conversation_file_service = _ConversationFilesStub(
         [
-            ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf"),
-            ConversationFileRow(file_id=33, file_type="excel", file_name="claims.xlsx"),
+            _ready_pdf(),
+            _ready_table(file_id=33, file_name="claims.xlsx", file_meta={}),
         ]
     )
     app.state.settings = replace(original_settings, patent_file_routes_enabled=True)
@@ -2611,7 +2587,7 @@ def test_mode_ask_stream_patent_preserves_structured_content_fields_and_capabili
                 json={
                     "question": "请比较前两个文件",
                     "requested_mode": "patent",
-                    "pdf_context": {"all_available_ids": [11, 33]},
+                    "pdf_context": {"selected_ids": [11, 33], "all_available_ids": [11, 33]},
                 },
             ) as response:
                 body = b"".join(response.iter_bytes())
@@ -2718,7 +2694,7 @@ def test_mode_ask_stream_does_not_persist_file_turn_context_hints():
     original_files = app.state.conversation_file_service
     original = app.state.conversation_persistence_service
     app.state.conversation_file_service = _ConversationFilesStub(
-        [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")]
+        [_ready_pdf()]
     )
     fake_persistence = _FakeConversationPersistenceService()
     app.state.conversation_persistence_service = fake_persistence
@@ -2838,12 +2814,7 @@ def test_mode_ask_uses_conversation_file_metadata_for_table_route():
     original_persistence = app.state.conversation_persistence_service
     app.state.conversation_file_service = _ConversationFilesStub(
         [
-            ConversationFileRow(
-                file_id=33,
-                file_type="excel",
-                file_name="cells.xlsx",
-                file_meta={"columns": ["电芯编号", "开路电压_V", "供应商"]},
-            )
+            _ready_table(),
         ]
     )
     app.state.conversation_persistence_service = _FakeConversationPersistenceService()
@@ -2885,11 +2856,7 @@ def test_mode_ask_routes_pdf_kb_question_to_hybrid_scope():
     original_persistence = app.state.conversation_persistence_service
     app.state.conversation_file_service = _ConversationFilesStub(
         [
-            ConversationFileRow(
-                file_id=11,
-                file_type="pdf",
-                file_name="battery-paper.pdf",
-            )
+            _ready_pdf()
         ]
     )
     app.state.conversation_persistence_service = _FakeConversationPersistenceService()
@@ -2929,13 +2896,8 @@ def test_mode_ask_routes_pdf_table_kb_question_to_hybrid_scope():
     original_persistence = app.state.conversation_persistence_service
     app.state.conversation_file_service = _ConversationFilesStub(
         [
-            ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf"),
-            ConversationFileRow(
-                file_id=33,
-                file_type="excel",
-                file_name="cells.xlsx",
-                file_meta={"columns": ["开路电压_V"]},
-            ),
+            _ready_pdf(),
+            _ready_table(file_meta={"columns": ["开路电压_V"]}),
         ]
     )
     app.state.conversation_persistence_service = _FakeConversationPersistenceService()
@@ -2956,7 +2918,7 @@ def test_mode_ask_routes_pdf_table_kb_question_to_hybrid_scope():
                     "question": "请结合知识库比较前两个文件",
                     "requested_mode": "thinking",
                     "conversation_id": 101,
-                    "pdf_context": {"all_available_ids": [11, 33]},
+                    "pdf_context": {"selected_ids": [11, 33], "all_available_ids": [11, 33]},
                 },
             )
     finally:
@@ -2992,6 +2954,7 @@ def test_mode_ask_with_public_http_provider_forwards_auth_and_trace():
                                 "file_id": 33,
                                 "file_type": "excel",
                                 "file_name": "cells.xlsx",
+                                "storage_ref": "minio://agentcode/uploads/cells.xlsx",
                                 "file_meta": {"columns": ["开路电压_V"]},
                             }
                         ]
@@ -3165,11 +3128,7 @@ def test_mode_ask_forwards_canonical_file_aware_fields():
     original_persistence = app.state.conversation_persistence_service
     app.state.conversation_file_service = _ConversationFilesStub(
         [
-            ConversationFileRow(
-                file_id=11,
-                file_type="pdf",
-                file_name="solid-state-review.pdf",
-            )
+            _ready_pdf(file_id=11, file_name="solid-state-review.pdf")
         ]
     )
     app.state.conversation_persistence_service = _FakeConversationPersistenceService()
@@ -3221,15 +3180,15 @@ def test_mode_ask_short_circuits_clarification_in_gateway():
     original = app.state.conversation_file_service
     app.state.conversation_file_service = _ConversationFilesStub(
         [
-            ConversationFileRow(file_id=11, file_type="pdf", file_name="solid-state-review.pdf"),
-            ConversationFileRow(file_id=22, file_type="pdf", file_name="battery-paper.pdf"),
+            _ready_pdf(file_id=11, file_name="solid-state-review.pdf"),
+            _ready_pdf(file_id=22, file_name="battery-paper.pdf"),
         ]
     )
-    calls = []
+    captured = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(request.url.path)
-        raise AssertionError(f"unexpected upstream path: {request.url.path}")
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
 
     try:
         with _TransportGuard(handler):
@@ -3245,16 +3204,10 @@ def test_mode_ask_short_circuits_clarification_in_gateway():
     finally:
         app.state.conversation_file_service = original
 
-    assert response.status_code == 400
-    assert response.json()["code"] == "FILE_SELECTION_CLARIFICATION_REQUIRED"
-    assert response.json()["needs_clarification"] is True
-    assert [item["file_id"] for item in response.json()["detail"]["clarify_candidates"]] == [11, 22]
-    assert response.json()["detail"]["file_selection"]["strategy"] == "clarify_required"
-    assert response.json()["detail"]["file_selection"]["selected_file_ids"] == [11, 22]
-    assert response.json()["detail"]["route_reasons"] == ["MULTIPLE_FILES_NEED_CLARIFICATION"]
-    assert response.json()["detail"]["route_confidence"] == 0.0
-    assert response.json()["detail"]["classifier_used"] is False
-    assert calls == []
+    assert response.status_code == 200
+    assert captured["body"]["route"] == "pdf_qa"
+    assert captured["body"]["selected_file_ids"] == [11, 22]
+    assert captured["body"]["strategy"] == "explicit_selection"
 
 
 def test_mode_ask_short_circuits_file_not_ready_status_in_gateway():
@@ -3284,9 +3237,9 @@ def test_mode_ask_short_circuits_file_not_ready_status_in_gateway():
             response = client.post(
                 "/api/thinking/ask",
                 json={
-                    "question": "#1",
+                    "question": "请总结这篇文献",
                     "requested_mode": "thinking",
-                    "pdf_context": {},
+                    "pdf_context": {"selected_ids": [44]},
                 },
             )
     finally:
@@ -3295,15 +3248,15 @@ def test_mode_ask_short_circuits_file_not_ready_status_in_gateway():
     assert response.status_code == 409
     assert response.json()["code"] == "FILE_NOT_READY"
     assert response.json()["retriable"] is True
-    assert response.json()["detail"]["file_selection"]["strategy"] == "explicit_ref"
+    assert response.json()["detail"]["file_selection"]["strategy"] == "explicit_selection"
     assert response.json()["detail"]["file_selection"]["selected_file_ids"] == [44]
-    assert response.json()["detail"]["route_reasons"] == ["EXPLICIT_FILE_REF"]
+    assert response.json()["detail"]["route_reasons"] == ["EXPLICIT_SELECTED_FILES"]
     assert response.json()["detail"]["route_confidence"] == 1.0
     assert response.json()["detail"]["classifier_used"] is False
     assert calls == []
 
 
-def test_mode_ask_short_circuits_unresolved_file_reference_as_clarification():
+def test_mode_ask_short_circuits_invalid_selected_ids_as_clarification():
     original = app.state.conversation_file_service
     app.state.conversation_file_service = _ConversationFilesStub([])
     calls = []
@@ -3318,9 +3271,9 @@ def test_mode_ask_short_circuits_unresolved_file_reference_as_clarification():
             response = client.post(
                 "/api/thinking/ask",
                 json={
-                    "question": "#1",
+                    "question": "请总结这篇文献",
                     "requested_mode": "thinking",
-                    "pdf_context": {},
+                    "pdf_context": {"selected_ids": [999]},
                 },
             )
     finally:
@@ -3353,7 +3306,7 @@ def test_mode_ask_forwards_chat_history_without_pdf_context():
                 "requested_mode": "thinking",
                 "conversation_id": 7,
                 "chat_history": chat_history,
-                "pdf_context": {"selected_ids": [11], "last_focus_ids": [11]},
+                "pdf_context": {"last_focus_ids": [11]},
             },
         )
 
@@ -3365,18 +3318,24 @@ def test_mode_ask_forwards_chat_history_without_pdf_context():
     assert captured["body"]["actual_mode"] == "thinking"
 
 
-def test_mode_ask_stream_short_circuits_clarification_in_gateway():
+def test_mode_ask_stream_routes_explicit_selection_to_fast_backend():
     original = app.state.conversation_file_service
     app.state.conversation_file_service = _ConversationFilesStub(
         [
-            ConversationFileRow(file_id=11, file_type="pdf", file_name="solid-state-review.pdf"),
-            ConversationFileRow(file_id=22, file_type="pdf", file_name="battery-paper.pdf"),
+            _ready_pdf(file_id=11, file_name="solid-state-review.pdf"),
+            _ready_pdf(file_id=22, file_name="battery-paper.pdf"),
         ]
     )
     calls = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request.url.path)
+        if request.url.path.endswith("/api/fast/ask_stream"):
+            return httpx.Response(
+                200,
+                content=b'data: {"type":"metadata","route":"pdf_qa","selected_file_ids":[11,22]}\n\n',
+                headers={"content-type": "text/event-stream"},
+            )
         raise AssertionError(f"unexpected upstream path: {request.url.path}")
 
     try:
@@ -3388,6 +3347,7 @@ def test_mode_ask_stream_short_circuits_clarification_in_gateway():
                 json={
                     "question": "请继续总结这篇文献",
                     "requested_mode": "thinking",
+                    "conversation_id": 42,
                     "pdf_context": {"selected_ids": [11, 22]},
                 },
             ) as response:
@@ -3396,15 +3356,10 @@ def test_mode_ask_stream_short_circuits_clarification_in_gateway():
         app.state.conversation_file_service = original
 
     assert response.status_code == 200
-    assert calls == []
+    assert len(calls) == 1
+    assert calls[0].endswith("/api/fast/ask_stream")
     assert b'"type":"metadata"' in body
-    assert b'"needs_clarification":true' in body
-    assert b'"clarify_candidates"' in body
-    assert b'"file_selection"' in body
-    assert b'"route_reasons":["MULTIPLE_FILES_NEED_CLARIFICATION"]' in body
-    assert b'"route_confidence":0.0' in body
-    assert b'"classifier_used":false' in body
-    assert b'FILE_SELECTION_CLARIFICATION_REQUIRED' in body
+    assert b'"route":"pdf_qa"' in body
     assert response.headers["content-type"].startswith("text/event-stream")
 
 
@@ -3436,9 +3391,10 @@ def test_mode_ask_stream_short_circuits_file_not_ready_status_in_gateway():
                 "POST",
                 "/api/thinking/ask_stream",
                 json={
-                    "question": "#1",
+                    "question": "请总结这篇文献",
                     "requested_mode": "thinking",
-                    "pdf_context": {},
+                    "conversation_id": 42,
+                    "pdf_context": {"selected_ids": [44]},
                 },
             ) as response:
                 body = b"".join(response.iter_bytes())
@@ -3451,7 +3407,7 @@ def test_mode_ask_stream_short_circuits_file_not_ready_status_in_gateway():
     assert b'FILE_NOT_READY' in body
     assert b'"retriable":true' in body
     assert b'"file_selection"' in body
-    assert b'"route_reasons":["EXPLICIT_FILE_REF"]' in body
+    assert b'"route_reasons":["EXPLICIT_SELECTED_FILES"]' in body
     assert b'"route_confidence":1.0' in body
     assert b'"classifier_used":false' in body
     assert response.headers["content-type"].startswith("text/event-stream")
@@ -3460,7 +3416,7 @@ def test_mode_ask_stream_short_circuits_file_not_ready_status_in_gateway():
 def test_mode_ask_logs_route_decision_context(caplog):
     original = app.state.conversation_file_service
     app.state.conversation_file_service = _ConversationFilesStub(
-        [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")]
+        [_ready_pdf()]
     )
 
     def handler(request: httpx.Request) -> httpx.Response:

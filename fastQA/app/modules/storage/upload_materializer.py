@@ -181,9 +181,21 @@ def materialize_uploaded_file(
         parsed_ref = parse_storage_ref(prepared.get("storage_ref"))
         if not parsed_ref:
             prepared["storage_error"] = "storage_ref_missing"
+            _LOGGER.info(
+                "upload materialize failed file_id=%s storage_ref=%s error=%s",
+                prepared.get("file_id"),
+                prepared.get("storage_ref"),
+                prepared.get("storage_error"),
+            )
             return prepared
         if parsed_ref["scheme"] != "minio":
             prepared["storage_error"] = "storage_ref_not_minio"
+            _LOGGER.info(
+                "upload materialize failed file_id=%s storage_ref=%s error=%s",
+                prepared.get("file_id"),
+                prepared.get("storage_ref"),
+                prepared.get("storage_error"),
+            )
             return prepared
         suffix = Path(str(prepared.get("file_name") or parsed_ref.get("object_name") or "upload.bin")).suffix or ".bin"
         try:
@@ -192,10 +204,22 @@ def materialize_uploaded_file(
             stat = reader.stat(str(prepared.get("storage_ref") or ""))
         except ObjectReaderProtocolError as exc:
             prepared["storage_error"] = str(exc) or "storage_ref_invalid"
+            _LOGGER.info(
+                "upload materialize failed file_id=%s storage_ref=%s error=%s",
+                prepared.get("file_id"),
+                prepared.get("storage_ref"),
+                prepared.get("storage_error"),
+            )
             return prepared
         except ObjectReaderUnavailableError as exc:
             _warn(logger, "uploaded file MinIO materialization failed for %s: %s", prepared.get("storage_ref"), exc)
             prepared["storage_error"] = "object_unavailable"
+            _LOGGER.info(
+                "upload materialize failed file_id=%s storage_ref=%s error=%s",
+                prepared.get("file_id"),
+                prepared.get("storage_ref"),
+                prepared.get("storage_error"),
+            )
             return prepared
         prepared["local_path"] = str(materialized)
         prepared["storage_error"] = ""
@@ -203,6 +227,13 @@ def materialize_uploaded_file(
         prepared["storage_object_name"] = stat.object_name
         prepared["storage_etag"] = stat.etag
         prepared["storage_size"] = stat.size
+        _LOGGER.info(
+            "upload materialize success file_id=%s storage_ref=%s local_path=%s size=%s",
+            prepared.get("file_id"),
+            prepared.get("storage_ref"),
+            prepared.get("local_path"),
+            prepared.get("storage_size"),
+        )
         return prepared
 
     existing_local_path = _resolve_readable_local_path(prepared.get("local_path"))

@@ -2593,7 +2593,7 @@ watch(
           <div class="pdf-list-actions">
             <button class="pdf-action-btn" @click="selectAllFiles" :disabled="!hasSelectableConversationFiles">全选</button>
             <button class="pdf-action-btn" @click="clearSelectedFiles" :disabled="!hasSelectableConversationFiles && selectedFileIds.length === 0">清空</button>
-            <span class="pdf-select-tip">已选 {{ selectedFileIds.length }} 个（不选则自动判定）</span>
+            <span class="pdf-select-tip">已选 {{ selectedFileIds.length }} 个（不选则使用知识库问答）</span>
           </div>
         </div>
         <div v-show="!fileListCollapsed" class="pdf-list-items">
