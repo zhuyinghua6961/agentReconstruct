@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+from app.modules.qa_tabular.renderer import _build_tabular_prompt
 from app.modules.qa_tabular.service import qa_tabular_service
 
 
@@ -117,12 +118,15 @@ def test_tabular_service_emits_hybrid_evidence_step(monkeypatch):
             sse_event=lambda event: event,
             clean_answer_for_frontend=lambda text, **_kwargs: text,
             log_qa_interaction=lambda **_kwargs: None,
-            extract_pdf_text_fn=lambda _path: "文献证据 chunk",
+            load_pdf_content_fn=lambda **kwargs: ("===== 文献 #1: 10.1_demo.pdf =====\n文献证据 chunk", None),
+            max_pdf_chars=12000,
         )
     )
 
     assert events[0]["type"] == "metadata"
-    assert any(event.get("step") == "hybrid_evidence" for event in events if isinstance(event, dict))
+    hybrid_events = [event for event in events if isinstance(event, dict) and event.get("step") == "hybrid_evidence"]
+    assert hybrid_events
+    assert "PDF 问答方式" in str(hybrid_events[-1].get("message") or "")
     assert events[-1]["type"] == "done"
     assert events[-1]["route"] == "hybrid_qa"
 
@@ -159,7 +163,8 @@ def test_hybrid_service_can_use_pdf_preview_when_file_not_ready(monkeypatch):
             sse_event=lambda event: event,
             clean_answer_for_frontend=lambda text, **_kwargs: text,
             log_qa_interaction=lambda **_kwargs: None,
-            extract_pdf_text_fn=lambda _path: "",
+            load_pdf_content_fn=lambda **kwargs: (None, "unavailable"),
+            max_pdf_chars=12000,
         )
     )
 
@@ -280,3 +285,67 @@ def test_tabular_service_logs_summary_diagnostics(monkeypatch):
     assert captured["extra"]["summary_column_count"] == 4
     assert captured["extra"]["summary_focus_columns"] == ["供应商", "实际容量_Ah"]
     assert captured["extra"]["summary_sample_count"] == 2
+
+
+def test_hybrid_compare_question_uses_summary_plan_and_cross_modal_prompt(monkeypatch):
+    captured_plan = {}
+
+    def _capture_plan(**kwargs):
+        captured_plan.update(kwargs)
+        return {"operation": "summary", "sheet_name": "Sheet1", "filters": []}
+
+    _stub_successful_tabular_flow(monkeypatch)
+    monkeypatch.setattr(qa_tabular_service, "plan", _capture_plan)
+
+    events = list(
+        qa_tabular_service.iter_answer_events(
+            question="对比一下这些文献和表格",
+            used_files=[
+                {
+                    "file_id": 1,
+                    "file_type": "excel",
+                    "file_name": "demo.xlsx",
+                    "local_path": "/tmp/demo.xlsx",
+                    "parse_status": "ready",
+                    "index_status": "ready",
+                    "processing_stage": "ready",
+                },
+                {
+                    "file_id": 2,
+                    "file_type": "pdf",
+                    "file_name": "10.1_demo.pdf",
+                    "local_path": "/tmp/demo.pdf",
+                    "parse_status": "ready",
+                    "index_status": "ready",
+                    "processing_stage": "ready",
+                },
+            ],
+            route_hint="hybrid_qa",
+            file_selection={"strategy": "explicit_selection", "selected_file_ids": [1, 2]},
+            agent=SimpleNamespace(llm=object()),
+            sse_event=lambda event: event,
+            clean_answer_for_frontend=lambda text, **_kwargs: text,
+            log_qa_interaction=lambda **_kwargs: None,
+            load_pdf_content_fn=lambda **kwargs: ("===== 文献 #1: 10.1_demo.pdf =====\n电压窗口 3.0-4.2V", None),
+            max_pdf_chars=12000,
+        )
+    )
+
+    assert captured_plan.get("route_hint") == "hybrid_qa"
+    assert captured_plan.get("table_file_count") == 1
+    plan_events = [event for event in events if isinstance(event, dict) and event.get("step") == "tabular_plan"]
+    assert plan_events
+    assert "summary" in str(plan_events[-1].get("message") or "")
+
+    prompt, _context = _build_tabular_prompt(
+        question="对比一下这些文献和表格",
+        file_name="demo.xlsx",
+        plan={"operation": "summary"},
+        result={"operation": "summary", "result_rows": [], "summary_stats": {"row_count": 1}},
+        route_hint="hybrid_qa",
+        pdf_evidence_context="===== 文献 #1: 10.1_demo.pdf =====\n电压窗口 3.0-4.2V",
+    )
+    assert "文献原文" in prompt
+    assert "表格执行结果" in prompt
+    assert "不得要求用户再提供文献或表格内容" in prompt
+    assert "必须优先依据这些结果作答" not in prompt

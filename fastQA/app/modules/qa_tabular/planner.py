@@ -457,6 +457,24 @@ def _pick_lookup_columns(
     }
 
 
+def _apply_selection_operation_guards(
+    operation: str,
+    extra: dict[str, Any],
+    *,
+    route_hint: str = "",
+    table_file_count: int = 0,
+) -> tuple[str, dict[str, Any], bool]:
+    guard_applied = False
+    route = str(route_hint or "").strip().lower()
+    if route == "hybrid_qa" and operation == "compare_tables":
+        guard_applied = True
+        return "summary", {}, guard_applied
+    if int(table_file_count or 0) < 2 and operation == "compare_tables":
+        guard_applied = True
+        return "summary", {}, guard_applied
+    return operation, extra, guard_applied
+
+
 def _detect_operation(question: str) -> tuple[str, dict[str, Any]]:
     text = _question_text(question).lower()
     top_k = 0
@@ -711,6 +729,9 @@ def _plan_single_tabular_query(
     profiles: list[dict[str, Any]] | None = None,
     workbook_count: int,
     inherited_filters: list[dict[str, Any]] | None = None,
+    route_hint: str = "",
+    table_file_count: int = 0,
+    selection_strategy: str = "",
 ) -> dict[str, Any]:
     profile_list = [item for item in (profiles or []) if isinstance(item, dict)]
     if not profile_list:
@@ -724,6 +745,12 @@ def _plan_single_tabular_query(
     primary_profile = profile_list[0]
 
     operation, extra = _detect_operation(question)
+    operation, extra, _guard_applied = _apply_selection_operation_guards(
+        operation,
+        extra,
+        route_hint=route_hint,
+        table_file_count=table_file_count or workbook_count,
+    )
     sheet_map: dict[int, str] = {}
     if operation == "compare_tables" and len(profile_list) > 1:
         sheet_map, sheet_clarify = _match_sheet_across_profiles(question, profile_list)
@@ -912,6 +939,9 @@ def plan_tabular_query(
     profile: dict[str, Any] | None = None,
     profiles: list[dict[str, Any]] | None = None,
     workbook_count: int,
+    route_hint: str = "",
+    table_file_count: int = 0,
+    selection_strategy: str = "",
 ) -> dict[str, Any]:
     subquestions = _split_compound_question(question)
     if len(subquestions) <= 1:
@@ -920,6 +950,9 @@ def plan_tabular_query(
             profile=profile,
             profiles=profiles,
             workbook_count=workbook_count,
+            route_hint=route_hint,
+            table_file_count=table_file_count,
+            selection_strategy=selection_strategy,
         )
 
     subplans: list[dict[str, Any]] = []
@@ -931,6 +964,9 @@ def plan_tabular_query(
             profiles=profiles,
             workbook_count=workbook_count,
             inherited_filters=inherited_filters if idx > 0 else None,
+            route_hint=route_hint,
+            table_file_count=table_file_count,
+            selection_strategy=selection_strategy,
         )
         if subplan.get("needs_clarification"):
             return subplan

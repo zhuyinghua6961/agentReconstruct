@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import os
-import re
 from typing import Any, Iterator
 
 from app.modules.qa_tabular.executor import execute_compare_plan, execute_tabular_plan
 from app.modules.qa_tabular.planner import plan_tabular_query
 from app.modules.qa_pdf.common import IncrementalCleanState, incremental_clean_events_for_piece
+from app.modules.qa_pdf.pdf_context import build_merged_pdf_context, extract_doi_from_filename
 from app.modules.qa_tabular.renderer import (
     build_tabular_answer,
     build_tabular_result_context,
@@ -102,189 +102,6 @@ def _summarize_files(files: list[dict[str, Any]], *, limit: int = 3) -> str:
     return ", ".join(names) + suffix
 
 
-def _extract_doi_from_filename(file_name: str) -> str:
-    text = str(file_name or "").strip()
-    if not text:
-        return ""
-    if "." in text.rsplit("/", 1)[-1]:
-        stem, suffix = text.rsplit(".", 1)
-        if suffix.lower() in {"pdf", "csv", "xlsx", "xls"}:
-            text = stem
-    match = re.search(r"(10\.\d+[/_][-._;()/:A-Za-z0-9]+)", text)
-    if not match:
-        return ""
-    return match.group(1).replace("_", "/", 1).rstrip(").,;")
-
-
-def _format_pdf_evidence_context(pdf_files: list[dict[str, Any]]) -> str:
-    rows: list[str] = []
-    for item in pdf_files[:3]:
-        file_name = str(item.get("file_name") or "").strip()
-        file_meta = item.get("file_meta") if isinstance(item.get("file_meta"), dict) else {}
-        preview = str(file_meta.get("parsed_preview") or "").strip()
-        doi = _extract_doi_from_filename(file_name)
-        title = file_name or "uploaded.pdf"
-        if doi:
-            title = f"{title} (DOI: {doi})"
-        rows.append(title)
-        if preview:
-            rows.append(preview[:600])
-    return "\n".join(rows).strip()
-
-
-def _split_text_chunks(text: str, *, max_chars: int = 720, overlap_chars: int = 120, max_chunks: int = 18) -> list[str]:
-    normalized = str(text or "").strip()
-    if not normalized:
-        return []
-    parts = [part.strip() for part in normalized.split("\n\n") if part.strip()] or [normalized]
-    chunks: list[str] = []
-    current = ""
-    for part in parts:
-        if len(current) + len(part) + 2 <= max_chars:
-            current = (current + "\n\n" + part).strip() if current else part
-            continue
-        if current:
-            chunks.append(current)
-        current = part
-        if len(chunks) >= max_chunks:
-            break
-    if current and len(chunks) < max_chunks:
-        chunks.append(current)
-    if overlap_chars > 0 and len(chunks) > 1:
-        merged = [chunks[0]]
-        for chunk in chunks[1:]:
-            merged.append((merged[-1][-overlap_chars:] + "\n\n" + chunk).strip())
-        chunks = merged
-    return chunks[:max_chunks]
-
-
-def _split_sentences(text: str, *, max_sentences: int = 240) -> list[str]:
-    parts = re.split(r"(?<=[。！？?!\.])\s+|\n+", str(text or ""))
-    sentences: list[str] = []
-    for part in parts:
-        value = str(part or "").strip()
-        if len(value) < 24:
-            continue
-        sentences.append(value)
-        if len(sentences) >= max_sentences:
-            break
-    return sentences
-
-
-def _build_sentence_windows(sentences: list[str], *, window_sizes: tuple[int, ...] = (2, 3), max_windows: int = 120) -> list[str]:
-    windows: list[str] = []
-    for window_size in window_sizes:
-        if window_size <= 1:
-            continue
-        for index in range(0, max(0, len(sentences) - window_size + 1)):
-            window = " ".join(sentences[index : index + window_size]).strip()
-            if len(window) < 40:
-                continue
-            windows.append(window)
-            if len(windows) >= max_windows:
-                return windows
-    return windows
-
-
-def _dedupe_text_candidates(candidates: list[str], *, limit: int = 80) -> list[str]:
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        key = re.sub(r"\s+", " ", str(candidate or "").strip().lower())
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        deduped.append(str(candidate).strip())
-        if len(deduped) >= limit:
-            break
-    return deduped
-
-
-def _tokenize_text(text: str) -> set[str]:
-    tokens: set[str] = set()
-    for matched in re.findall(r"[A-Za-z0-9_./+-]+|[\u4e00-\u9fff]{2,8}", str(text or "").lower()):
-        token = matched.strip()
-        if len(token) > 1:
-            tokens.add(token)
-    return tokens
-
-
-def _score_evidence_chunk(*, question: str, text: str) -> float:
-    q_tokens = _tokenize_text(question)
-    t_tokens = _tokenize_text(text)
-    if not q_tokens or not t_tokens:
-        return 0.0
-    overlap = len(q_tokens & t_tokens)
-    numeric_overlap = len(set(re.findall(r"\d+(?:\.\d+)?", str(question or ""))) & set(re.findall(r"\d+(?:\.\d+)?", str(text or ""))))
-    exact_hits = sum(1 for token in q_tokens if len(token) >= 3 and token in str(text or "").lower())
-    coverage = overlap / max(1, len(q_tokens))
-    length_bonus = min(len(str(text or "")), 900) / 900.0
-    return coverage * 2.4 + exact_hits * 0.18 + numeric_overlap * 0.8 + length_bonus * 0.2
-
-
-def _build_evidence_candidates(*, extracted_text: str, preview_text: str) -> list[str]:
-    candidates: list[str] = []
-    extracted = str(extracted_text or "").strip()
-    preview = str(preview_text or "").strip()
-    if extracted:
-        candidates.extend(_split_text_chunks(extracted, max_chars=680, overlap_chars=100, max_chunks=24))
-        sentences = _split_sentences(extracted, max_sentences=220)
-        candidates.extend(_build_sentence_windows(sentences, window_sizes=(2, 3), max_windows=80))
-    if preview:
-        candidates.append(preview[:900])
-    return _dedupe_text_candidates(candidates, limit=90)
-
-
-def _retrieve_hybrid_evidence(
-    *,
-    question: str,
-    pdf_files: list[dict[str, Any]],
-    extract_pdf_text_fn: Any,
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for item in pdf_files:
-        local_path = str(item.get("local_path") or "").strip()
-        file_meta = item.get("file_meta") if isinstance(item.get("file_meta"), dict) else {}
-        preview_text = str(file_meta.get("parsed_preview") or "").strip()
-        extracted_text = ""
-        if local_path and callable(extract_pdf_text_fn):
-            try:
-                extracted_text = str(extract_pdf_text_fn(local_path) or "").strip()
-            except Exception:
-                extracted_text = ""
-        for idx, chunk in enumerate(_build_evidence_candidates(extracted_text=extracted_text, preview_text=preview_text), start=1):
-            score = _score_evidence_chunk(question=question, text=chunk)
-            if score <= 0:
-                continue
-            rows.append(
-                {
-                    "file_id": int(item.get("file_id") or 0),
-                    "file_name": str(item.get("file_name") or ""),
-                    "doi": _extract_doi_from_filename(str(item.get("file_name") or "")),
-                    "chunk_id": idx,
-                    "text": chunk,
-                    "score": score,
-                    "source_type": "pdf_text" if extracted_text else "parsed_preview",
-                }
-            )
-    rows.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
-    return rows[:8]
-
-
-def _format_hybrid_evidence_context(rows: list[dict[str, Any]]) -> str:
-    if not rows:
-        return ""
-    parts: list[str] = []
-    for idx, item in enumerate(rows, start=1):
-        header = f"[E{idx}] 文件#{item.get('file_id') or 0} chunk#{item.get('chunk_id') or 0}: {item.get('file_name') or ''}"
-        doi = str(item.get("doi") or "")
-        if doi:
-            header += f" | DOI={doi}"
-        parts.append(header)
-        parts.append(str(item.get("text") or ""))
-    return "\n".join(parts).strip()
-
-
 def _fallback_profile_for_workbook(workbook: dict[str, Any]) -> dict[str, Any]:
     sheets = workbook.get("sheets") if isinstance(workbook.get("sheets"), list) else []
     normalized_sheets: list[dict[str, Any]] = []
@@ -336,7 +153,15 @@ class QaTabularService:
         sse_event = kwargs.get("sse_event")
         clean_answer_for_frontend = kwargs.get("clean_answer_for_frontend") or (lambda text: text)
         log_qa_interaction = kwargs.get("log_qa_interaction") or (lambda **_kwargs: None)
+        load_pdf_content_fn = kwargs.get("load_pdf_content_fn")
         extract_pdf_text_fn = kwargs.get("extract_pdf_text_fn")
+        logger = kwargs.get("logger")
+        file_selection = kwargs.get("file_selection") if isinstance(kwargs.get("file_selection"), dict) else {}
+        selection_strategy = str(file_selection.get("strategy") or kwargs.get("selection_strategy") or "").strip()
+        try:
+            max_pdf_chars = max(4000, int(kwargs.get("max_pdf_chars") or 12000))
+        except (TypeError, ValueError):
+            max_pdf_chars = 12000
 
         source_scope = str(kwargs.get("source_scope") or "").strip()
         kb_enabled = bool(kwargs.get("kb_enabled") or False)
@@ -446,12 +271,21 @@ class QaTabularService:
 
         yield _emit({"type": "thinking", "content": "🧭 正在识别工作表、字段和执行意图..."}, sse_event)
         primary_table = loaded_tables[0]
+        planned_operation = ""
+        operation_guard_applied = False
         plan = self.plan(
             question=question,
             profile=primary_table["profile"],
             profiles=[item["profile"] for item in loaded_tables],
             workbook_count=len(loaded_tables),
+            route_hint=route_hint,
+            table_file_count=len(table_files),
+            selection_strategy=selection_strategy,
         )
+        planned_operation = str(plan.get("operation") or "")
+        if hybrid_mode and planned_operation == "compare_tables":
+            plan = {**plan, "operation": "summary"}
+            operation_guard_applied = True
         if plan.get("needs_clarification"):
             message = str(plan.get("clarification_message") or "表格问答需要澄清")
             yield _emit(
@@ -517,29 +351,47 @@ class QaTabularService:
                 sse_event,
             )
 
-        hybrid_evidence_rows: list[dict[str, Any]] = []
         pdf_evidence_context = ""
+        pdf_references: list[str] = []
+        loaded_pdf_count = 0
+        pdf_context_source = ""
         if hybrid_mode:
-            hybrid_evidence_rows = _retrieve_hybrid_evidence(
-                question=question,
-                pdf_files=pdf_files,
-                extract_pdf_text_fn=extract_pdf_text_fn,
-            )
-            if hybrid_evidence_rows:
-                pdf_evidence_context = _format_hybrid_evidence_context(hybrid_evidence_rows)
-            else:
-                pdf_evidence_context = _format_pdf_evidence_context(pdf_files)
+            if callable(load_pdf_content_fn):
+                pdf_evidence_context, pdf_references, loaded_pdf_count = build_merged_pdf_context(
+                    pdf_files=pdf_files,
+                    load_pdf_content_fn=load_pdf_content_fn,
+                    question=question,
+                    max_pdf_chars=max_pdf_chars,
+                    logger=logger,
+                )
+                pdf_context_source = "pdf_qa_merge" if loaded_pdf_count > 0 else ("parsed_preview" if pdf_evidence_context else "empty")
+            elif callable(extract_pdf_text_fn):
+                pdf_evidence_context, pdf_references, loaded_pdf_count = build_merged_pdf_context(
+                    pdf_files=pdf_files,
+                    load_pdf_content_fn=lambda **load_kwargs: (
+                        str(extract_pdf_text_fn(str(load_kwargs.get("pdf_path") or "")) or ""),
+                        None,
+                    ),
+                    question=question,
+                    max_pdf_chars=max_pdf_chars,
+                    logger=logger,
+                )
+                pdf_context_source = "pdf_text_extract" if loaded_pdf_count > 0 else ("parsed_preview" if pdf_evidence_context else "empty")
         if hybrid_mode and pdf_files:
+            if loaded_pdf_count > 0:
+                hybrid_message = (
+                    f"🧩 已按 PDF 问答方式加载 {loaded_pdf_count} 篇文献原文（chars={len(pdf_evidence_context)}）"
+                )
+            elif pdf_evidence_context:
+                hybrid_message = f"🧩 已加载 {len(pdf_files)} 篇文献预览用于交叉验证（chars={len(pdf_evidence_context)}）"
+            else:
+                hybrid_message = f"🧩 未能加载 {len(pdf_files)} 篇文献原文，将仅依据表格结果作答"
             yield _emit(
                 {
                     "type": "step",
                     "step": "hybrid_evidence",
-                    "status": "success",
-                    "message": (
-                        f"🧩 已检索到 {len(hybrid_evidence_rows)} 条文献证据片段"
-                        if hybrid_evidence_rows
-                        else f"🧩 已加载 {len(pdf_files)} 篇文献预览用于交叉验证"
-                    ),
+                    "status": "success" if pdf_evidence_context else "warning",
+                    "message": hybrid_message,
                 },
                 sse_event,
             )
@@ -559,7 +411,7 @@ class QaTabularService:
                 },
                 sse_event,
             )
-        yield _emit({"type": "thinking", "content": "✍️ 正在基于真实执行结果生成答案..."}, sse_event)
+        yield _emit({"type": "thinking", "content": "✍️ 正在综合文献与表格材料生成答案..."}, sse_event)
         file_name = str(
             primary_table["workbook"].get("file_name")
             or primary_table["file_item"].get("file_name")
@@ -607,10 +459,12 @@ class QaTabularService:
                 yield _emit(event, sse_event)
 
         answer = str(clean_answer_for_frontend("".join(raw_parts)) or "").strip()
-        references = [
-            _extract_doi_from_filename(str(item.get("doi") or item.get("file_name") or ""))
-            for item in (hybrid_evidence_rows or pdf_files)
-        ]
+        references = list(pdf_references)
+        if not references:
+            references = [
+                extract_doi_from_filename(str(item.get("file_name") or ""))
+                for item in pdf_files
+            ]
         references = [item for item in references if item]
         for doi in kb_references:
             if doi and doi not in references:
@@ -626,9 +480,14 @@ class QaTabularService:
                     "tabular_branch": True,
                     "hybrid_mode": hybrid_mode,
                     "route_hint": route_hint,
+                    "selection_strategy": selection_strategy,
                     "table_file_count": len(table_files),
                     "pdf_file_count": len(pdf_files),
-                    "hybrid_evidence_count": len(hybrid_evidence_rows),
+                    "planned_operation": planned_operation or str(plan.get("operation") or ""),
+                    "operation_guard_applied": operation_guard_applied,
+                    "pdf_context_chars": len(pdf_evidence_context),
+                    "pdf_context_source": pdf_context_source,
+                    "loaded_pdf_count": loaded_pdf_count,
                     "kb_enabled": kb_enabled,
                     "kb_reference_count": len(kb_references),
                     "kb_evidence_chars": len(kb_evidence_context),

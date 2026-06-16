@@ -103,6 +103,12 @@ class FileRouteService:
         except Exception:
             return 50000
 
+    def _hybrid_pdf_context_chars(self) -> int:
+        try:
+            return max(4000, int(str(os.getenv("PDF_QA_MAX_PDF_CHARS", "12000") or "12000").strip()))
+        except Exception:
+            return 12000
+
     def _resolve_llm(self, *, app_state: Any):
         shared_llm = getattr(app_state, "shared_llm_adapter", None)
         if _has_invoke(shared_llm):
@@ -280,10 +286,13 @@ class FileRouteService:
                 "status": "success",
                 "message": "📊 已进入表格/混合文件问答链路",
             }
+            file_selection = dict(request.file_selection or {})
             yield from qa_tabular_service.iter_answer_events(
                 question=request.question,
                 used_files=request.execution_files or request.used_files,
                 route_hint=route,
+                file_selection=file_selection,
+                selection_strategy=str(file_selection.get("strategy") or ""),
                 agent=SimpleNamespace(llm=self._resolve_llm(app_state=app_state)),
                 sse_event=lambda event: event,
                 clean_answer_for_frontend=_clean_answer_for_frontend,
@@ -292,11 +301,8 @@ class FileRouteService:
                 is_cancelled=should_cancel,
                 logger=self._logger,
                 trace_id=request.trace_id,
-                extract_pdf_text_fn=lambda pdf_path: self._extract_pdf_text(
-                    pdf_path,
-                    max_pages=10,
-                    exclude_references=True,
-                ),
+                max_pdf_chars=self._hybrid_pdf_context_chars(),
+                load_pdf_content_fn=self._load_pdf_content_for_streaming,
             )
             return
 

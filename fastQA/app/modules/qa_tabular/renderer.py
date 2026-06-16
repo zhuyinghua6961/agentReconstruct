@@ -207,16 +207,18 @@ def _build_tabular_prompt(
 
     if hybrid_mode:
         lines: list[str] = [
-            "你是磷酸铁锂领域的混合文件分析助手。表格执行结果是真实计算结果，必须优先依据这些结果作答。证据内容（文献/知识库）只能用于解释和验证，不能覆盖表格结果。",
+            "你是磷酸铁锂领域的混合文件分析助手。用户已通过勾选同时指定了文献与表格。",
+            "下面的文献原文与表格执行结果均为后端真实材料，请综合两侧做交叉对比、印证与差异说明，给出直接结论。",
+            "不得要求用户再提供文献或表格内容；仅当某一侧材料确实为空时，才说明缺口。",
             "",
             "用户问题:",
             str(question or ""),
             "",
+            "文献原文:",
+            str(pdf_evidence_context or "无可用文献原文"),
+            "",
             "表格执行结果:",
             str(context_text or ""),
-            "",
-            "文献证据:",
-            str(pdf_evidence_context or "无可用文献证据"),
             "",
             "知识库证据:",
             str(kb_evidence_context or "无可用知识库证据"),
@@ -227,7 +229,7 @@ def _build_tabular_prompt(
         instruction = str(kb_reference_instruction or "").strip()
         if instruction:
             lines.extend([instruction, ""])
-        lines.append("请输出：1) 直接结论 2) 数据依据 3) 证据补充/不确定项")
+        lines.append("请输出：1) 直接结论 2) 文献与表格依据 3) 差异/不确定项")
         prompt = "\n".join(lines)
     else:
         intro = "你是磷酸铁锂领域的表格分析助手。下面的表格执行结果来自后端真实计算，不允许编造。"

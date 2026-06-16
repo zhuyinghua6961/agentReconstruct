@@ -582,11 +582,15 @@ def iter_tabular_route_events(
                 }
 
     yield {"type": "step", "step": "dispatch", "route": route, "message": "进入表格/混合问答分支"}
+    file_selection = dict(getattr(adapted_request, "file_selection", None) or {})
+    redis_service = getattr(app_state, "redis_service", None)
     for event in _iter_decoded_events(
         qa_tabular_service.iter_answer_events(
             question=adapted_request.question,
             used_files=execution_files,
             route_hint=route,
+            file_selection=file_selection,
+            selection_strategy=str(file_selection.get("strategy") or ""),
             source_scope=source_scope,
             kb_enabled=wants_kb,
             kb_evidence_context=kb_evidence_context,
@@ -601,7 +605,16 @@ def iter_tabular_route_events(
             is_cancelled=is_cancelled,
             logger=logger,
             trace_id=adapted_request.trace_id,
-            extract_pdf_text_fn=bindings.extract_pdf_text,
+            max_pdf_chars=_env_int("PDF_QA_MAX_PDF_CHARS", default=12000),
+            load_pdf_content_fn=lambda **kwargs: load_pdf_content_for_streaming(
+                **kwargs,
+                executor=None,
+                timeout_error_cls=FutureTimeoutError,
+                extract_pdf_text_fn=bindings.extract_pdf_text,
+                max_pdf_pages=10,
+                logger=logger,
+                redis_service=redis_service,
+            ),
         )
     ):
         yield event
