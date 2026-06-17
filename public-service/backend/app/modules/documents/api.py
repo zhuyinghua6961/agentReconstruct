@@ -208,22 +208,30 @@ def translate_document(
     _quota: QuotaGrant | None = Depends(require_quota("doc_assist", strict_config=True)),
 ):
     accept_header = str(request.headers.get("accept") or "").lower()
-    if "text/event-stream" in accept_header:
+    logger = _logger(request)
+    streaming = "text/event-stream" in accept_header
+    logger.info(
+        "document_translation request document_type=%s document_id=%s streaming=%s",
+        str(payload.document_type or "").strip(),
+        str(payload.document_id or "").strip(),
+        streaming,
+    )
+    if streaming:
         result = documents_service.stream_translate_document(
             document_type=payload.document_type,
             document_id=payload.document_id,
-            logger=_logger(request),
+            logger=logger,
         )
         response = _patent_original_response(result=dict(result or {}), head_only=False)
-        return _finalize_quota_softly(grant=_quota, result=response, logger=_logger(request))
+        return _finalize_quota_softly(grant=_quota, result=response, logger=logger)
 
     result, status_code = documents_service.translate_document(
         document_type=payload.document_type,
         document_id=payload.document_id,
-        logger=_logger(request),
+        logger=logger,
     )
     response = _json(result, status_code)
-    return _finalize_quota_softly(grant=_quota, result=response, logger=_logger(request))
+    return _finalize_quota_softly(grant=_quota, result=response, logger=logger)
 
 
 @router.get("/api/v1/check_pdf/{doi:path}")

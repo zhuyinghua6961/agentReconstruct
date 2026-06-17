@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 _INTERNAL_TOKEN_ENV = "PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN"
 _SOURCE_SERVICE_POLICY: dict[str, dict[str, set[str]]] = {
     "fastQA": {
-        "requested_modes": {"fast", "thinking"},
+        "requested_modes": {"fast", "thinking", "patent"},
         "actual_modes": {"fast"},
     },
     "highThinkingQA": {

@@ -704,7 +704,7 @@ def test_patent_original_store_resolves_fulltext_pdf_reference():
     assert fulltext.original_version == "2026-03-31T12:00:00Z#sha256:test"
 
 
-def test_documents_service_translate_document_for_doi_uses_extracted_paragraphs(monkeypatch, tmp_path):
+def test_documents_service_translate_document_for_doi_uses_packed_chunks(monkeypatch, tmp_path):
     pdf_path = tmp_path / "paper.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n")
 
@@ -714,22 +714,18 @@ def test_documents_service_translate_document_for_doi_uses_extracted_paragraphs(
         "_extract_pdf_body",
         lambda **kwargs: "First paragraph. Second sentence.\n\nThird paragraph.",
     )
-    monkeypatch.setattr(
-        documents_service,
-        "_segment_paragraphs",
-        lambda full_text: ["First paragraph. Second sentence.", "Third paragraph."],
-    )
 
     captured: dict[str, object] = {}
 
-    def _fake_translate(*, texts, logger):
+    def _fake_translate(*, texts, logger, **kwargs):
         captured["texts"] = list(texts)
+        captured["kwargs"] = dict(kwargs)
         return (
             {
                 "success": True,
-                "translations": ["第一段。", "第二段。"],
-                "count": 2,
-                "cache_hits": 2,
+                "translations": ["第一段。"],
+                "count": 1,
+                "cache_hits": 1,
             },
             200,
         )
@@ -743,10 +739,13 @@ def test_documents_service_translate_document_for_doi_uses_extracted_paragraphs(
     )
 
     assert status_code == 200
-    assert captured["texts"] == ["First paragraph. Second sentence.", "Third paragraph."]
-    assert payload["translated_text"] == "第一段。\n\n第二段。"
-    assert payload["segment_count"] == 2
-    assert payload["cache_hits"] == 2
+    assert captured["texts"] == ["First paragraph. Second sentence.\n\nThird paragraph."]
+    assert captured["kwargs"]["profile"] == "document"
+    assert payload["translated_text"].startswith("# 10.1000/test")
+    assert "第一段。" in payload["translated_text"]
+    assert payload["segment_count"] == 1
+    assert payload["truncated"] is False
+    assert payload["cache_hits"] == 1
     assert payload["cache_status"] == "hit"
 
 
@@ -775,7 +774,7 @@ def test_documents_service_translate_document_for_patent_assembles_structured_se
 
     captured: dict[str, object] = {}
 
-    def _fake_translate(*, texts, logger):
+    def _fake_translate(*, texts, logger, **kwargs):
         captured["texts"] = list(texts)
         return (
             {
@@ -826,7 +825,7 @@ def test_documents_service_stream_translate_document_emits_sse_events(monkeypatc
 
     call_index = {"value": 0}
 
-    def _fake_translate(*, texts, logger):
+    def _fake_translate(*, texts, logger, **kwargs):
         _ = logger
         idx = call_index["value"]
         call_index["value"] += 1

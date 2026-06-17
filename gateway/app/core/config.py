@@ -133,7 +133,7 @@ class GatewaySettings:
             host=str(os.getenv("GATEWAY_HOST", "0.0.0.0") or "0.0.0.0"),
             port=int(str(os.getenv("GATEWAY_PORT", "8101") or "8101")),
             request_timeout_seconds=int(str(os.getenv("GATEWAY_REQUEST_TIMEOUT_SECONDS", "30") or "30")),
-            sse_timeout_seconds=int(str(os.getenv("GATEWAY_SSE_TIMEOUT_SECONDS", "600") or "600")),
+            sse_timeout_seconds=int(str(os.getenv("GATEWAY_SSE_TIMEOUT_SECONDS", "1800") or "1800")),
             conversation_file_provider=str(os.getenv("GATEWAY_CONVERSATION_FILE_PROVIDER", "noop") or "noop").strip().lower(),
             endpoints=BackendEndpoints(
                 public=public_base_url,

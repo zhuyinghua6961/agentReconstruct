@@ -67,8 +67,6 @@ class RouteDecisionService:
     def _actual_mode(self, *, requested_mode: str, turn_mode: str) -> str:
         if turn_mode not in {"file_only", "mixed"}:
             return requested_mode
-        if requested_mode == "patent":
-            return "patent"
         return "fast"
 
     def _normalized_route(self, file_context: FileContextDecision) -> RouteName:

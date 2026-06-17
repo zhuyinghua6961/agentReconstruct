@@ -219,13 +219,22 @@
 
               <div v-else class="translation-document-panel">
                 <div class="translation-document-actions">
-                  <button
-                    class="summary-generate-btn"
-                    :disabled="isDocumentTranslating || !canTranslateCurrentDocument"
-                    @click="translateFullDocument(true)"
-                  >
-                    {{ isDocumentTranslating ? '翻译中...' : (fullDocumentTranslation ? '重新翻译全文' : '翻译全文') }}
-                  </button>
+                  <div class="translation-document-button-row">
+                    <button
+                      class="summary-generate-btn"
+                      :disabled="isDocumentTranslating || !canTranslateCurrentDocument"
+                      @click="translateFullDocument(true)"
+                    >
+                      {{ isDocumentTranslating ? '翻译中...' : (fullDocumentTranslation ? '重新翻译全文' : '翻译全文') }}
+                    </button>
+                    <button
+                      class="summary-generate-btn secondary"
+                      :disabled="!canDownloadFullDocumentTranslation"
+                      @click="downloadFullDocumentTranslation"
+                    >
+                      {{ fullDocumentTranslationDownloadLabel }}
+                    </button>
+                  </div>
                   <p class="translation-document-hint">
                     {{ canTranslateCurrentDocument ? '按当前打开的 DOI / 专利原文生成整篇中文译文。' : '当前文档暂不支持全文翻译。' }}
                   </p>
@@ -234,7 +243,10 @@
                   <QuotaLimitCard v-if="fullDocumentTranslationQuotaCard" :card="fullDocumentTranslationQuotaCard" />
                   <p v-else-if="fullDocumentTranslationError" class="summary-error">{{ fullDocumentTranslationError }}</p>
                   <template v-else-if="fullDocumentTranslation || isDocumentTranslating">
-                    <p v-if="isDocumentTranslating" class="summary-loading">正在提取文档正文并流式生成全文翻译，请稍候...</p>
+                    <p v-if="fullDocumentTranslationTruncated && fullDocumentTranslationCompleted" class="summary-error">
+                      正文过长或提取不完整，仅翻译了部分内容。
+                    </p>
+                    <p v-if="isDocumentTranslating" class="summary-loading">正在提取文档正文并生成结构化 Markdown 译文，完成后自动排版...</p>
                     <p v-if="getFullDocumentTranslationStatusLabel()" class="translation-document-status">
                       全文翻译状态：{{ getFullDocumentTranslationStatusLabel() }}
                     </p>
@@ -273,6 +285,8 @@ import {
 } from '../utils/pdfReaderClipboardTranslate.js'
 import { resolvePdfReaderInitialPanelMode, isPdfReaderPanelActive } from '../utils/pdfReaderPanelMode'
 import { buildPdfReaderOpenState, releasePdfBlobUrl } from '../utils/pdfReaderOpenFlow'
+import { downloadTextFile } from '../utils/downloadTextFile.js'
+import { buildFullDocumentTranslationFilename } from '../utils/pdfReaderTranslationDownload.js'
 
 // Props & Emits
 const emit = defineEmits(['close'])
@@ -312,6 +326,8 @@ const fullDocumentTranslationError = ref('')
 const fullDocumentTranslationQuotaCard = ref(null)
 const isDocumentTranslating = ref(false)
 const fullDocumentTranslationCacheStatus = ref('')
+const fullDocumentTranslationCompleted = ref(false)
+const fullDocumentTranslationTruncated = ref(false)
 const documentTranslationSessionId = ref(0)
 const documentTranslationAbortController = ref(null)
 
@@ -323,6 +339,14 @@ const isSummaryVisible = computed(() => isPdfReaderPanelActive(panelMode.value, 
 const isTranslationVisible = computed(() => isPdfReaderPanelActive(panelMode.value, 'translation'))
 const hasManualTranslateText = computed(() => normalizeClipboardText(manualText.value).length > 0)
 const canTranslateCurrentDocument = computed(() => Boolean(currentDoi.value || currentPatentId.value))
+const canDownloadFullDocumentTranslation = computed(() =>
+  fullDocumentTranslationCompleted.value
+  && !isDocumentTranslating.value
+  && Boolean(fullDocumentTranslation.value.trim())
+)
+const fullDocumentTranslationDownloadLabel = computed(() =>
+  fullDocumentTranslationTruncated.value ? '下载已译部分' : '下载译文'
+)
 
 function withPdfPageAnchor(url, page = null) {
   if (!url || !page) return url
@@ -356,6 +380,8 @@ function resetDocumentTranslationState() {
   fullDocumentTranslationQuotaCard.value = null
   isDocumentTranslating.value = false
   fullDocumentTranslationCacheStatus.value = ''
+  fullDocumentTranslationCompleted.value = false
+  fullDocumentTranslationTruncated.value = false
 }
 
 function resolvePatentId(label, documentUrl) {
@@ -396,6 +422,22 @@ function getFullDocumentTranslationStatusLabel() {
   if (fullDocumentTranslationCacheStatus.value === 'partial') return '部分缓存命中'
   if (fullDocumentTranslationCacheStatus.value === 'miss') return '本次新翻译'
   return ''
+}
+
+function downloadFullDocumentTranslation() {
+  if (!canDownloadFullDocumentTranslation.value) return
+
+  const request = resolveDocumentTranslationRequest()
+  const filename = buildFullDocumentTranslationFilename({
+    documentType: request?.documentType || 'doi',
+    documentId: request?.documentId || '',
+    label: currentDocumentLabel.value,
+  })
+
+  downloadTextFile({
+    content: fullDocumentTranslation.value,
+    filename,
+  })
 }
 
 function isActiveDocumentTranslationSession(sessionId) {
@@ -802,6 +844,8 @@ async function translateFullDocument(force = false) {
   fullDocumentTranslationError.value = ''
   fullDocumentTranslationQuotaCard.value = null
   fullDocumentTranslationCacheStatus.value = ''
+  fullDocumentTranslationCompleted.value = false
+  fullDocumentTranslationTruncated.value = false
   const translatedSegments = []
 
   try {
@@ -830,16 +874,23 @@ async function translateFullDocument(force = false) {
           }
           fullDocumentTranslationError.value = ''
           fullDocumentTranslationCacheStatus.value = String(event?.cache_status || '')
+          fullDocumentTranslationTruncated.value = Boolean(event?.truncated)
+          fullDocumentTranslationCompleted.value = true
           return
         }
 
         if (eventType === 'error') {
           fullDocumentTranslationError.value = String(event?.message || event?.error || '全文翻译失败')
+          fullDocumentTranslationCompleted.value = false
+          fullDocumentTranslationTruncated.value = false
           return
         }
 
-        if (eventType === 'start' && event?.cache_status) {
-          fullDocumentTranslationCacheStatus.value = String(event?.cache_status || '')
+        if (eventType === 'start') {
+          fullDocumentTranslationTruncated.value = Boolean(event?.truncated)
+          if (event?.cache_status) {
+            fullDocumentTranslationCacheStatus.value = String(event?.cache_status || '')
+          }
         }
       },
     })
@@ -851,6 +902,8 @@ async function translateFullDocument(force = false) {
   } catch (error) {
     if (!isActiveDocumentTranslationSession(sessionId)) return
     if (error?.name === 'AbortError') return
+    fullDocumentTranslationCompleted.value = false
+    fullDocumentTranslationTruncated.value = false
     const quotaCard = buildDocAssistQuotaCard(error, '全文翻译')
     if (quotaCard) {
       fullDocumentTranslationQuotaCard.value = quotaCard
@@ -1149,6 +1202,15 @@ onBeforeUnmount(() => {
 .summary-generate-btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+.summary-generate-btn.secondary {
+  background: #ffffff;
+  color: #334155;
+}
+
+.summary-generate-btn.secondary:not(:disabled):hover {
+  background: #f8fafc;
 }
 
 .summary-panel-content {
@@ -1469,6 +1531,12 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.translation-document-button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .translation-document-hint {

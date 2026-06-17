@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-import hashlib
 import json
 import os
 import threading
@@ -14,6 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import get_settings
+from app.modules.documents.translation_redis_cache import (
+    cache_chunk_translation,
+    get_cached_chunk_translation,
+    get_translation_redis_service,
+    hash_translation_text,
+)
 
 try:
     import fcntl
@@ -258,20 +263,49 @@ class TranslationCache:
                 self._upload_cache_to_remote()
                 self._last_remote_sync_at = time.time()
 
-    def _hash_text(self, text: str) -> str:
-        return hashlib.md5(text.encode("utf-8")).hexdigest()
+    def _hash_text(self, text: str, *, profile: str = "snippet") -> str:
+        return hash_translation_text(text, profile=profile)
 
-    def get(self, text: str) -> str | None:
+    def get(self, text: str, *, profile: str = "snippet") -> str | None:
+        redis_service = get_translation_redis_service()
+        redis_cached = get_cached_chunk_translation(
+            redis_service=redis_service,
+            text=text,
+            profile=profile,
+        )
+        if redis_cached:
+            text_hash = self._hash_text(text, profile=profile)
+            self.cache[text_hash] = {
+                "translation": redis_cached,
+                "updated_at": time.time(),
+            }
+            return redis_cached
+
         self._refresh_from_remote_if_due()
-        text_hash = self._hash_text(text)
+        text_hash = self._hash_text(text, profile=profile)
         entry = self.cache.get(text_hash)
         if entry:
             entry["updated_at"] = time.time()
-            return str(entry.get("translation") or "")
+            translation = str(entry.get("translation") or "")
+            if translation:
+                cache_chunk_translation(
+                    redis_service=redis_service,
+                    text=text,
+                    translation=translation,
+                    profile=profile,
+                )
+            return translation
         return None
 
-    def set(self, text: str, translation: str):
-        text_hash = self._hash_text(text)
+    def set(self, text: str, translation: str, *, profile: str = "snippet"):
+        redis_service = get_translation_redis_service()
+        cache_chunk_translation(
+            redis_service=redis_service,
+            text=text,
+            translation=translation,
+            profile=profile,
+        )
+        text_hash = self._hash_text(text, profile=profile)
         self.cache[text_hash] = {
             "translation": translation,
             "updated_at": time.time(),

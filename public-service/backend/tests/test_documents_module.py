@@ -100,6 +100,42 @@ def test_smart_translator_uses_placeholder_for_blank_llm_api_key(monkeypatch):
     assert calls == {"api_key": "local-openai-compatible", "base_url": "http://local-llm/v1"}
 
 
+def test_smart_translator_document_profile_uses_markdown_prompt(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _FakeCompletions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="## 摘要\n\n译文"))])
+
+    class _FakeOpenAI:
+        def __init__(self, **_kwargs):
+            self.chat = SimpleNamespace(completions=_FakeCompletions())
+
+    monkeypatch.setenv("TRANSLATION_PROMPT_VERSION", "2")
+    translator = SmartTranslator(
+        _FakeOpenAI,
+        api_key="",
+        base_url="http://local-llm/v1",
+        model="local-model",
+    )
+    source_text = f"document-profile-input-{time.time_ns()}"
+
+    result = translator.translate(
+        source_text,
+        show_progress=False,
+        profile="document",
+        chunk_index=1,
+        chunk_count=4,
+    )
+    messages = captured["messages"]
+
+    assert result.startswith("##")
+    assert "Markdown" in messages[0]["content"]
+    assert "第 2/4 段" in messages[1]["content"]
+    assert "参考文献" in messages[1]["content"]
+
+
 def test_smart_translator_disables_thinking_for_thinking_model(monkeypatch):
     captured: dict[str, object] = {}
 

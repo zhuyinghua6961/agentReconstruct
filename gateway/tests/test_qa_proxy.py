@@ -153,6 +153,40 @@ def _ready_csv(*, file_id: int = 21, file_name: str = "assignee-table.csv") -> C
     )
 
 
+def _expected_patent_upstream_path(*, request_path: str, route: str) -> str:
+    if route == "kb_qa":
+        return request_path
+    if request_path.endswith("ask_stream"):
+        return "/api/fast/ask_stream"
+    return "/api/fast/ask"
+
+
+def _patent_upstream_mock_response(request: httpx.Request) -> httpx.Response | None:
+    if request.url.path == "/api/patent/ask":
+        return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
+    if request.url.path == "/api/patent/ask_stream":
+        return httpx.Response(
+            200,
+            content=(
+                b'data: {"type":"metadata","query_mode":"patent"}\n\n'
+                b'data: {"type":"done","final_answer":"ok"}\n\n'
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+    if request.url.path == "/api/fast/ask":
+        return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
+    if request.url.path == "/api/fast/ask_stream":
+        return httpx.Response(
+            200,
+            content=(
+                b'data: {"type":"metadata","query_mode":"patent"}\n\n'
+                b'data: {"type":"done","final_answer":"ok"}\n\n'
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+    return None
+
+
 def test_mode_ask_calls_internal_quota_precheck_and_finalize_for_plain_question(monkeypatch):
     monkeypatch.setenv("PUBLIC_SERVICE_INTERNAL_AUTH_TOKEN", "authority-test-token")
     calls = []
@@ -683,17 +717,9 @@ def test_mode_patent_routes_map_to_canonical_quota_buckets(
                 200,
                 json={"success": True, "data": {"grant_id": f"grant-{label}", "counted": request_payload["success"], "idempotent": False}},
             )
-        if request.url.path == "/api/patent/ask":
-            return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
-        if request.url.path == "/api/patent/ask_stream":
-            return httpx.Response(
-                200,
-                content=(
-                    b'data: {"type":"metadata","query_mode":"patent"}\n\n'
-                    b'data: {"type":"done","final_answer":"ok"}\n\n'
-                ),
-                headers={"content-type": "text/event-stream"},
-            )
+        upstream_response = _patent_upstream_mock_response(request)
+        if upstream_response is not None:
+            return upstream_response
         raise AssertionError(f"unexpected upstream path: {request.url.path}")
 
     try:
@@ -713,7 +739,7 @@ def test_mode_patent_routes_map_to_canonical_quota_buckets(
         assert b'"type":"done"' in body
     assert calls[0][0] == "/internal/quota/grants/precheck"
     assert calls[0][1]["quota_type"] == expected_quota_type
-    assert calls[1][0] == request_path
+    assert calls[1][0] == _expected_patent_upstream_path(request_path=request_path, route=expected_route)
     assert calls[1][1]["route"] == expected_route
     assert calls[2][0] == f"/internal/quota/grants/grant-{label}/finalize"
     assert calls[2][1]["success"] is True
@@ -732,17 +758,9 @@ def test_mode_patent_skips_quota_calls_for_missing_or_invalid_user_id(monkeypatc
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append((request.url.path, _json_request_body(request)))
-        if request.url.path == "/api/patent/ask":
-            return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
-        if request.url.path == "/api/patent/ask_stream":
-            return httpx.Response(
-                200,
-                content=(
-                    b'data: {"type":"metadata","query_mode":"patent"}\n\n'
-                    b'data: {"type":"done","final_answer":"ok"}\n\n'
-                ),
-                headers={"content-type": "text/event-stream"},
-            )
+        upstream_response = _patent_upstream_mock_response(request)
+        if upstream_response is not None:
+            return upstream_response
         raise AssertionError(f"unexpected upstream path: {request.url.path}")
 
     payload = {
@@ -769,7 +787,9 @@ def test_mode_patent_skips_quota_calls_for_missing_or_invalid_user_id(monkeypatc
     assert response.status_code == 200
     if body:
         assert b'"type":"done"' in body
-    assert [item[0] for item in calls] == [request_path]
+    assert [item[0] for item in calls] == [
+        _expected_patent_upstream_path(request_path=request_path, route="pdf_qa")
+    ]
 
 
 @pytest.mark.parametrize(
@@ -822,8 +842,9 @@ def test_mode_ask_patent_sync_surfaces_canonical_quota_payload(monkeypatch, labe
                 200,
                 json={"success": True, "data": {"grant_id": label, "counted": request_payload["success"], "idempotent": False}},
             )
-        if request.url.path == "/api/patent/ask":
-            return httpx.Response(200, json={"success": True, "data": {"final_answer": "ok"}})
+        upstream_response = _patent_upstream_mock_response(request)
+        if upstream_response is not None:
+            return upstream_response
         raise AssertionError(f"unexpected upstream path: {request.url.path}")
 
     try:
@@ -894,7 +915,7 @@ def test_mode_ask_patent_stream_done_event_surfaces_canonical_quota_payload(
                 200,
                 json={"success": True, "data": {"grant_id": label, "counted": request_payload["success"], "idempotent": False}},
             )
-        if request.url.path == "/api/patent/ask_stream":
+        if request.url.path in {"/api/patent/ask_stream", "/api/fast/ask_stream"}:
             return httpx.Response(
                 200,
                 content=(
@@ -917,6 +938,7 @@ def test_mode_ask_patent_stream_done_event_surfaces_canonical_quota_payload(
     assert f'"route":"{expected_route}"'.encode("utf-8") in body
     assert f'"quota_type":"{expected_quota_type}"'.encode("utf-8") in body
     assert b'"counted":true' in body
+    assert calls[1][0] == _expected_patent_upstream_path(request_path="/api/patent/ask_stream", route=expected_route)
     assert calls[1][1]["route"] == expected_route
     assert calls[2][0] == f"/internal/quota/grants/{label}/finalize"
     assert calls[2][1]["success"] is True
@@ -2123,7 +2145,7 @@ def test_mode_ask_doi_lookup_with_multiple_selected_files_routes_to_file_scope()
     assert captured["body"]["execution_files"]
 
 
-def test_mode_ask_keeps_patent_backend_for_plain_question_with_selected_scope_without_forwarding_file_fields():
+def test_mode_ask_routes_patent_selected_scope_plain_question_to_fast_backend():
     original = app.state.conversation_file_service
     app.state.conversation_file_service = _ConversationFilesStub(
         [
@@ -2153,14 +2175,15 @@ def test_mode_ask_keeps_patent_backend_for_plain_question_with_selected_scope_wi
         app.state.conversation_file_service = original
 
     assert response.status_code == 200
-    assert captured["url"].endswith("/api/patent/ask")
-    assert captured["body"]["actual_mode"] == "patent"
+    assert captured["url"].endswith("/api/fast/ask")
+    assert captured["body"]["actual_mode"] == "fast"
+    assert captured["body"]["requested_mode"] == "patent"
     assert captured["body"]["route"] == "pdf_qa"
     assert captured["body"]["source_scope"] == "pdf"
     assert captured["body"]["execution_files"]
     assert captured["body"]["selected_file_ids"] == [11]
     assert captured["body"]["strategy"] == "explicit_selection"
-    assert response.headers["x-gateway-backend"] == "patent"
+    assert response.headers["x-gateway-backend"] == "fast"
 
 def test_mode_ask_routes_mixed_question_to_fast_backend():
     original = app.state.conversation_file_service
@@ -2209,7 +2232,7 @@ def test_mode_ask_routes_mixed_question_to_fast_backend():
     assert response.headers["x-gateway-backend"] == "fast"
 
 
-def test_mode_ask_routes_patent_file_question_to_patent_backend():
+def test_mode_ask_routes_patent_file_question_to_fast_backend():
     original = app.state.conversation_file_service
     original_settings = app.state.settings
     app.state.conversation_file_service = _ConversationFilesStub(
@@ -2243,16 +2266,16 @@ def test_mode_ask_routes_patent_file_question_to_patent_backend():
         app.state.settings = original_settings
 
     assert response.status_code == 200
-    assert captured["url"].endswith("/api/patent/ask")
+    assert captured["url"].endswith("/api/fast/ask")
     assert captured["body"]["requested_mode"] == "patent"
-    assert captured["body"]["actual_mode"] == "patent"
+    assert captured["body"]["actual_mode"] == "fast"
     assert captured["body"]["route"] == "pdf_qa"
     assert captured["body"]["source_scope"] == "pdf"
     assert "EXPLICIT_SELECTED_FILES" in captured["body"]["route_reasons"]
-    assert response.headers["x-gateway-backend"] == "patent"
+    assert response.headers["x-gateway-backend"] == "fast"
 
 
-def test_mode_ask_routes_patent_mixed_question_to_patent_backend():
+def test_mode_ask_routes_patent_mixed_question_to_fast_backend():
     original = app.state.conversation_file_service
     original_settings = app.state.settings
     app.state.conversation_file_service = _ConversationFilesStub(
@@ -2285,15 +2308,15 @@ def test_mode_ask_routes_patent_mixed_question_to_patent_backend():
         app.state.settings = original_settings
 
     assert response.status_code == 200
-    assert captured["url"].endswith("/api/patent/ask")
+    assert captured["url"].endswith("/api/fast/ask")
     assert captured["body"]["requested_mode"] == "patent"
-    assert captured["body"]["actual_mode"] == "patent"
+    assert captured["body"]["actual_mode"] == "fast"
     assert captured["body"]["route"] == "hybrid_qa"
     assert captured["body"]["source_scope"] == "pdf+kb"
     assert captured["body"]["turn_mode"] == "mixed"
     assert captured["body"]["kb_enabled"] is True
     assert "EXPLICIT_MIXED_INTENT" in captured["body"]["route_reasons"]
-    assert response.headers["x-gateway-backend"] == "patent"
+    assert response.headers["x-gateway-backend"] == "fast"
 
 
 def test_mode_ask_patent_file_route_is_open_by_default():
@@ -2329,12 +2352,12 @@ def test_mode_ask_patent_file_route_is_open_by_default():
         app.state.settings = original_settings
 
     assert response.status_code == 200
-    assert captured["url"].endswith("/api/patent/ask")
+    assert captured["url"].endswith("/api/fast/ask")
     assert captured["body"]["requested_mode"] == "patent"
-    assert captured["body"]["actual_mode"] == "patent"
+    assert captured["body"]["actual_mode"] == "fast"
     assert captured["body"]["route"] == "pdf_qa"
     assert captured["body"]["source_scope"] == "pdf"
-    assert response.headers["x-gateway-backend"] == "patent"
+    assert response.headers["x-gateway-backend"] == "fast"
 
 
 def test_mode_ask_patent_file_route_returns_gated_error_when_disabled():
@@ -2376,11 +2399,11 @@ def test_mode_ask_patent_file_route_returns_gated_error_when_disabled():
     assert payload["code"] == "PATENT_FILE_ROUTE_DISABLED"
     assert payload["retriable"] is False
     assert payload["requested_mode"] == "patent"
-    assert payload["actual_mode"] == "patent"
+    assert payload["actual_mode"] == "fast"
     assert payload["route"] == "pdf_qa"
     assert payload["detail"]["source_scope"] == "pdf"
     assert payload["detail"]["selected_file_ids"] == [11]
-    assert response.headers["x-gateway-backend"] == "patent"
+    assert response.headers["x-gateway-backend"] == "fast"
 
 def test_v1_ask_stream_alias_is_removed():
     called = {"upstream": False}
@@ -2488,16 +2511,16 @@ def test_mode_ask_stream_patent_file_route_returns_gated_error_when_disabled():
     assert calls == []
     assert b'"type":"metadata"' in body
     assert b'"requested_mode":"patent"' in body
-    assert b'"actual_mode":"patent"' in body
+    assert b'"actual_mode":"fast"' in body
     assert b'"route":"pdf_qa"' in body
     assert b'"selected_file_ids":[11]' in body
     assert b'"type":"error"' in body
     assert b'"code":"PATENT_FILE_ROUTE_DISABLED"' in body
     assert response.headers["content-type"].startswith("text/event-stream")
-    assert response.headers["x-gateway-backend"] == "patent"
+    assert response.headers["x-gateway-backend"] == "fast"
 
 
-def test_mode_ask_stream_routes_patent_mixed_question_to_patent_backend():
+def test_mode_ask_stream_routes_patent_mixed_question_to_fast_backend():
     original = app.state.conversation_file_service
     original_settings = app.state.settings
     app.state.conversation_file_service = _ConversationFilesStub(
@@ -2508,10 +2531,10 @@ def test_mode_ask_stream_routes_patent_mixed_question_to_patent_backend():
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request.url.path)
-        assert str(request.url).endswith("/api/patent/ask_stream")
+        assert str(request.url).endswith("/api/fast/ask_stream")
         payload = json.loads(request.content.decode("utf-8"))
         assert payload["requested_mode"] == "patent"
-        assert payload["actual_mode"] == "patent"
+        assert payload["actual_mode"] == "fast"
         assert payload["route"] == "hybrid_qa"
         assert payload["source_scope"] == "pdf+kb"
         return httpx.Response(
@@ -2542,14 +2565,14 @@ def test_mode_ask_stream_routes_patent_mixed_question_to_patent_backend():
         app.state.settings = original_settings
 
     assert response.status_code == 200
-    assert calls == ["/api/patent/ask_stream"]
+    assert calls == ["/api/fast/ask_stream"]
     assert b'"type":"done"' in body
     assert b'"route":"hybrid_qa"' in body
     assert b'"source_scope":"pdf+kb"' in body
-    assert response.headers["x-gateway-backend"] == "patent"
+    assert response.headers["x-gateway-backend"] == "fast"
 
 
-def test_mode_ask_stream_patent_preserves_structured_content_fields_and_capability_header():
+def test_mode_ask_stream_patent_file_route_passthroughs_sse_to_fast_backend():
     original = app.state.conversation_file_service
     original_settings = app.state.settings
     app.state.conversation_file_service = _ConversationFilesStub(
@@ -2565,13 +2588,12 @@ def test_mode_ask_stream_patent_preserves_structured_content_fields_and_capabili
         captured["url"] = str(request.url)
         captured["headers"] = dict(request.headers)
         captured["body"] = json.loads(request.content.decode("utf-8"))
-        assert str(request.url).endswith("/api/patent/ask_stream")
+        assert str(request.url).endswith("/api/fast/ask_stream")
         return httpx.Response(
             200,
             content=(
                 b'data: {"type":"metadata","query_mode":"patent","route":"hybrid_qa","source_scope":"pdf+table"}\n\n'
-                b'data: {"type":"content","content":"PDF preview","content_role":"preview","content_source":"pdf","content_stream_id":"pdf:primary","content_phase":"start","replace_stream":true}\n\n'
-                b'data: {"type":"content","content":"final answer","content_role":"final","content_source":"hybrid","content_stream_id":"final:answer","content_phase":"snapshot","replace_stream":true}\n\n'
+                b'data: {"type":"content","content":"final answer"}\n\n'
                 b'data: {"type":"done","final_answer":"final answer","route":"hybrid_qa","source_scope":"pdf+table"}\n\n'
             ),
             headers={"content-type": "text/event-stream"},
@@ -2583,7 +2605,6 @@ def test_mode_ask_stream_patent_preserves_structured_content_fields_and_capabili
             with client.stream(
                 "POST",
                 "/api/patent/ask_stream",
-                headers={"X-Patent-Stream-Capability": "preview_v1"},
                 json={
                     "question": "请比较前两个文件",
                     "requested_mode": "patent",
@@ -2596,17 +2617,13 @@ def test_mode_ask_stream_patent_preserves_structured_content_fields_and_capabili
         app.state.settings = original_settings
 
     assert response.status_code == 200
-    assert captured["url"].endswith("/api/patent/ask_stream")
-    assert captured["headers"]["x-patent-stream-capability"] == "preview_v1"
+    assert captured["url"].endswith("/api/fast/ask_stream")
     assert captured["body"]["route"] == "hybrid_qa"
     assert captured["body"]["source_scope"] == "pdf+table"
-    assert b'"content_role":"preview"' in body
-    assert b'"content_source":"pdf"' in body
-    assert b'"content_stream_id":"pdf:primary"' in body
-    assert b'"content_phase":"start"' in body
-    assert b'"replace_stream":true' in body
-    assert b'"content_role":"final"' in body
-    assert b'"content_source":"hybrid"' in body
+    assert captured["body"]["actual_mode"] == "fast"
+    assert b'"type":"content"' in body
+    assert b'"type":"done"' in body
+    assert response.headers["x-gateway-backend"] == "fast"
 
 
 def test_mode_ask_stream_passthroughs_sse():

@@ -4,7 +4,7 @@
 - `backend/app/modules/documents/service.py`
 - `backend/app/modules/documents/api.py`
 - `backend/app/modules/storage/service.py`
-- `backend/app/modules/qa_pdf/pdf_extractor.py`
+- `backend/app/modules/documents/pdf_text_extractor.py`（与 fastQA `qa_pdf.pdf_extractor` 对齐的 vendor 实现）
 
 ## 1. papers 根目录如何确定
 

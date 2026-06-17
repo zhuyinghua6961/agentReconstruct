@@ -66,6 +66,7 @@ The service design assumes the already-written protocol documents are the source
 The most important confirmed Phase 1 rules are:
 
 - gateway sends patent traffic only for `requested_mode=patent`
+- gateway routes patent `file_only` / `mixed` file turns to fastQA via `actual_mode=fast` (same compatibility rule as thinking); patent-local file route code remains frozen in-repo but is not the default production execution path
 - gateway is the only file-intent and route authority
 - `patent` now accepts `kb_only`, `file_only`, and `mixed` patent turns through the shared canonical contract
 - durable patent transcript ownership belongs to `public-service`, not the patent service

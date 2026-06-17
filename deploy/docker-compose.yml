@@ -658,7 +658,7 @@ services:
       REDIS_KEY_PREFIX: gateway
       GATEWAY_CONVERSATION_FILE_PROVIDER: public_http
       GATEWAY_REQUEST_TIMEOUT_SECONDS: 30
-      GATEWAY_SSE_TIMEOUT_SECONDS: 600
+      GATEWAY_SSE_TIMEOUT_SECONDS: 1800
 
   frontend:
     image: ${FRONTEND_IMAGE:-lifeo4agent/frontend:latest}

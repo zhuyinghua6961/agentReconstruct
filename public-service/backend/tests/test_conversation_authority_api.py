@@ -732,6 +732,43 @@ def test_internal_task_create_turn_allows_gateway_caller_and_materializes_both_m
     assert detail["data"]["messages"][1]["metadata"]["task_id"] == "task_gateway_create_001"
 
 
+def test_internal_task_create_turn_allows_fastqa_rerouted_patent_file_request(monkeypatch):
+    monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
+
+    with TestClient(app) as client, _authority_harness(client) as service:
+        created = service.create_conversation(user_id=7, title="gateway owned patent file route")
+        conversation_id = int(created["data"]["conversation_id"])
+        response = client.post(
+            f"/internal/conversations/{conversation_id}/tasks/task_gateway_patent_file/create-turn",
+            json={
+                "conversation_id": conversation_id,
+                "user_id": 7,
+                "trace_id": "task-gateway-patent-file-trace",
+                "source_service": "fastQA",
+                "route": "pdf_qa",
+                "requested_mode": "patent",
+                "actual_mode": "fast",
+                "task_id": "task_gateway_patent_file",
+                "message": {
+                    "role": "user",
+                    "content": "请总结这两篇文献",
+                },
+                "context_hints": {
+                    "selected_file_ids": [22, 23],
+                    "last_turn_route_hint": "pdf_qa",
+                },
+                "status": "queued",
+                "last_seq": 0,
+            },
+            headers=_internal_headers("gateway"),
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["task_id"] == "task_gateway_patent_file"
+
+
 def test_internal_context_snapshot_rejects_invalid_source_service_policy(monkeypatch):
     monkeypatch.setenv(INTERNAL_TOKEN_ENV, INTERNAL_TOKEN)
 

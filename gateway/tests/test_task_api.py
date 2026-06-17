@@ -723,7 +723,14 @@ def test_create_task_allows_patent_mode_and_persists_patent_backend_target():
 def test_create_task_rejects_patent_file_route_when_patent_file_routes_are_disabled():
     async def _list_files(*, conversation_id, request=None):
         _ = conversation_id, request
-        return [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")]
+        return [
+            ConversationFileRow(
+                file_id=11,
+                file_type="pdf",
+                file_name="battery-paper.pdf",
+                storage_ref="minio://agentcode/uploads/battery-paper.pdf",
+            )
+        ]
 
     original_settings = app.state.settings
     original_list_files = app.state.conversation_file_service.list_files
@@ -753,7 +760,14 @@ def test_create_task_rejects_patent_file_route_when_patent_file_routes_are_disab
 def test_create_task_persists_patent_file_route_protocol_fields_for_worker_execution():
     async def _list_files(*, conversation_id, request=None):
         _ = conversation_id, request
-        return [ConversationFileRow(file_id=11, file_type="pdf", file_name="battery-paper.pdf")]
+        return [
+            ConversationFileRow(
+                file_id=11,
+                file_type="pdf",
+                file_name="battery-paper.pdf",
+                storage_ref="minio://agentcode/uploads/battery-paper.pdf",
+            )
+        ]
 
     original_list_files = app.state.conversation_file_service.list_files
     app.state.conversation_file_service.list_files = _list_files
@@ -813,7 +827,9 @@ def test_create_task_persists_patent_file_route_protocol_fields_for_worker_execu
     assert stored is not None
     snapshot = stored["execution_snapshot"]
     assert snapshot["requested_mode"] == "patent"
-    assert snapshot["actual_mode"] == "patent"
+    assert snapshot["actual_mode"] == "fast"
+    assert stored["actual_mode"] == "fast"
+    assert stored["target_backend"] == "fast"
     assert snapshot["route"] == "hybrid_qa"
     assert snapshot["turn_mode"] == "mixed"
     assert snapshot["source_scope"] == "pdf+kb"

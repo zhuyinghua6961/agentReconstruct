@@ -652,6 +652,18 @@ Example E:
 - question: `总结这篇文献`
 - output: clarification, no backend execution
 
+Example F:
+- selected mode: `patent`
+- selected files: `[11]`
+- question: `请总结这篇文献`
+- output: `route=pdf_qa`, `turn_mode=file_only`, `actual_mode=fast`, `requested_mode=patent`
+
+Example G:
+- selected mode: `patent`
+- selected files: `[11]`
+- question: `请结合知识库总结这篇文献`
+- output: `route=hybrid_qa`, `turn_mode=mixed`, `actual_mode=fast`, `requested_mode=patent`
+
 ## 9. Gateway Decision Output Contract
 
 For every ask turn, gateway produces these routing outputs.
@@ -692,7 +704,7 @@ Condition:
 
 Output:
 - `turn_mode = file_only`
-- `actual_mode = fast`
+- `actual_mode = fast` for all requested modes (`fast`, `thinking`, `patent`)
 - route depends on resolved file types
 
 #### Mixed QA
@@ -701,7 +713,7 @@ Condition:
 
 Output:
 - `turn_mode = mixed`
-- `actual_mode = fast`
+- `actual_mode = fast` for all requested modes (`fast`, `thinking`, `patent`)
 - `allow_kb_verification = true`
 
 #### Route selection by file types

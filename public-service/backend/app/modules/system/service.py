@@ -751,6 +751,20 @@ class SystemService:
                 "conversation_detail_touch_on_hit": str(os.getenv("CONVERSATION_DETAIL_CACHE_TOUCH_ON_HIT", "1") or "1").strip(),
                 "conversation_list_recent_pages_ttl_seconds": str(os.getenv("CONVERSATION_LIST_RECENT_PAGES_TTL_SECONDS", "900") or "900").strip(),
                 "conversation_list_recent_pages_limit": str(os.getenv("CONVERSATION_LIST_RECENT_PAGES_LIMIT", "8") or "8").strip(),
+                "translation_redis_cache_enabled": str(os.getenv("TRANSLATION_REDIS_CACHE_ENABLED", "1") or "1").strip(),
+                "translation_cache_epoch": str(os.getenv("TRANSLATION_CACHE_EPOCH", "0") or "0").strip(),
+                "translation_redis_chunk_ttl_seconds": str(
+                    os.getenv("TRANSLATION_REDIS_CHUNK_TTL_SECONDS", "604800") or "604800"
+                ).strip(),
+                "translation_redis_document_ttl_seconds": str(
+                    os.getenv("TRANSLATION_REDIS_DOCUMENT_TTL_SECONDS", "604800") or "604800"
+                ).strip(),
+                "translation_document_lock_ttl_seconds": str(
+                    os.getenv("TRANSLATION_DOCUMENT_LOCK_TTL_SECONDS", "1800") or "1800"
+                ).strip(),
+                "translation_document_lock_wait_seconds": str(
+                    os.getenv("TRANSLATION_DOCUMENT_LOCK_WAIT_SECONDS", "30") or "30"
+                ).strip(),
             },
         }
 
