@@ -26,6 +26,16 @@ from app.modules.system.upstream_auth_logging import (
     log_upstream_auth_failure,
     log_upstream_auth_success_once,
 )
+from app.modules.documents.literature_content_cache import (
+    build_literature_content_cache_key,
+    cache_literature_content,
+    get_cached_literature_content,
+    resolve_literature_content_redis_service,
+)
+from app.modules.documents.literature_vector_lookup import (
+    lookup_literature_from_vector_dbs,
+    resolve_literature_collections,
+)
 from app.modules.documents.patent_original_store import (
     PatentOriginalNotFoundError,
     PatentOriginalStore,
@@ -1302,69 +1312,55 @@ class DocumentsService:
             if not doi:
                 return {"error": "缺少DOI参数"}, 200
 
-            logger.info("📖 获取文献内容: %s", doi)
-            if not agent:
-                return {
+            normalized = storage_service.normalize_doi(doi)
+            if not normalized:
+                return {"error": "缺少DOI参数"}, 200
+
+            redis_service = resolve_literature_content_redis_service(runtime)
+            cache_key = None
+            if redis_service is not None:
+                cache_key = build_literature_content_cache_key(
+                    redis_service=redis_service,
+                    normalized_doi=normalized,
+                )
+                cached = get_cached_literature_content(redis_service=redis_service, cache_key=cache_key)
+                if cached is not None:
+                    return cached, 200
+
+            logger.info("📖 获取文献内容: %s", normalized)
+            fastqa_collection, highthinking_collection = resolve_literature_collections(
+                agent=agent,
+                runtime=runtime,
+            )
+            if fastqa_collection is None and highthinking_collection is None:
+                payload = {
                     "success": False,
                     "error": "知识库运行时未初始化",
                     "code": "RETRIEVAL_RUNTIME_UNAVAILABLE",
                     **self._retrieval_dependency_payload(
                         runtime,
                         mode="required",
-                        detail="literature_content requires retrieval metadata runtime",
+                        detail="literature_content requires vector retrieval runtime",
                     ),
-                }, 200
+                }
+                return payload, 200
 
-            graph = getattr(agent, "graph", None)
-            semantic_expert = getattr(agent, "semantic_expert", None)
-            collection = getattr(semantic_expert, "collection", None) if semantic_expert is not None else None
+            payload = lookup_literature_from_vector_dbs(
+                doi=normalized,
+                fastqa_collection=fastqa_collection,
+                highthinking_collection=highthinking_collection,
+            )
+            if payload is None:
+                payload = {"error": "未找到该文献"}
 
-            result = []
-            if graph is not None:
-                query = """
-                MATCH (n)
-                WHERE n.doi = $doi OR n.material_name = $doi OR n.material_name CONTAINS $doi
-                WITH n,
-                  CASE
-                    WHEN n.doi = $doi THEN 0
-                    WHEN n.material_name = $doi THEN 1
-                    ELSE 2
-                  END AS match_rank
-                RETURN n
-                ORDER BY match_rank ASC
-                LIMIT 1
-                """
-                result = graph.run(query, doi=doi).data()
-
-            if not result:
-                if collection is not None:
-                    try:
-                        search_result = collection.get(where={"doi": doi})
-                        if search_result and search_result["ids"]:
-                            doc_index = 0
-                            return {
-                                "doi": doi,
-                                "title": search_result["metadatas"][doc_index].get("title", "未知标题"),
-                                "authors": search_result["metadatas"][doc_index].get("authors", "未知作者"),
-                                "journal": search_result["metadatas"][doc_index].get("journal", "未知期刊"),
-                                "publication_date": search_result["metadatas"][doc_index].get("date", "未知日期"),
-                                "abstract": search_result["metadatas"][doc_index].get("abstract", "无摘要"),
-                                "content": search_result["documents"][doc_index],
-                            }, 200
-                    except Exception as exc:
-                        logger.warning("从ChromaDB查询失败: %s", exc)
-                return {"error": "未找到该文献"}, 200
-
-            node_data = dict(result[0]["n"])
-            return {
-                "doi": doi,
-                "title": node_data.get("title", f"文献 {doi}"),
-                "authors": node_data.get("authors", "未知作者"),
-                "journal": node_data.get("journal", "未知期刊"),
-                "publication_date": node_data.get("publication_date", "未知日期"),
-                "abstract": node_data.get("abstract", "无摘要信息"),
-                "content": format_material_content(node_data),
-            }, 200
+            if redis_service is not None and cache_key is not None:
+                cache_literature_content(
+                    redis_service=redis_service,
+                    cache_key=cache_key,
+                    payload=payload,
+                    logger=logger,
+                )
+            return payload, 200
         except Exception as exc:
             logger.error("获取文献内容失败: %s", exc)
             return {"error": f"获取文献内容失败: {str(exc)}"}, 200

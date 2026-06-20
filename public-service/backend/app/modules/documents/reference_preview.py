@@ -7,6 +7,7 @@ from typing import Any, Sequence
 from urllib.parse import quote
 
 from app.core.config import get_settings
+from app.integrations.neo4j.client import run_graph_query
 from app.modules.storage.service import storage_service
 
 
@@ -96,7 +97,7 @@ def query_graph_reference_metadata(agent: Any, doi: str, logger: Any) -> dict[st
         ORDER BY match_rank ASC
         LIMIT 1
         """
-        data = agent.graph.run(query, doi=doi).data()
+        data = run_graph_query(agent.graph, query, {"doi": doi})
         if not data:
             return {}
         row = data[0]

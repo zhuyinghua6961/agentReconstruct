@@ -2646,6 +2646,7 @@ watch(
           </div>
         </div>
         <div class="header-right">
+          <router-link to="/literature-search" class="nav-link">文献检索</router-link>
           <a href="/profile" class="nav-link">个人中心</a>
           <a href="/admin" class="nav-link admin-only">管理后台</a>
         </div>

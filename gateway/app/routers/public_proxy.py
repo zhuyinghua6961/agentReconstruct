@@ -249,6 +249,7 @@ _ROUTE_SPECS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (_paths("/api/background_status"), ("GET",)),
     (_paths("/api/health"), ("GET",)),
     (_paths("/api/literature_content"), ("GET",)),
+    (_paths("/api/literature_search"), ("GET", "POST")),
     (_paths("/api/reference_preview"), ("POST",)),
     (_paths("/api/patent/original/{canonical_patent_id}"), ("GET", "HEAD")),
     (_paths("/api/summarize_pdf/{doi:path}"), ("POST",)),

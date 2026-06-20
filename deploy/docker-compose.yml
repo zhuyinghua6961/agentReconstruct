@@ -279,6 +279,10 @@ services:
         condition: service_completed_successfully
       public-service-ref-seed:
         condition: service_completed_successfully
+      fastqa-ref-seed:
+        condition: service_completed_successfully
+      highthinking-ref-seed:
+        condition: service_completed_successfully
       neo4j-literature:
         condition: service_healthy
     environment:
@@ -309,7 +313,12 @@ services:
       MINIO_USE_PROXY: "1"
       MINIO_DOWNLOAD_EXPIRES: 3600
       PAPERS_DIR: /data/public-service/runtime/papers
-      VECTOR_DB_PATH: /ref/public-service/vector_database
+      VECTOR_DB_PATH: /ref/fastqa/vector_database
+      VECTOR_COLLECTION_NAME: ${VECTOR_COLLECTION_NAME:-lfp_papers}
+      VECTOR_DB_MD_PATH: /ref/fastqa/vector_database_md
+      VECTOR_DB_MD_COLLECTION: ${VECTOR_DB_MD_COLLECTION:-md_papers}
+      HIGHTHINKING_VECTOR_DB_PATH: /ref/highthinkingqa/vectordb
+      HIGHTHINKING_VECTOR_COLLECTION_NAME: ${CHROMA_COLLECTION_NAME:-lfp_markdown_qwen3_4096}
       LOCAL_STORAGE_ROOT: /data/public-service/runtime/storage
       TRANSLATION_CACHE_DIR: /data/public-service/runtime/translation_cache
       LLM_API_KEY: ${LLM_API_KEY}
@@ -336,6 +345,14 @@ services:
       RERANK_MODEL: ${RERANK_MODEL:-}
       RERANK_API_KEY: ${RERANK_API_KEY:-}
       RERANK_AUTH_MODE: ${RERANK_AUTH_MODE:-bearer}
+      LITERATURE_SEARCH_REDIS_CACHE_ENABLED: ${LITERATURE_SEARCH_REDIS_CACHE_ENABLED:-1}
+      LITERATURE_SEARCH_CACHE_EPOCH: ${LITERATURE_SEARCH_CACHE_EPOCH:-0}
+      LITERATURE_SEARCH_CACHE_TTL_SECONDS: ${LITERATURE_SEARCH_CACHE_TTL_SECONDS:-259200}
+      LITERATURE_SEARCH_CACHE_LOCK_ENABLED: ${LITERATURE_SEARCH_CACHE_LOCK_ENABLED:-1}
+      LITERATURE_CONTENT_REDIS_CACHE_ENABLED: ${LITERATURE_CONTENT_REDIS_CACHE_ENABLED:-1}
+      LITERATURE_CONTENT_CACHE_EPOCH: ${LITERATURE_CONTENT_CACHE_EPOCH:-0}
+      LITERATURE_CONTENT_CACHE_TTL_SECONDS: ${LITERATURE_CONTENT_CACHE_TTL_SECONDS:-259200}
+      LITERATURE_CONTENT_CACHE_MAX_BYTES: ${LITERATURE_CONTENT_CACHE_MAX_BYTES:-524288}
       OPENAI_API_KEY: ${LLM_API_KEY}
       OPENAI_BASE_URL: ${LLM_BASE_URL}
       OPENAI_MODEL: ${LLM_MODEL}
@@ -348,6 +365,8 @@ services:
     volumes:
       - public_service_data:/data/public-service/runtime
       - public_service_ref_data:/ref/public-service
+      - fastqa_ref_data:/ref/fastqa
+      - highthinking_ref_data:/ref/highthinkingqa
 
   fastqa:
     image: ${FASTQA_IMAGE:-lifeo4agent/fastqa:latest}

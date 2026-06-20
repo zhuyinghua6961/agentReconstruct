@@ -492,6 +492,16 @@ def test_public_proxy_registers_department_delete_methods_without_status_routes(
     assert methods_by_path["/api/admin/departments/batch-force-delete"] == {"POST"}
 
 
+def test_public_proxy_registers_literature_search_routes():
+    methods_by_path = {
+        route.path: set(getattr(route, "methods", set())) - {"HEAD"}
+        for route in public_proxy_router.routes
+    }
+
+    assert methods_by_path["/api/literature_search"] == {"GET", "POST"}
+    assert methods_by_path["/api/v1/literature_search"] == {"GET", "POST"}
+
+
 def test_public_proxy_keeps_auth_register_routes_in_api_and_v1_parity():
     methods_by_path = {
         route.path: set(getattr(route, "methods", set())) - {"HEAD"}

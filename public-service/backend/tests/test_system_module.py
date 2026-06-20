@@ -134,6 +134,10 @@ def test_system_service_kb_info_works_with_lightweight_runtime(monkeypatch):
             runtime=RetrievalRuntimeConfig(
                 vector_db_path=runtime_module.Path("/tmp/vector-db"),
                 vector_collection_name="lfp_papers",
+                fastqa_md_vector_db_path=runtime_module.Path("/tmp/fastqa-md"),
+                fastqa_md_vector_collection_name="md_papers",
+                highthinking_vector_db_path=runtime_module.Path("/tmp/highthinking-vectordb"),
+                highthinking_vector_collection_name="lfp_markdown_qwen3_4096",
                 neo4j_url="",
                 neo4j_username="neo4j",
                 neo4j_password="password",

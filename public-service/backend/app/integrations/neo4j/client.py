@@ -5,6 +5,21 @@ from typing import Any
 from app.modules.retrieval.models import Neo4jBootstrapResult
 
 
+def run_graph_query(graph: Any, query: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Execute Cypher against LangChain Neo4jGraph or legacy py2neo-style graphs."""
+    if graph is None:
+        return []
+    bound = dict(params or {})
+    if hasattr(graph, "query"):
+        rows = graph.query(query, bound)
+        return [dict(item) for item in list(rows or []) if isinstance(item, dict)]
+    if hasattr(graph, "run"):
+        result = graph.run(query, **bound)
+        data = result.data() if hasattr(result, "data") else result
+        return [dict(item) for item in list(data or []) if isinstance(item, dict)]
+    raise AttributeError(f"unsupported neo4j graph type: {type(graph)!r}")
+
+
 def _apoc_error(text: str) -> bool:
     lowered = str(text or "").lower()
     return "apoc" in lowered

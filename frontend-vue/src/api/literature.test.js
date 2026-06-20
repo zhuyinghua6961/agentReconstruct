@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { fetchPdfDocument, fetchPdfDocumentByUrl } from './literature.js'
+import { fetchPdfDocument, fetchPdfDocumentByUrl, searchLiterature } from './literature.js'
 
 test('fetchPdfDocument returns blobUrl when view_pdf responds with PDF', async () => {
   const originalFetch = global.fetch
@@ -92,5 +92,34 @@ test('fetchPdfDocumentByUrl requests the provided patent original url with auth 
     global.fetch = originalFetch
     URL.createObjectURL = originalCreate
     delete global.localStorage
+  }
+})
+
+test('searchLiterature builds literature_search query string', async () => {
+  const originalFetch = global.fetch
+  const calls = []
+
+  global.fetch = async (url) => {
+    calls.push(String(url))
+    return new Response(JSON.stringify({ items: [], count: 0 }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+  }
+
+  try {
+    await searchLiterature({
+      query: 'LiFePO4',
+      queryType: 'title',
+      matchMode: 'semantic',
+      sources: 'both',
+      limit: 10,
+    })
+    assert.match(calls[0], /\/api\/literature_search\?/)
+    assert.match(calls[0], /query=LiFePO4/)
+    assert.match(calls[0], /query_type=title/)
+    assert.match(calls[0], /match_mode=semantic/)
+  } finally {
+    global.fetch = originalFetch
   }
 })

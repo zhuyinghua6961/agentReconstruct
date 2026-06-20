@@ -40,9 +40,57 @@ class RetrievalService:
                 values.get("vector_collection_name") or os.getenv("VECTOR_COLLECTION_NAME", "lfp_papers")
             ).strip()
             or "lfp_papers",
+            fastqa_md_vector_db_path=_resolve_path(
+                str(
+                    values.get("fastqa_md_vector_db_path")
+                    or os.getenv("VECTOR_DB_MD_PATH", "vector_database_md")
+                ),
+                project_root=project_dir,
+            ),
+            fastqa_md_vector_collection_name=str(
+                values.get("fastqa_md_vector_collection_name")
+                or os.getenv("VECTOR_DB_MD_COLLECTION", "md_papers")
+            ).strip()
+            or "md_papers",
+            highthinking_vector_db_path=_resolve_path(
+                str(
+                    values.get("highthinking_vector_db_path")
+                    or os.getenv("HIGHTHINKING_VECTOR_DB_PATH", "resource/highThinkingQA/vectordb")
+                ),
+                project_root=project_dir,
+            ),
+            highthinking_vector_collection_name=str(
+                values.get("highthinking_vector_collection_name")
+                or os.getenv("HIGHTHINKING_VECTOR_COLLECTION_NAME", "lfp_markdown_qwen3_4096")
+            ).strip()
+            or "lfp_markdown_qwen3_4096",
             neo4j_url=str(values.get("neo4j_url") or os.getenv("NEO4J_URL", "")).strip(),
             neo4j_username=str(values.get("neo4j_username") or os.getenv("NEO4J_USERNAME", "neo4j")).strip(),
             neo4j_password=str(values.get("neo4j_password") or os.getenv("NEO4J_PASSWORD", "password")).strip(),
+        )
+
+    def build_highthinking_chroma(
+        self,
+        *,
+        config: dict[str, object] | None = None,
+        project_root: str | Path | None = None,
+    ) -> ChromaBootstrapResult:
+        runtime = self.build_runtime_config(config=config, project_root=project_root)
+        return bootstrap_chroma_collection(
+            db_path=runtime.highthinking_vector_db_path,
+            collection_name=runtime.highthinking_vector_collection_name,
+        )
+
+    def build_fastqa_md_chroma(
+        self,
+        *,
+        config: dict[str, object] | None = None,
+        project_root: str | Path | None = None,
+    ) -> ChromaBootstrapResult:
+        runtime = self.build_runtime_config(config=config, project_root=project_root)
+        return bootstrap_chroma_collection(
+            db_path=runtime.fastqa_md_vector_db_path,
+            collection_name=runtime.fastqa_md_vector_collection_name,
         )
 
     def build_bindings(

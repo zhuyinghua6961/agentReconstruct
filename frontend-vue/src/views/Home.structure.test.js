@@ -12,6 +12,11 @@ const assistantMessageSection = source.slice(
   source.indexOf(`<div v-else-if="getTaskPhaseLabel(store.currentChatId)" class="loading-animation">`)
 )
 
+test('Home exposes literature search entry in header navigation', () => {
+  assert.match(source, /router-link to="\/literature-search"/)
+  assert.match(source, /文献检索/)
+})
+
 function extractFunctionBody(name) {
   const signature = `function ${name}(`
   const start = source.indexOf(signature)

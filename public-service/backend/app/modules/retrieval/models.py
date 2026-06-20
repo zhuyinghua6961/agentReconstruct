@@ -9,6 +9,10 @@ from typing import Any
 class RetrievalRuntimeConfig:
     vector_db_path: Path
     vector_collection_name: str
+    fastqa_md_vector_db_path: Path
+    fastqa_md_vector_collection_name: str
+    highthinking_vector_db_path: Path
+    highthinking_vector_collection_name: str
     neo4j_url: str
     neo4j_username: str
     neo4j_password: str

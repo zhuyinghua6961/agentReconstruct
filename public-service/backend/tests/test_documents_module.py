@@ -725,26 +725,33 @@ def test_extract_pdf_text_authenticated_missing_doc_assist_config_fails_closed(m
     assert response.json()["code"] == "QUOTA_CONFIG_MISSING"
 
 
-def test_literature_content_graph_query_prefers_exact_doi_match():
-    captured: dict[str, object] = {}
+def test_literature_content_uses_vector_lookup_without_graph():
+    class _FakeHighThinkingCollection:
+        def get(self, *, where, include=None):
+            _ = include
+            assert where == {"doi": "10.1000/test"}
+            return {
+                "ids": ["chunk-1"],
+                "metadatas": [{"doi": "10.1000/test", "title": "Vector Paper", "section_name": "Intro", "chunk_index": 0}],
+                "documents": ["vector content"],
+            }
 
-    class _FakeGraph:
-        def run(self, query, **kwargs):
-            captured["query"] = query
-            captured["kwargs"] = kwargs
-            return SimpleNamespace(data=lambda: [{"n": {"title": "Exact", "authors": "A", "journal": "J", "publication_date": "2025", "abstract": "Abs"}}])
-
+    runtime = SimpleNamespace(
+        settings=SimpleNamespace(data_root="/tmp"),
+        highthinking_chroma=_FakeHighThinkingCollection(),
+        vector_collection=None,
+    )
     payload, status_code = documents_service.literature_content(
         doi="10.1000/test",
-        agent=SimpleNamespace(graph=_FakeGraph(), semantic_expert=None),
+        agent=None,
         logger=SimpleNamespace(info=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None),
+        runtime=runtime,
     )
 
     assert status_code == 200
-    assert payload["title"] == "Exact"
-    assert captured["kwargs"] == {"doi": "10.1000/test"}
-    assert "n.doi = $doi" in str(captured["query"])
-    assert "ORDER BY match_rank ASC" in str(captured["query"])
+    assert payload["title"] == "Vector Paper"
+    assert payload["content"] == "## Intro\n\nvector content"
+    assert payload["source"] == "highthinking_chroma"
 
 
 def test_literature_content_route_reports_retrieval_dependency_when_runtime_missing(monkeypatch):
@@ -874,7 +881,8 @@ def test_reference_preview_route_reports_optional_retrieval_dependency_when_runt
 
 def test_literature_content_route_works_with_public_service_kb_runtime(monkeypatch):
     class _FakeCollection:
-        def get(self, *, where):
+        def get(self, *, where, include=None):
+            _ = include
             assert where == {"doi": "10.1000/test"}
             return {
                 "ids": ["doc-1"],
@@ -894,6 +902,10 @@ def test_literature_content_route_works_with_public_service_kb_runtime(monkeypat
             runtime=RetrievalRuntimeConfig(
                 vector_db_path=runtime_module.Path("/tmp/vector-db"),
                 vector_collection_name="lfp_papers",
+                fastqa_md_vector_db_path=runtime_module.Path("/tmp/fastqa-md"),
+                fastqa_md_vector_collection_name="md_papers",
+                highthinking_vector_db_path=runtime_module.Path("/tmp/highthinking-vectordb"),
+                highthinking_vector_collection_name="lfp_markdown_qwen3_4096",
                 neo4j_url="",
                 neo4j_username="neo4j",
                 neo4j_password="password",
@@ -902,6 +914,11 @@ def test_literature_content_route_works_with_public_service_kb_runtime(monkeypat
             chroma=ChromaBootstrapResult(client=object(), collection=_FakeCollection(), available=True, error=None),
             neo4j_client=None,
         ),
+    )
+    monkeypatch.setattr(
+        runtime_module.retrieval_service,
+        "build_highthinking_chroma",
+        lambda **kwargs: ChromaBootstrapResult(client=None, collection=None, available=False, error=None),
     )
 
     with TestClient(app) as client:
@@ -916,10 +933,10 @@ def test_reference_preview_graph_query_prefers_exact_doi_match():
     captured: dict[str, object] = {}
 
     class _FakeGraph:
-        def run(self, query, **kwargs):
+        def query(self, query, params):
             captured["query"] = query
-            captured["kwargs"] = kwargs
-            return SimpleNamespace(data=lambda: [{"title": "Exact", "journal": "J", "publication_date": "2024", "match_rank": 0}])
+            captured["params"] = params
+            return [{"title": "Exact", "journal": "J", "publication_date": "2024", "match_rank": 0}]
 
     payload = query_graph_reference_metadata(
         agent=SimpleNamespace(graph=_FakeGraph()),
@@ -928,7 +945,7 @@ def test_reference_preview_graph_query_prefers_exact_doi_match():
     )
 
     assert payload["title"] == "Exact"
-    assert captured["kwargs"] == {"doi": "10.1000/test"}
+    assert captured["params"] == {"doi": "10.1000/test"}
     assert "n.doi = $doi" in str(captured["query"])
     assert "ORDER BY match_rank ASC" in str(captured["query"])
 
@@ -983,6 +1000,10 @@ def test_reference_preview_route_uses_public_service_kb_runtime(monkeypatch):
             runtime=RetrievalRuntimeConfig(
                 vector_db_path=runtime_module.Path("/tmp/vector-db"),
                 vector_collection_name="lfp_papers",
+                fastqa_md_vector_db_path=runtime_module.Path("/tmp/fastqa-md"),
+                fastqa_md_vector_collection_name="md_papers",
+                highthinking_vector_db_path=runtime_module.Path("/tmp/highthinking-vectordb"),
+                highthinking_vector_collection_name="lfp_markdown_qwen3_4096",
                 neo4j_url="",
                 neo4j_username="neo4j",
                 neo4j_password="password",
