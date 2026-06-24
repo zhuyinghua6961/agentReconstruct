@@ -75,6 +75,17 @@ def _bool_text(value: bool) -> str:
     return "true" if value else "false"
 
 
+def _httpx_timeout(
+    httpx_module: Any,
+    *,
+    connect: float,
+    read: float,
+    write: float,
+    pool: float,
+) -> Any:
+    return httpx_module.Timeout(connect=float(connect), read=float(read), write=float(write), pool=float(pool))
+
+
 def _message_count(messages: Any) -> int:
     if isinstance(messages, list):
         return len(messages)
@@ -125,6 +136,7 @@ def _log_model_call_start(
     input_count: int | None = None,
     input_chars: int | None = None,
     dimensions: Any | None = None,
+    timeout_seconds: float | None = None,
 ) -> float:
     started_at = time.perf_counter()
     fields = [
@@ -136,6 +148,8 @@ def _log_model_call_start(
     ]
     if stream is not None:
         fields.append(f"stream={_bool_text(stream)}")
+    if timeout_seconds is not None:
+        fields.append(f"timeout_seconds={timeout_seconds}")
     if message_count is not None:
         fields.append(f"message_count={message_count}")
     if message_chars is not None:
@@ -197,6 +211,7 @@ def _log_model_call_failed(
     exc: Exception,
     status_code: Any = None,
     stream: bool | None = None,
+    timeout_seconds: float | None = None,
 ) -> None:
     fields = [
         "model_call failed service=highThinkingQA",
@@ -209,6 +224,11 @@ def _log_model_call_failed(
         fields.append(f"status_code={status_code}")
     if stream is not None:
         fields.append(f"stream={_bool_text(stream)}")
+    if timeout_seconds is not None:
+        fields.append(f"timeout_seconds={timeout_seconds}")
+    error_text = " ".join(str(exc or "").split())
+    if error_text:
+        fields.append(f"error_message={error_text[:300]}")
     fields.extend(
         [
             f"elapsed_ms={(time.perf_counter() - started_at) * 1000.0:.2f}",
@@ -357,15 +377,37 @@ class OpenAICompatibleChatClient:
         api_key: str,
         auth_mode: str | None = None,
         http_client: Any | None = None,
-        timeout_seconds: float = 60.0,
+        connect_timeout_seconds: float = 15.0,
+        read_timeout_seconds: float = 180.0,
+        stream_read_timeout_seconds: float = 600.0,
+        write_timeout_seconds: float = 180.0,
+        pool_timeout_seconds: float = 30.0,
+        timeout_seconds: float | None = None,
         max_retries: int | None = None,
     ) -> None:
         del max_retries
+        if timeout_seconds is not None:
+            read_timeout_seconds = float(timeout_seconds)
+            stream_read_timeout_seconds = float(timeout_seconds)
         self.endpoint = normalize_openai_compatible_endpoint(base_url)
         self.api_key = str(api_key or "")
         self.auth_mode = auth_mode
+        self._connect_timeout_seconds = float(connect_timeout_seconds)
+        self._read_timeout_seconds = float(read_timeout_seconds)
+        self._stream_read_timeout_seconds = float(stream_read_timeout_seconds)
+        self._write_timeout_seconds = float(write_timeout_seconds)
+        self._pool_timeout_seconds = float(pool_timeout_seconds)
         self._owns_client = http_client is None
-        self._client = http_client or httpx.Client(timeout=float(timeout_seconds), http2=False)
+        self._client = http_client or httpx.Client(
+            timeout=_httpx_timeout(
+                httpx,
+                connect=self._connect_timeout_seconds,
+                read=self._read_timeout_seconds,
+                write=self._write_timeout_seconds,
+                pool=self._pool_timeout_seconds,
+            ),
+            http2=False,
+        )
         self.chat = SimpleNamespace(completions=_SyncCompletions(self))
 
     def close(self) -> None:
@@ -381,6 +423,13 @@ class OpenAICompatibleChatClient:
     def _auth_mode(self) -> str:
         return resolve_auth_mode(self.auth_mode)
 
+    def _effective_timeout_seconds(self, timeout: Any | None, *, stream: bool) -> float:
+        if timeout is not None:
+            return float(timeout)
+        if stream:
+            return self._stream_read_timeout_seconds
+        return self._read_timeout_seconds
+
     def _create(self, **kwargs: Any) -> Any:
         payload = _build_payload(kwargs)
         timeout = kwargs.get("timeout")
@@ -389,6 +438,7 @@ class OpenAICompatibleChatClient:
         request_kwargs: dict[str, Any] = {"headers": self._headers(), "json": payload}
         if timeout is not None:
             request_kwargs["timeout"] = float(timeout)
+        effective_timeout = self._effective_timeout_seconds(timeout, stream=False)
         started_at = _log_model_call_start(
             component="llm",
             model=str(payload.get("model") or ""),
@@ -397,6 +447,7 @@ class OpenAICompatibleChatClient:
             stream=False,
             message_count=_message_count(payload.get("messages")),
             message_chars=_message_chars(payload.get("messages")),
+            timeout_seconds=effective_timeout,
         )
         response = None
         try:
@@ -413,6 +464,7 @@ class OpenAICompatibleChatClient:
                 exc=exc,
                 status_code=getattr(response, "status_code", None),
                 stream=False,
+                timeout_seconds=effective_timeout,
             )
             raise
         answer = parsed.choices[0].message.content if getattr(parsed, "choices", None) else ""
@@ -432,6 +484,15 @@ class OpenAICompatibleChatClient:
         request_kwargs: dict[str, Any] = {"headers": self._headers(), "json": payload}
         if timeout is not None:
             request_kwargs["timeout"] = float(timeout)
+        else:
+            request_kwargs["timeout"] = _httpx_timeout(
+                httpx,
+                connect=self._connect_timeout_seconds,
+                read=self._stream_read_timeout_seconds,
+                write=self._write_timeout_seconds,
+                pool=self._pool_timeout_seconds,
+            )
+        effective_timeout = self._effective_timeout_seconds(timeout, stream=True)
         started_at = _log_model_call_start(
             component="llm",
             model=str(payload.get("model") or ""),
@@ -440,6 +501,7 @@ class OpenAICompatibleChatClient:
             stream=True,
             message_count=_message_count(payload.get("messages")),
             message_chars=_message_chars(payload.get("messages")),
+            timeout_seconds=effective_timeout,
         )
         chunk_count = 0
         answer_chars = 0
@@ -466,6 +528,7 @@ class OpenAICompatibleChatClient:
                 exc=exc,
                 status_code=getattr(response, "status_code", None),
                 stream=True,
+                timeout_seconds=effective_timeout,
             )
             raise
         _log_model_call_success(
@@ -489,15 +552,37 @@ class AsyncOpenAICompatibleChatClient:
         api_key: str,
         auth_mode: str | None = None,
         http_client: Any | None = None,
-        timeout_seconds: float = 60.0,
+        connect_timeout_seconds: float = 15.0,
+        read_timeout_seconds: float = 180.0,
+        stream_read_timeout_seconds: float = 600.0,
+        write_timeout_seconds: float = 180.0,
+        pool_timeout_seconds: float = 30.0,
+        timeout_seconds: float | None = None,
         max_retries: int | None = None,
     ) -> None:
         del max_retries
+        if timeout_seconds is not None:
+            read_timeout_seconds = float(timeout_seconds)
+            stream_read_timeout_seconds = float(timeout_seconds)
         self.endpoint = normalize_openai_compatible_endpoint(base_url)
         self.api_key = str(api_key or "")
         self.auth_mode = auth_mode
+        self._connect_timeout_seconds = float(connect_timeout_seconds)
+        self._read_timeout_seconds = float(read_timeout_seconds)
+        self._stream_read_timeout_seconds = float(stream_read_timeout_seconds)
+        self._write_timeout_seconds = float(write_timeout_seconds)
+        self._pool_timeout_seconds = float(pool_timeout_seconds)
         self._owns_client = http_client is None
-        self._client = http_client or httpx.AsyncClient(timeout=float(timeout_seconds), http2=False)
+        self._client = http_client or httpx.AsyncClient(
+            timeout=_httpx_timeout(
+                httpx,
+                connect=self._connect_timeout_seconds,
+                read=self._read_timeout_seconds,
+                write=self._write_timeout_seconds,
+                pool=self._pool_timeout_seconds,
+            ),
+            http2=False,
+        )
         self.chat = SimpleNamespace(completions=_AsyncCompletions(self))
 
     async def aclose(self) -> None:
@@ -513,6 +598,13 @@ class AsyncOpenAICompatibleChatClient:
     def _auth_mode(self) -> str:
         return resolve_auth_mode(self.auth_mode)
 
+    def _effective_timeout_seconds(self, timeout: Any | None, *, stream: bool) -> float:
+        if timeout is not None:
+            return float(timeout)
+        if stream:
+            return self._stream_read_timeout_seconds
+        return self._read_timeout_seconds
+
     async def _create(self, **kwargs: Any) -> Any:
         payload = _build_payload(kwargs)
         timeout = kwargs.get("timeout")
@@ -521,6 +613,7 @@ class AsyncOpenAICompatibleChatClient:
         request_kwargs: dict[str, Any] = {"headers": self._headers(), "json": payload}
         if timeout is not None:
             request_kwargs["timeout"] = float(timeout)
+        effective_timeout = self._effective_timeout_seconds(timeout, stream=False)
         started_at = _log_model_call_start(
             component="llm",
             model=str(payload.get("model") or ""),
@@ -529,6 +622,7 @@ class AsyncOpenAICompatibleChatClient:
             stream=False,
             message_count=_message_count(payload.get("messages")),
             message_chars=_message_chars(payload.get("messages")),
+            timeout_seconds=effective_timeout,
         )
         response = None
         try:
@@ -545,6 +639,7 @@ class AsyncOpenAICompatibleChatClient:
                 exc=exc,
                 status_code=getattr(response, "status_code", None),
                 stream=False,
+                timeout_seconds=effective_timeout,
             )
             raise
         answer = parsed.choices[0].message.content if getattr(parsed, "choices", None) else ""
@@ -564,6 +659,15 @@ class AsyncOpenAICompatibleChatClient:
         request_kwargs: dict[str, Any] = {"headers": self._headers(), "json": payload}
         if timeout is not None:
             request_kwargs["timeout"] = float(timeout)
+        else:
+            request_kwargs["timeout"] = _httpx_timeout(
+                httpx,
+                connect=self._connect_timeout_seconds,
+                read=self._stream_read_timeout_seconds,
+                write=self._write_timeout_seconds,
+                pool=self._pool_timeout_seconds,
+            )
+        effective_timeout = self._effective_timeout_seconds(timeout, stream=True)
         started_at = _log_model_call_start(
             component="llm",
             model=str(payload.get("model") or ""),
@@ -572,6 +676,7 @@ class AsyncOpenAICompatibleChatClient:
             stream=True,
             message_count=_message_count(payload.get("messages")),
             message_chars=_message_chars(payload.get("messages")),
+            timeout_seconds=effective_timeout,
         )
         chunk_count = 0
         answer_chars = 0
@@ -598,6 +703,7 @@ class AsyncOpenAICompatibleChatClient:
                 exc=exc,
                 status_code=getattr(response, "status_code", None),
                 stream=True,
+                timeout_seconds=effective_timeout,
             )
             raise
         _log_model_call_success(

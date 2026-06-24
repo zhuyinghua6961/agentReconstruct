@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 import config
+from agent_core.llm_http_diagnostics import log_llm_http_runtime_settings
 from server.runtime.request_context import clear_trace_id, generate_trace_id, get_trace_id, set_trace_id
 from server.services.redis_client import bootstrap_redis_state
 from server_fastapi.errors import register_exception_handlers
@@ -37,6 +38,7 @@ def create_app() -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     settings = config.HTTP_SETTINGS
     app.logger = _configure_application_logging(settings)
+    log_llm_http_runtime_settings(logger=logging.getLogger("agent_core.llm_http_diagnostics"))
 
     app.state.config = {
         "APP_ENV": settings.app_env,

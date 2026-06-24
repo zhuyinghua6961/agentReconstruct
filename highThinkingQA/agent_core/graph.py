@@ -25,6 +25,7 @@ from agent_core.direct_answerer import direct_answer
 from agent_core.decomposer import decompose_question
 from agent_core.answer_summary import apply_answer_summary_experiment, summary_experiment_enabled
 from agent_core.llm_client import get_async_llm_client, get_llm_client
+from agent_core.llm_http_diagnostics import llm_http_settings_snapshot
 from agent_core.sub_answerer import iter_pre_answers_async, pre_answer_all
 from agent_core.synthesizer import synthesize_answer, synthesize_answer_stream
 from agent_core.doi_diagnostics import build_preanswer_blob, doi_diagnostics_enabled, log_doi_trace
@@ -42,8 +43,6 @@ from agent_core.intent_detect import (
 
 logger = logging.getLogger(__name__)
 _PARTIAL_RETRIEVAL_FLUSH_WAIT_SECONDS = 0.8
-_CHECKER_WALL_CLOCK_TIMEOUT_SECONDS = 60.0
-_REVISER_WALL_CLOCK_TIMEOUT_SECONDS = 60.0
 _CANCEL_WAIT_INTERVAL_SECONDS = 0.05
 _DIAGNOSTIC_TEXT_PREVIEW_CHARS = 500
 _DIAGNOSTIC_MAX_ITEMS = 20
@@ -237,6 +236,17 @@ def _log_synthesis_input(
         _unique_doi_sample(retrieved_chunks or []),
         bool(stream_enabled),
         bool(summary_enabled),
+    )
+    http_settings = llm_http_settings_snapshot()
+    logger.info(
+        "%sstep4 synthesis timeout policy stream=%s read_timeout_seconds=%s "
+        "stream_read_timeout_seconds=%s ask_timeout_seconds=%s gunicorn_timeout_seconds=%s",
+        _trace_prefix(trace_id),
+        bool(stream_enabled),
+        http_settings["read_timeout_seconds"],
+        http_settings["stream_read_timeout_seconds"],
+        http_settings["ask_timeout_seconds"],
+        http_settings["gunicorn_timeout_seconds"],
     )
 
 
@@ -1022,12 +1032,12 @@ def run_agent(
                     len(state.retrieved_chunks or []),
                     sum(len(chunks or []) for chunks in state.retrieved_chunks or []),
                     _unique_doi_sample(state.retrieved_chunks or []),
-                    _CHECKER_WALL_CLOCK_TIMEOUT_SECONDS,
+                    config.LLM_HTTP_READ_TIMEOUT_SECONDS,
                 )
                 try:
                     passed, issues = _call_with_wall_clock_timeout(
                         func=check_answer,
-                        timeout_seconds=_CHECKER_WALL_CLOCK_TIMEOUT_SECONDS,
+                        timeout_seconds=config.LLM_HTTP_READ_TIMEOUT_SECONDS,
                         timeout_error=CheckerTimeoutError("checker llm request timed out"),
                         cancel_event=cancel_event,
                         cancel_error=RuntimeError("cancelled"),
@@ -1128,12 +1138,12 @@ def run_agent(
                     before_revise_chars,
                     len(issues),
                     _issue_type_summary(issues),
-                    _REVISER_WALL_CLOCK_TIMEOUT_SECONDS,
+                    config.LLM_HTTP_READ_TIMEOUT_SECONDS,
                 )
                 try:
                     current_answer = _call_with_wall_clock_timeout(
                         func=revise_answer,
-                        timeout_seconds=_REVISER_WALL_CLOCK_TIMEOUT_SECONDS,
+                        timeout_seconds=config.LLM_HTTP_READ_TIMEOUT_SECONDS,
                         timeout_error=ReviserTimeoutError("reviser llm request timed out"),
                         cancel_event=cancel_event,
                         cancel_error=RuntimeError("cancelled"),

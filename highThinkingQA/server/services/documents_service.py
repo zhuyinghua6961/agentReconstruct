@@ -56,6 +56,11 @@ class DocumentsService:
             api_key=api_key,
             base_url=str(self._llm_base_url() or ""),
             auth_mode=getattr(config, "LLM_AUTH_MODE", None),
+            connect_timeout_seconds=config.LLM_HTTP_CONNECT_TIMEOUT_SECONDS,
+            read_timeout_seconds=config.LLM_HTTP_READ_TIMEOUT_SECONDS,
+            stream_read_timeout_seconds=config.LLM_HTTP_STREAM_READ_TIMEOUT_SECONDS,
+            write_timeout_seconds=config.LLM_HTTP_WRITE_TIMEOUT_SECONDS,
+            pool_timeout_seconds=config.LLM_HTTP_POOL_TIMEOUT_SECONDS,
         )
 
     @staticmethod

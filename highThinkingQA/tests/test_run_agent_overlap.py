@@ -381,7 +381,7 @@ def test_run_agent_uses_no_retry_client_for_checker_and_reviser(monkeypatch):
 
 
 def test_run_agent_enforces_wall_clock_timeout_for_checker(monkeypatch):
-    monkeypatch.setattr("agent_core.graph._CHECKER_WALL_CLOCK_TIMEOUT_SECONDS", 0.01, raising=False)
+    monkeypatch.setattr("agent_core.graph.config.LLM_HTTP_READ_TIMEOUT_SECONDS", 0.01, raising=False)
     monkeypatch.setattr("agent_core.graph.get_llm_client", lambda *args, **kwargs: object())
     monkeypatch.setattr("agent_core.graph.get_async_llm_client", lambda: object())
     monkeypatch.setattr("agent_core.graph.get_embedding_client", lambda: object())

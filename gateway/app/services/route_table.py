@@ -47,6 +47,7 @@ _PUBLIC_ROUTE_GROUPS = (
     _paths("/api/background_status"),
     _paths("/api/health"),
     _paths("/api/literature_content"),
+    _paths("/api/literature_search"),
     _paths("/api/reference_preview"),
     _paths("/api/patent/original/{canonical_patent_id}"),
     _paths("/api/summarize_pdf/{doi:path}"),
@@ -110,6 +111,7 @@ PUBLIC_ROUTE_PATTERNS = tuple(path for group in _PUBLIC_ROUTE_GROUPS for path in
 _QA_ROUTE_GROUPS = (
     _mode_paths("ask"),
     _mode_paths("ask_stream"),
+    _paths("/api/patent_search"),
 )
 
 QA_ROUTE_PATTERNS = tuple(path for group in _QA_ROUTE_GROUPS for path in group)

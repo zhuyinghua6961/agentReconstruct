@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Optional, Generator
 
 import config
+from agent_core.llm_http_diagnostics import log_llm_request_prepared, resolve_request_timeout_seconds
 from agent_core.openai_compat import AsyncOpenAICompatibleChatClient, OpenAICompatibleChatClient
 from agent_core.thinking import (
     LLM_STAGE_CONTROL,
@@ -24,21 +25,33 @@ logger = logging.getLogger(__name__)
 
 def get_llm_client(*, max_retries: int | None = None) -> OpenAICompatibleChatClient:
     """获取 LLM API 客户端"""
+    http = config.LLM_HTTP_SETTINGS
     return OpenAICompatibleChatClient(
         base_url=config.LLM_BASE_URL,
         api_key=config.LLM_API_KEY,
         auth_mode=getattr(config, "LLM_AUTH_MODE", None),
         max_retries=max_retries,
+        connect_timeout_seconds=http.connect_timeout_seconds,
+        read_timeout_seconds=http.read_timeout_seconds,
+        stream_read_timeout_seconds=http.stream_read_timeout_seconds,
+        write_timeout_seconds=http.write_timeout_seconds,
+        pool_timeout_seconds=http.pool_timeout_seconds,
     )
 
 
 def get_async_llm_client(*, max_retries: int | None = None) -> AsyncOpenAICompatibleChatClient:
     """获取异步 LLM API 客户端。"""
+    http = config.LLM_HTTP_SETTINGS
     return AsyncOpenAICompatibleChatClient(
         base_url=config.LLM_BASE_URL,
         api_key=config.LLM_API_KEY,
         auth_mode=getattr(config, "LLM_AUTH_MODE", None),
         max_retries=max_retries,
+        connect_timeout_seconds=http.connect_timeout_seconds,
+        read_timeout_seconds=http.read_timeout_seconds,
+        stream_read_timeout_seconds=http.stream_read_timeout_seconds,
+        write_timeout_seconds=http.write_timeout_seconds,
+        pool_timeout_seconds=http.pool_timeout_seconds,
     )
 
 
@@ -126,8 +139,19 @@ def chat_completion(
 
     kwargs = _build_kwargs(messages, temperature, max_tokens, enable_thinking, model=model, stage=stage)
 
-    if timeout_seconds is not None:
-        kwargs["timeout"] = float(timeout_seconds)
+    kwargs["timeout"] = float(
+        timeout_seconds if timeout_seconds is not None else config.LLM_HTTP_READ_TIMEOUT_SECONDS
+    )
+    effective_timeout = resolve_request_timeout_seconds(timeout=kwargs["timeout"], stream=False)
+    log_llm_request_prepared(
+        stage=stage,
+        stream=False,
+        model=str(kwargs.get("model") or ""),
+        timeout_seconds=effective_timeout,
+        message_count=len(messages),
+        message_chars=sum(len(str(item.get("content") or "")) for item in messages),
+        prompt_chars=len(prompt),
+    )
 
     try:
         response = client.chat.completions.create(**kwargs)
@@ -204,8 +228,19 @@ def chat_completion_stream(
         model=model,
         stage=stage,
     )
-    if timeout_seconds is not None:
-        kwargs["timeout"] = float(timeout_seconds)
+    kwargs["timeout"] = float(
+        timeout_seconds if timeout_seconds is not None else config.LLM_HTTP_STREAM_READ_TIMEOUT_SECONDS
+    )
+    effective_timeout = resolve_request_timeout_seconds(timeout=kwargs["timeout"], stream=True)
+    log_llm_request_prepared(
+        stage=stage,
+        stream=True,
+        model=str(kwargs.get("model") or ""),
+        timeout_seconds=effective_timeout,
+        message_count=len(messages),
+        message_chars=sum(len(str(item.get("content") or "")) for item in messages),
+        prompt_chars=len(prompt),
+    )
 
     try:
         response = client.chat.completions.create(**kwargs)

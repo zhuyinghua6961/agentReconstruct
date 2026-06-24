@@ -15,6 +15,7 @@ from server.patent.hybrid_synthesis import PatentHybridSynthesisClient
 from server.patent.original_service import OriginalViewService
 from server.patent.planning_hot_pool import PatentPlanningHotPool, PatentPlanningHotPoolConfig
 from server.patent.pdf_service import PatentPdfAnswerClient, PatentPdfService
+from server.patent.browse_search import build_patent_browse_search_service
 from server.patent.runtime import (
     build_default_patent_runtime,
     build_patent_planning_runtime_inputs,
@@ -653,6 +654,7 @@ def _bootstrap_service_state(app: FastAPI) -> None:
     app.state.patent_tabular_service = patent_tabular_service
     app.state.patent_hybrid_synthesis_client = patent_hybrid_synthesis_client
     app.state.patent_runtime = patent_runtime
+    app.state.patent_browse_search_service = build_patent_browse_search_service(patent_runtime)
     app.state.patent_graph_kb_client = patent_graph_kb_client
     app.state.ask_service = ask_service
     app.state.original_service = original_service

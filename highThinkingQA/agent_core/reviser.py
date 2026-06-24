@@ -14,8 +14,6 @@ from agent_core.question_anchor import prepend_question_anchor
 
 logger = logging.getLogger(__name__)
 
-_REVISER_REQUEST_TIMEOUT_SECONDS = 60.0
-
 
 class ReviserTimeoutError(RuntimeError):
     """Reviser request exceeded its per-call timeout."""
@@ -91,7 +89,7 @@ def revise_answer(
             enable_thinking=False,
             max_tokens=8192,
             temperature=0.3,
-            timeout_seconds=_REVISER_REQUEST_TIMEOUT_SECONDS,
+            timeout_seconds=config.LLM_HTTP_READ_TIMEOUT_SECONDS,
         )
     except Exception as exc:
         if _is_timeout_error(exc):

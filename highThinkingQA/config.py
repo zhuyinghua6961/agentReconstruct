@@ -67,6 +67,31 @@ def _get_int_from_names(*names: str, default: int, minimum: int | None = None, m
     return _get_int(selected, default, minimum=minimum, maximum=maximum)
 
 
+def _get_float(name: str, default: float, *, minimum: float | None = None, maximum: float | None = None) -> float:
+    try:
+        value = float(str(os.getenv(name, str(default))).strip())
+    except Exception:
+        value = float(default)
+    if minimum is not None:
+        value = max(float(minimum), value)
+    if maximum is not None:
+        value = min(float(maximum), value)
+    return value
+
+
+def _get_float_from_names(
+    *names: str,
+    default: float,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    for name in names:
+        raw = str(os.getenv(name, "") or "").strip()
+        if raw:
+            return _get_float(name, default, minimum=minimum, maximum=maximum)
+    return float(default)
+
+
 def _first_env(*names: str, default: str = "") -> str:
     for name in names:
         raw = str(os.getenv(name, "") or "").strip()
@@ -258,6 +283,55 @@ class GunicornSettings:
     max_requests_jitter: int
 
 
+@dataclass(frozen=True)
+class LlmHttpSettings:
+    connect_timeout_seconds: float
+    read_timeout_seconds: float
+    stream_read_timeout_seconds: float
+    write_timeout_seconds: float
+    pool_timeout_seconds: float
+
+
+def get_llm_http_settings() -> LlmHttpSettings:
+    return LlmHttpSettings(
+        connect_timeout_seconds=_get_float_from_names(
+            "LLM_CONNECT_TIMEOUT_SECONDS",
+            "HIGHTHINKINGQA_LLM_HTTP_CONNECT_TIMEOUT_SECONDS",
+            default=15.0,
+            minimum=1.0,
+            maximum=300.0,
+        ),
+        read_timeout_seconds=_get_float_from_names(
+            "LLM_READ_TIMEOUT_SECONDS",
+            "HIGHTHINKINGQA_LLM_HTTP_READ_TIMEOUT_SECONDS",
+            default=180.0,
+            minimum=5.0,
+            maximum=1800.0,
+        ),
+        stream_read_timeout_seconds=_get_float_from_names(
+            "LLM_STREAM_READ_TIMEOUT_SECONDS",
+            "HIGHTHINKINGQA_LLM_HTTP_STREAM_READ_TIMEOUT_SECONDS",
+            default=600.0,
+            minimum=5.0,
+            maximum=7200.0,
+        ),
+        write_timeout_seconds=_get_float_from_names(
+            "LLM_WRITE_TIMEOUT_SECONDS",
+            "HIGHTHINKINGQA_LLM_HTTP_WRITE_TIMEOUT_SECONDS",
+            default=180.0,
+            minimum=5.0,
+            maximum=1800.0,
+        ),
+        pool_timeout_seconds=_get_float_from_names(
+            "LLM_POOL_TIMEOUT_SECONDS",
+            "HIGHTHINKINGQA_LLM_HTTP_POOL_TIMEOUT_SECONDS",
+            default=30.0,
+            minimum=1.0,
+            maximum=300.0,
+        ),
+    )
+
+
 def get_runtime_settings() -> RuntimeSettings:
     llm_api_key = str(os.getenv("LLM_API_KEY") or "").strip()
     llm_model = str(os.getenv("LLM_MODEL", "qwen3-max") or "qwen3-max").strip()
@@ -391,6 +465,7 @@ SETTINGS = get_runtime_settings()
 HTTP_SETTINGS = get_http_service_settings()
 CONVERSATION_ROLLOUT_SETTINGS = get_conversation_rollout_settings()
 GUNICORN_SETTINGS = get_gunicorn_settings()
+LLM_HTTP_SETTINGS = get_llm_http_settings()
 
 LLM_BASE_URL = SETTINGS.llm_base_url
 LLM_MODEL = SETTINGS.llm_model
@@ -465,3 +540,8 @@ GUNICORN_TIMEOUT = GUNICORN_SETTINGS.timeout
 GUNICORN_KEEPALIVE = GUNICORN_SETTINGS.keepalive
 GUNICORN_MAX_REQUESTS = GUNICORN_SETTINGS.max_requests
 GUNICORN_MAX_REQUESTS_JITTER = GUNICORN_SETTINGS.max_requests_jitter
+LLM_HTTP_CONNECT_TIMEOUT_SECONDS = LLM_HTTP_SETTINGS.connect_timeout_seconds
+LLM_HTTP_READ_TIMEOUT_SECONDS = LLM_HTTP_SETTINGS.read_timeout_seconds
+LLM_HTTP_STREAM_READ_TIMEOUT_SECONDS = LLM_HTTP_SETTINGS.stream_read_timeout_seconds
+LLM_HTTP_WRITE_TIMEOUT_SECONDS = LLM_HTTP_SETTINGS.write_timeout_seconds
+LLM_HTTP_POOL_TIMEOUT_SECONDS = LLM_HTTP_SETTINGS.pool_timeout_seconds

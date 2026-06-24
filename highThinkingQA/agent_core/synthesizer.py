@@ -8,12 +8,14 @@
 import logging
 from typing import Any, Optional, Generator
 
+import config
 from agent_core.answer_summary import build_summary_instruction
 from agent_core.llm_client import (
     chat_completion,
     chat_completion_stream,
     load_prompt_template,
 )
+from agent_core.llm_http_diagnostics import llm_http_settings_snapshot
 from agent_core.question_anchor import prepend_question_anchor
 from agent_core.thinking import LLM_STAGE_STAGE4_FINAL_ANSWER
 from retriever.vector_retriever import RetrievedChunk
@@ -98,6 +100,15 @@ def synthesize_answer(
         sub_questions,
         summary_enabled=summary_enabled,
     )
+    http_settings = llm_http_settings_snapshot()
+    logger.info(
+        "stage4 synthesis start stream=false prompt_chars=%s read_timeout_seconds=%s "
+        "stream_read_timeout_seconds=%s ask_timeout_seconds=%s",
+        len(prompt),
+        http_settings["read_timeout_seconds"],
+        http_settings["stream_read_timeout_seconds"],
+        http_settings["ask_timeout_seconds"],
+    )
 
     answer = chat_completion(
         prompt=prompt,
@@ -131,6 +142,15 @@ def synthesize_answer_stream(
         all_retrieved_chunks,
         sub_questions,
         summary_enabled=summary_enabled,
+    )
+    http_settings = llm_http_settings_snapshot()
+    logger.info(
+        "stage4 synthesis start stream=true prompt_chars=%s read_timeout_seconds=%s "
+        "stream_read_timeout_seconds=%s ask_timeout_seconds=%s",
+        len(prompt),
+        http_settings["read_timeout_seconds"],
+        http_settings["stream_read_timeout_seconds"],
+        http_settings["ask_timeout_seconds"],
     )
 
     logger.info("开始流式生成综合回答...")

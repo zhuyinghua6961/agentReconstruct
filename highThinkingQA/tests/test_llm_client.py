@@ -297,6 +297,53 @@ def test_chat_completion_forwards_timeout_to_sdk_call():
     assert completions.calls[0]["timeout"] == 12.5
 
 
+def test_chat_completion_uses_configured_read_timeout_by_default(monkeypatch):
+    monkeypatch.setattr("agent_core.llm_client.config.LLM_HTTP_READ_TIMEOUT_SECONDS", 222.0, raising=False)
+    completions = _FakeCompletions()
+    client = _FakeClient(completions)
+
+    chat_completion(prompt="demo", client=client, enable_thinking=False)
+
+    assert completions.calls[0]["timeout"] == 222.0
+
+
+def test_chat_completion_stream_uses_configured_stream_read_timeout_by_default(monkeypatch):
+    monkeypatch.setattr("agent_core.llm_client.config.LLM_HTTP_STREAM_READ_TIMEOUT_SECONDS", 333.0, raising=False)
+    completions = _FakeStreamCompletions(
+        [SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="ok", reasoning_content=None))])]
+    )
+    client = _FakeClient(completions)
+
+    list(chat_completion_stream(prompt="demo", client=client, enable_thinking=False))
+
+    assert completions.calls[0]["timeout"] == 333.0
+
+
+def test_get_llm_client_applies_shared_http_timeout_settings(monkeypatch):
+    monkeypatch.setattr(
+        "agent_core.llm_client.config.LLM_HTTP_SETTINGS",
+        type(
+            "Settings",
+            (),
+            {
+                "connect_timeout_seconds": 11.0,
+                "read_timeout_seconds": 22.0,
+                "stream_read_timeout_seconds": 33.0,
+                "write_timeout_seconds": 44.0,
+                "pool_timeout_seconds": 55.0,
+            },
+        )(),
+        raising=False,
+    )
+    monkeypatch.setattr("agent_core.llm_client.config.LLM_API_KEY", "token")
+    monkeypatch.setattr("agent_core.llm_client.config.LLM_BASE_URL", "https://example.invalid/v1")
+
+    client = get_llm_client()
+
+    assert client._read_timeout_seconds == 22.0
+    assert client._stream_read_timeout_seconds == 33.0
+
+
 def test_chat_completion_logs_llm_auth_success_once(monkeypatch, caplog):
     reset_upstream_auth_log_state_for_tests()
     monkeypatch.setattr("agent_core.llm_client.config.LLM_MODEL", "demo-model", raising=False)

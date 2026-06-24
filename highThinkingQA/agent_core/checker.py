@@ -19,7 +19,6 @@ from retriever.vector_retriever import RetrievedChunk
 
 logger = logging.getLogger(__name__)
 
-_CHECKER_REQUEST_TIMEOUT_SECONDS = 60.0
 _CHECKER_MAX_PARALLEL_SLICES = 4
 _CHECKER_MAX_CHUNKS_PER_SLICE = 8
 _CHECKER_MAX_PASSAGE_CHARS_PER_SLICE = 6000
@@ -312,7 +311,7 @@ def _run_checker_slice(
         enable_thinking=False,
         max_tokens=4096,
         temperature=0.3,
-        timeout_seconds=_CHECKER_REQUEST_TIMEOUT_SECONDS,
+        timeout_seconds=config.LLM_HTTP_READ_TIMEOUT_SECONDS,
     )
     passed, issues = _parse_check_result(raw)
     meta = {

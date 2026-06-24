@@ -3,34 +3,33 @@ import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import PdfReader from '../components/PdfReader.vue'
 import MarkdownRenderer from '../features/markdown/MarkdownRenderer.vue'
-import { buildPdfViewUrl, getLiteratureContent, searchLiterature } from '../api/literature'
+import { buildPatentPdfUrl, fetchPdfDocumentByUrl, getPatentAbstract, searchPatent } from '../api/patent'
 
 const router = useRouter()
 const pdfReader = ref(null)
 
 const query = ref('')
 const queryType = ref('auto')
-const matchMode = ref('semantic')
 const limit = ref(20)
 
 const loading = ref(false)
 const error = ref('')
 const results = ref([])
 const resultMeta = ref({ query_type_detected: '', count: 0 })
-const selectedDoi = ref('')
+const selectedPatentId = ref('')
 const detail = ref(null)
 const detailLoading = ref(false)
 const detailError = ref('')
 const detailScrollRef = ref(null)
 
-function shouldShowRelevance(meta, mode) {
-  if (String(meta?.query_type_detected || '').toLowerCase() === 'doi') {
+function shouldShowRelevance(meta) {
+  if (String(meta?.query_type_detected || '').toLowerCase() === 'patent_id') {
     return false
   }
   if (Boolean(meta?.rerank_applied)) {
     return true
   }
-  return String(mode || '').toLowerCase() === 'semantic'
+  return String(meta?.query_type_detected || '').toLowerCase() === 'topic'
 }
 
 function formatRelevancePercent(score) {
@@ -50,11 +49,11 @@ function relevanceLabel(item) {
 
 function queryTypeDetectedLabel(value) {
   const normalized = String(value || '').toLowerCase()
-  if (normalized === 'doi') {
-    return 'DOI 精确'
+  if (normalized === 'patent_id') {
+    return '专利号精确'
   }
-  if (normalized === 'title') {
-    return '主题全文'
+  if (normalized === 'topic') {
+    return '主题语义'
   }
   return value
 }
@@ -62,22 +61,21 @@ function queryTypeDetectedLabel(value) {
 async function runSearch() {
   const cleanQuery = String(query.value || '').trim()
   if (!cleanQuery) {
-    error.value = '请输入 DOI 或检索主题'
+    error.value = '请输入专利公开号或检索主题'
     return
   }
 
   loading.value = true
   error.value = ''
   results.value = []
-  selectedDoi.value = ''
+  selectedPatentId.value = ''
   detail.value = null
   detailError.value = ''
 
   try {
-    const payload = await searchLiterature({
+    const payload = await searchPatent({
       query: cleanQuery,
       queryType: queryType.value,
-      matchMode: matchMode.value,
       limit: limit.value,
     })
     results.value = Array.isArray(payload?.items) ? payload.items : []
@@ -99,11 +97,11 @@ async function runSearch() {
 }
 
 async function selectResult(item) {
-  const doi = String(item?.doi || '').trim()
-  if (!doi) {
+  const patentId = String(item?.canonical_patent_id || item?.publication_number || '').trim()
+  if (!patentId) {
     return
   }
-  selectedDoi.value = doi
+  selectedPatentId.value = patentId
   detailLoading.value = true
   detailError.value = ''
   detail.value = null
@@ -111,32 +109,43 @@ async function selectResult(item) {
     detailScrollRef.value.scrollTop = 0
   }
   try {
-    const payload = await getLiteratureContent(doi)
-    if (payload?.error) {
-      detailError.value = String(payload.error)
+    const payload = await getPatentAbstract(patentId)
+    if (!payload?.success) {
+      detailError.value = String(payload?.message || payload?.error || '加载专利详情失败')
       detail.value = {
-        doi,
-        title: item?.title || doi,
-        authors: item?.authors || '-',
-        journal: item?.journal || '-',
+        canonical_patent_id: patentId,
+        title: item?.title || patentId,
+        applicants: item?.applicants || '-',
         publication_date: item?.publication_date || '-',
-        abstract: item?.abstract || '无摘要信息',
-        content: '',
+        abstract: item?.abstract || item?.snippet || '无摘要信息',
       }
       return
     }
-    detail.value = payload
+    const bibliography = payload?.content?.bibliography || {}
+    detail.value = {
+      canonical_patent_id: patentId,
+      title: payload?.title || item?.title || patentId,
+      applicants: item?.applicants || bibliography?.applicant || '-',
+      publication_date: item?.publication_date || bibliography?.publication_date || '-',
+      abstract: payload?.abstract_text || item?.abstract || '无摘要信息',
+      publication_number: bibliography?.publication_number || item?.publication_number || patentId,
+      application_number: bibliography?.application_number || item?.application_number || '-',
+      country: bibliography?.country || item?.country || '-',
+      kind_code: bibliography?.kind_code || item?.kind_code || '-',
+      snippet: item?.snippet || '',
+    }
   } catch (err) {
-    detailError.value = err?.message || '加载文献详情失败'
+    detailError.value = err?.message || '加载专利详情失败'
   } finally {
     detailLoading.value = false
   }
 }
 
-function openPdf(doi) {
-  const url = buildPdfViewUrl(doi)
-  if (pdfReader.value?.open) {
-    pdfReader.value.open({ doi, url })
+function openPdf(patentId) {
+  const normalized = String(patentId || '').trim()
+  const url = buildPatentPdfUrl(normalized)
+  if (pdfReader.value?.openUrlReader) {
+    pdfReader.value.openUrlReader(normalized, url, [])
     return
   }
   window.open(url, '_blank', 'noopener,noreferrer')
@@ -148,56 +157,47 @@ function goBack() {
 </script>
 
 <template>
-  <div class="literature-search-page">
+  <div class="patent-search-page">
     <div class="page-top">
-    <header class="page-header">
-      <div class="header-left">
-        <button class="back-btn" type="button" @click="goBack">返回问答</button>
-        <h1>文献检索</h1>
-      </div>
-      <p class="subtitle">支持 DOI 精确检索与主题全文语义检索（基于向量库正文分块），结果可查看详情并打开 MinIO PDF。</p>
-    </header>
+      <header class="page-header">
+        <div class="header-left">
+          <button class="back-btn" type="button" @click="goBack">返回问答</button>
+          <h1>专利检索</h1>
+        </div>
+        <p class="subtitle">支持专利公开号精确检索与主题语义检索（摘要库 + 片段库），结果可查看详情并打开 MinIO 原文 PDF。</p>
+      </header>
 
-    <section class="search-panel">
-      <div class="search-row">
-        <input
-          v-model="query"
-          class="search-input"
-          type="search"
-          placeholder="输入 DOI 或检索主题，如：磷酸铁锂 离子传导"
-          @keyup.enter="runSearch"
-        />
-        <button class="primary-btn" type="button" :disabled="loading" @click="runSearch">
-          {{ loading ? '检索中...' : '检索' }}
-        </button>
-      </div>
+      <section class="search-panel">
+        <div class="search-row">
+          <input
+            v-model="query"
+            class="search-input"
+            type="search"
+            placeholder="输入专利公开号或检索主题，如：磷酸铁锂 正极材料"
+            @keyup.enter="runSearch"
+          />
+          <button class="primary-btn" type="button" :disabled="loading" @click="runSearch">
+            {{ loading ? '检索中...' : '检索' }}
+          </button>
+        </div>
 
-      <div class="options-grid">
-        <label class="option-field">
-          <span>查询类型</span>
-          <select v-model="queryType">
-            <option value="auto">自动识别</option>
-            <option value="doi">DOI 精确</option>
-            <option value="title">主题全文</option>
-          </select>
-        </label>
+        <div class="options-grid">
+          <label class="option-field">
+            <span>查询类型</span>
+            <select v-model="queryType">
+              <option value="auto">自动识别</option>
+              <option value="patent_id">专利号精确</option>
+              <option value="topic">主题语义</option>
+            </select>
+          </label>
+        </div>
+      </section>
 
-        <label v-if="queryType !== 'doi'" class="option-field">
-          <span>匹配方式</span>
-          <select v-model="matchMode">
-            <option value="semantic">全文语义（推荐）</option>
-            <option value="fuzzy">仅标题模糊</option>
-            <option value="exact">仅标题精确</option>
-          </select>
-        </label>
-      </div>
-    </section>
-
-    <p v-if="error" class="error-text">{{ error }}</p>
-    <p v-else-if="resultMeta.count > 0" class="meta-text">
-      共 {{ resultMeta.count }} 条结果
-      <template v-if="resultMeta.query_type_detected">（识别为 {{ queryTypeDetectedLabel(resultMeta.query_type_detected) }}）</template>
-    </p>
+      <p v-if="error" class="error-text">{{ error }}</p>
+      <p v-else-if="resultMeta.count > 0" class="meta-text">
+        共 {{ resultMeta.count }} 条结果
+        <template v-if="resultMeta.query_type_detected">（识别为 {{ queryTypeDetectedLabel(resultMeta.query_type_detected) }}）</template>
+      </p>
     </div>
 
     <div class="content-grid">
@@ -206,57 +206,58 @@ function goBack() {
         <div class="panel-scroll">
           <p v-if="!loading && results.length === 0" class="hint">暂无结果</p>
           <ul v-else class="result-list">
-          <li
-            v-for="item in results"
-            :key="item.doi"
-            :class="['result-item', { active: item.doi === selectedDoi }]"
-          >
-            <button class="result-btn" type="button" @click="selectResult(item)">
-              <span class="result-title">{{ item.title || item.doi }}</span>
-              <span class="result-doi">{{ item.doi }}</span>
-              <span class="result-tags">
-                <span
-                  v-if="shouldShowRelevance(resultMeta, matchMode) && relevanceLabel(item)"
-                  class="tag score"
-                  title="列表内相对相关度，不代表绝对置信概率"
-                >
-                  {{ relevanceLabel(item) }}
-                </span>
-                <span class="tag">{{ item.match_source }}</span>
-                <span class="tag">{{ item.match_mode }}</span>
-                <span v-if="item.pdf_exists" class="tag ok">PDF 可用</span>
-                <span v-else class="tag warn">无 PDF</span>
-              </span>
-            </button>
-            <button
-              class="text-btn"
-              type="button"
-              :disabled="!item.pdf_exists"
-              @click="openPdf(item.doi)"
+            <li
+              v-for="item in results"
+              :key="item.canonical_patent_id"
+              :class="['result-item', { active: item.canonical_patent_id === selectedPatentId }]"
             >
-              打开 PDF
-            </button>
-          </li>
+              <button class="result-btn" type="button" @click="selectResult(item)">
+                <span class="result-title">{{ item.title || item.canonical_patent_id }}</span>
+                <span class="result-id">{{ item.canonical_patent_id }}</span>
+                <span class="result-tags">
+                  <span
+                    v-if="shouldShowRelevance(resultMeta) && relevanceLabel(item)"
+                    class="tag score"
+                    title="列表内相对相关度，不代表绝对置信概率"
+                  >
+                    {{ relevanceLabel(item) }}
+                  </span>
+                  <span class="tag">{{ item.match_source }}</span>
+                  <span class="tag">{{ item.match_mode }}</span>
+                  <span v-if="item.has_pdf" class="tag ok">PDF 可用</span>
+                  <span v-else class="tag warn">无 PDF</span>
+                </span>
+              </button>
+              <button
+                class="text-btn"
+                type="button"
+                :disabled="!item.has_pdf"
+                @click="openPdf(item.canonical_patent_id)"
+              >
+                打开 PDF
+              </button>
+            </li>
           </ul>
         </div>
       </section>
 
       <section class="detail-panel">
-        <h2>文献详情</h2>
+        <h2>专利详情</h2>
         <div ref="detailScrollRef" class="panel-scroll">
           <p v-if="detailLoading" class="hint">正在加载...</p>
           <p v-else-if="detailError" class="error-text">{{ detailError }}</p>
           <p v-else-if="!detail" class="hint">选择一条结果查看详情</p>
           <div v-else class="detail-body">
-            <h3>{{ detail.title || selectedDoi }}</h3>
-            <p class="meta-line">DOI: {{ detail.doi || selectedDoi }}</p>
-            <p class="meta-line">作者: {{ detail.authors || '-' }}</p>
-            <p class="meta-line">期刊: {{ detail.journal || '-' }}</p>
+            <h3>{{ detail.title || selectedPatentId }}</h3>
+            <p class="meta-line">公开号: {{ detail.publication_number || selectedPatentId }}</p>
+            <p class="meta-line">申请号: {{ detail.application_number || '-' }}</p>
+            <p class="meta-line">申请人: {{ detail.applicants || '-' }}</p>
             <p class="meta-line">日期: {{ detail.publication_date || '-' }}</p>
+            <p class="meta-line">国家/类型: {{ detail.country || '-' }} {{ detail.kind_code || '' }}</p>
             <p class="abstract">{{ detail.abstract || '无摘要信息' }}</p>
-            <div v-if="detail.content" class="detail-content">
-              <h4>正文摘录</h4>
-              <MarkdownRenderer :content="detail.content" />
+            <div v-if="detail.snippet" class="detail-content">
+              <h4>命中片段</h4>
+              <MarkdownRenderer :content="detail.snippet" />
             </div>
           </div>
         </div>
@@ -268,7 +269,7 @@ function goBack() {
 </template>
 
 <style scoped>
-.literature-search-page {
+.patent-search-page {
   display: flex;
   flex-direction: column;
   height: 100vh;
@@ -449,8 +450,7 @@ function goBack() {
   color: #111827;
 }
 
-.result-doi,
-.result-meta {
+.result-id {
   display: block;
   margin-top: 4px;
   font-size: 12px;
@@ -519,7 +519,7 @@ function goBack() {
 }
 
 @media (max-width: 960px) {
-  .literature-search-page {
+  .patent-search-page {
     height: auto;
     min-height: 100vh;
     min-height: 100dvh;

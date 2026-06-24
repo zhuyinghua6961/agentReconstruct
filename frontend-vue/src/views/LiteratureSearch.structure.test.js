@@ -13,7 +13,7 @@ test('LiteratureSearch page wires search API and result selection', () => {
   assert.match(source, /getLiteratureContent\(/)
   assert.match(source, /queryType/)
   assert.match(source, /matchMode/)
-  assert.match(source, /sources/)
+  assert.doesNotMatch(source, /数据源/)
 })
 
 test('LiteratureSearch page includes navigation back to chat', () => {

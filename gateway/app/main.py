@@ -14,6 +14,7 @@ from app.core.trace import trace_id_middleware
 from app.integrations.redis.service import bootstrap_redis_runtime
 from app.routers.admission import router as admission_router
 from app.routers.health import router as health_router
+from app.routers.patent_proxy import router as patent_proxy_router
 from app.routers.public_proxy import router as public_proxy_router
 from app.routers.qa import router as qa_router
 from app.routers.tasks import router as tasks_router
@@ -92,6 +93,7 @@ def create_app() -> FastAPI:
     app.include_router(admission_router)
     app.include_router(tasks_router)
     app.include_router(public_proxy_router)
+    app.include_router(patent_proxy_router)
     app.include_router(qa_router)
     return app
 

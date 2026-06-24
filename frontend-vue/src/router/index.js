@@ -4,6 +4,7 @@ import Register from '../views/Register.vue'
 import AdminDashboard from '../views/AdminDashboard.vue'
 import Home from '../views/Home.vue'
 import LiteratureSearch from '../views/LiteratureSearch.vue'
+import PatentSearch from '../views/PatentSearch.vue'
 import UserProfile from '../views/UserProfile.vue'
 import ForgotPassword from '../views/ForgotPassword.vue'
 import { buildRequiredProfilePath, hasRequiredProfileSetup, mergeValidatedUser } from './profileSetup'
@@ -18,6 +19,7 @@ import {
 const routes = [
   { path: '/', component: Home, meta: { requiresAuth: true } },
   { path: '/literature-search', component: LiteratureSearch, meta: { requiresAuth: true } },
+  { path: '/patent-search', component: PatentSearch, meta: { requiresAuth: true } },
   { path: '/login', component: Login },
   { path: '/register', component: Register },
   { path: '/forgot-password', component: ForgotPassword },

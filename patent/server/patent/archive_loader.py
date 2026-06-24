@@ -18,6 +18,43 @@ from server.patent.retrieval_models import (
 )
 
 
+def _extract_name_list(value: object) -> list[str]:
+    names: list[str] = []
+    if isinstance(value, dict):
+        candidate = str(value.get("name") or value.get("text") or "").strip()
+        if candidate:
+            names.append(candidate)
+        return names
+    for item in list(value or []):
+        if isinstance(item, str):
+            text = item.strip()
+            if text:
+                names.append(text)
+            continue
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("name") or item.get("text") or "").strip()
+        if text and text not in names:
+            names.append(text)
+    return names
+
+
+def _extract_classification_codes(value: object) -> list[str]:
+    codes: list[str] = []
+    for item in list(value or []):
+        if isinstance(item, str):
+            text = item.strip()
+            if text:
+                codes.append(text)
+            continue
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or item.get("code") or item.get("symbol") or "").strip()
+        if text and text not in codes:
+            codes.append(text)
+    return codes
+
+
 class PatentArchiveLoader:
     def __init__(self, archive_root: str | Path) -> None:
         self._archive_root = Path(archive_root).resolve()
@@ -57,13 +94,27 @@ class PatentArchiveLoader:
         bibliography_payload = self._load_json(base_dir / "著录项目.json")
         bibliography = _build_structured_bibliography(normalized, bibliography_payload)
         bib = dict(bibliography.get("bibliography") or {})
+        root = list(bibliography_payload.get("data") or [{}])[0]
+        bibliographic_data = dict(root.get("bibliographic_data") or {})
         publication_date = str((((bibliography_payload.get("data") or [{}])[0]).get("bibliographic_data") or {}).get("publication_reference", {}).get("date") or "")
+        applicant_names = _extract_name_list(bibliographic_data.get("applicants") or bibliographic_data.get("applicant"))
+        inventor_names = _extract_name_list(bibliographic_data.get("inventors") or bibliographic_data.get("inventor"))
+        ipc_codes = _extract_classification_codes(
+            bibliographic_data.get("classifications_ipc")
+            or bibliographic_data.get("ipc")
+            or bibliographic_data.get("classifications")
+        )
+        cpc_codes = _extract_classification_codes(bibliographic_data.get("classifications_cpc") or bibliographic_data.get("cpc"))
         return PatentCatalogRecord(
             canonical_patent_id=normalized,
             publication_number=str(bib.get("publication_number") or normalized).strip().upper(),
             application_number=str(bib.get("application_number") or "").strip() or None,
             title=str(bibliography.get("title") or normalized).strip(),
             abstract_text=str(bibliography.get("abstract_text") or "").strip(),
+            applicant_names=applicant_names,
+            inventor_names=inventor_names,
+            ipc_codes=ipc_codes,
+            cpc_codes=cpc_codes,
             country=str(bib.get("country") or ""),
             kind_code=str(bib.get("kind_code") or ""),
             publication_date=publication_date,
