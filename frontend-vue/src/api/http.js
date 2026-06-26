@@ -1,3 +1,5 @@
+import { formatHttpError } from '../utils/userFacingErrors.js';
+
 const viteEnv = (typeof import.meta !== 'undefined' && import.meta?.env) ? import.meta.env : {};
 const API_BASE = viteEnv.VITE_API_BASE_URL || '';
 const TOKEN_KEYS = ['agentcode.auth.token.v1', 'token'];
@@ -43,7 +45,7 @@ export async function getJson(path, options = {}) {
     headers: buildHeaders({ includeJson: true, extra: headers, auth }),
   });
   if (!resp.ok) {
-    throw new Error(`HTTP ${resp.status}: ${path}`);
+    throw new Error(formatHttpError(resp.status, path));
   }
   return await resp.json();
 }
@@ -56,7 +58,7 @@ export async function postJson(path, payload, options = {}) {
     body: JSON.stringify(payload ?? {}),
   });
   if (!resp.ok) {
-    throw new Error(`HTTP ${resp.status}: ${path}`);
+    throw new Error(formatHttpError(resp.status, path));
   }
   return await resp.json();
 }
@@ -69,7 +71,7 @@ export async function putJson(path, payload, options = {}) {
     body: JSON.stringify(payload ?? {}),
   });
   if (!resp.ok) {
-    throw new Error(`HTTP ${resp.status}: ${path}`);
+    throw new Error(formatHttpError(resp.status, path));
   }
   return await resp.json();
 }
@@ -82,7 +84,7 @@ export async function postForm(path, formData, options = {}) {
     body: formData,
   });
   if (!resp.ok) {
-    throw new Error(`HTTP ${resp.status}: ${path}`);
+    throw new Error(formatHttpError(resp.status, path));
   }
   return await resp.json();
 }
@@ -94,7 +96,7 @@ export async function deleteJson(path, options = {}) {
     headers: buildHeaders({ includeJson: true, extra: headers, auth }),
   });
   if (!resp.ok) {
-    throw new Error(`HTTP ${resp.status}: ${path}`);
+    throw new Error(formatHttpError(resp.status, path));
   }
   return await resp.json();
 }

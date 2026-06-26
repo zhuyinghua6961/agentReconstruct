@@ -5,6 +5,7 @@ from collections.abc import Iterable, Iterator
 from typing import Any
 
 from app.integrations.llm import raise_if_upstream_pool_timeout
+from app.utils.user_errors import humanize_exception, user_message_for_code
 
 
 def _emit(payload: dict[str, Any], sse_event: Any) -> Any:
@@ -127,7 +128,14 @@ def iter_uploaded_pdf_answer_events(**kwargs: Any) -> Iterator[Any]:
     yield _emit({"type": "thinking", "content": "✍️ 正在生成答案..."}, sse_event)
 
     if not callable(answer_from_pdf_fn):
-        yield _emit({"type": "error", "error": "pdf_answer_backend_unavailable"}, sse_event)
+        yield _emit(
+            {
+                "type": "error",
+                "error": "pdf_answer_backend_unavailable",
+                "message": user_message_for_code("PDF_ANSWER_BACKEND_UNAVAILABLE"),
+            },
+            sse_event,
+        )
         return
 
     try:
@@ -143,7 +151,14 @@ def iter_uploaded_pdf_answer_events(**kwargs: Any) -> Iterator[Any]:
         raise_if_upstream_pool_timeout(exc)
         if logger is not None:
             logger.warning("PDF QA invocation failed: %s", exc)
-        yield _emit({"type": "error", "error": str(exc) or "pdf_qa_failed"}, sse_event)
+        yield _emit(
+            {
+                "type": "error",
+                "error": str(exc) or "pdf_qa_failed",
+                "message": humanize_exception(exc or "pdf_qa_failed", code="PDF_QA_FAILED", error="pdf_qa_failed"),
+            },
+            sse_event,
+        )
         return
 
     raw_parts: list[str] = []

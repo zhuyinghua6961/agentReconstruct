@@ -1,6 +1,4 @@
-"""Ask service adapter: mode routing + run_agent integration + SSE events."""
-
-from __future__ import annotations
+from server.utils.user_errors import humanize_exception, user_message_for_code
 
 import concurrent.futures
 import atexit
@@ -183,6 +181,8 @@ def _normalize_step_status(raw: str, *, default: str = "processing") -> str:
     value = str(raw or "").strip().lower()
     if value in {"processing", "in_progress", "running", "pending", "started"}:
         return "processing"
+    if value in {"warning", "warn", "degraded", "degradation"}:
+        return "warning"
     if value in {"success", "succeeded", "completed", "complete", "done", "ok"}:
         return "success"
     if value in {"error", "failed", "fail", "failure"}:
@@ -927,7 +927,7 @@ def stream_ask_events(
                 "type": "error",
                 "code": "ASK_CANCELLED",
                 "error": "cancelled",
-                "message": "cancelled",
+                "message": user_message_for_code("ASK_CANCELLED", fallback="cancelled"),
                 "retriable": False,
                 "trace_id": trace_id,
             }
@@ -947,7 +947,7 @@ def stream_ask_events(
                 "type": "error",
                 "code": "UPSTREAM_TIMEOUT",
                 "error": "upstream_timeout",
-                "message": "upstream model timeout",
+                "message": user_message_for_code("UPSTREAM_TIMEOUT"),
                 "retriable": True,
                 "trace_id": trace_id,
             }
@@ -989,7 +989,7 @@ def stream_ask_events(
                 "type": "error",
                 "code": "UPSTREAM_TIMEOUT",
                 "error": "upstream_timeout",
-                "message": "upstream model timeout",
+                "message": user_message_for_code("UPSTREAM_TIMEOUT"),
                 "retriable": True,
                 "trace_id": trace_id,
             }
@@ -998,7 +998,7 @@ def stream_ask_events(
             "type": "error",
             "code": "ASK_CANCELLED",
             "error": "cancelled",
-            "message": "cancelled",
+            "message": user_message_for_code("ASK_CANCELLED", fallback="cancelled"),
             "retriable": False,
             "trace_id": trace_id,
         }
@@ -1011,7 +1011,7 @@ def stream_ask_events(
             "type": "error",
             "code": "UPSTREAM_ERROR",
             "error": "upstream_error",
-            "message": str(result_holder["error"]),
+            "message": humanize_exception(result_holder["error"], code="UPSTREAM_ERROR", error="upstream_error"),
             "retriable": True,
             "trace_id": trace_id,
         }
@@ -1023,7 +1023,7 @@ def stream_ask_events(
             "type": "error",
             "code": "INTERNAL_ERROR",
             "error": "internal_error",
-            "message": "empty execution result",
+            "message": user_message_for_code("INTERNAL_ERROR", fallback="empty execution result"),
             "retriable": False,
             "trace_id": trace_id,
         }
@@ -1037,7 +1037,7 @@ def stream_ask_events(
                     "type": "error",
                     "code": "UPSTREAM_TIMEOUT",
                     "error": "upstream_timeout",
-                    "message": "upstream model timeout",
+                    "message": user_message_for_code("UPSTREAM_TIMEOUT"),
                     "retriable": True,
                     "trace_id": trace_id,
                 }
@@ -1046,7 +1046,7 @@ def stream_ask_events(
                 "type": "error",
                 "code": "ASK_CANCELLED",
                 "error": "cancelled",
-                "message": "cancelled",
+                "message": user_message_for_code("ASK_CANCELLED", fallback="cancelled"),
                 "retriable": False,
                 "trace_id": trace_id,
             }
@@ -1055,7 +1055,7 @@ def stream_ask_events(
             "type": "error",
             "code": "UPSTREAM_ERROR",
             "error": "upstream_error",
-            "message": str(state.error),
+            "message": humanize_exception(state.error, code="UPSTREAM_ERROR", error="upstream_error"),
             "retriable": True,
             "trace_id": trace_id,
         }

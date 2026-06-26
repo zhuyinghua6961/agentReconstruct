@@ -129,7 +129,7 @@ def test_iter_pdf_route_events_returns_soft_error_when_uploaded_file_unavailable
         {
             "type": "error",
             "error": "execution_file_unavailable",
-            "message": "uploaded file is not ready for direct reading yet; retry later or refresh file metadata",
+            "message": "上传文件尚未可读，请稍后重试或刷新文件元数据",
         }
     ]
 
@@ -183,7 +183,7 @@ def test_iter_pdf_route_events_rejects_local_only_file_even_when_path_exists(tmp
         {
             "type": "error",
             "error": "execution_file_unavailable",
-            "message": "uploaded file is not ready for direct reading yet; retry later or refresh file metadata",
+            "message": "上传文件尚未可读，请稍后重试或刷新文件元数据",
         }
     ]
 
@@ -231,7 +231,7 @@ def test_iter_pdf_route_events_rejects_direct_local_pdf_path_in_strict_mode(tmp_
         {
             "type": "error",
             "error": "execution_file_unavailable",
-            "message": "local PDF paths are disabled for file QA; retry with a MinIO-backed execution file",
+            "message": "文件问答已禁用本地 PDF 路径，请使用 MinIO 存储的文件重试",
         }
     ]
 
@@ -299,7 +299,7 @@ def test_iter_pdf_route_events_does_not_fallback_to_direct_path_when_execution_p
         {
             "type": "error",
             "error": "execution_file_unavailable",
-            "message": "uploaded file is not ready for direct reading yet; retry later or refresh file metadata",
+            "message": "上传文件尚未可读，请稍后重试或刷新文件元数据",
         }
     ]
 
@@ -371,7 +371,7 @@ def test_iter_pdf_route_events_rejects_partial_multi_pdf_materialization(tmp_pat
         {
             "type": "error",
             "error": "execution_file_unavailable",
-            "message": "uploaded file is not ready for direct reading yet; retry later or refresh file metadata",
+            "message": "上传文件尚未可读，请稍后重试或刷新文件元数据",
         }
     ]
 
@@ -519,7 +519,7 @@ def test_iter_tabular_route_events_rejects_partial_table_materialization(tmp_pat
         {
             "type": "error",
             "error": "execution_file_unavailable",
-            "message": "uploaded file is not ready for direct reading yet; retry later or refresh file metadata",
+            "message": "上传文件尚未可读，请稍后重试或刷新文件元数据",
         }
     ]
 
@@ -596,6 +596,6 @@ def test_iter_tabular_route_events_rejects_hybrid_pdf_preview_after_materializat
         {
             "type": "error",
             "error": "execution_file_unavailable",
-            "message": "uploaded file is not ready for direct reading yet; retry later or refresh file metadata",
+            "message": "上传文件尚未可读，请稍后重试或刷新文件元数据",
         }
     ]

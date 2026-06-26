@@ -22,6 +22,7 @@ from server.schemas.request_models import ProtocolMismatchRequestError, parse_pa
 from server.services.ask_service import AskService
 from server.runtime.request_context import get_trace_id
 from server_fastapi.auth.deps import require_auth_context
+from server.utils.user_errors import humanize_exception, user_message_for_code
 
 router = APIRouter()
 logger = logging.getLogger("patent.server_fastapi.ask")
@@ -44,7 +45,7 @@ def _map_exception(exc: Exception) -> APIError:
         return exc
     return APIError(
         code=codes.INTERNAL_ERROR,
-        message="internal server error",
+        message=user_message_for_code(codes.INTERNAL_ERROR),
         status_code=500,
         error="internal_error",
         retriable=False,
@@ -80,7 +81,7 @@ async def _read_json_payload(request: Request) -> dict[str, Any]:
     except Exception as exc:
         raise APIError(
             code=codes.INVALID_REQUEST,
-            message="request body must be valid JSON",
+            message=user_message_for_code(codes.INVALID_REQUEST, fallback="request body must be valid JSON"),
             status_code=400,
             error="invalid_request",
             retriable=False,
@@ -88,7 +89,7 @@ async def _read_json_payload(request: Request) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise APIError(
             code=codes.INVALID_REQUEST,
-            message="request body must be a JSON object",
+            message=user_message_for_code(codes.INVALID_REQUEST, fallback="request body must be a JSON object"),
             status_code=400,
             error="invalid_request",
             retriable=False,
@@ -137,7 +138,7 @@ async def _parse_patent_request_or_raise(request: Request):
     except ProtocolMismatchRequestError as exc:
         raise APIError(
             code=codes.PROTOCOL_MISMATCH,
-            message=str(exc),
+            message=humanize_exception(exc, code=codes.PROTOCOL_MISMATCH),
             status_code=400,
             error="protocol_mismatch",
             retriable=False,
@@ -145,7 +146,7 @@ async def _parse_patent_request_or_raise(request: Request):
     except ValueError as exc:
         raise APIError(
             code=codes.INVALID_REQUEST,
-            message=str(exc),
+            message=humanize_exception(exc, code=codes.INVALID_REQUEST),
             status_code=400,
             error="invalid_request",
             retriable=False,
@@ -158,7 +159,7 @@ def _get_ask_service(request: Request) -> AskService:
     if service is None:
         raise APIError(
             code=codes.SERVICE_NOT_READY,
-            message="patent ask service is not ready",
+            message=user_message_for_code(codes.SERVICE_NOT_READY, fallback="patent ask service is not ready"),
             status_code=503,
             error="service_not_ready",
             retriable=True,
@@ -188,7 +189,7 @@ def _ensure_durable_mode_enabled(*, request: Request, ask_request) -> None:
         return
     raise APIError(
         code=codes.DURABLE_MODE_DISABLED,
-        message="durable patent mode is disabled",
+        message=user_message_for_code(codes.DURABLE_MODE_DISABLED, fallback="durable patent mode is disabled"),
         status_code=503,
         error="durable_mode_disabled",
         retriable=False,
@@ -203,7 +204,7 @@ def _ensure_patent_file_routes_enabled(*, request: Request, ask_request) -> None
         return
     raise APIError(
         code=codes.PATENT_FILE_ROUTE_DISABLED,
-        message="patent file routes are disabled",
+        message=user_message_for_code(codes.PATENT_FILE_ROUTE_DISABLED, fallback="patent file routes are disabled"),
         status_code=503,
         error="patent_file_route_disabled",
         retriable=False,
@@ -222,7 +223,7 @@ def _ensure_durable_dependencies_ready(*, request: Request, ask_request) -> None
         return
     raise APIError(
         code=codes.SERVICE_NOT_READY,
-        message="durable patent dependencies are not ready",
+        message=user_message_for_code(codes.SERVICE_NOT_READY, fallback="durable patent dependencies are not ready"),
         status_code=503,
         error="service_not_ready",
         retriable=True,
@@ -253,7 +254,7 @@ def _acquire_stream_slot(request: Request):
     if lease is None:
         raise APIError(
             code=codes.PATENT_BUSY,
-            message="too many running patent streams",
+            message=user_message_for_code(codes.PATENT_BUSY, fallback="too many running patent streams"),
             status_code=429,
             error="patent_busy",
             retriable=True,

@@ -35,6 +35,7 @@ import QuotaLimitCard from '../components/QuotaLimitCard.vue'
 import MarkdownRenderer from '../features/markdown/MarkdownRenderer.vue'
 import { buildCitationLocationsForDoi } from '../utils/citationEvidence'
 import { buildRoutingErrorPresentation, mergeRoutingMetadata } from '../utils/routingStatus'
+import { formatUserFacingError } from '../utils/userFacingErrors'
 
 const PINNED_CHATS_COLLAPSED_KEY = 'lfp.sidebar.pinned-collapsed.v1'
 const RECENT_CHATS_COLLAPSED_KEY = 'lfp.sidebar.recent-collapsed.v1'
@@ -816,7 +817,13 @@ function buildStepPayload(data, fallbackKey, fallbackStatus = 'processing') {
     sourceType: String(data?.type || 'step'),
     updatedAt: new Date().toISOString()
   }
-  if (data?.error) payload.error = String(data.error)
+  if (data?.error) {
+    payload.error = formatUserFacingError({
+      code: data?.code,
+      error: data?.error,
+      message: data?.error,
+    })
+  }
   return payload
 }
 
@@ -824,6 +831,7 @@ function getStepIcon(step) {
   const status = normalizeStepStatus(step?.status)
   if (status === 'success') return '●'
   if (status === 'skipped') return '●'
+  if (status === 'warning') return '●'
   if (status === 'error') return '●'
   return '●'
 }
@@ -892,8 +900,10 @@ function getStepOverview(msg) {
   const processing = steps.filter((step) => normalizeStepStatus(step?.status) === 'processing').length
   const success = steps.filter((step) => normalizeStepStatus(step?.status) === 'success').length
   const skipped = steps.filter((step) => normalizeStepStatus(step?.status) === 'skipped').length
+  const warning = steps.filter((step) => normalizeStepStatus(step?.status) === 'warning').length
   const error = steps.filter((step) => normalizeStepStatus(step?.status) === 'error').length
-  if (error > 0) return `失败 ${error} · 完成 ${success}${skipped ? ` · 跳过 ${skipped}` : ''}`
+  if (error > 0) return `失败 ${error} · 完成 ${success}${warning ? ` · 警告 ${warning}` : ''}${skipped ? ` · 跳过 ${skipped}` : ''}`
+  if (warning > 0) return `警告 ${warning} · 完成 ${success}${skipped ? ` · 跳过 ${skipped}` : ''}`
   if (processing > 0) return `进行中 ${processing} · 完成 ${success}${skipped ? ` · 跳过 ${skipped}` : ''}`
   return skipped > 0 ? `已完成 ${success} · 跳过 ${skipped}` : `已完成 ${success}`
 }
@@ -934,6 +944,7 @@ function normalizeStepStatus(status, fallback = 'processing') {
   const raw = String(status || '').trim().toLowerCase()
   if (['processing', 'in_progress', 'running', 'pending'].includes(raw)) return 'processing'
   if (['skipped', 'skip', 'skipping'].includes(raw)) return 'skipped'
+  if (['warning', 'warn', 'degraded', 'degradation'].includes(raw)) return 'warning'
   if (['success', 'succeeded', 'completed', 'complete', 'done', 'ok'].includes(raw)) return 'success'
   if (['error', 'failed', 'fail', 'failure'].includes(raw)) return 'error'
   return fallback
@@ -1211,7 +1222,12 @@ function applyGatewayEvent(chatId, data, runtime = getStreamRuntime(chatId)) {
     }
     const existingMeta = (targetMessage.metadata && typeof targetMessage.metadata === 'object') ? targetMessage.metadata : {}
     const mergedMeta = mergeRoutingMetadata(existingMeta, data)
-    const errorText = String(data.message || data.error || '处理失败')
+    const errorText = formatUserFacingError({
+      code: data.code || (String(data.error || '').trim().toLowerCase() === 'execution_file_unavailable' ? 'EXECUTION_FILE_UNAVAILABLE' : ''),
+      error: data.error,
+      message: data.message || data.error,
+      metadata: mergedMeta,
+    })
     const presentation = buildRoutingErrorPresentation({
       code: data.code || (String(data.error || '').trim().toLowerCase() === 'execution_file_unavailable' ? 'EXECUTION_FILE_UNAVAILABLE' : ''),
       error: data.error,
@@ -3825,6 +3841,10 @@ watch(
   color: #64748b;
 }
 
+.step-icon-warning {
+  color: #d97706;
+}
+
 .step-icon-error {
   color: #dc2626;
 }
@@ -3858,6 +3878,12 @@ watch(
 .step-error-text {
   margin-top: 4px;
   color: #b91c1c;
+  line-height: 1.5;
+}
+
+.step-warning-text {
+  margin-top: 4px;
+  color: #b45309;
   line-height: 1.5;
 }
 

@@ -391,7 +391,7 @@ def test_stream_cancel_error_persists_canceled_terminal(monkeypatch):
             "type": "error",
             "code": "ASK_CANCELLED",
             "error": "cancelled",
-            "message": "cancelled",
+            "message": "已取消生成",
             "retriable": False,
             "trace_id": kwargs["trace_id"],
         }
@@ -441,7 +441,7 @@ def test_sync_error_persists_failed_terminal_before_error_response(monkeypatch):
 
     assert response.status_code == 502
     assert assistant_calls[0]["terminal_status"] == "failed"
-    assert assistant_calls[0]["failure"]["message"] == "boom"
+    assert assistant_calls[0]["failure"]["message"] == "上游模型服务异常，请稍后重试"
     assert assistant_calls[0]["async_enabled"] is False
 
 
@@ -479,7 +479,7 @@ def test_sync_error_persists_mapped_failure_contract(monkeypatch):
     assert assistant_calls[0]["failure"] == {
         "stage": "unknown",
         "code": "MODE_NOT_SUPPORTED",
-        "message": "not supported",
+        "message": "不支持的模式",
         "retriable": False,
     }
 
@@ -769,7 +769,7 @@ def test_gateway_owned_stream_disconnect_passes_cancel_event_to_executor(monkeyp
                 "type": "error",
                 "code": "ASK_CANCELLED",
                 "error": "cancelled",
-                "message": "cancelled",
+                "message": "已取消生成",
                 "retriable": False,
                 "trace_id": kwargs["trace_id"],
             }

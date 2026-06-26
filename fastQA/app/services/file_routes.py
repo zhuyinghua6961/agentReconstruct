@@ -19,6 +19,7 @@ from app.services.file_qa_helpers import (
     load_pdf_content_for_streaming,
     log_qa_interaction,
 )
+from app.utils.user_errors import humanize_exception, user_message_for_code
 
 
 _LOGGER = logging.getLogger("fastqa.file_routes")
@@ -341,7 +342,7 @@ def iter_pdf_route_events(
         yield {
             "type": "error",
             "error": "execution_file_unavailable",
-            "message": "uploaded file is not ready for direct reading yet; retry later or refresh file metadata",
+            "message": user_message_for_code("FILE_NOT_READY"),
         }
         return
     if not pdf_files and direct_pdf_path and _strict_upload_minio_only():
@@ -361,7 +362,7 @@ def iter_pdf_route_events(
         yield {
             "type": "error",
             "error": "execution_file_unavailable",
-            "message": "local PDF paths are disabled for file QA; retry with a MinIO-backed execution file",
+            "message": user_message_for_code("LOCAL_PDF_PATHS_DISABLED"),
         }
         return
     pdf_path = str(
@@ -381,7 +382,7 @@ def iter_pdf_route_events(
         yield {
             "type": "error",
             "error": "execution_file_unavailable",
-            "message": "uploaded file is not ready for direct reading yet; retry later or refresh file metadata",
+            "message": user_message_for_code("FILE_NOT_READY"),
         }
         return
     if not pdf_path and not pdf_files:
@@ -391,7 +392,7 @@ def iter_pdf_route_events(
             trace_id=trace_id,
             conversation_id=getattr(adapted_request, "conversation_id", None),
         )
-        yield {"type": "error", "error": "pdf_path_missing", "message": "PDF branch selected but no readable PDF source is available"}
+        yield {"type": "error", "error": "pdf_path_missing", "message": user_message_for_code("PDF_PATH_MISSING")}
         return
 
     pdf_content = None
@@ -407,7 +408,15 @@ def iter_pdf_route_events(
             redis_service=redis_service,
         )
         if error_message or not pdf_content:
-            yield {"type": "error", "error": error_message or "pdf_content_unavailable"}
+            yield {
+                "type": "error",
+                "error": error_message or "pdf_content_unavailable",
+                "message": humanize_exception(
+                    error_message or "pdf_content_unavailable",
+                    code="PDF_CONTENT_UNAVAILABLE",
+                    error=error_message or "pdf_content_unavailable",
+                ),
+            }
             return
 
     yield {"type": "step", "step": "dispatch", "route": "pdf_qa", "message": "进入 PDF 问答分支"}
@@ -490,14 +499,14 @@ def iter_tabular_route_events(
         yield {
             "type": "error",
             "error": "execution_file_unavailable",
-            "message": "uploaded file is not ready for direct reading yet; retry later or refresh file metadata",
+            "message": user_message_for_code("FILE_NOT_READY"),
         }
         return
     if table_files and not readable_table_files:
         yield {
             "type": "error",
             "error": "execution_file_unavailable",
-            "message": "uploaded file is not ready for direct reading yet; retry later or refresh file metadata",
+            "message": user_message_for_code("FILE_NOT_READY"),
         }
         return
     pdf_files = [
@@ -510,7 +519,7 @@ def iter_tabular_route_events(
         yield {
             "type": "error",
             "error": "execution_file_unavailable",
-            "message": "uploaded file is not ready for direct reading yet; retry later or refresh file metadata",
+            "message": user_message_for_code("FILE_NOT_READY"),
         }
         return
 

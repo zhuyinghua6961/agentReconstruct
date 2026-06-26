@@ -13,6 +13,7 @@ from app.modules.qa_pdf.sidecar_client import iter_uploaded_pdf_answer_events_vi
 from app.modules.qa_pdf.engine import answer_from_pdf as legacy_answer_from_pdf
 from app.modules.qa_pdf.streaming import _iter_answer_pieces, iter_uploaded_pdf_answer_events
 from app.modules.qa_pdf.truncation import smart_truncate_pdf_content
+from app.utils.user_errors import user_message_for_code
 
 
 _PDFQA_SIDECAR_HEALTH_TTL_SEC = 5.0
@@ -197,7 +198,13 @@ class PdfQaService:
                 return False
 
         if not callable(load_pdf_content_fn) or not callable(answer_from_pdf_fn):
-            yield _emit({"type": "error", "error": "multi_pdf_backend_unavailable"})
+            yield _emit(
+                {
+                    "type": "error",
+                    "error": "multi_pdf_backend_unavailable",
+                    "message": user_message_for_code("MULTI_PDF_BACKEND_UNAVAILABLE"),
+                }
+            )
             return
 
         yield _emit({"type": "metadata", "query_mode": "多文献PDF问答"})

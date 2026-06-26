@@ -19,6 +19,7 @@ from app.services.proxy import ProxyService, StreamingProxyHandle
 from app.services.quota_proxy import QuotaProxyResult, QuotaProxyService
 from app.services.usage_stats_client import UsageStatsClient
 from app.services.sse_frames import SSEFrameBuffer, parse_sse_json_frame
+from app.utils.user_errors import humanize_exception, sse_escape_message, user_message_for_code
 
 router = APIRouter(tags=["qa"])
 logger = logging.getLogger(__name__)
@@ -114,8 +115,6 @@ def _normalized_positive_user_id(value) -> int | None:
     except Exception:
         return None
     return user_id if user_id > 0 else None
-
-
 
 
 def _conversation_id_int(value: Any) -> int | None:
@@ -245,7 +244,9 @@ def _encode_sse_payload(payload: dict, *, prefix_lines: list[str] | None = None)
 
 
 def _stream_error_frame_bytes(*, trace_id: str, backend: str, exc: Exception) -> bytes:
-    message = str(exc).replace('"', '\\"') or "upstream_stream_unavailable"
+    message = sse_escape_message(
+        humanize_exception(exc, code="UPSTREAM_STREAM_UNAVAILABLE", error="upstream_stream_unavailable")
+    )
     return (
         'data: {"type":"error","code":"UPSTREAM_STREAM_UNAVAILABLE","error":"upstream_stream_unavailable","message":"%s","backend":"%s","retriable":true,"trace_id":"%s"}\n\n'
         % (message, backend.replace('"', '\\"'), trace_id)
@@ -400,7 +401,11 @@ def _conversation_files_error_json(*, trace_id: str, exc: ConversationFileProvid
             "success": False,
             "code": "CONVERSATION_FILE_PROVIDER_UNAVAILABLE",
             "error": "conversation_file_provider_unavailable",
-            "message": str(exc),
+            "message": humanize_exception(
+                exc,
+                code="CONVERSATION_FILE_PROVIDER_UNAVAILABLE",
+                error="conversation_file_provider_unavailable",
+            ),
             "provider": getattr(exc, "provider", "unknown"),
             "trace_id": trace_id,
         },
@@ -408,10 +413,18 @@ def _conversation_files_error_json(*, trace_id: str, exc: ConversationFileProvid
 
 
 def _conversation_files_error_stream(*, trace_id: str, exc: ConversationFileProviderError) -> StreamingResponse:
+    message = sse_escape_message(
+        humanize_exception(
+            exc,
+            code="CONVERSATION_FILE_PROVIDER_UNAVAILABLE",
+            error="conversation_file_provider_unavailable",
+        )
+    )
+
     def _frames():
         yield (
             'data: {"type":"error","code":"CONVERSATION_FILE_PROVIDER_UNAVAILABLE","error":"conversation_file_provider_unavailable","message":"%s","provider":"%s","retriable":true,"trace_id":"%s"}\n\n'
-            % (str(exc).replace('"', '\"'), str(getattr(exc, "provider", "unknown") or "unknown").replace('"', '\"'), trace_id)
+            % (message, str(getattr(exc, "provider", "unknown") or "unknown").replace('"', '\\"'), trace_id)
         )
 
     return StreamingResponse(
@@ -428,7 +441,9 @@ def _clarification_json(*, trace_id: str, route_decision) -> JSONResponse:
             "success": False,
             "code": "FILE_SELECTION_CLARIFICATION_REQUIRED",
             "error": "file_selection_clarification_required",
-            "message": route_decision.clarification_message or "File selection requires clarification",
+            "message": route_decision.clarification_message or user_message_for_code(
+                "FILE_SELECTION_CLARIFICATION_REQUIRED"
+            ),
             "trace_id": trace_id,
             "requested_mode": route_decision.requested_mode,
             "actual_mode": route_decision.actual_mode,
@@ -464,7 +479,13 @@ def _clarification_stream(*, trace_id: str, route_decision) -> StreamingResponse
         )
         yield (
             'data: {"type":"error","code":"FILE_SELECTION_CLARIFICATION_REQUIRED","error":"file_selection_clarification_required","message":"%s","retriable":false,"trace_id":"%s"}\n\n'
-            % ((route_decision.clarification_message or "File selection requires clarification").replace('"', '\\"'), trace_id)
+            % (
+                sse_escape_message(
+                    route_decision.clarification_message
+                    or user_message_for_code("FILE_SELECTION_CLARIFICATION_REQUIRED")
+                ),
+                trace_id,
+            )
         )
 
     return StreamingResponse(
@@ -530,7 +551,7 @@ def _patent_file_route_disabled_json(*, trace_id: str, route_decision) -> JSONRe
             "success": False,
             "code": "PATENT_FILE_ROUTE_DISABLED",
             "error": "patent_file_route_disabled",
-            "message": "patent file routes are disabled",
+            "message": user_message_for_code("PATENT_FILE_ROUTE_DISABLED"),
             "retriable": False,
             "trace_id": trace_id,
             "requested_mode": route_decision.requested_mode,
@@ -561,8 +582,8 @@ def _patent_file_route_disabled_stream(*, trace_id: str, route_decision) -> Stre
             )
         )
         yield (
-            'data: {"type":"error","code":"PATENT_FILE_ROUTE_DISABLED","error":"patent_file_route_disabled","message":"patent file routes are disabled","retriable":false,"trace_id":"%s"}\n\n'
-            % trace_id
+            'data: {"type":"error","code":"PATENT_FILE_ROUTE_DISABLED","error":"patent_file_route_disabled","message":"%s","retriable":false,"trace_id":"%s"}\n\n'
+            % (sse_escape_message(user_message_for_code("PATENT_FILE_ROUTE_DISABLED")), trace_id)
         )
 
     return StreamingResponse(
@@ -573,7 +594,9 @@ def _patent_file_route_disabled_stream(*, trace_id: str, route_decision) -> Stre
 
 
 def _upstream_stream_error_stream(*, trace_id: str, backend: str, exc: Exception) -> StreamingResponse:
-    message = str(exc).replace('"', '\\"') or "upstream_stream_unavailable"
+    message = sse_escape_message(
+        humanize_exception(exc, code="UPSTREAM_STREAM_UNAVAILABLE", error="upstream_stream_unavailable")
+    )
 
     def _frames():
         yield (
@@ -590,7 +613,11 @@ def _upstream_stream_error_stream(*, trace_id: str, backend: str, exc: Exception
 
 def _quota_precheck_error_stream(*, trace_id: str, route_decision, result: QuotaProxyResult) -> StreamingResponse:
     payload = dict(result.payload or {})
-    message = str(payload.get("message") or payload.get("error") or "quota_precheck_failed")
+    message = humanize_exception(
+        str(payload.get("message") or payload.get("error") or "quota_precheck_failed"),
+        code=str(payload.get("code") or "QUOTA_PRECHECK_FAILED"),
+        error=str(payload.get("error") or "quota_precheck_failed"),
+    )
     code = str(payload.get("code") or "QUOTA_PRECHECK_FAILED")
     error = str(payload.get("error") or "quota_precheck_failed")
     data = payload.get("data")
@@ -620,7 +647,9 @@ def _quota_precheck_error_stream(*, trace_id: str, route_decision, result: Quota
 
 
 def _upstream_status_error_stream(*, trace_id: str, backend: str, status_code: int, message: str) -> StreamingResponse:
-    escaped = str(message or "upstream_error").replace('"', '\\"')
+    escaped = sse_escape_message(
+        humanize_exception(message or "upstream_error", code="UPSTREAM_ERROR", error="upstream_error")
+    )
 
     def _frames():
         yield (
@@ -838,7 +867,11 @@ async def _proxy_ask_stream(request: Request, payload: AskRequest, mode: str):
             trace_id=trace_id,
             backend=handle.backend,
             status_code=handle.status_code,
-            message=body.decode("utf-8", errors="ignore") or "upstream_error",
+            message=humanize_exception(
+                body.decode("utf-8", errors="ignore") or "upstream_error",
+                code="UPSTREAM_ERROR",
+                error="upstream_error",
+            ),
         )
     _log_gateway_event(
         "ask_stream upstream opened",

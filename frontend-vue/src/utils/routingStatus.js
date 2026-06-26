@@ -1,4 +1,5 @@
 import { buildQuotaErrorCardModel, isQuotaBlockingErrorCode } from '../services/quota-error-formatting.js'
+import { formatUserFacingError } from './userFacingErrors.js'
 
 const ROUTE_LABELS = {
   kb_qa: '知识库问答',
@@ -109,12 +110,18 @@ function normalizeRoutingErrorCode({ code = '', error = '', metadata = {} } = {}
   if (errorName === 'file_not_found') return 'FILE_NOT_FOUND'
   if (errorName === 'storage_ref_missing') return 'FILE_STORAGE_REF_MISSING'
   if (errorName === 'storage_ref_not_minio') return 'FILE_STORAGE_REF_NOT_MINIO'
+  if (errorName === 'upstream_stream_unavailable') return 'UPSTREAM_STREAM_UNAVAILABLE'
+  if (errorName === 'upstream_error') return 'UPSTREAM_ERROR'
+  if (errorName === 'upstream_pool_timeout') return 'UPSTREAM_POOL_TIMEOUT'
+  if (errorName === 'cancelled') return 'ASK_CANCELLED'
+  if (errorName === 'internal_error') return 'INTERNAL_ERROR'
+  if (errorName === 'timeout') return 'UPSTREAM_TIMEOUT'
   return String(errorName || '').trim().toUpperCase()
 }
 
 export function buildRoutingErrorMarkdown({ code = '', message = '', metadata = {}, error = '' } = {}) {
   const normalizedCode = normalizeRoutingErrorCode({ code, error, metadata })
-  const normalizedMessage = String(message || '').trim() || '处理失败'
+  const normalizedMessage = formatUserFacingError({ code: normalizedCode, error, message, metadata })
   const routeLabel = getRouteModeLabel(metadata?.route)
   const selectedIds = Array.isArray(metadata?.selected_file_ids) ? metadata.selected_file_ids.filter(Boolean) : []
   const clarifyCandidates = Array.isArray(metadata?.clarify_candidates)
@@ -180,6 +187,42 @@ export function buildRoutingErrorMarkdown({ code = '', message = '', metadata = 
     if (routeLabel) lines.push('', `当前路由：${routeLabel}`)
     if (selectedIds.length > 0) lines.push(`已选文件：${selectedIds.map((id) => `#${id}`).join('、')}`)
     lines.push('', '建议：重新上传文件后再试。')
+    return lines.join('\n')
+  }
+
+  if (normalizedCode === 'UPSTREAM_STREAM_UNAVAILABLE' || normalizedCode === 'UPSTREAM_POOL_TIMEOUT') {
+    lines.push(normalizedMessage)
+    lines.push('', '建议：稍后重试。')
+    if (routeLabel) lines.push('', `当前路由：${routeLabel}`)
+    return lines.join('\n')
+  }
+
+  if (normalizedCode === 'UPSTREAM_TIMEOUT') {
+    lines.push('模型响应超时。', '', normalizedMessage)
+    lines.push('', '建议：简化问题后重试，或稍后再试。')
+    if (routeLabel) lines.push('', `当前路由：${routeLabel}`)
+    return lines.join('\n')
+  }
+
+  if (normalizedCode === 'UPSTREAM_ERROR' || normalizedCode === 'INTERNAL_ERROR' || normalizedCode === 'FASTQA_RUNTIME_ERROR') {
+    lines.push(normalizedMessage)
+    if (routeLabel) lines.push('', `当前路由：${routeLabel}`)
+    return lines.join('\n')
+  }
+
+  if (normalizedCode === 'ASK_CANCELLED') {
+    lines.push(normalizedMessage)
+    return lines.join('\n')
+  }
+
+  if (normalizedCode === 'TASK_EXPIRED') {
+    lines.push(normalizedMessage)
+    lines.push('', '建议：重新发起提问。')
+    return lines.join('\n')
+  }
+
+  if (normalizedCode === 'PATENT_FILE_ROUTE_DISABLED') {
+    lines.push(normalizedMessage)
     return lines.join('\n')
   }
 

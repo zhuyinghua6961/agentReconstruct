@@ -22,6 +22,7 @@ from app.modules.qa_kb.service import qa_kb_service
 from app.modules.qa_kb.streaming import build_doi_locations, normalize_reference_objects, normalize_references
 from app.modules.storage.service import storage_service
 from app.services.file_routes import iter_pdf_route_events, iter_tabular_route_events
+from app.utils.user_errors import humanize_exception, user_message_for_code
 from app.services.conversation_context_builder import build_conversation_context
 from app.services.request_adapter import GatewayAskRequest, RequestAdapterError, adapt_gateway_ask_payload
 from app.services.stream_contract import AskStreamTap
@@ -519,7 +520,11 @@ def _authority_preflight_error_response(
             "success": False,
             "code": code,
             "error": str(exc) or "fastQA authority preflight failed",
-            "message": str(exc) or "fastQA authority preflight failed",
+            "message": humanize_exception(
+                exc or "fastQA authority preflight failed",
+                code=code,
+                error=str(exc) or "fastQA authority preflight failed",
+            ),
             "trace_id": trace_id,
             "requested_mode": requested_mode,
             "actual_mode": actual_mode,
@@ -544,7 +549,7 @@ def _runtime_error_event(
         "success": False,
         "code": code,
         "error": error,
-        "message": error,
+        "message": humanize_exception(error, code=code, error=error),
         "trace_id": trace_id,
         "requested_mode": requested_mode,
         "actual_mode": actual_mode,
@@ -561,7 +566,7 @@ def _upstream_pool_timeout_payload(*, trace_id: str, route: str) -> dict[str, An
         "success": False,
         "code": "UPSTREAM_POOL_TIMEOUT",
         "error": "upstream_pool_timeout",
-        "message": "upstream_pool_timeout",
+        "message": user_message_for_code("UPSTREAM_POOL_TIMEOUT"),
         "retriable": True,
         "route": route,
         "trace_id": trace_id,

@@ -35,6 +35,7 @@ from server.services.ask_service import (
 from server.services import chat_persistence
 from server_fastapi.auth.deps import AuthContext, require_auth_context
 from server_fastapi.http import read_json_payload
+from server.utils.user_errors import humanize_exception, user_message_for_code
 
 router = APIRouter()
 
@@ -56,7 +57,7 @@ def _acquire_slot_or_raise(request: Request):
         return semaphore
     raise APIError(
         code=codes.ASK_STREAM_BUSY,
-        message=f"too many running requests, max={request.app.state.config['ASK_STREAM_MAX_CONCURRENT']}",
+        message=f"当前并发请求过多（上限 {request.app.state.config['ASK_STREAM_MAX_CONCURRENT']}），请稍后重试",
         status_code=429,
         error="server_busy",
         retriable=True,
@@ -83,7 +84,7 @@ def _handle_service_error(exc: Exception) -> APIError:
     if isinstance(exc, AskCancelledError):
         return APIError(
             code="ASK_CANCELLED",
-            message="cancelled",
+            message=user_message_for_code("ASK_CANCELLED"),
             status_code=499,
             error="cancelled",
             retriable=False,
@@ -91,7 +92,7 @@ def _handle_service_error(exc: Exception) -> APIError:
     if isinstance(exc, ModeNotImplementedError):
         return APIError(
             code=codes.NOT_IMPLEMENTED,
-            message=str(exc),
+            message=humanize_exception(exc, code=codes.NOT_IMPLEMENTED),
             status_code=501,
             error="not_implemented",
             retriable=False,
@@ -99,7 +100,7 @@ def _handle_service_error(exc: Exception) -> APIError:
     if isinstance(exc, ModeNotSupportedError):
         return APIError(
             code=codes.MODE_NOT_SUPPORTED,
-            message=str(exc),
+            message=humanize_exception(exc, code=codes.MODE_NOT_SUPPORTED),
             status_code=400,
             error="mode_not_supported",
             retriable=False,
@@ -107,7 +108,7 @@ def _handle_service_error(exc: Exception) -> APIError:
     if isinstance(exc, AskTimeoutError):
         return APIError(
             code=codes.UPSTREAM_TIMEOUT,
-            message=str(exc),
+            message=user_message_for_code(codes.UPSTREAM_TIMEOUT),
             status_code=504,
             error="upstream_timeout",
             retriable=True,
@@ -115,14 +116,14 @@ def _handle_service_error(exc: Exception) -> APIError:
     if isinstance(exc, AskServiceError):
         return APIError(
             code=codes.UPSTREAM_ERROR,
-            message=str(exc),
+            message=humanize_exception(exc, code=codes.UPSTREAM_ERROR, error="upstream_error"),
             status_code=502,
             error="upstream_error",
             retriable=True,
         )
     return APIError(
         code=codes.INTERNAL_ERROR,
-        message="internal server error",
+        message=user_message_for_code(codes.INTERNAL_ERROR),
         status_code=500,
         error="internal_error",
         retriable=False,
@@ -155,7 +156,7 @@ async def _parse_request_or_raise(request: Request, *, forced_mode: str | None =
 
 def _bind_auth_context(ask_request, context: AuthContext):
     if ask_request.user_id is not None and int(ask_request.user_id) != int(context.user_id):
-        raise_invalid_request("user_id in token and body are inconsistent")
+        raise_invalid_request("令牌与请求体中的 user_id 不一致")
     return replace(ask_request, user_id=int(context.user_id))
 
 

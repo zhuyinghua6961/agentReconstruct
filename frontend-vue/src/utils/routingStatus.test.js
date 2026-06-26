@@ -99,6 +99,7 @@ test('buildRoutingErrorMarkdown formats execution_file_unavailable with retry an
   assert.match(markdown, /已选文件：#15/)
   assert.match(markdown, /等待文件状态变为“就绪”后重新提问/)
   assert.match(markdown, /重新上传文件/)
+  assert.match(markdown, /文件处理中，请等待就绪后重试/)
 })
 
 test('buildRoutingErrorMarkdown formats storage ref errors with reupload guidance', () => {

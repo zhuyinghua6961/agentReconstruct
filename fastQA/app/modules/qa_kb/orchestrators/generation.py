@@ -41,6 +41,7 @@ from app.modules.qa_kb.stages.planning import Stage1Planner
 from app.modules.qa_kb.stages.retrieval import Stage25MdExpansion, Stage2Retriever
 from app.modules.qa_kb.stages.synthesis import Stage4Synthesizer
 from app.modules.qa_kb.streaming import iter_result_events
+from app.utils.user_errors import humanize_exception, user_message_for_code
 
 
 def _consume_stage4_result(stage4_output: Any, logger: Any) -> dict[str, Any]:
@@ -89,6 +90,50 @@ def _evidence_counts(pdf_chunks: dict[str, list[dict[str, Any]]] | None) -> tupl
     return len(chunks_by_source), sum(len(chunks or []) for chunks in chunks_by_source.values())
 
 
+_RERANK_FALLBACK_MESSAGES = {
+    "provider_disabled": "重排序服务未启用，已按向量相似度排序继续",
+    "request_failed": "重排序服务请求失败，已按向量相似度排序继续",
+    "empty_rerank_result": "重排序未返回有效结果，已按向量相似度排序继续",
+    "empty_rerank_output": "重排序未返回有效结果，已按向量相似度排序继续",
+}
+
+
+def _degradation_warning_step(*, step: str, message: str, detail: str = "") -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "type": "step",
+        "step": step,
+        "title": "降级提示",
+        "message": message,
+        "status": "warning",
+    }
+    if detail:
+        payload["detail"] = detail
+    return payload
+
+
+def _rerank_fallback_message(reason: str) -> str:
+    clean = str(reason or "").strip().lower()
+    if not clean:
+        return "重排序服务不可用，已按向量相似度排序继续"
+    if clean.startswith("rerank_exception:"):
+        return "重排序服务不可用，已按向量相似度排序继续"
+    for key, message in _RERANK_FALLBACK_MESSAGES.items():
+        if key in clean:
+            return message
+    return "重排序服务不可用，已按向量相似度排序继续"
+
+
+def _stage2_rerank_degradation_message(stage2_result: dict[str, Any]) -> str:
+    claim_map = stage2_result.get("claim_to_results") or {}
+    if not isinstance(claim_map, dict):
+        return ""
+    for claim_data in claim_map.values():
+        if not isinstance(claim_data, dict):
+            continue
+        rerank = claim_data.get("rerank") or {}
+        if isinstance(rerank, dict) and rerank.get("fallback"):
+            return _rerank_fallback_message(str(rerank.get("reason") or ""))
+    return ""
 
 
 def _final_query_mode(*, provided: Any, skip_pdf: bool) -> str:
@@ -317,11 +362,11 @@ class GenerationPipelineOrchestrator:
             "type": "step",
             "step": "intent_detect",
             "title": "意图识别",
-            "message": f"意图识别：{intent_tag}",
+            "message": "意图识别失败，已按通用模式继续" if not ok else f"意图识别：{intent_tag}",
             "detail": "快速判断问题意图，辅助阶段一规划",
-            "status": "success" if ok else "error",
+            "status": "success" if ok else "warning",
             "data": data,
-            **({"error": error} if error else {}),
+            **({"error": error} if error and not ok else {}),
         }
 
     @staticmethod
@@ -1225,7 +1270,15 @@ class GenerationPipelineOrchestrator:
             question[:120],
         )
         if not stage1_result.get("success"):
-            yield sse_event({"type": "error", "error": stage1_result.get("error", "阶段一失败")})
+            stage1_error = str(stage1_result.get("error") or "阶段一失败")
+            yield sse_event(
+                {
+                    "type": "error",
+                    "code": "UPSTREAM_ERROR",
+                    "error": "upstream_error",
+                    "message": humanize_exception(stage1_error, code="UPSTREAM_ERROR", error="upstream_error"),
+                }
+            )
             return
         intent_step = self._intent_step_from_stage1(stage1_result)
         if intent_step:
@@ -1269,6 +1322,12 @@ class GenerationPipelineOrchestrator:
                 bool(comparison_plan.get("enabled")),
                 str(stage1_result.get("fallback") or ""),
                 _short_preview(question),
+            )
+            yield sse_event(
+                _degradation_warning_step(
+                    step="stage1_no_retrieval_claims",
+                    message="未生成检索要点，将仅使用阶段一预回答",
+                )
             )
             yield from iter_result_events(
                 result=self._fallback_result(
@@ -1322,6 +1381,12 @@ class GenerationPipelineOrchestrator:
                 len(retrieval_claims),
                 _short_preview(question),
             )
+            yield sse_event(
+                _degradation_warning_step(
+                    step="stage2_failed",
+                    message="文献检索失败，将仅使用阶段一预回答",
+                )
+            )
             yield from iter_result_events(
                 result=self._fallback_result(
                     final_answer=deep_answer,
@@ -1338,6 +1403,15 @@ class GenerationPipelineOrchestrator:
                 chunk_size=chunk_size,
             )
             return
+
+        rerank_warning = _stage2_rerank_degradation_message(stage2_result)
+        if rerank_warning:
+            yield sse_event(
+                _degradation_warning_step(
+                    step="stage2_rerank_fallback",
+                    message=rerank_warning,
+                )
+            )
 
         dois = list(runtime._extract_dois_from_results(stage2_result))
         all_stage2_dois = _dedupe_preserve_order(dois)
@@ -1378,6 +1452,12 @@ class GenerationPipelineOrchestrator:
                 doi_source,
                 stage1_query_focus_terms,
                 _short_preview(question),
+            )
+            yield sse_event(
+                _degradation_warning_step(
+                    step="stage2_no_doi",
+                    message="未检索到相关文献，将仅使用阶段一预回答",
+                )
             )
             yield from iter_result_events(
                 result=self._fallback_result(
@@ -1451,6 +1531,12 @@ class GenerationPipelineOrchestrator:
                 )
         except Exception as exc:
             logger.warning("stage25 md expansion failed, falling back to PDF path: %s", exc)
+            yield sse_event(
+                _degradation_warning_step(
+                    step="stage25_md_expansion_failed",
+                    message="MD 原文扩展失败，已回退 PDF 路径",
+                )
+            )
 
         skip_decision = self.evaluate_stage3_pdf_skip_fn(md_expansion_result=md_expansion_result)
         skip_pdf = bool(skip_decision.get("should_skip"))
@@ -1550,6 +1636,14 @@ class GenerationPipelineOrchestrator:
             ),
         )
         pdf_chunks = dict(evidence_rerank_result.get("pdf_chunks") or pdf_chunks)
+        stage35_stats = dict(evidence_rerank_result.get("stats") or {})
+        if stage35_stats.get("failed"):
+            yield sse_event(
+                _degradation_warning_step(
+                    step="stage35_evidence_rerank_failed",
+                    message="证据重排序失败，已使用未排序片段继续",
+                )
+            )
         logger.info(
             "fastqa stream stage35 completed stats=%s pdf_source_count=%s pdf_chunk_count=%s",
             dict(evidence_rerank_result.get("stats") or {}),
@@ -1607,6 +1701,12 @@ class GenerationPipelineOrchestrator:
                 "fastqa stream stage4 failed error=%s partial_answer_chars=%s",
                 (final_result or {}).get("error") if isinstance(final_result, dict) else None,
                 len("".join(final_chunks).strip()),
+            )
+            yield sse_event(
+                _degradation_warning_step(
+                    step="stage4_synthesis_failed",
+                    message="最终合成失败，以下为阶段一预回答",
+                )
             )
             fallback = self._fallback_result(
                 final_answer=deep_answer,

@@ -2304,7 +2304,7 @@ def test_stream_maps_timeout_to_terminal_timeout_error():
     assert events[-1]["type"] == "error"
     assert events[-1]["error"] == "timeout"
     assert events[-1]["code"] == codes.INTERNAL_ERROR
-    assert events[-1]["message"] == "patent execution timed out"
+    assert events[-1]["message"] == "专利问答执行超时"
 
 
 
@@ -2323,7 +2323,7 @@ def test_stream_maps_metadata_builder_failures_to_terminal_error():
             "type": "error",
             "code": codes.INTERNAL_ERROR,
             "error": "internal_error",
-            "message": "internal server error",
+            "message": "服务器内部错误",
             "trace_id": "req_123",
             "seq": 0,
             "ts": "1970-01-01T00:00:00Z",

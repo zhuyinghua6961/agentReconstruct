@@ -261,7 +261,7 @@ def test_sync_kb_route_surfaces_upstream_pool_timeout_as_http_503(monkeypatch):
         "success": False,
         "code": "UPSTREAM_POOL_TIMEOUT",
         "error": "upstream_pool_timeout",
-        "message": "upstream_pool_timeout",
+        "message": "模型连接繁忙，请稍后重试",
         "retriable": True,
         "route": "kb_qa",
         "trace_id": "trace-sync",
@@ -286,7 +286,7 @@ def test_kb_stream_route_surfaces_upstream_pool_timeout_with_http_503_before_fir
         "success": False,
         "code": "UPSTREAM_POOL_TIMEOUT",
         "error": "upstream_pool_timeout",
-        "message": "upstream_pool_timeout",
+        "message": "模型连接繁忙，请稍后重试",
         "retriable": True,
         "route": "kb_qa",
         "trace_id": "trace-stream-503",
@@ -311,7 +311,7 @@ def test_kb_stream_route_emits_sse_error_after_stream_started_on_pool_timeout(mo
     assert '"type": "error"' in body
     assert '"code": "UPSTREAM_POOL_TIMEOUT"' in body
     assert '"error": "upstream_pool_timeout"' in body
-    assert '"message": "upstream_pool_timeout"' in body
+    assert '"message": "模型连接繁忙，请稍后重试"' in body
     assert '"retriable": true' in body
     assert '"route": "kb_qa"' in body
     assert '"trace_id": "trace-stream-sse"' in body
@@ -331,7 +331,7 @@ def test_sync_kb_route_surfaces_stage1_pool_timeout_from_generation_pipeline(mon
         "success": False,
         "code": "UPSTREAM_POOL_TIMEOUT",
         "error": "upstream_pool_timeout",
-        "message": "upstream_pool_timeout",
+        "message": "模型连接繁忙，请稍后重试",
         "retriable": True,
         "route": "kb_qa",
         "trace_id": "trace-kb-stage1",
@@ -386,7 +386,7 @@ def test_sync_pdf_route_surfaces_pool_timeout_from_pdf_engine(monkeypatch):
         "success": False,
         "code": "UPSTREAM_POOL_TIMEOUT",
         "error": "upstream_pool_timeout",
-        "message": "upstream_pool_timeout",
+        "message": "模型连接繁忙，请稍后重试",
         "retriable": True,
         "route": "pdf_qa",
         "trace_id": "trace-pdf-sync",

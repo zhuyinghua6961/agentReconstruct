@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import PdfReader from '../components/PdfReader.vue'
 import MarkdownRenderer from '../features/markdown/MarkdownRenderer.vue'
 import { buildPdfViewUrl, getLiteratureContent, searchLiterature } from '../api/literature'
+import { formatUserFacingError } from '../utils/userFacingErrors'
 
 const router = useRouter()
 const pdfReader = ref(null)
@@ -89,10 +90,14 @@ async function runSearch() {
       rerank_applied: Boolean(payload?.rerank?.applied),
     }
     if (payload?.error && results.value.length === 0) {
-      error.value = String(payload.error)
+      error.value = formatUserFacingError({
+        code: payload.code,
+        message: payload.error,
+        error: payload.error,
+      })
     }
   } catch (err) {
-    error.value = err?.message || '检索失败'
+    error.value = formatUserFacingError({ message: err?.message }) || '检索失败'
   } finally {
     loading.value = false
   }
@@ -113,7 +118,11 @@ async function selectResult(item) {
   try {
     const payload = await getLiteratureContent(doi)
     if (payload?.error) {
-      detailError.value = String(payload.error)
+      detailError.value = formatUserFacingError({
+        code: payload.code,
+        message: payload.error,
+        error: payload.error,
+      })
       detail.value = {
         doi,
         title: item?.title || doi,
@@ -127,7 +136,7 @@ async function selectResult(item) {
     }
     detail.value = payload
   } catch (err) {
-    detailError.value = err?.message || '加载文献详情失败'
+    detailError.value = formatUserFacingError({ message: err?.message }) || '加载文献详情失败'
   } finally {
     detailLoading.value = false
   }
@@ -204,7 +213,15 @@ function goBack() {
       <section class="results-panel">
         <h2>检索结果</h2>
         <div class="panel-scroll">
-          <p v-if="!loading && results.length === 0" class="hint">暂无结果</p>
+          <div v-if="loading" class="loading-animation">
+            <div class="loading-spinner" aria-hidden="true">
+              <span class="loading-dot" />
+              <span class="loading-dot" />
+              <span class="loading-dot" />
+            </div>
+            <span>检索中，请稍候...</span>
+          </div>
+          <p v-else-if="results.length === 0" class="hint">暂无结果</p>
           <ul v-else class="result-list">
           <li
             v-for="item in results"
