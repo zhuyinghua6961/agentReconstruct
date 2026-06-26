@@ -306,6 +306,9 @@ _ROUTE_SPECS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (_paths("/api/admin/departments/batch-force-delete", include_v1=False), ("POST",)),
     (_paths("/api/admin/departments/batch-import", include_v1=False), ("POST",)),
     (_paths("/api/admin/departments/import-template", include_v1=False), ("GET",)),
+    (_paths("/api/activity/heartbeat"), ("POST",)),
+    (_paths("/api/admin/usage-stats", include_v1=False), ("GET",)),
+    (_paths("/api/admin/usage-stats/export", include_v1=False), ("GET",)),
 )
 
 for paths, methods in _ROUTE_SPECS:

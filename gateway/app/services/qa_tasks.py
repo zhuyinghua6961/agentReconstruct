@@ -1502,6 +1502,23 @@ class GatewayTaskExecutor:
         self.proxy_service = app.state.proxy_service
         self.conversation_persistence_service = app.state.conversation_persistence_service
         self.quota_proxy_service = app.state.quota_proxy_service
+        self.usage_stats_client = getattr(app.state, "usage_stats_client", None)
+
+    async def _record_task_usage_activity(self, *, internal_request: Request, request: dict[str, Any]) -> None:
+        user_id = _normalized_positive_int(request.get("user_id"))
+        quota_type = str(request.get("quota_type") or "").strip().lower()
+        if user_id is None or quota_type not in {"ask_query", "file_qa"}:
+            return
+        client = self.usage_stats_client
+        if client is None:
+            return
+        await client.record_event(
+            request=internal_request,
+            user_id=int(user_id),
+            event_type=quota_type,
+            trace_id=str(request.get("trace_id") or "").strip() or None,
+            conversation_id=_normalized_positive_int(request.get("conversation_id")),
+        )
 
     class GatewayTaskCancelled(Exception):
         pass
@@ -2201,6 +2218,7 @@ class GatewayTaskExecutor:
                                 timings=dict(done_timings),
                                 quota_success=True,
                             )
+                        await self._record_task_usage_activity(internal_request=internal_request, request=request)
                         return AdmissionExecutionOutcome(
                             outcome="completed",
                             terminal_status="completed",

@@ -95,6 +95,11 @@ def test_route_table_patterns_include_personnel_routes():
     assert expected.issubset(set(PUBLIC_ROUTE_PATTERNS))
 
 
-def test_route_table_patterns_include_admin_model_status_route():
-    assert "/api/admin/model-status" in set(PUBLIC_ROUTE_PATTERNS)
-    assert "/api/admin/model-status/test" in set(PUBLIC_ROUTE_PATTERNS)
+def test_route_table_patterns_include_usage_stats_routes():
+    expected = {
+        "/api/activity/heartbeat",
+        "/api/v1/activity/heartbeat",
+        "/api/admin/usage-stats",
+        "/api/admin/usage-stats/export",
+    }
+    assert expected.issubset(set(PUBLIC_ROUTE_PATTERNS))

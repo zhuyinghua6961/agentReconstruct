@@ -30,6 +30,7 @@ from app.services.file_context_resolver import FileContextResolver
 from app.services.provider_factory import build_conversation_file_provider
 from app.services.proxy import ProxyService
 from app.services.quota_proxy import QuotaProxyService
+from app.services.usage_stats_client import UsageStatsClient
 from app.services.route_classifier import ClassifierThresholdPolicy, NoopRouteClassifier
 from app.services.route_decision import RouteDecisionService
 
@@ -75,6 +76,7 @@ def create_app() -> FastAPI:
     app.state.active_task_streams_lock = threading.RLock()
     app.state.gateway_auth_service = GatewayAuthService(settings)
     app.state.quota_proxy_service = QuotaProxyService(settings)
+    app.state.usage_stats_client = UsageStatsClient(settings)
     app.state.conversation_persistence_service = ConversationPersistenceService(settings)
     app.state.component_status = {
         "redis": redis_runtime.status.to_dict(),

@@ -11,6 +11,7 @@ required_files=(
   "$DEPLOY_DIR/mysql-init/001_schema.sql"
   "$DEPLOY_DIR/mysql-init/002_seed_departments.sql"
   "$DEPLOY_DIR/mysql-init/003_seed_admin.sql"
+  "$DEPLOY_DIR/mysql-init/004_usage_stats.sql"
   "$DEPLOY_DIR/minio-init/init.sh"
   "$DEPLOY_DIR/nginx/edge-https.conf.template"
   "$DEPLOY_DIR/certs/fullchain.pem"

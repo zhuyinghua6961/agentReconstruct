@@ -104,6 +104,9 @@ _PUBLIC_ROUTE_GROUPS = (
     _paths("/api/admin/departments/batch-force-delete", include_v1=False),
     _paths("/api/admin/departments/batch-import", include_v1=False),
     _paths("/api/admin/departments/import-template", include_v1=False),
+    _paths("/api/activity/heartbeat"),
+    _paths("/api/admin/usage-stats", include_v1=False),
+    _paths("/api/admin/usage-stats/export", include_v1=False),
 )
 
 PUBLIC_ROUTE_PATTERNS = tuple(path for group in _PUBLIC_ROUTE_GROUPS for path in group)

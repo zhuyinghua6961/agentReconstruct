@@ -12,6 +12,8 @@ from app.modules.documents.api import _finalize_quota_softly, _precheck_authenti
 from app.modules.literature_search.schemas import LiteratureSearchRequest
 from app.modules.literature_search.service import literature_search_service
 from app.modules.quota.service import QuotaGrant
+from app.modules.usage_stats import service as usage_stats_service_module
+from app.modules.usage_stats.helpers import should_count_search_response
 
 
 router = APIRouter(tags=["literature-search"])
@@ -51,6 +53,17 @@ def _handle_search(
         logger=_logger(request),
         runtime=_runtime_from_request(request),
     )
+    if auth is not None and int(auth.user_id) > 0 and should_count_search_response(payload=payload, status_code=status_code):
+        usage_stats_service_module.usage_stats_service.record_event(
+            user_id=int(auth.user_id),
+            event_type="literature_search",
+            metadata={
+                "query": query,
+                "query_type": query_type,
+                "query_type_detected": payload.get("query_type_detected") if isinstance(payload, dict) else None,
+                "count": payload.get("count") if isinstance(payload, dict) else None,
+            },
+        )
     response = _json(payload, status_code)
     return _finalize_quota_softly(grant=quota, result=response, logger=_logger(request))
 

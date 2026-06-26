@@ -608,4 +608,41 @@ export const adminApi = {
       `department_import_template.${format}`
     )
   },
+
+  async getUsageStats(params = {}) {
+    const token = readStoredToken()
+    const search = new URLSearchParams()
+    if (params.from) search.set('from', params.from)
+    if (params.to) search.set('to', params.to)
+    if (params.page) search.set('page', String(params.page))
+    if (params.page_size) search.set('page_size', String(params.page_size))
+    if (params.keyword) search.set('keyword', params.keyword)
+    if (params.primary_department_id) search.set('primary_department_id', String(params.primary_department_id))
+    if (params.secondary_department_id) search.set('secondary_department_id', String(params.secondary_department_id))
+    if (params.tertiary_department_id) search.set('tertiary_department_id', String(params.tertiary_department_id))
+    if (params.sort_by) search.set('sort_by', params.sort_by)
+    if (params.sort_order) search.set('sort_order', params.sort_order)
+    const query = search.toString()
+    const url = query ? `${API_BASE}/usage-stats?${query}` : `${API_BASE}/usage-stats`
+    return fetchWithErrorHandling(url, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+  },
+
+  async exportUsageStats(params = {}) {
+    const token = readStoredToken()
+    const search = new URLSearchParams()
+    if (params.from) search.set('from', params.from)
+    if (params.to) search.set('to', params.to)
+    if (params.keyword) search.set('keyword', params.keyword)
+    if (params.primary_department_id) search.set('primary_department_id', String(params.primary_department_id))
+    if (params.secondary_department_id) search.set('secondary_department_id', String(params.secondary_department_id))
+    if (params.tertiary_department_id) search.set('tertiary_department_id', String(params.tertiary_department_id))
+    if (params.sort_by) search.set('sort_by', params.sort_by)
+    if (params.sort_order) search.set('sort_order', params.sort_order)
+    const format = params.format === 'csv' ? 'csv' : 'xlsx'
+    search.set('format', format)
+    const filename = `usage_stats_${params.from || 'from'}_${params.to || 'to'}.${format}`
+    await downloadFile(`${API_BASE}/usage-stats/export?${search.toString()}`, token, filename)
+  },
 }

@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from app.core.auth import AuthContext, GatewayAuthService
 from app.services.proxy import ProxyService
 from app.services.quota_proxy import QuotaProxyResult, QuotaProxyService
+from app.services.usage_stats_client import UsageStatsClient
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,14 @@ async def _proxy_patent_search(request: Request) -> JSONResponse:
     response = await proxy_service.forward(request=request, target=registry.get("patent"))
 
     if not grant_id:
+        if auth is not None and int(auth.user_id) > 0 and _should_count_patent_search_response(response):
+            usage_client: UsageStatsClient | None = getattr(request.app.state, "usage_stats_client", None)
+            if usage_client is not None:
+                await usage_client.record_event(
+                    request=request,
+                    user_id=int(auth.user_id),
+                    event_type="patent_search",
+                )
         return response
     if not _should_count_patent_search_response(response):
         await _abort_quota_grant(request=request, quota_proxy=quota_proxy, grant_id=grant_id)
@@ -157,6 +166,14 @@ async def _proxy_patent_search(request: Request) -> JSONResponse:
             finalize_result.payload.get("code"),
             finalize_result.payload.get("error"),
         )
+    if auth is not None and int(auth.user_id) > 0:
+        usage_client: UsageStatsClient | None = getattr(request.app.state, "usage_stats_client", None)
+        if usage_client is not None:
+            await usage_client.record_event(
+                request=request,
+                user_id=int(auth.user_id),
+                event_type="patent_search",
+            )
     return _with_sync_quota_payload(response, quota_type=_QUOTA_TYPE, finalize_result=finalize_result)
 
 

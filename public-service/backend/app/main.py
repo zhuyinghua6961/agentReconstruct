@@ -21,6 +21,9 @@ from app.modules.personnel.api import router as personnel_router
 from app.modules.quota.api import router as quota_router
 from app.modules.system.api import router as system_router
 from app.modules.uploads.api import router as uploads_router
+from app.modules.usage_stats.admin_api import router as usage_stats_admin_router
+from app.modules.usage_stats.api import router as usage_stats_router
+from app.modules.usage_stats.internal_api import router as usage_stats_internal_router
 
 
 DEFAULT_ROUTERS: tuple[APIRouter, ...] = (
@@ -35,6 +38,9 @@ DEFAULT_ROUTERS: tuple[APIRouter, ...] = (
     documents_router,
     literature_search_router,
     uploads_router,
+    usage_stats_router,
+    usage_stats_admin_router,
+    usage_stats_internal_router,
 )
 
 
@@ -85,6 +91,7 @@ def create_app(
                     "documents",
                     "literature_search",
                     "uploads",
+                    "usage_stats",
                 ],
             },
         )

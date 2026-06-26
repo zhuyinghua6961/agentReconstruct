@@ -17,6 +17,7 @@ from app.services.file_route_gates import file_status_json_response as _file_sta
 from app.services.file_route_gates import route_context_payload as _route_context_payload
 from app.services.proxy import ProxyService, StreamingProxyHandle
 from app.services.quota_proxy import QuotaProxyResult, QuotaProxyService
+from app.services.usage_stats_client import UsageStatsClient
 from app.services.sse_frames import SSEFrameBuffer, parse_sse_json_frame
 
 router = APIRouter(tags=["qa"])
@@ -113,6 +114,44 @@ def _normalized_positive_user_id(value) -> int | None:
     except Exception:
         return None
     return user_id if user_id > 0 else None
+
+
+
+
+def _conversation_id_int(value: Any) -> int | None:
+    try:
+        conversation_id = int(value)
+    except Exception:
+        return None
+    return conversation_id if conversation_id > 0 else None
+
+
+async def _record_ask_usage_activity(
+    request: Request,
+    *,
+    user_id: int | None,
+    quota_type: str | None,
+    trace_id: str,
+    conversation_id: int | None,
+    success: bool,
+) -> None:
+    if not success:
+        return
+    normalized_type = str(quota_type or "").strip().lower()
+    if normalized_type not in {"ask_query", "file_qa"}:
+        return
+    if user_id is None:
+        return
+    client: UsageStatsClient | None = getattr(request.app.state, "usage_stats_client", None)
+    if client is None:
+        return
+    await client.record_event(
+        request=request,
+        user_id=int(user_id),
+        event_type=normalized_type,
+        trace_id=trace_id,
+        conversation_id=conversation_id,
+    )
 
 
 def _sync_json_payload(response: JSONResponse | StreamingResponse | object) -> dict | None:
@@ -222,11 +261,10 @@ async def _stream_with_quota(
     quota_type: str | None,
     trace_id: str,
     backend: str,
+    user_id: int | None = None,
+    conversation_id: int | None = None,
 ):
-    if not str(grant_id or "").strip() or not str(quota_type or "").strip():
-        async for chunk in handle.body_iter():
-            yield chunk
-        return
+    has_quota_grant = bool(str(grant_id or "").strip() and str(quota_type or "").strip())
 
     frame_buffer = SSEFrameBuffer()
     done_payload: dict | None = None
@@ -309,35 +347,47 @@ async def _stream_with_quota(
         else:
             yield buffer.encode("utf-8")
 
-    finalize_result = await asyncio.shield(
-        quota_proxy.finalize(
-            request=request,
-            grant_id=str(grant_id),
-            success=done_payload is not None and not saw_error_event,
+    stream_success = done_payload is not None and not saw_error_event
+    finalize_result: QuotaProxyResult | None = None
+    if has_quota_grant:
+        finalize_result = await asyncio.shield(
+            quota_proxy.finalize(
+                request=request,
+                grant_id=str(grant_id),
+                success=stream_success,
+            )
         )
+        finalized = True
+        if not finalize_result.success:
+            logger.warning(
+                "gateway stream quota finalize failed: grant_id=%s quota_type=%s status=%s code=%s error=%s",
+                grant_id,
+                quota_type,
+                finalize_result.status_code,
+                finalize_result.payload.get("code"),
+                finalize_result.payload.get("error"),
+            )
+    await _record_ask_usage_activity(
+        request=request,
+        user_id=user_id,
+        quota_type=quota_type,
+        trace_id=trace_id,
+        conversation_id=conversation_id,
+        success=stream_success,
     )
-    finalized = True
-    if not finalize_result.success:
-        logger.warning(
-            "gateway stream quota finalize failed: grant_id=%s quota_type=%s status=%s code=%s error=%s",
-            grant_id,
-            quota_type,
-            finalize_result.status_code,
-            finalize_result.payload.get("code"),
-            finalize_result.payload.get("error"),
-        )
     if done_payload is not None:
         done_payload = dict(done_payload)
-        done_payload["quota"] = _quota_payload_from_finalize(
-            quota_type=str(quota_type),
-            finalize_result=finalize_result,
-        )
+        if has_quota_grant:
+            done_payload["quota"] = _quota_payload_from_finalize(
+                quota_type=str(quota_type),
+                finalize_result=finalize_result,
+            )
         _log_gateway_event(
             "ask_stream finalized",
             trace_id=trace_id,
             backend=backend,
             quota_type=quota_type,
-            success=done_payload is not None and not saw_error_event,
+            success=stream_success,
             elapsed_ms=round((time.perf_counter() - stream_started) * 1000, 3),
         )
         yield _encode_sse_payload(done_payload, prefix_lines=done_prefix_lines)
@@ -656,6 +706,15 @@ async def _proxy_ask(request: Request, payload: AskRequest, mode: str) -> JSONRe
         payload=upstream_payload,
     )
     if quota_type is None or not grant_id:
+        if _should_count_sync_response(response):
+            await _record_ask_usage_activity(
+                request=request,
+                user_id=user_id,
+                quota_type=quota_type,
+                trace_id=trace_id,
+                conversation_id=_conversation_id_int(payload.conversation_id),
+                success=True,
+            )
         _log_gateway_event(
             "ask completed",
             trace_id=trace_id,
@@ -677,6 +736,14 @@ async def _proxy_ask(request: Request, payload: AskRequest, mode: str) -> JSONRe
             finalize_result.payload.get("code"),
             finalize_result.payload.get("error"),
         )
+    await _record_ask_usage_activity(
+        request=request,
+        user_id=user_id,
+        quota_type=quota_type,
+        trace_id=trace_id,
+        conversation_id=_conversation_id_int(payload.conversation_id),
+        success=True,
+    )
     _log_gateway_event(
         "ask completed",
         trace_id=trace_id,
@@ -791,6 +858,8 @@ async def _proxy_ask_stream(request: Request, payload: AskRequest, mode: str):
             quota_type=quota_type,
             trace_id=trace_id,
             backend=handle.backend,
+            user_id=user_id,
+            conversation_id=_conversation_id_int(payload.conversation_id),
         ),
         status_code=handle.status_code,
         media_type=str(handle.headers.get("content-type") or "text/event-stream"),

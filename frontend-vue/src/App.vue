@@ -1,5 +1,8 @@
 <script setup>
-// App.vue - 路由容器
+import { RouterView } from 'vue-router'
+import { useActivityHeartbeat } from './composables/useActivityHeartbeat'
+
+useActivityHeartbeat()
 </script>
 
 <template>

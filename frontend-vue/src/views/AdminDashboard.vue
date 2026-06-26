@@ -9,6 +9,7 @@ import ImportResultDialog from '../components/ImportResultDialog.vue'
 import PersonnelLookupSelect from '../components/PersonnelLookupSelect.vue'
 import PersonnelManagementPanel from '../components/PersonnelManagementPanel.vue'
 import QuotaManagementPanel from '../components/QuotaManagementPanel.vue'
+import UsageStatsPanel from '../components/UsageStatsPanel.vue'
 import { runPersonnelManagementRefresh } from '../utils/personnelManagementSync'
 
 const route = useRoute()
@@ -18,6 +19,7 @@ const DEFAULT_ADMIN_TAB = 'users'
 const ADMIN_TAB_ITEMS = [
   { key: 'models', label: '模型状态' },
   { key: 'quota', label: '配额管理' },
+  { key: 'stats', label: '数据统计' },
   { key: 'users', label: '用户管理' },
   { key: 'departments', label: '部门管理' },
 ]
@@ -863,6 +865,14 @@ onMounted(async () => {
       </section>
 
       <section
+        v-else-if="activeAdminTab === 'stats'"
+        class="usage-stats-shell"
+        aria-label="数据统计"
+      >
+        <UsageStatsPanel />
+      </section>
+
+      <section
         v-else-if="activeAdminTab === 'departments'"
         class="department-management-shell"
         aria-label="部门管理"
@@ -1236,6 +1246,7 @@ onMounted(async () => {
 .alert-success { background: #dcfce7; color: #166534; }
 .alert-error { background: #fef2f2; color: #dc2626; }
 .quota-management-shell { margin-bottom: 24px; }
+.usage-stats-shell { margin-bottom: 24px; }
 .user-section { background: white; border: 1px solid #e5e7eb; border-radius: 12px; padding: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
 .section-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 20px; }
 .section-heading { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
