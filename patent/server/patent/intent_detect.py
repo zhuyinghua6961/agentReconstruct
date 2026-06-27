@@ -116,14 +116,28 @@ def _message_chars(messages: list[dict[str, Any]]) -> int:
     return sum(len(str(item.get("content") or "")) for item in messages if isinstance(item, dict))
 
 
-def _create_dedicated_intent_completion(*, model: str, messages: list[dict[str, Any]]) -> Any:
+def _intent_max_tokens(*, include_anchors: bool) -> int:
+    if not include_anchors:
+        return 64
+    try:
+        return max(64, min(int(str(os.getenv("PATENT_INTENT_ANCHOR_MAX_TOKENS", "256")).strip()), 512))
+    except Exception:
+        return 256
+
+
+def _create_dedicated_intent_completion(
+    *,
+    model: str,
+    messages: list[dict[str, Any]],
+    include_anchors: bool = False,
+) -> Any:
     endpoint_url = _chat_completions_url(_intent_model_base_url())
     timeout_seconds = _intent_model_timeout_seconds()
     payload = {
         "model": model,
         "messages": messages,
         "temperature": 0.0,
-        "max_tokens": 64,
+        "max_tokens": _intent_max_tokens(include_anchors=include_anchors),
         "stream": False,
         "enable_thinking": False,
     }
@@ -176,14 +190,20 @@ def _create_dedicated_intent_completion(*, model: str, messages: list[dict[str, 
     return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=str(content or "")))])
 
 
-def _create_intent_completion(*, client: Any, model: str, messages: list[dict[str, Any]]) -> Any:
+def _create_intent_completion(
+    *,
+    client: Any,
+    model: str,
+    messages: list[dict[str, Any]],
+    include_anchors: bool = False,
+) -> Any:
     if _intent_model_api_key():
-        return _create_dedicated_intent_completion(model=model, messages=messages)
+        return _create_dedicated_intent_completion(model=model, messages=messages, include_anchors=include_anchors)
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "temperature": 0.0,
-        "max_tokens": 64,
+        "max_tokens": _intent_max_tokens(include_anchors=include_anchors),
         "stream": False,
         "extra_body": {"enable_thinking": False},
     }
@@ -212,7 +232,13 @@ def patent_intent_detect_cache_signature() -> dict[str, Any]:
     """Fields merged into Stage1 Redis cache fingerprint when intent routing is configured."""
     if not intent_detect_enabled():
         return {"patent_intent_detect": False}
-    return {"patent_intent_detect": True, "patent_intent_detect_model": intent_detect_model()}
+    from server.patent.question_anchors import intent_anchor_extract_enabled
+
+    return {
+        "patent_intent_detect": True,
+        "patent_intent_detect_model": intent_detect_model(),
+        "patent_intent_anchor_extract": intent_anchor_extract_enabled(),
+    }
 
 
 def _normalize_intent_tag(raw: str) -> str:
@@ -225,11 +251,25 @@ def _normalize_intent_tag(raw: str) -> str:
     return "generic"
 
 
-def build_intent_detect_system_prompt() -> str:
+def build_intent_detect_system_prompt(*, include_anchors: bool = False) -> str:
     """System message for tag classification（user role = raw question）。与 fastQA 文案保持一致。"""
     intent_dict = {k: v for k, v in _INTENT_TAG_DESCRIPTIONS.items()}
     intent_string = json.dumps(intent_dict, ensure_ascii=False)
     keys_line = ", ".join(sorted(k for k in _INTENT_TAG_DESCRIPTIONS))
+    if include_anchors:
+        return (
+            "You classify a user's question for materials/battery/electrochemistry patent QA and extract retrieval anchor terms.\n"
+            f"Valid intent_tag values (copy ONE verbatim): {keys_line}\n\n"
+            f"Tag meanings:\n{intent_string}\n\n"
+            "Reply with ONLY one JSON object, no markdown fences or extra text:\n"
+            '{"intent_tag":"<one valid tag>","anchor_terms":["term1","term2"]}\n\n'
+            "Rules for anchor_terms:\n"
+            "- Extract 3-10 terms that MUST appear in patent retrieval queries.\n"
+            "- Prefer the user's exact wording for materials, methods, metrics, ratios, and patent IDs.\n"
+            "- Include explicit chemical/material names (e.g. 铁红, 葡萄糖, PEG) and numeric thresholds if present.\n"
+            "- Do NOT invent terms absent from the user question.\n"
+            "- Do NOT include generic stopwords like 如何, 什么, 专利, 制备.\n"
+        )
     return (
         "You classify a user's question for materials/battery/electrochemistry QA.\n"
         "Pick exactly ONE tag whose key best matches the user's MAIN information need (what evidence to prioritize).\n"
@@ -243,22 +283,60 @@ def build_intent_detect_system_prompt() -> str:
     )
 
 
+def _unwrap_outer_json_fence(text: str) -> str | None:
+    match = re.match(r"^\s*```(?:json)?\s*(.*)\s*```\s*$", str(text or ""), flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    candidate = str(match.group(1) or "").strip()
+    return candidate or None
+
+
+def _parse_intent_payload(raw: str) -> dict[str, Any] | None:
+    for candidate in (
+        str(raw or "").strip(),
+        _unwrap_outer_json_fence(raw),
+    ):
+        normalized = str(candidate or "").strip()
+        if not normalized or not normalized.startswith("{"):
+            continue
+        try:
+            payload = json.loads(normalized)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
 def run_intent_detect_quick_tag(
     *,
     client: Any,
     user_question: str,
     logger: Any,
 ) -> dict[str, Any]:
-    """Call classifier; returns tag + timing + raw text. Failures degrade to generic (non-pool-timeout)."""
+    """Call classifier; returns tag + anchor_terms + timing. Failures degrade to generic (non-pool-timeout)."""
+    from server.patent.question_anchors import (
+        extract_rule_based_anchor_terms,
+        intent_anchor_extract_enabled,
+        normalize_anchor_term_list,
+        resolve_question_anchor_terms,
+    )
+
     model = intent_detect_model()
     started = time.perf_counter()
-    system_prompt = build_intent_detect_system_prompt()
+    include_anchors = intent_anchor_extract_enabled()
+    system_prompt = build_intent_detect_system_prompt(include_anchors=include_anchors)
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": str(user_question or "").strip()},
     ]
     try:
-        response = _create_intent_completion(client=client, model=model, messages=messages)
+        response = _create_intent_completion(
+            client=client,
+            model=model,
+            messages=messages,
+            include_anchors=include_anchors,
+        )
         raw = str(response.choices[0].message.content or "").strip()
     except Exception as exc:
         if is_patent_pool_timeout(exc):
@@ -268,8 +346,10 @@ def run_intent_detect_quick_tag(
                 logger.warning("patent intent-detect failed, using generic: %s", exc)
             except Exception:
                 pass
+        fallback_anchors = extract_rule_based_anchor_terms(user_question)
         return {
             "intent_tag": "generic",
+            "anchor_terms": fallback_anchors,
             "raw_response": "",
             "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
             "model": model,
@@ -277,14 +357,33 @@ def run_intent_detect_quick_tag(
             "error": str(exc),
         }
 
-    tag = _normalize_intent_tag(raw)
+    tag = "generic"
+    llm_anchor_terms: list[str] = []
+    if include_anchors:
+        payload = _parse_intent_payload(raw)
+        if payload is not None:
+            tag = _normalize_intent_tag(str(payload.get("intent_tag") or raw))
+            llm_anchor_terms = normalize_anchor_term_list(payload.get("anchor_terms"))
+        else:
+            tag = _normalize_intent_tag(raw)
+    else:
+        tag = _normalize_intent_tag(raw)
+    partial_result = {
+        "intent_tag": tag,
+        "anchor_terms": llm_anchor_terms,
+        "raw_response": raw,
+        "ok": True,
+        "error": "",
+    }
+    anchor_terms = resolve_question_anchor_terms(user_question=user_question, intent_result=partial_result)
     elapsed = round((time.perf_counter() - started) * 1000, 3)
     if logger is not None:
         try:
             logger.info(
-                "patent intent-detect ok model=%s intent_tag=%s raw=%r elapsed_ms=%s",
+                "patent intent-detect ok model=%s intent_tag=%s anchor_terms=%s raw=%r elapsed_ms=%s",
                 model,
                 tag,
+                anchor_terms,
                 raw[:200],
                 elapsed,
             )
@@ -292,6 +391,7 @@ def run_intent_detect_quick_tag(
             pass
     return {
         "intent_tag": tag,
+        "anchor_terms": anchor_terms,
         "raw_response": raw,
         "elapsed_ms": elapsed,
         "model": model,
@@ -306,11 +406,19 @@ def format_intent_hint_for_stage1_user_block(*, intent_result: dict[str, Any]) -
         return ""
     tag = str(intent_result.get("intent_tag") or "generic").strip()
     label = _INTENT_TAG_DESCRIPTIONS.get(tag, tag)
-    return (
-        "【快速意图识别（供深度预回答与 retrieval_claims 锚定参考）】\n"
-        f"- 主轴类型建议对齐：`{tag}`（含义：{label}）\n"
-        "- 每条检索主张与用户显性关键词必须与该主轴和用户原句一致；冲突时以用户原句为准。\n"
-    )
+    anchor_terms = [
+        str(item).strip()
+        for item in list(intent_result.get("anchor_terms") or [])
+        if str(item).strip()
+    ]
+    lines = [
+        "【快速意图识别（供深度预回答与 retrieval_claims 锚定参考）】",
+        f"- 主轴类型建议对齐：`{tag}`（含义：{label}）",
+    ]
+    if anchor_terms:
+        lines.append(f"- 检索锚词（每条 retrieval_claims.keywords 必须包含）：{', '.join(anchor_terms)}")
+    lines.append("- 每条检索主张与用户显性关键词必须与该主轴和用户原句一致；冲突时以用户原句为准。")
+    return "\n".join(lines) + "\n"
 
 
 __all__ = [

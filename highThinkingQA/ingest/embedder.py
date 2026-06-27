@@ -25,6 +25,7 @@ from agent_core.upstream_auth_logging import (
     log_upstream_auth_failure,
     log_upstream_auth_success_once,
 )
+from server.utils.upstream_errors import UpstreamCallError, status_code_from_exception
 
 logger = logging.getLogger(__name__)
 
@@ -196,7 +197,11 @@ def embed_texts(
                         f"Embedding 调用失败 (batch {batch_start // BATCH_SIZE}), "
                         f"已重试 {max_retries} 次: {e}"
                     )
-                    raise
+                    raise UpstreamCallError.embedding_unavailable(
+                        stage="retrieval",
+                        status_code=status_code_from_exception(e),
+                        detail=str(e),
+                    ) from e
 
                 # 指数退避 + 抖动，Connection error 用更长退避
                 if "Connection" in error_str:

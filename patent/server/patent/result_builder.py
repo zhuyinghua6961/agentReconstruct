@@ -15,6 +15,8 @@ from server.schemas.response_models import (
     StepEvent,
 )
 from server.services.mode_profiles import PatentModeProfile, get_patent_mode_profile
+from server.utils.upstream_errors import UpstreamCallError, coerce_upstream_error
+from server.utils.user_errors import humanize_exception, user_message_for_code
 
 
 TimestampFactory = Callable[[], str]
@@ -171,6 +173,7 @@ class PatentResultBuilder:
         return event.model_dump()
 
     def build_error_event(self, *, trace_id: str, seq: int, error: APIError) -> dict[str, Any]:
+        extra = dict(error.extra or {})
         event = ErrorEvent(
             seq=int(seq),
             ts=self._timestamp(),
@@ -178,16 +181,34 @@ class PatentResultBuilder:
             error=str(error.error),
             message=str(error.message),
             trace_id=str(trace_id),
+            retriable=bool(error.retriable),
+            status_code=extra.get("status_code"),
+            failure_stage=str(extra.get("failure_stage") or "").strip() or None,
+            component=str(extra.get("component") or "").strip() or None,
         )
-        return event.model_dump()
+        return event.model_dump(exclude_none=True)
 
     def to_api_error(self, exc: Exception) -> APIError:
         if isinstance(exc, APIError):
             return exc
+        upstream = coerce_upstream_error(exc)
+        if upstream is not None:
+            return APIError(
+                code=str(upstream.code),
+                message=str(upstream.message),
+                status_code=int(upstream.status_code or 500),
+                error=str(upstream.error),
+                retriable=bool(upstream.retriable),
+                extra={
+                    "failure_stage": str(upstream.stage or ""),
+                    "component": str(upstream.component or ""),
+                    "status_code": upstream.status_code,
+                },
+            )
         if type(exc).__name__ == "_PatentStreamCancelled":
             return APIError(
                 code="ASK_CANCELLED",
-                message="cancelled",
+                message=user_message_for_code("ASK_CANCELLED"),
                 status_code=499,
                 error="cancelled",
                 retriable=False,
@@ -195,14 +216,14 @@ class PatentResultBuilder:
         if isinstance(exc, TimeoutError):
             return APIError(
                 code=codes.INTERNAL_ERROR,
-                message="patent execution timed out",
+                message=user_message_for_code("UPSTREAM_TIMEOUT", fallback="patent execution timed out"),
                 status_code=504,
                 error="timeout",
                 retriable=True,
             )
         return APIError(
             code=codes.INTERNAL_ERROR,
-            message="internal server error",
+            message=user_message_for_code(codes.INTERNAL_ERROR),
             status_code=500,
             error="internal_error",
             retriable=False,

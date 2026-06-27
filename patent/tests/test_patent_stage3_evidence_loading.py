@@ -12,6 +12,7 @@ from server.patent.pdf_service import PatentPdfService
 from server.patent.retrieval_models import PatentCatalogRecord, PatentTableSupplement
 from server.patent.runtime import PatentRuntime
 from server.patent.stages.evidence_loading import run_stage3_load_patent_evidence
+from server.utils.upstream_errors import UpstreamCallError
 
 
 def test_stage3_evidence_loading_groups_stage2_documents_caps_retrieval_chunks_and_attaches_table_markdown():
@@ -257,13 +258,15 @@ def test_stage3_parallel_drops_failed_patents_from_source_ids_and_keeps_alignmen
 
 
 def test_stage3_parallel_raises_when_all_patents_fail():
-    with pytest.raises(RuntimeError, match="stage3 evidence loading produced no successful patent bundles"):
+    with pytest.raises(UpstreamCallError) as exc_info:
         run_stage3_load_patent_evidence(
             retrieval_results={"documents": [], "metadatas": [], "reference_objects": []},
             source_ids=["CN115132975B", "US20240001234A1"],
             catalog_loader=lambda _patent_id: (_ for _ in ()).throw(RuntimeError("bad patent")),
             parallel_workers=2,
         )
+    assert exc_info.value.code == "RETRIEVAL_FAILED"
+    assert exc_info.value.stage == "stage3"
 
 
 def test_stage3_parallel_force_pdf_keeps_pdf_chunks_on_the_right_patent():

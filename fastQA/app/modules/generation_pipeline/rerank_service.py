@@ -10,6 +10,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from app.integrations.llm.thinking import auth_headers
+from app.utils.upstream_errors import status_code_from_exception
 
 try:
     import requests
@@ -27,12 +28,13 @@ def _fallback_result(
     top_n: int,
     reason: str,
     provider: str,
+    status_code: int | None = None,
 ) -> Dict[str, Any]:
     docs = list(documents[:top_n])
     metas = list((metadatas or [])[:top_n])
     # fallback score follows original order, higher means more relevant
     scores = [1.0 - (idx * 0.01) for idx in range(len(docs))]
-    return {
+    payload = {
         "documents": docs,
         "metadatas": metas,
         "rerank_scores": scores,
@@ -40,6 +42,9 @@ def _fallback_result(
         "fallback_reason": reason,
         "provider": provider,
     }
+    if status_code is not None:
+        payload["status_code"] = int(status_code)
+    return payload
 
 
 def _clamp_top_n(top_n: int, document_count: int) -> int:
@@ -140,6 +145,7 @@ def rerank_documents(
         timeout_seconds,
         bool(api_key),
     )
+    response = None
     try:
         response = req.post(endpoint, headers=headers, json=payload, timeout=timeout_seconds)
         response.raise_for_status()
@@ -179,6 +185,7 @@ def rerank_documents(
                 top_n=top_n,
                 reason="empty_rerank_result",
                 provider=RERANK_PROVIDER_NAME,
+                status_code=getattr(response, "status_code", None),
             )
 
         _LOGGER.info(
@@ -214,12 +221,16 @@ def rerank_documents(
             (time.perf_counter() - started_at) * 1000.0,
             type(exc).__name__,
         )
+        status_code = getattr(response, "status_code", None) if response is not None else None
+        if status_code is None:
+            status_code = status_code_from_exception(exc)
         return _fallback_result(
             documents=documents,
             metadatas=metadatas,
             top_n=top_n,
             reason="request_failed",
             provider=RERANK_PROVIDER_NAME,
+            status_code=status_code,
         )
 
 

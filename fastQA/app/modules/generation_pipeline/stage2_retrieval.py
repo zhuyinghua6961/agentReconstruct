@@ -19,6 +19,8 @@ from app.modules.generation_pipeline.text_processing import (
     preprocess_retrieval_query,
 )
 from app.modules.qa_kb.comparison_intent import build_retrieval_claims_from_comparison_plan
+from app.utils.upstream_errors import UpstreamCallError, looks_like_embedding_failure
+from app.utils.user_errors import build_upstream_error_message
 
 
 ELEMENT_SYNONYM_GROUPS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
@@ -1574,6 +1576,15 @@ def run_stage2_targeted_retrieval(
                 exc,
             )
             logger.warning("[%s/%s] 检索失败: %s", index, len(claims), exc)
+            component = "embedding" if looks_like_embedding_failure(str(exc)) else "retrieval"
+            code = "EMBEDDING_UNAVAILABLE" if component == "embedding" else "RETRIEVAL_FAILED"
+            upstream = UpstreamCallError.from_exception(
+                exc,
+                code=code,
+                component=component,
+                stage="stage2",
+                error=str(code).lower(),
+            )
             return {
                 "index": index,
                 "claim_key": claim_key,
@@ -1594,6 +1605,7 @@ def run_stage2_targeted_retrieval(
                 },
                 "ok": False,
                 "error": str(exc),
+                "upstream_error": upstream.to_dict(),
             }
 
     claim_jobs = list(enumerate(claims, 1))
@@ -1760,8 +1772,52 @@ def run_stage2_targeted_retrieval(
         "unique_count": len(unique_documents),
         "total_count": len(all_documents),
     }
+    hard_failure = _resolve_stage2_claim_hard_failure(claim_outputs)
+    if hard_failure is not None:
+        result.update(hard_failure)
+        logger.error(
+            "Stage2 hard failure: claims=%s code=%s error=%s",
+            len(claim_outputs),
+            dict(hard_failure.get("upstream_error") or {}).get("code"),
+            hard_failure.get("error"),
+        )
+        return result
     logger.info("✅ 检索完成：共找到 %s 个片段，去重后 %s 个", len(all_documents), len(unique_documents))
     return result
+
+
+def _resolve_stage2_claim_hard_failure(claim_outputs: List[Dict[str, Any]]) -> Dict[str, Any] | None:
+    if not claim_outputs:
+        return None
+    ok_outputs = [output for output in claim_outputs if output.get("ok")]
+    if ok_outputs:
+        return None
+    failed_outputs = [
+        output
+        for output in claim_outputs
+        if not output.get("ok") and not output.get("cancelled") and str(output.get("error") or "").strip()
+    ]
+    if not failed_outputs:
+        return None
+    primary = failed_outputs[0]
+    upstream_payload = dict(primary.get("upstream_error") or {})
+    if not upstream_payload:
+        component = "embedding" if looks_like_embedding_failure(str(primary.get("error") or "")) else "retrieval"
+        code = "EMBEDDING_UNAVAILABLE" if component == "embedding" else "RETRIEVAL_FAILED"
+        upstream_payload = UpstreamCallError(
+            code=code,
+            error=str(code).lower(),
+            component=component,
+            stage="stage2",
+            message=build_upstream_error_message(component, detail=str(primary.get("error") or "")),
+            retriable=True,
+        ).to_dict()
+    return {
+        "success": False,
+        "hard_failure": True,
+        "error": str(primary.get("error") or ""),
+        "upstream_error": upstream_payload,
+    }
 
 
 __all__ = [

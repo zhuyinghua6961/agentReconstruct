@@ -190,6 +190,8 @@ def run_semantic_search(
                     "reason": str(reranked.get("fallback_reason", "")),
                     "provider": str(reranked.get("provider", "")),
                 }
+                if reranked.get("status_code") is not None:
+                    rerank_meta["status_code"] = int(reranked["status_code"])
             else:
                 rerank_meta = {
                     "enabled": True,

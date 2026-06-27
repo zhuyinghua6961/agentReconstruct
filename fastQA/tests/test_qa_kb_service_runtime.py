@@ -50,7 +50,12 @@ class _Runtime:
 def test_service_run_generation_pipeline_uses_real_orchestrator():
     runtime = _Runtime(
         stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]},
-        stage2_payload={"success": False, "error": "retrieval_failed"},
+        stage2_payload={
+            "success": False,
+            "hard_failure": True,
+            "error": "retrieval_failed",
+            "upstream_error": {"code": "RETRIEVAL_FAILED", "error": "retrieval_failed", "component": "retrieval", "stage": "stage2", "message": "文献检索失败", "retriable": True},
+        },
         doi_payload=[],
         stage25_payload={},
         stage3_payload={},
@@ -64,8 +69,8 @@ def test_service_run_generation_pipeline_uses_real_orchestrator():
         n_results_per_claim=5,
     )
 
-    assert result.success is True
-    assert result.final_answer == "deep"
+    assert result.success is False
+    assert result.final_answer == ""
 
 
 def test_service_iter_generation_answer_events_streams_payloads():
@@ -133,7 +138,12 @@ def test_service_iter_generation_answer_events_emits_intent_step_with_elapsed_ms
 def test_service_iter_answer_events_normalizes_thinking_into_steps():
     runtime = _Runtime(
         stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]},
-        stage2_payload={"success": False, "error": "retrieval_failed"},
+        stage2_payload={
+            "success": False,
+            "hard_failure": True,
+            "error": "retrieval_failed",
+            "upstream_error": {"code": "RETRIEVAL_FAILED", "error": "retrieval_failed", "component": "retrieval", "stage": "stage2", "message": "文献检索失败", "retriable": True},
+        },
         doi_payload=[],
         stage25_payload={},
         stage3_payload={},
@@ -150,7 +160,7 @@ def test_service_iter_answer_events_normalizes_thinking_into_steps():
     )
 
     assert events[0]["type"] == "step"
-    assert events[-1]["type"] == "done"
+    assert events[-1]["type"] == "error"
 
 
 def test_service_run_generation_pipeline_passes_graph_context_and_fact_block():

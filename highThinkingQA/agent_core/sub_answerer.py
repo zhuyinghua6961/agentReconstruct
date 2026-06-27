@@ -128,23 +128,23 @@ async def iter_pre_answers_async(
     async_client: Optional[Any] = None,
     *,
     original_question: str | None = None,
-) -> AsyncGenerator[tuple[int, str], None]:
+) -> AsyncGenerator[tuple[int, str, Exception | None], None]:
     """
     按完成顺序返回子问题预回答结果。
 
     Yields:
-        (原始索引, 预回答文本)
+        (原始索引, 预回答文本, 失败异常或 None)
     """
     if async_client is None:
         async_client = get_async_llm_client()
 
-    async def _indexed_answer(index: int, sub_question: str) -> tuple[int, str]:
+    async def _indexed_answer(index: int, sub_question: str) -> tuple[int, str, Exception | None]:
         try:
             answer = await _async_pre_answer(sub_question, async_client, original_question=original_question)
-            return index, answer
+            return index, answer, None
         except Exception as exc:
             logger.error(f"子问题 Q{index+1} 预回答失败: {exc}")
-            return index, ""
+            return index, "", exc
 
     tasks = [
         asyncio.create_task(_indexed_answer(index, sub_question))

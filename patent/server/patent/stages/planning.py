@@ -13,8 +13,13 @@ from server.patent.intent_detect import (
 )
 from server.patent.models import PatentRetrievalClaim, PatentRetrievalPlan
 from server.patent.prompt_loader import load_patent_prompt_template
+from server.patent.question_anchors import (
+    merge_anchor_terms_into_claims,
+    resolve_question_anchor_terms,
+)
 from server.patent.thinking import LLM_STAGE_CONTROL, merge_extra_body, resolve_thinking_controls
 from server.patent.upstream_transport import is_patent_pool_timeout
+from server.utils.upstream_errors import UpstreamCallError, status_code_from_exception
 
 
 DEFAULT_PATENT_STAGE1_PROMPT = load_patent_prompt_template("stage1_planning.txt")
@@ -369,6 +374,27 @@ def _normalize_claims(raw_claims: Any, *, question: str) -> list[PatentRetrieval
     return normalized
 
 
+def _apply_anchor_terms_to_claims(
+    claims: list[PatentRetrievalClaim],
+    *,
+    question: str,
+    intent_result: dict[str, Any] | None,
+    logger: Any,
+) -> list[PatentRetrievalClaim]:
+    anchor_terms = resolve_question_anchor_terms(user_question=question, intent_result=intent_result)
+    if not anchor_terms or not claims:
+        return list(claims or [])
+    merged = merge_anchor_terms_into_claims(list(claims or []), anchor_terms)
+    if logger is not None:
+        logger.info(
+            "patent stage1 anchor merge anchor_terms=%s claim_count=%s sample_keywords=%s",
+            anchor_terms,
+            len(merged),
+            list(merged[0].keywords or [])[:12] if merged else [],
+        )
+    return merged
+
+
 def _extract_patent_ids(text: str) -> list[str]:
     normalized: list[str] = []
     for match in _PATENT_ID_RE.findall(str(text or "").upper()):
@@ -538,6 +564,12 @@ def run_stage1_pre_answer_and_planning(
     )
     if client is None or not str(model or "").strip():
         retrieval_claims = _seed_retrieval_claims_from_graph(question=question, conversation_context=conversation_context)
+        retrieval_claims = _apply_anchor_terms_to_claims(
+            retrieval_claims,
+            question=question,
+            intent_result=None,
+            logger=logger,
+        )
         retrieval_plan = _retrieval_plan_from_claims(retrieval_claims, question=question) if retrieval_claims else _empty_retrieval_plan(question)
         deep_answer = _fallback_deep_answer(question, retrieval_plan)
         logger.warning(
@@ -600,6 +632,12 @@ def run_stage1_pre_answer_and_planning(
         payload, cleaned_text = _parse_stage1_json_payload(result_text)
         if payload is None:
             retrieval_claims = _seed_retrieval_claims_from_graph(question=question, conversation_context=conversation_context)
+            retrieval_claims = _apply_anchor_terms_to_claims(
+                retrieval_claims,
+                question=question,
+                intent_result=intent_result,
+                logger=logger,
+            )
             retrieval_plan = _retrieval_plan_from_claims(retrieval_claims, question=question) if retrieval_claims else _empty_retrieval_plan(question)
             logger.warning(
                 "patent stage1 planning json parse failed response_chars=%s question_type=%s",
@@ -649,6 +687,12 @@ def run_stage1_pre_answer_and_planning(
                 _infer_question_type(question, _extract_patent_ids(question)),
                 _preview(cleaned_text or result_text),
             )
+        retrieval_claims = _apply_anchor_terms_to_claims(
+            retrieval_claims,
+            question=question,
+            intent_result=intent_result,
+            logger=logger,
+        )
         retrieval_plan = _retrieval_plan_from_claims(retrieval_claims, question=question) if retrieval_claims else _empty_retrieval_plan(question)
         deep_answer = " ".join(str(payload.get("deep_answer") or "").split()).strip()
         if not deep_answer:
@@ -692,28 +736,7 @@ def run_stage1_pre_answer_and_planning(
         if is_patent_pool_timeout(exc):
             raise
         logger.error("patent stage1 planning failed: %s", exc)
-        retrieval_claims = _seed_retrieval_claims_from_graph(question=question, conversation_context=conversation_context)
-        retrieval_plan = _retrieval_plan_from_claims(retrieval_claims, question=question) if retrieval_claims else _empty_retrieval_plan(question)
-        deep_answer = _fallback_deep_answer(question, retrieval_plan)
-        _log_stage1_structured_quality(
-            logger=logger,
-            raw_response="",
-            json_parsed=False,
-            schema_valid=False,
-            deep_answer=deep_answer,
-            retrieval_claims_count=len(retrieval_claims),
-            valid_claims_count=len(retrieval_claims),
-            raw_claims_count=0,
-            fallback="planner_error",
-        )
-        err_out: dict[str, Any] = {
-            "success": True,
-            "deep_answer": deep_answer,
-            "retrieval_claims": retrieval_claims,
-            "retrieval_plan": retrieval_plan,
-            "fallback": "planner_error",
-            "error": str(exc),
-        }
-        if intent_detect_enabled():
-            err_out["intent_detect"] = intent_result or {}
-        return err_out
+        raise UpstreamCallError.llm_unavailable(
+            stage="stage1",
+            status_code=status_code_from_exception(exc),
+        ) from exc

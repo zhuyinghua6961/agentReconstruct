@@ -77,9 +77,9 @@ def test_iter_pre_answers_async_yields_completion_order(monkeypatch):
     results = asyncio.run(_collect())
 
     assert results == [
-        (1, "answer:q2"),
-        (2, "answer:q3"),
-        (0, "answer:q1"),
+        (1, "answer:q2", None),
+        (2, "answer:q3", None),
+        (0, "answer:q1", None),
     ]
 
 

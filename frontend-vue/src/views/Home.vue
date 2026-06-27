@@ -2,14 +2,14 @@
 import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
 import { useChatStore } from '../stores/chatStore'
 import { api } from '../services/api'
-import { formatTime } from '../utils'
+import { formatTime, formatMessageTime } from '../utils'
 import { buildMessageRenderMemoKey } from '../utils/messageRenderMemo'
 import { buildVisibleMessageWindow, resolveHiddenHistoryReveal } from '../utils/messageWindowing'
 import { resolveStreamingTarget } from '../utils/streamingTarget'
 import { buildChatRequestContext } from '../utils/chatRequestContext'
 import { focusQuestionItem } from '../utils/questionFocus'
 import { buildQuestionOutlineItems, buildQuestionOutlineSignature, getLastQuestionOutlineItem, getQuestionAnchorId } from '../utils/questionOutline'
-import { getMessageStageTimingModel, getStepTimingDurationLabel as getStepTimingDurationLabelFromModel } from '../utils/stageTimings'
+import { getMessageStageTimingModel, getStepTimingDurationLabel as getStepTimingDurationLabelFromModel, resolveStepDisplayStatus } from '../utils/stageTimings'
 import { DEFAULT_NEAR_BOTTOM_THRESHOLD_PX, isNearBottom, shouldAutoScroll } from '../utils/scrollFollow'
 import { mergeSelectedFileIdsAfterUpload, resolveUploadedFileDisplayNumber } from '../utils/fileSelection'
 import {
@@ -69,8 +69,8 @@ let filePollConsecutiveUnchanged = 0
 let filePollLastPendingSignature = ''
 let filePollInFlight = false
 const questionOutlineCollapsed = ref(false)
-const questionOutlineWidth = ref(300)
-const questionOutlineLastExpandedWidth = ref(300)
+const questionOutlineWidth = ref(340)
+const questionOutlineLastExpandedWidth = ref(340)
 const activeQuestionMessageIndex = ref(null)
 const highlightedQuestionMessageIndex = ref(null)
 const userMessageElements = new Map()
@@ -113,6 +113,7 @@ const currentLeftSidebarWidth = computed(() =>
 const currentRightPanelWidth = computed(() =>
   questionOutlineCollapsed.value ? RIGHT_PANEL_COLLAPSED_WIDTH : questionOutlineWidth.value
 )
+const bothSidePanelsCollapsed = computed(() => leftSidebarCollapsed.value && questionOutlineCollapsed.value)
 const pinnedChats = computed(() => store.chats.filter(chat => Boolean(chat?.isPinned)))
 const recentChats = computed(() => store.chats.filter(chat => !Boolean(chat?.isPinned)))
 const questionOutlineItems = ref([])
@@ -894,14 +895,31 @@ function getGraphStepDetail(step) {
   return '已获取结构化线索，继续文献检索与生成'
 }
 
+function getStepDisplayStatus(msg, step, stepIndex) {
+  const steps = getVisibleMessageSteps(msg)
+  return resolveStepDisplayStatus(msg, step, {
+    stepIndex,
+    stepCount: steps.length,
+    normalizeStatus: (status) => normalizeStepStatus(status),
+  })
+}
+
+function getCollapsedStepDisplayStatus(msg) {
+  const steps = getVisibleMessageSteps(msg)
+  const summary = getCollapsedStepSummary(msg)
+  if (!summary) return 'processing'
+  const stepIndex = steps.findIndex((item) => item === summary)
+  return getStepDisplayStatus(msg, summary, Math.max(stepIndex, 0))
+}
+
 function getStepOverview(msg) {
   const steps = getVisibleMessageSteps(msg)
   if (steps.length === 0) return ''
-  const processing = steps.filter((step) => normalizeStepStatus(step?.status) === 'processing').length
-  const success = steps.filter((step) => normalizeStepStatus(step?.status) === 'success').length
-  const skipped = steps.filter((step) => normalizeStepStatus(step?.status) === 'skipped').length
-  const warning = steps.filter((step) => normalizeStepStatus(step?.status) === 'warning').length
-  const error = steps.filter((step) => normalizeStepStatus(step?.status) === 'error').length
+  const processing = steps.filter((step, idx) => getStepDisplayStatus(msg, step, idx) === 'processing').length
+  const success = steps.filter((step, idx) => getStepDisplayStatus(msg, step, idx) === 'success').length
+  const skipped = steps.filter((step, idx) => getStepDisplayStatus(msg, step, idx) === 'skipped').length
+  const warning = steps.filter((step, idx) => getStepDisplayStatus(msg, step, idx) === 'warning').length
+  const error = steps.filter((step, idx) => getStepDisplayStatus(msg, step, idx) === 'error').length
   if (error > 0) return `失败 ${error} · 完成 ${success}${warning ? ` · 警告 ${warning}` : ''}${skipped ? ` · 跳过 ${skipped}` : ''}`
   if (warning > 0) return `警告 ${warning} · 完成 ${success}${skipped ? ` · 跳过 ${skipped}` : ''}`
   if (processing > 0) return `进行中 ${processing} · 完成 ${success}${skipped ? ` · 跳过 ${skipped}` : ''}`
@@ -909,7 +927,8 @@ function getStepOverview(msg) {
 }
 
 function getCollapsedStepSummary(msg) {
-  const current = [...getVisibleMessageSteps(msg)].reverse().find((step) => normalizeStepStatus(step?.status) === 'processing')
+  const steps = getVisibleMessageSteps(msg)
+  const current = [...steps].reverse().find((step, reverseIdx) => getStepDisplayStatus(msg, step, steps.length - 1 - reverseIdx) === 'processing')
   return current || getLastStep(msg)
 }
 
@@ -1093,7 +1112,7 @@ function applyGatewayEvent(chatId, data, runtime = getStreamRuntime(chatId)) {
     const stepPayload = buildStepPayload(data, `step_${Date.now()}`, 'processing')
     upsertStreamingStep(chatId, stepPayload, eventState.activeStepKey, {
       markPreviousActiveSuccess:
-        stepPayload.step !== eventState.activeStepKey && normalizeStepStatus(stepPayload.status) === 'processing'
+        Boolean(eventState.activeStepKey && stepPayload.step && stepPayload.step !== eventState.activeStepKey)
     })
     eventState.activeStepKey = stepPayload.step
     return { terminal: false }
@@ -1197,6 +1216,11 @@ function applyGatewayEvent(chatId, data, runtime = getStreamRuntime(chatId)) {
       used_files: Array.isArray(data.used_files) ? data.used_files : (existingMeta.used_files || []),
       timings: (data.timings && typeof data.timings === 'object') ? data.timings : (existingMeta.timings || {}),
     }
+    const runtimeTaskId = String(getStreamRuntime(chatId)?.requestId || '').trim()
+    if (runtimeTaskId.startsWith('task_')) {
+      updates.metadata.task_id = String(updates.metadata.task_id || runtimeTaskId).trim() || runtimeTaskId
+      updates.metadata.trace_id = String(updates.metadata.trace_id || runtimeTaskId).trim() || runtimeTaskId
+    }
     if (updates.metadata.timings && typeof updates.metadata.timings === 'object' && !Array.isArray(updates.metadata.timings)) {
       updates.timings = { ...updates.metadata.timings }
     }
@@ -1226,7 +1250,10 @@ function applyGatewayEvent(chatId, data, runtime = getStreamRuntime(chatId)) {
       code: data.code || (String(data.error || '').trim().toLowerCase() === 'execution_file_unavailable' ? 'EXECUTION_FILE_UNAVAILABLE' : ''),
       error: data.error,
       message: data.message || data.error,
-      metadata: mergedMeta,
+      metadata: {
+        ...mergedMeta,
+        status_code: data.status_code ?? mergedMeta.status_code,
+      },
     })
     const presentation = buildRoutingErrorPresentation({
       code: data.code || (String(data.error || '').trim().toLowerCase() === 'execution_file_unavailable' ? 'EXECUTION_FILE_UNAVAILABLE' : ''),
@@ -1258,14 +1285,19 @@ function applyGatewayEvent(chatId, data, runtime = getStreamRuntime(chatId)) {
         })
       })
     }
-    const existingContent = String(targetMessage.content || '').trim()
+    const errorMetadata = {
+      ...mergedMeta,
+      streaming_terminal_event: 'error',
+    }
+    const runtimeTaskId = String(getStreamRuntime(chatId)?.requestId || '').trim()
+    if (runtimeTaskId.startsWith('task_')) {
+      errorMetadata.task_id = String(errorMetadata.task_id || runtimeTaskId).trim() || runtimeTaskId
+      errorMetadata.trace_id = String(errorMetadata.trace_id || runtimeTaskId).trim() || runtimeTaskId
+    }
     updateStreamingTargetMessage(chatId, {
-      content: existingContent ? `${existingContent}\n\n${renderedError}` : renderedError,
+      content: renderedError,
       queryMode: getActualQueryModeLabel(data, mergedMeta, { allowRouteFallback: false }) || targetMessage.queryMode || '',
-      metadata: {
-        ...mergedMeta,
-        streaming_terminal_event: 'error',
-      },
+      metadata: errorMetadata,
       isComplete: true
     })
     taskRecoveryDebug.log('home:event-error', {
@@ -1299,6 +1331,57 @@ function getPatentPreviewSourceLabel(stream) {
 
 function getMessageRenderMemoKey(msg) {
   return buildMessageRenderMemoKey(msg)
+}
+
+function getMessageTimeLabel(message) {
+  const value = message?.timestamp || message?.created_at
+  if (!value) return ''
+  return formatMessageTime(value)
+}
+
+function getMessageSupportId(message) {
+  const metadata = (message?.metadata && typeof message.metadata === 'object') ? message.metadata : {}
+  const candidates = [
+    metadata.task_id,
+    metadata.trace_id,
+    message?.task_id,
+    message?.trace_id,
+    message?.streamRequestId,
+  ]
+  for (const raw of candidates) {
+    const value = String(raw || '').trim()
+    if (!value) continue
+    if (value.startsWith('task_') || value.startsWith('req_')) return value
+  }
+  return ''
+}
+
+const copiedSupportId = ref('')
+
+async function copyMessageSupportId(message) {
+  const value = getMessageSupportId(message)
+  if (!value) return
+  try {
+    if (window.isSecureContext && navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value)
+    } else {
+      const textarea = document.createElement('textarea')
+      textarea.value = value
+      textarea.setAttribute('readonly', '')
+      textarea.style.position = 'fixed'
+      textarea.style.opacity = '0'
+      document.body.appendChild(textarea)
+      textarea.select()
+      document.execCommand('copy')
+      document.body.removeChild(textarea)
+    }
+    copiedSupportId.value = value
+    window.setTimeout(() => {
+      if (copiedSupportId.value === value) copiedSupportId.value = ''
+    }, 1600)
+  } catch {
+    window.prompt('复制追踪 ID', value)
+  }
 }
 
 function handleMarkdownPatentOpen(patentId) {
@@ -2479,7 +2562,11 @@ watch(
 </script>
 
 <template>
-  <div ref="appContainer" class="app-container" :class="{ resizing: isPanelResizing }">
+  <div
+    ref="appContainer"
+    class="app-container"
+    :class="{ resizing: isPanelResizing, 'both-panels-collapsed': bothSidePanelsCollapsed }"
+  >
     <aside
       class="sidebar"
       :class="{ collapsed: leftSidebarCollapsed }"
@@ -2744,7 +2831,12 @@ watch(
         </div>
       </div>
 
-      <div class="messages-area" ref="messagesArea" @scroll="handleMessagesScroll">
+      <div
+        class="messages-area"
+        :class="{ 'messages-area-expanded': bothSidePanelsCollapsed }"
+        ref="messagesArea"
+        @scroll="handleMessagesScroll"
+      >
         <template v-if="!hasMessages">
           <div class="empty-state">
             <div class="empty-icon">🔋</div>
@@ -2761,7 +2853,7 @@ watch(
           <div
             v-for="entry in visibleMessageEntries"
             :key="entry.absoluteMessageIndex"
-            v-memo="[getMessageRenderMemoKey(entry.message), highlightedQuestionMessageIndex === entry.absoluteMessageIndex]"
+            v-memo="[getMessageRenderMemoKey(entry.message), highlightedQuestionMessageIndex === entry.absoluteMessageIndex, copiedSupportId === getMessageSupportId(entry.message) ? copiedSupportId : '']"
             class="message"
             :data-message-index="entry.absoluteMessageIndex"
             :class="[
@@ -2775,17 +2867,39 @@ watch(
             :ref="entry.message.role === 'user' ? (el) => setUserMessageElement(entry.absoluteMessageIndex, el) : null"
           >
             <template v-if="entry.message.role === 'user'">
-              <div class="message-content">{{ entry.message.content }}</div>
+              <div class="message-column message-column-user">
+                <div v-if="getMessageTimeLabel(entry.message)" class="message-time">{{ getMessageTimeLabel(entry.message) }}</div>
+                <div class="message-content">{{ entry.message.content }}</div>
+              </div>
             </template>
             <template v-else-if="entry.message.role === 'system'">
-              <div class="system-message">
-                <span class="system-icon">ℹ️</span>
-                <span class="system-text">{{ entry.message.content }}</span>
+              <div class="message-column message-column-system">
+                <div v-if="getMessageTimeLabel(entry.message)" class="message-time">{{ getMessageTimeLabel(entry.message) }}</div>
+                <div class="system-message">
+                  <span class="system-icon">ℹ️</span>
+                  <span class="system-text">{{ entry.message.content }}</span>
+                </div>
               </div>
             </template>
             <template v-else-if="entry.message.role === 'bot' || entry.message.role === 'assistant'">
               <div class="bot-avatar">✨</div>
-              <div class="message-content" :class="{ 'message-graph-kb': isGraphKbMessage(entry.message), 'message-patent': isPatentMessage(entry.message) }">
+              <div class="message-column message-column-bot">
+                <div v-if="getMessageTimeLabel(entry.message) || getMessageSupportId(entry.message)" class="message-meta-row">
+                  <div v-if="getMessageTimeLabel(entry.message)" class="message-time">{{ getMessageTimeLabel(entry.message) }}</div>
+                  <button
+                    v-if="getMessageSupportId(entry.message)"
+                    type="button"
+                    class="message-support-id"
+                    :title="copiedSupportId === getMessageSupportId(entry.message) ? '已复制' : '复制追踪 ID，便于运维查日志'"
+                    @click="copyMessageSupportId(entry.message)"
+                  >
+                    {{ copiedSupportId === getMessageSupportId(entry.message) ? '已复制' : getMessageSupportId(entry.message) }}
+                  </button>
+                </div>
+                <div
+                  v-if="entry.message.queryMode || hasProcessPanel(entry.message) || getPatentPreviewStreams(entry.message).length > 0"
+                  class="message-auxiliary"
+                >
                 <div v-if="entry.message.queryMode" class="query-mode-badge">{{ entry.message.queryMode }}</div>
                 <div v-if="hasProcessPanel(entry.message)" class="steps-panel">
                   <div class="steps-header" @click="toggleSteps(entry.absoluteMessageIndex)">
@@ -2800,7 +2914,7 @@ watch(
                       </span>
                       <span v-if="getStepOverview(entry.message)" class="steps-overview">{{ getStepOverview(entry.message) }}</span>
                       <div v-if="isStepsCollapsed(entry.message) && getCollapsedStepSummary(entry.message)" class="steps-summary">
-                        <span class="step-icon" :class="'step-icon-' + normalizeStepStatus(getCollapsedStepSummary(entry.message).status)">
+                        <span class="step-icon" :class="'step-icon-' + getCollapsedStepDisplayStatus(entry.message)">
                           {{ getStepIcon(getCollapsedStepSummary(entry.message)) }}
                         </span>
                         <span class="step-message">{{ getStepTitle(getCollapsedStepSummary(entry.message)) }}</span>
@@ -2811,8 +2925,8 @@ watch(
                     </div>
                   </div>
                   <div v-show="!isStepsCollapsed(entry.message)" class="processing-steps">
-                    <div v-for="(step, idx) in getVisibleMessageSteps(entry.message)" :key="step.step || idx" class="step-item" :class="'step-' + normalizeStepStatus(step.status)">
-                      <span class="step-icon" :class="'step-icon-' + normalizeStepStatus(step.status)">{{ getStepIcon(step) }}</span>
+                    <div v-for="(step, idx) in getVisibleMessageSteps(entry.message)" :key="step.step || idx" class="step-item" :class="'step-' + getStepDisplayStatus(entry.message, step, idx)">
+                      <span class="step-icon" :class="'step-icon-' + getStepDisplayStatus(entry.message, step, idx)">{{ getStepIcon(step) }}</span>
                       <div class="step-body">
                         <div class="step-row">
                           <span class="step-title">{{ getStepTitle(step) }}</span>
@@ -2861,21 +2975,31 @@ watch(
                     <div v-else class="patent-preview-stream-empty">处理中...</div>
                   </div>
                 </div>
+                </div>
                 <QuotaLimitCard v-if="getQuotaCard(entry.message)" :card="getQuotaCard(entry.message)" />
                 <div
                   v-else-if="entry.message.content && isStreamingTextMessage(entry.message)"
-                  class="message-markdown-content"
-                  :class="{ 'graph-kb-markdown': isGraphKbMessage(entry.message), 'patent-markdown': isPatentMessage(entry.message) }"
+                  class="message-content"
+                  :class="{ 'message-graph-kb': isGraphKbMessage(entry.message), 'message-patent': isPatentMessage(entry.message) }"
                 >
-                  <MarkdownRenderer
-                    :content="String(entry.message.content || '')"
-                    :streaming="true"
-                    :variant="getMessageMarkdownVariant(entry.message)"
-                    @open-doi="(doi) => handleMarkdownDoiOpen(doi, entry.absoluteMessageIndex)"
-                    @open-patent="handleMarkdownPatentOpen"
-                  />
+                  <div
+                    class="message-markdown-content"
+                    :class="{ 'graph-kb-markdown': isGraphKbMessage(entry.message), 'patent-markdown': isPatentMessage(entry.message) }"
+                  >
+                    <MarkdownRenderer
+                      :content="String(entry.message.content || '')"
+                      :streaming="true"
+                      :variant="getMessageMarkdownVariant(entry.message)"
+                      @open-doi="(doi) => handleMarkdownDoiOpen(doi, entry.absoluteMessageIndex)"
+                      @open-patent="handleMarkdownPatentOpen"
+                    />
+                  </div>
                 </div>
-                <template v-else-if="entry.message.content">
+                <div
+                  v-else-if="entry.message.content"
+                  class="message-content"
+                  :class="{ 'message-graph-kb': isGraphKbMessage(entry.message), 'message-patent': isPatentMessage(entry.message) }"
+                >
                   <div
                     class="message-markdown-content"
                     :class="{ 'graph-kb-markdown': isGraphKbMessage(entry.message), 'patent-markdown': isPatentMessage(entry.message) }"
@@ -2891,13 +3015,17 @@ watch(
                     <div class="terminal-message-title">{{ getTerminalMessageTitle(entry.message) }}</div>
                     <div v-if="getTerminalMessageDetail(entry.message)" class="terminal-message-detail">{{ getTerminalMessageDetail(entry.message) }}</div>
                   </div>
-                </template>
-                <div v-else-if="getTerminalMessageState(entry.message)" class="terminal-message-card" :class="'terminal-message-' + getTerminalMessageState(entry.message)">
+                </div>
+                <div v-else-if="getTerminalMessageState(entry.message)" class="message-content terminal-message-card" :class="'terminal-message-' + getTerminalMessageState(entry.message)">
                   <div class="terminal-message-title">{{ getTerminalMessageTitle(entry.message) }}</div>
                   <div v-if="getTerminalMessageDetail(entry.message)" class="terminal-message-detail">{{ getTerminalMessageDetail(entry.message) }}</div>
                 </div>
-                <div v-else-if="getTaskPhaseLabel(store.currentChatId)" class="loading-animation"><span>{{ getTaskPhaseLabel(store.currentChatId) }}...</span></div>
-                <div v-else class="loading-animation"><span>思考中...</span></div>
+                <div v-else-if="getTaskPhaseLabel(store.currentChatId)" class="message-content message-content-loading">
+                  <div class="loading-animation"><span>{{ getTaskPhaseLabel(store.currentChatId) }}...</span></div>
+                </div>
+                <div v-else class="message-content message-content-loading">
+                  <div class="loading-animation"><span>思考中...</span></div>
+                </div>
               </div>
             </template>
           </div>
@@ -3461,6 +3589,11 @@ watch(
   flex: 1;
   overflow-y: auto;
   padding: 24px;
+  --chat-user-max-width: min(720px, 92%);
+}
+
+.both-panels-collapsed .messages-area.messages-area-expanded {
+  --chat-user-max-width: min(920px, 96%);
 }
 
 .empty-state {
@@ -3503,22 +3636,117 @@ watch(
   justify-content: flex-start;
 }
 
+.message-system {
+  justify-content: center;
+}
+
+.message-column {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.message-column-user {
+  flex: 0 0 auto;
+  max-width: var(--chat-user-max-width);
+  align-items: flex-end;
+}
+
+.message-column-bot {
+  flex: 1;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.message-column-system {
+  max-width: 80%;
+  align-items: center;
+}
+
+.message-auxiliary {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  max-width: min(680px, 100%);
+  margin-bottom: 4px;
+}
+
+.message-column-bot > .message-content {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.message-time {
+  font-size: 11px;
+  line-height: 1.2;
+  color: #94a3b8;
+  padding: 0 4px;
+  user-select: none;
+}
+
+.message-meta-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  max-width: 100%;
+}
+
+.message-support-id {
+  display: block;
+  max-width: min(520px, 100%);
+  padding: 0 4px;
+  border: none;
+  background: transparent;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.2;
+  color: #64748b;
+  cursor: pointer;
+  text-align: left;
+  text-decoration: underline dotted;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-support-id:hover {
+  color: #475569;
+}
+
+.message-user .message-time {
+  text-align: right;
+}
+
 .message-content {
-  max-width: 70%;
+  box-sizing: border-box;
   padding: 12px 16px;
   border-radius: 12px;
   font-size: 14px;
   line-height: 1.6;
+  max-width: none;
 }
 
 .message-user .message-content {
+  display: block;
+  width: auto;
+  max-width: 100%;
   background: #667eea;
   color: white;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .message-bot .message-content {
+  width: 100%;
+  max-width: none;
   background: white;
   border: 1px solid #e2e8f0;
+}
+
+.message-content-loading {
+  min-height: 48px;
 }
 
 .message-content :deep(.stream-bullet) {
@@ -3614,12 +3842,14 @@ watch(
 
 .query-mode-badge {
   display: inline-block;
+  width: fit-content;
+  max-width: 100%;
   padding: 4px 10px;
   background: #dbeafe;
   color: #1d4ed8;
   border-radius: 4px;
   font-size: 12px;
-  margin-bottom: 8px;
+  margin-bottom: 0;
 }
 
 .processing-steps {
@@ -3627,8 +3857,14 @@ watch(
   padding: 4px 10px 10px;
 }
 
+.message-markdown-content {
+  width: 100%;
+  box-sizing: border-box;
+}
+
 .steps-panel {
-  margin-bottom: 12px;
+  width: 100%;
+  margin-bottom: 0;
   border: 1px solid #dbe6f3;
   border-radius: 12px;
   background: linear-gradient(180deg, #f8fbff 0%, #f3f7fb 100%);
@@ -3642,6 +3878,23 @@ watch(
   padding: 10px 12px;
   cursor: pointer;
   gap: 12px;
+  flex-wrap: wrap;
+}
+
+.both-panels-collapsed .steps-header {
+  align-items: flex-start;
+}
+
+.both-panels-collapsed .steps-meta {
+  flex: 1 1 100%;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.both-panels-collapsed .stage-timing-summary,
+.both-panels-collapsed .steps-overview {
+  max-width: 100%;
+  white-space: normal;
 }
 
 .steps-title {
@@ -3705,7 +3958,8 @@ watch(
 }
 
 .patent-preview-panel {
-  margin: 0 0 12px;
+  width: 100%;
+  margin: 0;
   padding: 12px;
   border: 1px solid #bfdbfe;
   border-radius: 12px;
@@ -3831,6 +4085,12 @@ watch(
 
 .step-icon-processing {
   color: #2563eb;
+  animation: stepPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes stepPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
 }
 
 .step-icon-success {
@@ -4438,12 +4698,11 @@ watch(
   display: flex;
   align-items: center;
   gap: 8px;
+  width: 100%;
   padding: 12px 16px;
   background: #f0f9ff;
   border-left: 3px solid #0ea5e9;
   border-radius: 8px;
-  margin: 12px auto;
-  max-width: 80%;
   font-size: 14px;
   color: #0c4a6e;
 }
@@ -4583,8 +4842,8 @@ watch(
     display: none;
   }
 
-  .message-content {
-    max-width: 78%;
+  .messages-area {
+    --chat-user-max-width: min(720px, 96%);
   }
 }
 

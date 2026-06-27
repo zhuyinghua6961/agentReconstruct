@@ -8,9 +8,14 @@ from typing import Any
 CODE_MESSAGES: dict[str, str] = {
     "ASK_CANCELLED": "已取消生成",
     "INTERNAL_ERROR": "服务器内部错误",
+    "UPSTREAM_ERROR": "上游模型服务异常，请稍后重试",
     "UPSTREAM_TIMEOUT": "专利问答执行超时",
+    "LLM_UNAVAILABLE": "LLM 服务不可用",
     "EMBEDDING_UNAVAILABLE": "语义检索依赖的向量服务不可用",
+    "RETRIEVAL_FAILED": "专利证据加载失败",
     "RETRIEVAL_RUNTIME_UNAVAILABLE": "专利检索运行时不可用",
+    "UPSTREAM_STREAM_INTERRUPTED": "模型流式输出中断",
+    "RERANK_DEGRADED": "重排序服务不可用，已按向量相似度排序继续",
     "PATENT_FILE_ROUTE_DISABLED": "专利文件问答路由已禁用",
     "SERVICE_NOT_READY": "专利问答服务未就绪",
     "DURABLE_MODE_DISABLED": "持久化专利模式已禁用",
@@ -55,7 +60,36 @@ def user_message_for_code(code: str, *, fallback: str = "") -> str:
     return "处理失败，请稍后重试"
 
 
+def build_upstream_error_message(component: str, *, status_code: int | None = None, detail: str = "") -> str:
+    component_key = str(component or "").strip().lower()
+    if component_key == "llm":
+        base = CODE_MESSAGES["LLM_UNAVAILABLE"]
+    elif component_key == "embedding":
+        base = CODE_MESSAGES["EMBEDDING_UNAVAILABLE"]
+    elif component_key == "retrieval":
+        base = CODE_MESSAGES["RETRIEVAL_FAILED"]
+    elif component_key == "stream":
+        base = CODE_MESSAGES["UPSTREAM_STREAM_INTERRUPTED"]
+    elif component_key == "rerank":
+        base = CODE_MESSAGES["RERANK_DEGRADED"]
+    else:
+        base = CODE_MESSAGES["UPSTREAM_ERROR"]
+    if status_code is not None:
+        base = f"{base}（HTTP {int(status_code)}）"
+    clean_detail = str(detail or "").strip()
+    if clean_detail and _looks_chinese(clean_detail) and clean_detail not in base:
+        return f"{base}：{clean_detail}"
+    return base
+
+
 def humanize_exception(exc: BaseException | str | Any, *, code: str = "", error: str = "") -> str:
+    from server.utils.upstream_errors import UpstreamCallError, coerce_upstream_error
+
+    if isinstance(exc, UpstreamCallError):
+        return str(exc.message)
+    coerced = coerce_upstream_error(exc)
+    if coerced is not None:
+        return str(coerced.message)
     text = str(exc or "").strip()
     normalized_code = str(code or "").strip().upper()
     if normalized_code in CODE_MESSAGES and (not text or _is_machine_message(text, error)):

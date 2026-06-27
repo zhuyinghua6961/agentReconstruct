@@ -138,3 +138,7 @@ class ErrorEvent(_BaseEvent):
     error: str
     message: str
     trace_id: str
+    retriable: bool | None = None
+    status_code: int | None = None
+    failure_stage: str | None = None
+    component: str | None = None

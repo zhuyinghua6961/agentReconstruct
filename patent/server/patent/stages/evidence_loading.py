@@ -15,6 +15,7 @@ from server.patent.retrieval_models import (
     PatentStage3EvidenceResult,
     PatentTableSupplement,
 )
+from server.utils.upstream_errors import UpstreamCallError
 
 _WHITESPACE_RE = re.compile(r"\s+")
 _LOGGER = logging.getLogger("patent.stage3")
@@ -472,7 +473,15 @@ def run_stage3_load_patent_evidence(
             int(index) + 1,
             exc,
         )
+        stage3_failed_patents.append(
+            {
+                "patent_id": patent_id,
+                "error": str(exc),
+            }
+        )
         return {"index": index, "patent_id": patent_id, "bundle": None, "ok": False}
+
+    stage3_failed_patents: list[dict[str, str]] = []
 
     def _build_patent_bundle(index: int, patent_id: str) -> dict[str, Any]:
         catalog_record = catalog_loader(patent_id) if callable(catalog_loader) else None
@@ -648,12 +657,17 @@ def run_stage3_load_patent_evidence(
     failed_patent_count = len(normalized_source_ids) - len(successful_source_ids)
 
     if not evidences and failed_patent_count > 0:
-        raise RuntimeError("stage3 evidence loading produced no successful patent bundles")
+        raise UpstreamCallError.retrieval_failed(stage="stage3")
+
+    stage3_metadata: dict[str, object] = {"force_pdf": bool(force_pdf)}
+    if stage3_failed_patents:
+        stage3_metadata["stage3_failed_patents"] = list(stage3_failed_patents)
+        stage3_metadata["stage3_failed_patent_count"] = len(stage3_failed_patents)
 
     bundle = PatentStage3EvidenceResult(
         source_ids=successful_source_ids,
         evidences=evidences,
-        metadata={"force_pdf": bool(force_pdf)},
+        metadata=stage3_metadata,
     )
     _LOGGER.info(
         "patent stage3 evidence loading completed source_count=%s evidence_bundle_count=%s failed_patent_count=%s",

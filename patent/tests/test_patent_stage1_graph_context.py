@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from server.patent.stages.planning import run_stage1_pre_answer_and_planning
+from server.utils.upstream_errors import UpstreamCallError
 
 
 class _Logger:
@@ -114,18 +117,18 @@ def test_stage1_json_parse_failed_fallback_seeds_from_graph_payload():
     assert "CN100355122C" in result["retrieval_plan"].explicit_patent_ids
 
 
-def test_stage1_planner_error_fallback_seeds_from_graph_payload():
+def test_stage1_planner_error_raises_upstream_call_error():
     class _BrokenClient:
         chat = SimpleNamespace(completions=SimpleNamespace(create=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom"))))
 
-    result = run_stage1_pre_answer_and_planning(
-        user_question="比较 CN100355122C 和 CN100371239C 的工艺步骤差异",
-        client=_BrokenClient(),
-        model="gpt-test",
-        logger=_Logger(),
-        conversation_context=_graph_context(),
-    )
+    with pytest.raises(UpstreamCallError) as exc_info:
+        run_stage1_pre_answer_and_planning(
+            user_question="比较 CN100355122C 和 CN100371239C 的工艺步骤差异",
+            client=_BrokenClient(),
+            model="gpt-test",
+            logger=_Logger(),
+            conversation_context=_graph_context(),
+        )
 
-    assert result["fallback"] == "planner_error"
-    assert result["retrieval_claims"]
-    assert "CN100355122C" in result["retrieval_plan"].explicit_patent_ids
+    assert exc_info.value.code == "LLM_UNAVAILABLE"
+    assert exc_info.value.stage == "stage1"

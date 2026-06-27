@@ -115,6 +115,21 @@ test('graph direct lookup patent id rendered as inline code becomes a clickable 
   }
 })
 
+test('inline markdown heading marker before numbered subsection is normalized', () => {
+  const markdown = [
+    '关键工艺步骤与参数调控 #### 1. 湿法研磨',
+    '将原料加入水中研磨。',
+  ].join('\n')
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.doesNotMatch(html, /#### 1\. 湿法研磨/)
+    assert.match(html, /湿法研磨/)
+  }
+})
+
 test('inline markdown heading marker after plain text is normalized into a real heading', () => {
   const markdown = [
     '全电池性能 ### 总结',
@@ -390,6 +405,41 @@ test('inline markdown heading with trailing punctuation after patent citation is
   for (const html of [streamingHtml, finalHtml]) {
     assert.doesNotMatch(html, /### 二、工艺参数对压实密度的提升作用。/)
     assert.match(html, /<h3>二、工艺参数对压实密度的提升作用。<\/h3>/)
+  }
+})
+
+test('patent answer plain section headings and process steps normalize into hierarchical headings', () => {
+  const markdown = [
+    '原料体系与多孔疏松的形成机制',
+    '',
+    '该工艺的原料选择具有明确的工程目的。(CN115321508A)。',
+    '',
+    '关键工艺步骤与参数调控',
+    '',
+    '湿法研磨 将铁红、碳酸锂、磷酸二氢铵和葡萄糖按照化学计量比进行称量配比。',
+    '',
+    '2. 喷雾干燥造粒',
+    '',
+    '3. 高温烧结（一烧） 将喷雾干燥后的前驱体颗粒在惰性气氛下进行高温烧结。',
+    '',
+    '(CN118270751A)。 (CN120423517B) (CN113745481A) (CN119774573A)',
+  ].join('\n')
+
+  const streamingHtml = formatStreamingAnswer(markdown)
+  const finalHtml = formatAnswer(markdown)
+
+  for (const html of [streamingHtml, finalHtml]) {
+    assert.match(html, /<h2>原料体系与多孔疏松的形成机制<\/h2>/)
+    assert.match(html, /<h2>关键工艺步骤与参数调控<\/h2>/)
+    assert.match(html, /<h3>湿法研磨<\/h3>/)
+    assert.match(html, /<h3>2\. 喷雾干燥造粒<\/h3>/)
+    assert.match(html, /<h3>3\. 高温烧结（一烧）<\/h3>/)
+    assert.match(html, /将铁红、碳酸锂、磷酸二氢铵和葡萄糖按照化学计量比进行称量配比。/)
+    assert.match(html, /将喷雾干燥后的前驱体颗粒在惰性气氛下进行高温烧结。/)
+    assert.match(html, /data-patent-id="CN115321508A"/)
+    assert.doesNotMatch(html, /CN120423517B/)
+    assert.doesNotMatch(html, /CN113745481A/)
+    assert.doesNotMatch(html, /CN119774573A/)
   }
 })
 

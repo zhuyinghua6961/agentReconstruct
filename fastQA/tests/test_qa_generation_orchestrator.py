@@ -114,10 +114,15 @@ def _merge_stage2_identity(**kwargs):
     return dict(kwargs.get("pdf_chunks") or {})
 
 
-def test_orchestrator_run_returns_fallback_when_stage2_fails():
+def test_orchestrator_run_returns_error_when_stage2_hard_fails():
     runtime = _Runtime(
         stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]},
-        stage2_payload={"success": False, "error": "retrieval_failed"},
+        stage2_payload={
+            "success": False,
+            "hard_failure": True,
+            "error": "retrieval_failed",
+            "upstream_error": {"code": "RETRIEVAL_FAILED", "error": "retrieval_failed", "component": "retrieval", "stage": "stage2", "message": "文献检索失败", "retriable": True},
+        },
         doi_payload=[],
         stage25_payload={},
         stage3_payload={},
@@ -135,9 +140,8 @@ def test_orchestrator_run_returns_fallback_when_stage2_fails():
         logger=_logger(),
     )
 
-    assert result.success is True
-    assert result.final_answer == "deep"
-    assert result.metadata.query_mode == "生成驱动检索（检索失败，仅预回答）"
+    assert result.success is False
+    assert result.final_answer == ""
 
 
 def test_orchestrator_run_returns_final_result_when_stage4_succeeds():
@@ -733,7 +737,7 @@ def test_orchestrator_does_not_cache_stage2_result_when_cancel_flips_after_retur
     redis_service = RedisService.from_prefix(client=_FakeRedis(), key_prefix="agentcode")
     runtime = _Runtime(
         stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]},
-        stage2_payload={"success": False, "error": "retrieval_failed", "metadata": {}},
+        stage2_payload={"success": False, "cancelled": True, "error": "cancelled"},
         doi_payload=[],
         stage25_payload={},
         stage3_payload={},
@@ -766,8 +770,8 @@ def test_orchestrator_does_not_cache_stage2_result_when_cancel_flips_after_retur
     )
 
     metrics = snapshot_cache_metrics()
-    assert first.success is True
-    assert second.success is True
+    assert first.success is False
+    assert second.success is False
     assert metrics["stage2"].get("cache_hit", 0) == 0
 
 

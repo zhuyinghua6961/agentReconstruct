@@ -39,3 +39,31 @@ test('formatHttpError returns Chinese status summary', () => {
   assert.equal(formatHttpError(404, '/api/literature_search'), '请求的资源不存在')
   assert.equal(formatHttpError(503, '/api/patent_search'), '服务暂时不可用，请稍后重试')
 })
+
+test('formatUserFacingError maps new upstream error codes', () => {
+  assert.equal(
+    formatUserFacingError({
+      code: 'LLM_UNAVAILABLE',
+      error: 'llm_unavailable',
+      message: 'LLM 服务不可用（HTTP 503）',
+    }),
+    'LLM 服务不可用（HTTP 503）'
+  )
+  assert.equal(
+    formatUserFacingError({
+      code: 'EMBEDDING_UNAVAILABLE',
+      error: 'embedding_unavailable',
+      message: 'Embedding 模型不可用',
+      metadata: { status_code: 503 },
+    }),
+    'Embedding 模型不可用（HTTP 503）'
+  )
+  assert.equal(
+    formatUserFacingError({
+      code: 'UPSTREAM_STREAM_INTERRUPTED',
+      error: 'upstream_stream_interrupted',
+      message: '模型流式输出中断',
+    }),
+    '模型流式输出中断'
+  )
+})

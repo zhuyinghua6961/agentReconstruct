@@ -46,6 +46,7 @@ def _clear_intent_model_env(monkeypatch):
         "PATENT_INTENT_DETECT_MODEL",
         "QA_INTENT_DETECT_ENABLED",
         "QA_INTENT_DETECT_MODEL",
+        "PATENT_INTENT_ANCHOR_EXTRACT_ENABLED",
         "LLM_IS_THINKING_MODEL",
         "LLM_THINKING_ENABLED",
     ):
@@ -61,7 +62,11 @@ def test_patent_intent_detect_cache_signature_reflects_toggle(monkeypatch):
     monkeypatch.delenv("QA_INTENT_DETECT_MODEL", raising=False)
     monkeypatch.setenv("PATENT_INTENT_DETECT_MODEL", "custom-intent-model")
     sig = patent_intent_detect_cache_signature()
-    assert sig == {"patent_intent_detect": True, "patent_intent_detect_model": "custom-intent-model"}
+    assert sig == {
+        "patent_intent_detect": True,
+        "patent_intent_detect_model": "custom-intent-model",
+        "patent_intent_anchor_extract": True,
+    }
 
 
 def test_intent_detect_enabled_accepts_legacy_qa_alias(monkeypatch):
@@ -255,6 +260,36 @@ def test_run_intent_detect_quick_tag_normalizes_tag():
     got = run_intent_detect_quick_tag(client=client, user_question="反应机理？", logger=_Logger())
     assert got["ok"] is True
     assert got["intent_tag"] == "mechanism_analysis"
+    assert isinstance(got.get("anchor_terms"), list)
+
+
+def test_run_intent_detect_parses_json_anchor_terms():
+    client = _FakeClient(
+        '{"intent_tag":"synthesis_preparation","anchor_terms":["铁红","二烧","葡萄糖","PEG","比例"]}'
+    )
+    got = run_intent_detect_quick_tag(
+        client=client,
+        user_question="以铁红、二烧为铁源，葡萄糖和 PEG 为碳源，最佳混合比例是多少？",
+        logger=_Logger(),
+    )
+    assert got["ok"] is True
+    assert got["intent_tag"] == "synthesis_preparation"
+    assert "铁红" in got["anchor_terms"]
+    assert "二烧" in got["anchor_terms"]
+    assert "PEG" in got["anchor_terms"]
+
+
+def test_format_intent_hint_includes_anchor_terms():
+    hint = format_intent_hint_for_stage1_user_block(
+        intent_result={
+            "ok": True,
+            "intent_tag": "synthesis_preparation",
+            "anchor_terms": ["铁红", "葡萄糖", "PEG"],
+        },
+    )
+    assert "检索锚词" in hint
+    assert "铁红" in hint
+    assert "PEG" in hint
 
 
 def test_format_intent_hint_empty_when_not_ok():

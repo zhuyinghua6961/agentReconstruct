@@ -7,6 +7,7 @@ import time
 from typing import Any, Dict, List, Literal
 
 from app.integrations.llm import raise_if_upstream_pool_timeout
+from app.utils.upstream_errors import UpstreamCallError
 from app.integrations.llm.thinking import LLM_STAGE_CONTROL, merge_extra_body, resolve_thinking_controls
 from app.modules.generation_pipeline.intent_detect import (
     apply_intent_tag_to_question_focus,
@@ -808,4 +809,11 @@ def run_stage1_pre_answer_and_planning(
     except Exception as exc:
         raise_if_upstream_pool_timeout(exc)
         logger.error("阶段一执行失败: %s", exc)
-        return {"success": False, "error": str(exc)}
+        upstream = UpstreamCallError.from_exception(
+            exc,
+            code="LLM_UNAVAILABLE",
+            component="llm",
+            stage="stage1",
+            error="llm_unavailable",
+        )
+        return {"success": False, "error": str(exc), "upstream_error": upstream.to_dict()}

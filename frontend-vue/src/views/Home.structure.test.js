@@ -9,7 +9,7 @@ const source = readFileSync(join(currentDir, 'Home.vue'), 'utf8')
 const scriptSource = source.slice(0, source.indexOf('</script>'))
 const assistantMessageSection = source.slice(
   source.indexOf(`<template v-else-if="entry.message.role === 'bot' || entry.message.role === 'assistant'">`),
-  source.indexOf(`<div v-else-if="getTaskPhaseLabel(store.currentChatId)" class="loading-animation">`)
+  source.indexOf(`<div v-else-if="getTaskPhaseLabel(store.currentChatId)" class="message-content message-content-loading">`)
 )
 
 test('Home exposes literature search entry in header navigation', () => {
@@ -204,8 +204,8 @@ test('Home renders quota limit cards inline for quota failures while keeping mar
   assert.match(source, /function getQuotaCard\(message\)/)
   assert.match(source, /mergedMeta\.quota_card = presentation\.card/)
   assert.match(source, /<QuotaLimitCard v-if="getQuotaCard\(entry\.message\)" :card="getQuotaCard\(entry\.message\)" \/>/)
-  assert.match(source, /<QuotaLimitCard v-if="getQuotaCard\(entry\.message\)" :card="getQuotaCard\(entry\.message\)" \/>\s*<div\s+v-else-if="entry\.message\.content && isStreamingTextMessage\(entry\.message\)"[\s\S]*class="message-markdown-content"/s)
-  assert.match(source, /<template v-else-if="entry\.message\.content">/)
+  assert.match(source, /<QuotaLimitCard v-if="getQuotaCard\(entry\.message\)" :card="getQuotaCard\(entry\.message\)" \/>\s*<div\s+v-else-if="entry\.message\.content && isStreamingTextMessage\(entry\.message\)"[\s\S]*class="message-content"[\s\S]*class="message-markdown-content"/s)
+  assert.match(source, /<div\s+v-else-if="entry\.message\.content"[\s\S]*class="message-content"/s)
   assert.match(source, /<MarkdownRenderer[\s\S]*:content="String\(entry\.message\.content \|\| ''\)"[\s\S]*@open-doi="\(doi\) => handleMarkdownDoiOpen\(doi, entry\.absoluteMessageIndex\)"[\s\S]*@open-patent="handleMarkdownPatentOpen"/s)
   assert.doesNotMatch(source, /v-html="getRenderedMessageHtml\(entry\.message\)"/)
 })
@@ -229,12 +229,12 @@ test('Home renders failed terminal assistant messages as terminal cards instead 
   assert.match(source, /if \(state === 'expired'\) return '已结束'/)
   assert.match(source, /if \(state === 'expired'\) return '这次回答已过期结束，请重新发起提问。'/)
   assert.match(source, /<div v-if="getTerminalMessageState\(entry\.message\)" class="terminal-message-inline" :class="'terminal-message-' \+ getTerminalMessageState\(entry\.message\)">/)
-  assert.match(source, /<div v-else-if="getTerminalMessageState\(entry\.message\)" class="terminal-message-card"/)
+  assert.match(source, /<div v-else-if="getTerminalMessageState\(entry\.message\)" class="message-content terminal-message-card"/)
   assert.match(source, /<div class="terminal-message-title">{{ getTerminalMessageTitle\(entry\.message\) }}<\/div>/)
   assert.match(source, /<div v-if="getTerminalMessageDetail\(entry\.message\)" class="terminal-message-detail">{{ getTerminalMessageDetail\(entry\.message\) }}<\/div>/)
   assert.match(source, /\.terminal-message-canceled \{/)
   assert.match(source, /\.terminal-message-expired \{/)
-  assert.match(source, /<div v-else class="loading-animation"><span>思考中\.\.\.<\/span><\/div>/)
+  assert.match(source, /<div v-else class="message-content message-content-loading">\s*<div class="loading-animation"><span>思考中\.\.\.<\/span><\/div>/)
 })
 
 test('Home ignores late stream errors after a done event has already completed the message', () => {
@@ -358,7 +358,7 @@ test('Home exposes queued and admitted task states in the UI instead of showing 
   assert.match(source, /if \(taskStatus === 'admitted'\) return '即将开始'/)
   assert.match(source, /if \(taskStatus === 'running'\) return '生成中'/)
   assert.match(source, /<span v-if="getTaskPhaseLabel\(chat\.id\)" class="history-status-badge">{{ getTaskPhaseLabel\(chat\.id\) }}<\/span>/)
-  assert.match(source, /<div v-else-if="getTaskPhaseLabel\(store\.currentChatId\)" class="loading-animation"><span>{{ getTaskPhaseLabel\(store\.currentChatId\) }}\.\.\.<\/span><\/div>/)
+  assert.match(source, /<div v-else-if="getTaskPhaseLabel\(store\.currentChatId\)" class="message-content message-content-loading">\s*<div class="loading-animation"><span>{{ getTaskPhaseLabel\(store\.currentChatId\) }}\.\.\.<\/span><\/div>/)
 })
 
 test('Home stop flow uses gateway task cancel for recoverable tasks and attaches recovery on current-chat active_task', () => {

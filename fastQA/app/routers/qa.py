@@ -807,6 +807,12 @@ def _iter_route_events(
                     return
             except Exception as exc:
                 logger.warning("fastqa graph kb attempt failed, falling back to generation: %s", exc)
+                yield _graph_retrieval_step_event(
+                    status="error",
+                    mode="error",
+                    diagnostics={},
+                    error=str(exc) or exc.__class__.__name__,
+                )
 
         runtime = getattr(request.app.state, "generation_runtime", None) if generation_runtime_is_ready(request.app.state) else None
         redis_service = getattr(request.app.state, "redis_service", None)
@@ -935,7 +941,7 @@ def _graph_retrieval_step_event(
         detail = "正在尝试从知识图谱获取结构化线索"
     elif normalized_status == "error":
         message = "图谱检索：结构化查询失败，转入文献检索"
-        detail = "图谱检索失败，已自动降级为常规生成链路"
+        detail = f"图谱检索失败：{error}" if error else "图谱检索失败，已自动降级为常规生成链路"
     elif normalized_mode == "skip_graph":
         message = "图谱检索：未命中可用结构化线索，转入文献检索"
         detail = "未找到可直接用于增强生成的图谱线索"

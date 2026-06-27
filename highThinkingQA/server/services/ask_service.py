@@ -1,4 +1,5 @@
 from server.utils.user_errors import humanize_exception, user_message_for_code
+from server.utils.upstream_errors import UpstreamCallError, build_sse_error_event, coerce_upstream_error
 
 import concurrent.futures
 import atexit
@@ -330,6 +331,51 @@ def _format_frontend_step_message(stage: str, payload: dict[str, Any]) -> tuple[
         return "阶段5：开始引用验证与必要修订", data
 
     return raw_message, data
+
+
+def _build_fatal_error_event(
+    *,
+    exc_or_state: Any,
+    trace_id: str,
+    default_code: str = "UPSTREAM_ERROR",
+    default_error: str = "upstream_error",
+) -> dict[str, Any]:
+    upstream: UpstreamCallError | None = None
+    if isinstance(exc_or_state, UpstreamCallError):
+        upstream = exc_or_state
+    elif hasattr(exc_or_state, "upstream_error"):
+        upstream = coerce_upstream_error(getattr(exc_or_state, "upstream_error", None))
+    elif isinstance(exc_or_state, dict):
+        upstream = coerce_upstream_error(exc_or_state.get("upstream_error") or exc_or_state)
+    else:
+        upstream = coerce_upstream_error(exc_or_state)
+
+    if upstream is not None:
+        return build_sse_error_event(upstream, trace_id=trace_id)
+
+    raw_error = exc_or_state
+    if hasattr(exc_or_state, "error"):
+        raw_error = getattr(exc_or_state, "error", "")
+    message = humanize_exception(raw_error, code=default_code, error=default_error)
+    return {
+        "type": "error",
+        "code": default_code,
+        "error": default_error,
+        "message": message,
+        "retriable": True,
+        "trace_id": trace_id,
+    }
+
+
+def _has_fatal_execution_error(*, result_holder: dict[str, Any], state: Any | None) -> bool:
+    if "error" in result_holder:
+        return True
+    if state is None:
+        return False
+    error_text = str(getattr(state, "error", "") or "").strip()
+    if not error_text:
+        return False
+    return error_text.lower() != "cancelled"
 
 
 def _progress_to_step_event(payload: dict[str, Any]) -> dict[str, Any]:
@@ -980,7 +1026,12 @@ def stream_ask_events(
         if isinstance(item, dict):
             yield item
 
-    if streamed_raw_content:
+    has_fatal_error = False
+    state = result_holder.get("state")
+    if "error" in result_holder or _has_fatal_execution_error(result_holder=result_holder, state=state):
+        has_fatal_error = True
+
+    if streamed_raw_content and not has_fatal_error:
         _emit_adapted_delta(_adapt_answer_for_frontend(streamed_raw_content))
 
     if active_cancel_event.is_set():
@@ -1007,14 +1058,7 @@ def stream_ask_events(
     state = result_holder.get("state")
     if "error" in result_holder:
         logger.error("[trace_id=%s] stream finished with upstream error=%s", trace_id, result_holder["error"])
-        yield {
-            "type": "error",
-            "code": "UPSTREAM_ERROR",
-            "error": "upstream_error",
-            "message": humanize_exception(result_holder["error"], code="UPSTREAM_ERROR", error="upstream_error"),
-            "retriable": True,
-            "trace_id": trace_id,
-        }
+        yield _build_fatal_error_event(exc_or_state=result_holder["error"], trace_id=trace_id)
         return
 
     if state is None:
@@ -1051,14 +1095,7 @@ def stream_ask_events(
                 "trace_id": trace_id,
             }
             return
-        yield {
-            "type": "error",
-            "code": "UPSTREAM_ERROR",
-            "error": "upstream_error",
-            "message": humanize_exception(state.error, code="UPSTREAM_ERROR", error="upstream_error"),
-            "retriable": True,
-            "trace_id": trace_id,
-        }
+        yield _build_fatal_error_event(exc_or_state=state, trace_id=trace_id)
         return
 
     with completion_lock:

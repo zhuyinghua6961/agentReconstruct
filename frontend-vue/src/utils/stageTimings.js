@@ -195,3 +195,22 @@ export function getStepTimingDurationLabel(message, step = {}) {
   const entry = candidateKeys.map((key) => entriesByKey.get(key)).find(Boolean)
   return entry?.durationLabel || ''
 }
+
+function normalizeStoredStepStatus(status) {
+  const raw = String(status || '').trim().toLowerCase()
+  if (['processing', 'in_progress', 'running', 'pending'].includes(raw)) return 'processing'
+  if (['skipped', 'skip', 'skipping'].includes(raw)) return 'skipped'
+  if (['warning', 'warn', 'degraded', 'degradation'].includes(raw)) return 'warning'
+  if (['success', 'succeeded', 'completed', 'complete', 'done', 'ok'].includes(raw)) return 'success'
+  if (['error', 'failed', 'fail', 'failure'].includes(raw)) return 'error'
+  return 'processing'
+}
+
+export function resolveStepDisplayStatus(message, step = {}, { stepIndex = 0, stepCount = 1, normalizeStatus = normalizeStoredStepStatus } = {}) {
+  const stored = normalizeStatus(step?.status)
+  if (stored !== 'processing') return stored
+  if (stepIndex < Math.max(stepCount - 1, 0)) return 'success'
+  if (Boolean(message?.isComplete || message?.metadata?.done_seen)) return 'success'
+  if (getStepTimingDurationLabel(message, step)) return 'success'
+  return 'processing'
+}

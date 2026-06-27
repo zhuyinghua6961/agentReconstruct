@@ -19,6 +19,7 @@ from agent_core.upstream_auth_logging import (
     log_upstream_auth_failure,
     log_upstream_auth_success_once,
 )
+from server.utils.upstream_errors import UpstreamCallError, status_code_from_exception
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +167,11 @@ def chat_completion(
             exc=exc,
             auth_mode=resolve_auth_mode(getattr(config, "LLM_AUTH_MODE", None)),
         )
-        raise
+        raise UpstreamCallError.llm_unavailable(
+            stage=stage,
+            status_code=status_code_from_exception(exc),
+            detail=str(exc),
+        ) from exc
     log_upstream_auth_success_once(
         logger=logger,
         service="highThinkingQA",
@@ -255,7 +260,11 @@ def chat_completion_stream(
             exc=exc,
             auth_mode=resolve_auth_mode(getattr(config, "LLM_AUTH_MODE", None)),
         )
-        raise
+        raise UpstreamCallError.llm_unavailable(
+            stage=stage,
+            status_code=status_code_from_exception(exc),
+            detail=str(exc),
+        ) from exc
     log_upstream_auth_success_once(
         logger=logger,
         service="highThinkingQA",
@@ -271,28 +280,35 @@ def chat_completion_stream(
     first_reasoning_logged = False
     first_content_logged = False
 
-    for chunk in response:
-        if not chunk.choices:
-            continue
-        delta = chunk.choices[0].delta
+    try:
+        for chunk in response:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
 
-        # 收集思考内容（不输出给用户）
-        reasoning = getattr(delta, "reasoning_content", None)
-        if not reasoning and hasattr(delta, "model_extra"):
-            reasoning = (delta.model_extra or {}).get("reasoning_content")
-        if reasoning:
-            reasoning_chars += len(reasoning)
-            if not first_reasoning_logged:
-                first_reasoning_logged = True
-                logger.info("LLM stream first_reasoning_chunk elapsed=%.3fs chars=%s", time.time() - started_at, len(reasoning))
-            continue
+            # 收集思考内容（不输出给用户）
+            reasoning = getattr(delta, "reasoning_content", None)
+            if not reasoning and hasattr(delta, "model_extra"):
+                reasoning = (delta.model_extra or {}).get("reasoning_content")
+            if reasoning:
+                reasoning_chars += len(reasoning)
+                if not first_reasoning_logged:
+                    first_reasoning_logged = True
+                    logger.info("LLM stream first_reasoning_chunk elapsed=%.3fs chars=%s", time.time() - started_at, len(reasoning))
+                continue
 
-        # 输出最终回答内容
-        if delta.content:
-            if not first_content_logged:
-                first_content_logged = True
-                logger.info("LLM stream first_content_chunk elapsed=%.3fs chars=%s", time.time() - started_at, len(delta.content))
-            yield delta.content
+            # 输出最终回答内容
+            if delta.content:
+                if not first_content_logged:
+                    first_content_logged = True
+                    logger.info("LLM stream first_content_chunk elapsed=%.3fs chars=%s", time.time() - started_at, len(delta.content))
+                yield delta.content
+    except Exception as exc:
+        raise UpstreamCallError.stream_interrupted(
+            stage=stage,
+            status_code=status_code_from_exception(exc),
+            detail=str(exc),
+        ) from exc
 
     if reasoning_chars:
         logger.debug("LLM stream reasoning omitted chars=%s", reasoning_chars)

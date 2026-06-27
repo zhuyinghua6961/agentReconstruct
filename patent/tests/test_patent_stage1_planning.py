@@ -622,7 +622,10 @@ def test_stage1_prepends_intent_hint_when_patent_intent_detect_enabled(monkeypat
         '"retrieval_claims":[{"claim":"主张一","keywords":["LiFePO4"],'
         '"preferred_sections":["methods"],"filters":{}}]}'
     )
-    client = _SequentialClient(["mechanism_analysis", planner_json])
+    intent_json = (
+        '{"intent_tag":"electrochemical_performance","anchor_terms":["LiFePO4","碳包覆","倍率"]}'
+    )
+    client = _SequentialClient([intent_json, planner_json])
     result = run_stage1_pre_answer_and_planning(
         user_question="LiFePO4 碳包覆对倍率有何影响？",
         client=client,
@@ -634,12 +637,17 @@ def test_stage1_prepends_intent_hint_when_patent_intent_detect_enabled(monkeypat
     intent_call = client.calls[0]
     plan_call = client.calls[1]
     assert intent_call["model"] == "qwen3-8b"
-    assert intent_call["max_tokens"] == 64
+    assert intent_call["max_tokens"] == 256
     assert plan_call["model"] == "gpt-test"
     plan_user = str(plan_call["messages"][1]["content"])
     assert "快速意图识别" in plan_user
+    assert "检索锚词" in plan_user
     assert plan_user.startswith("【快速意图识别")
     assert "用户问题：" in plan_user
     intent_meta = dict(result.get("intent_detect") or {})
     assert intent_meta.get("ok") is True
-    assert intent_meta.get("intent_tag") == "mechanism_analysis"
+    assert intent_meta.get("intent_tag") == "electrochemical_performance"
+    claim_keywords = list(result["retrieval_claims"][0].keywords)
+    assert "LiFePO4" in claim_keywords
+    assert "碳包覆" in claim_keywords
+    assert "倍率" in claim_keywords

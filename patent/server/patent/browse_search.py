@@ -165,6 +165,10 @@ class PatentBrowseSearchService:
         payload["sources"] = self._sources_used(normalized_sources, payload.get("retrieval_backend", ""))
 
         if payload.get("code") in {"EMBEDDING_UNAVAILABLE", "RETRIEVAL_RUNTIME_UNAVAILABLE"}:
+            if not str(payload.get("error") or "").strip():
+                from server.utils.user_errors import user_message_for_code
+
+                payload["error"] = user_message_for_code(str(payload.get("code") or ""))
             _LOGGER.error(
                 "patent_search failed stage=retrieval query=%r resolved_type=%s code=%s backend=%s elapsed_ms=%.2f",
                 _preview_query(clean_query),

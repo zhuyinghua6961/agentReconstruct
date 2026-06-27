@@ -41,6 +41,7 @@ from app.modules.qa_kb.stages.planning import Stage1Planner
 from app.modules.qa_kb.stages.retrieval import Stage25MdExpansion, Stage2Retriever
 from app.modules.qa_kb.stages.synthesis import Stage4Synthesizer
 from app.modules.qa_kb.streaming import iter_result_events
+from app.utils.upstream_errors import UpstreamCallError, build_sse_error_event, coerce_upstream_error
 from app.utils.user_errors import humanize_exception, user_message_for_code
 
 
@@ -98,7 +99,7 @@ _RERANK_FALLBACK_MESSAGES = {
 }
 
 
-def _degradation_warning_step(*, step: str, message: str, detail: str = "") -> dict[str, Any]:
+def _degradation_warning_step(*, step: str, message: str, detail: str = "", data: dict[str, Any] | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "type": "step",
         "step": step,
@@ -108,10 +109,45 @@ def _degradation_warning_step(*, step: str, message: str, detail: str = "") -> d
     }
     if detail:
         payload["detail"] = detail
+    if data:
+        payload["data"] = dict(data)
     return payload
 
 
-def _rerank_fallback_message(reason: str) -> str:
+def _build_fatal_error_event(
+    *,
+    exc_or_state: Any,
+    trace_id: str = "",
+    default_code: str = "UPSTREAM_ERROR",
+    default_error: str = "upstream_error",
+    default_stage: str = "",
+) -> dict[str, Any]:
+    upstream: UpstreamCallError | None = None
+    if isinstance(exc_or_state, UpstreamCallError):
+        upstream = exc_or_state
+    elif isinstance(exc_or_state, dict):
+        upstream = coerce_upstream_error(exc_or_state.get("upstream_error") or exc_or_state)
+    else:
+        upstream = coerce_upstream_error(exc_or_state)
+
+    if upstream is not None:
+        return build_sse_error_event(upstream, trace_id=trace_id)
+
+    message = humanize_exception(exc_or_state, code=default_code, error=default_error)
+    event = {
+        "type": "error",
+        "code": default_code,
+        "error": default_error,
+        "message": message,
+        "retriable": True,
+        "trace_id": str(trace_id or ""),
+    }
+    if default_stage:
+        event["failure_stage"] = default_stage
+    return event
+
+
+def _rerank_fallback_message(reason: str, *, status_code: int | None = None) -> str:
     clean = str(reason or "").strip().lower()
     if not clean:
         return "重排序服务不可用，已按向量相似度排序继续"
@@ -119,21 +155,38 @@ def _rerank_fallback_message(reason: str) -> str:
         return "重排序服务不可用，已按向量相似度排序继续"
     for key, message in _RERANK_FALLBACK_MESSAGES.items():
         if key in clean:
+            if status_code is not None:
+                return f"{message}（HTTP {int(status_code)}）"
             return message
-    return "重排序服务不可用，已按向量相似度排序继续"
+    base = "重排序服务不可用，已按向量相似度排序继续"
+    if status_code is not None:
+        return f"{base}（HTTP {int(status_code)}）"
+    return base
 
 
-def _stage2_rerank_degradation_message(stage2_result: dict[str, Any]) -> str:
+def _stage2_rerank_degradation_info(stage2_result: dict[str, Any]) -> dict[str, Any] | None:
     claim_map = stage2_result.get("claim_to_results") or {}
     if not isinstance(claim_map, dict):
-        return ""
+        return None
     for claim_data in claim_map.values():
         if not isinstance(claim_data, dict):
             continue
         rerank = claim_data.get("rerank") or {}
         if isinstance(rerank, dict) and rerank.get("fallback"):
-            return _rerank_fallback_message(str(rerank.get("reason") or ""))
-    return ""
+            reason = str(rerank.get("reason") or rerank.get("fallback_reason") or "")
+            status_code = rerank.get("status_code")
+            normalized_status_code = int(status_code) if status_code is not None else None
+            return {
+                "message": _rerank_fallback_message(reason, status_code=normalized_status_code),
+                "reason": reason,
+                "status_code": normalized_status_code,
+            }
+    return None
+
+
+def _stage2_rerank_degradation_message(stage2_result: dict[str, Any]) -> str:
+    info = _stage2_rerank_degradation_info(stage2_result)
+    return str(info.get("message") or "") if info else ""
 
 
 def _final_query_mode(*, provided: Any, skip_pdf: bool) -> str:
@@ -923,14 +976,22 @@ class GenerationPipelineOrchestrator:
                 len(retrieval_claims),
                 _short_preview(question),
             )
-            return self._fallback_result(
-                final_answer=deep_answer,
-                query_mode="生成驱动检索（检索失败，仅预回答）",
-                timings=timings,
+            return QaKbExecutionResult(
+                success=False,
+                final_answer="",
+                metadata=QaKbExecutionMetadata(
+                    route="kb_qa",
+                    pipeline_mode="new",
+                    query_mode="生成驱动检索（检索失败）",
+                    use_generation_driven=True,
+                    stage_timings_ms=timings,
+                ),
                 raw={
+                    "error": stage2_result.get("error"),
+                    "upstream_error": stage2_result.get("upstream_error"),
+                    "retrieval_results": stage2_result,
                     "deep_answer": deep_answer,
                     "retrieval_claims": retrieval_claims,
-                    "retrieval_results": stage2_result,
                     "comparison_plan": comparison_plan,
                 },
             )
@@ -1182,11 +1243,22 @@ class GenerationPipelineOrchestrator:
         )
         synthesis_result = _consume_stage4_result(stage4_output, logger)
         if not synthesis_result.get("success"):
-            return self._fallback_result(
-                final_answer=prepared["deep_answer"],
-                query_mode="生成驱动检索（合成失败，仅预回答）",
-                timings=prepared["timings"],
-                raw=prepared,
+            return QaKbExecutionResult(
+                success=False,
+                final_answer="",
+                metadata=QaKbExecutionMetadata(
+                    route="kb_qa",
+                    pipeline_mode="new",
+                    query_mode="生成驱动检索（合成失败）",
+                    use_generation_driven=True,
+                    stage_timings_ms=prepared["timings"],
+                ),
+                raw={
+                    **prepared,
+                    "synthesis_result": synthesis_result,
+                    "error": synthesis_result.get("error"),
+                    "upstream_error": synthesis_result.get("upstream_error"),
+                },
             )
 
         return QaKbExecutionResult(
@@ -1270,14 +1342,13 @@ class GenerationPipelineOrchestrator:
             question[:120],
         )
         if not stage1_result.get("success"):
-            stage1_error = str(stage1_result.get("error") or "阶段一失败")
             yield sse_event(
-                {
-                    "type": "error",
-                    "code": "UPSTREAM_ERROR",
-                    "error": "upstream_error",
-                    "message": humanize_exception(stage1_error, code="UPSTREAM_ERROR", error="upstream_error"),
-                }
+                _build_fatal_error_event(
+                    exc_or_state=stage1_result.get("upstream_error") or stage1_result.get("error"),
+                    default_stage="stage1",
+                    default_code="LLM_UNAVAILABLE",
+                    default_error="llm_unavailable",
+                )
             )
             return
         intent_step = self._intent_step_from_stage1(stage1_result)
@@ -1382,34 +1453,32 @@ class GenerationPipelineOrchestrator:
                 _short_preview(question),
             )
             yield sse_event(
-                _degradation_warning_step(
-                    step="stage2_failed",
-                    message="文献检索失败，将仅使用阶段一预回答",
+                _build_fatal_error_event(
+                    exc_or_state=stage2_result.get("upstream_error") or stage2_result.get("error"),
+                    default_stage="stage2",
+                    default_code=(
+                        str(dict(stage2_result.get("upstream_error") or {}).get("code") or "RETRIEVAL_FAILED")
+                    ),
+                    default_error=str(dict(stage2_result.get("upstream_error") or {}).get("error") or "retrieval_failed"),
                 )
-            )
-            yield from iter_result_events(
-                result=self._fallback_result(
-                    final_answer=deep_answer,
-                    query_mode="生成驱动检索（检索失败，仅预回答）",
-                    timings=timings,
-                    raw={
-                        "deep_answer": deep_answer,
-                        "retrieval_claims": retrieval_claims,
-                        "retrieval_results": stage2_result,
-                        "comparison_plan": comparison_plan,
-                    },
-                ),
-                sse_event=sse_event,
-                chunk_size=chunk_size,
             )
             return
 
-        rerank_warning = _stage2_rerank_degradation_message(stage2_result)
+        rerank_warning = _stage2_rerank_degradation_info(stage2_result)
         if rerank_warning:
+            warning_data = {
+                "code": "RERANK_DEGRADED",
+                "failure_stage": "stage2",
+                "reason": rerank_warning.get("reason") or "",
+            }
+            if rerank_warning.get("status_code") is not None:
+                warning_data["status_code"] = int(rerank_warning["status_code"])
             yield sse_event(
                 _degradation_warning_step(
                     step="stage2_rerank_fallback",
-                    message=rerank_warning,
+                    message=str(rerank_warning.get("message") or ""),
+                    detail=str(rerank_warning.get("reason") or ""),
+                    data=warning_data,
                 )
             )
 
@@ -1703,43 +1772,17 @@ class GenerationPipelineOrchestrator:
                 len("".join(final_chunks).strip()),
             )
             yield sse_event(
-                _degradation_warning_step(
-                    step="stage4_synthesis_failed",
-                    message="最终合成失败，以下为阶段一预回答",
+                _build_fatal_error_event(
+                    exc_or_state=(
+                        dict(final_result or {}).get("upstream_error")
+                        or dict(final_result or {}).get("error")
+                        or final_result
+                    ),
+                    default_stage="stage4",
+                    default_code="LLM_UNAVAILABLE",
+                    default_error="llm_unavailable",
                 )
             )
-            fallback = self._fallback_result(
-                final_answer=deep_answer,
-                query_mode="生成驱动检索（合成失败，仅预回答）",
-                timings=timings,
-                raw={"deep_answer": deep_answer, "retrieval_claims": retrieval_claims, "retrieval_results": stage2_result, "dois": dois, "pdf_chunks": pdf_chunks},
-            )
-            if not final_chunks:
-                for event in iter_result_events(result=fallback, sse_event=sse_event, chunk_size=chunk_size):
-                    payload = event if isinstance(event, dict) else None
-                    if payload is None or payload.get("type") != "metadata":
-                        yield event
-            else:
-                yield sse_event(
-                    {
-                        "type": "done",
-                        "query_mode": fallback.metadata.query_mode,
-                        "route": fallback.metadata.route,
-                        "doi_source": fallback.metadata.doi_source,
-                        "doi_count": 0,
-                        "chunk_count": 0,
-                        "source_count": 0,
-                        "final_answer": "".join(final_chunks).strip() or fallback.final_answer,
-                        "timings": timings,
-                        "references": [],
-                        "metadata": {
-                            "route": fallback.metadata.route,
-                            "query_mode": fallback.metadata.query_mode,
-                            "pipeline_mode": fallback.metadata.pipeline_mode,
-                            "doi_source": fallback.metadata.doi_source,
-                        },
-                    }
-                )
             return
 
         final_answer = str(final_result.get("final_answer") or "".join(final_chunks))

@@ -6,6 +6,7 @@ import {
   getMessageStageTimingModel,
   getStepTimingDurationLabel,
   normalizeStageTimings,
+  resolveStepDisplayStatus,
 } from './stageTimings.js'
 
 test('normalizes patent and fastQA stage timings as milliseconds', () => {
@@ -159,4 +160,36 @@ test('uses step data elapsed_ms for intent substep without adding it to total ti
     }),
     '123ms'
   )
+})
+
+test('resolveStepDisplayStatus turns earlier processing steps green once later steps exist', () => {
+  const message = {
+    metadata: {
+      timings: {
+        stage1: 26500,
+        stage2: 14100,
+        stage4: 30000,
+      },
+    },
+  }
+  const steps = [
+    { step: 'stage1', title: '阶段一', status: 'processing' },
+    { step: 'intent_detect', title: '意图识别', status: 'success' },
+    { step: 'stage2', title: '阶段二', status: 'processing' },
+    { step: 'stage4', title: '阶段四', status: 'processing' },
+  ]
+
+  assert.equal(resolveStepDisplayStatus(message, steps[0], { stepIndex: 0, stepCount: steps.length }), 'success')
+  assert.equal(resolveStepDisplayStatus(message, steps[2], { stepIndex: 2, stepCount: steps.length }), 'success')
+  assert.equal(resolveStepDisplayStatus(message, steps[3], { stepIndex: 3, stepCount: steps.length }), 'success')
+})
+
+test('resolveStepDisplayStatus keeps the active tail step pulsing until timing or completion', () => {
+  const message = { metadata: { timings: {} } }
+  const step = { step: 'stage4', title: '阶段四', status: 'processing' }
+
+  assert.equal(resolveStepDisplayStatus(message, step, { stepIndex: 0, stepCount: 1 }), 'processing')
+
+  const timedMessage = { metadata: { timings: { stage4: 30000 } } }
+  assert.equal(resolveStepDisplayStatus(timedMessage, step, { stepIndex: 0, stepCount: 1 }), 'success')
 })

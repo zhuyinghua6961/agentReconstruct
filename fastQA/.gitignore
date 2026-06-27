@@ -1,3 +1,5 @@
 .runtime/
 .pytest_cache/
 __pycache__/
+benchmark/lfp_bench_v1_draft.jsonl
+benchmark/pilot_seed.jsonl

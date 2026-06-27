@@ -14,6 +14,7 @@ from server.patent.answering import (
     render_patent_citations_for_user,
     sanitize_patent_id_citations,
 )
+from server.utils.upstream_errors import UpstreamCallError
 from server.patent.retrieval_models import (
     PatentDescriptionSnippet,
     PatentEvidence,
@@ -603,6 +604,8 @@ def run_stage4_synthesis_with_patent_evidence(
         ).strip()
         used_fallback_builder = True
         _LOGGER.warning("patent stage4 synthesis using fallback answer builder because no callable answer_builder is configured")
+    if callable(answer_builder) and not used_fallback_builder and not raw_answer and not (callable(should_cancel) and should_cancel()):
+        raise UpstreamCallError.llm_unavailable(stage="stage4")
     raw_answer_diagnostics = _log_patent_answer_diagnostics(
         stage="raw_answer",
         text=raw_answer,

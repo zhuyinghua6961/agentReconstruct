@@ -18,6 +18,8 @@ from server.patent.intent_detect import patent_intent_detect_cache_signature
 from server.patent.models import PatentQaExecutionMetadata, PatentQaExecutionResult, PatentRetrievalPlan
 from server.patent.models import PatentRetrievalClaim
 from server.patent.streaming import emit_text_chunks
+from server.utils.user_errors import humanize_exception, user_message_for_code
+from server.utils.upstream_errors import UpstreamCallError
 
 _LOGGER = logging.getLogger("patent.generation")
 
@@ -188,6 +190,56 @@ def _emit_progress_step(
             **({"data": dict(data)} if isinstance(data, dict) and data else {}),
         }
     )
+
+
+def _stage2_rerank_warning_step(stage2_result: dict[str, Any] | None) -> dict[str, Any] | None:
+    rerank = dict(dict(dict(stage2_result or {}).get("metadata") or {}).get("stage2_rerank") or {})
+    if not rerank.get("fallback"):
+        return None
+    reason = str(rerank.get("fallback_reason") or "unknown")
+    status_code = rerank.get("status_code")
+    message = user_message_for_code("RERANK_DEGRADED")
+    if status_code is not None:
+        message = f"{message}（HTTP {int(status_code)}）"
+    data: dict[str, Any] = {
+        "code": "RERANK_DEGRADED",
+        "failure_stage": "stage2",
+        "component": "rerank",
+        "fallback_reason": reason,
+    }
+    if status_code is not None:
+        data["status_code"] = int(status_code)
+    return {
+        "step": "stage2_rerank_fallback",
+        "title": "降级提示",
+        "message": message,
+        "status": "warning",
+        "data": data,
+    }
+
+
+def _stage3_partial_failure_warning_step(stage3_result: dict[str, Any] | None) -> dict[str, Any] | None:
+    metadata = dict(dict(stage3_result or {}).get("metadata") or {})
+    failed_patents = list(metadata.get("stage3_failed_patents") or [])
+    if not failed_patents:
+        return None
+    failed_ids = [
+        str(item.get("patent_id") or "")
+        for item in failed_patents
+        if isinstance(item, dict) and str(item.get("patent_id") or "").strip()
+    ]
+    return {
+        "step": "stage3_partial_failure",
+        "title": "降级提示",
+        "message": f"部分专利证据加载失败（{len(failed_patents)} 个），将基于可用证据继续生成答案",
+        "status": "warning",
+        "data": {
+            "failure_stage": "stage3",
+            "component": "retrieval",
+            "failed_patent_ids": failed_ids,
+            "failed_patent_count": len(failed_patents),
+        },
+    }
 
 
 def _build_stage_steps(
@@ -632,6 +684,9 @@ class PatentGenerationOrchestrator:
                 dict(dict(stage2_result or {}).get("metadata") or {}).get("stage2_validation"),
                 timings.get("stage2"),
             )
+            rerank_warning = _stage2_rerank_warning_step(dict(stage2_result or {}))
+            if rerank_warning:
+                _emit_progress_step(progress_callback, **rerank_warning)
             source_ids = list(runtime._extract_patent_ids_from_results(stage2_result) or [])
             _LOGGER.info(
                 "patent stage2 extracted source_ids trace=%s count=%s sample=%s",
@@ -732,6 +787,9 @@ class PatentGenerationOrchestrator:
                 bool(getattr(runtime, "stage3_force_pdf", False)),
                 timings.get("stage3"),
             )
+            stage3_warning = _stage3_partial_failure_warning_step(dict(stage3_result or {}))
+            if stage3_warning:
+                _emit_progress_step(progress_callback, **stage3_warning)
             _emit_progress_step(
                 progress_callback,
                 step="stage4",
@@ -832,6 +890,8 @@ class PatentGenerationOrchestrator:
                     "steps": steps,
                 },
             )
+        except UpstreamCallError:
+            raise
         except Exception as exc:
             failed_stage = current_progress_step or next((key for key in ("stage4", "stage3", "stage25", "stage2", "stage1") if key in timings), "stage1")
             failed_title = {
@@ -847,7 +907,7 @@ class PatentGenerationOrchestrator:
                 title=failed_title,
                 message=f"{failed_title}失败",
                 status="error",
-                error=str(exc),
+                error=humanize_exception(exc, code="UPSTREAM_ERROR", error="upstream_error"),
             )
             _LOGGER.exception(
                 "patent pipeline failed trace=%s question=%s timings=%s error=%s",

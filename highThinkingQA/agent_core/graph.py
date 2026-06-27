@@ -35,6 +35,7 @@ from retriever.vector_retriever import batch_retrieve, RetrievedChunk
 from ingest.embedder import get_embedding_client
 from ingest.vector_store import get_or_create_collection
 from server.services.stage_cache import get_or_compute_decompose, get_or_compute_direct_answer
+from server.utils.upstream_errors import UpstreamCallError, coerce_upstream_error
 from agent_core.intent_detect import (
     format_intent_hint_for_thinking_user_block,
     intent_detect_enabled,
@@ -332,6 +333,7 @@ class AgentState:
     # 运行元信息
     timings: dict = field(default_factory=dict)
     error: str = ""
+    upstream_error: dict | None = None
 
 
 def _run_pre_answer_retrieval_pipeline(
@@ -453,13 +455,35 @@ def _run_pre_answer_retrieval_pipeline(
         retrieval_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
         try:
             _raise_if_cancelled()
-            async for index, answer in iter_pre_answers_async(
+            async for index, answer, pre_answer_error in iter_pre_answers_async(
                 sub_questions,
                 async_client=async_llm_client,
                 original_question=original_question,
             ):
                 _raise_if_cancelled()
                 completed_pre_answers += 1
+                if pre_answer_error is not None:
+                    logger.warning(
+                        "%sstep2 sub-question pre-answer failed index=%s/%s error=%s",
+                        _trace_prefix(trace_id),
+                        index + 1,
+                        len(sub_questions),
+                        pre_answer_error,
+                    )
+                    if progress_callback:
+                        progress_callback(
+                            {
+                                "type": "progress",
+                                "stage": "step2",
+                                "status": "warning",
+                                "message": f"子问题 Q{index + 1} 预回答失败，已跳过",
+                                "data": {
+                                    "sub_question_index": index,
+                                    "failure_stage": "sub_answer",
+                                    "error": str(pre_answer_error),
+                                },
+                            }
+                        )
                 logger.info(
                     "%sstep2 sub-question answered index=%s/%s answer_chars=%s question=%s",
                     _trace_prefix(trace_id),
@@ -846,8 +870,10 @@ def run_agent(
                 _emit_progress(
                     "step1",
                     "warning",
-                    "直接回答超时，继续使用检索结果生成答案",
+                    "直接回答超时，已改用检索结果生成答案",
                     fallback=True,
+                    failure_stage="direct_answer",
+                    code="UPSTREAM_TIMEOUT",
                     error=str(exc),
                 )
             _emit_progress(
@@ -1241,9 +1267,19 @@ def run_agent(
                 state.timings["step5_check_revise"],
             )
 
+    except UpstreamCallError as e:
+        logger.error("%sAgent 运行出错 (upstream): %s", _trace_prefix(trace_id), e, exc_info=True)
+        state.upstream_error = e.to_dict()
+        state.error = str(e.message)
     except Exception as e:
-        logger.error("%sAgent 运行出错: %s", _trace_prefix(trace_id), e, exc_info=True)
-        state.error = str(e)
+        upstream = coerce_upstream_error(e)
+        if upstream is not None:
+            logger.error("%sAgent 运行出错 (upstream): %s", _trace_prefix(trace_id), upstream, exc_info=True)
+            state.upstream_error = upstream.to_dict()
+            state.error = str(upstream.message)
+        else:
+            logger.error("%sAgent 运行出错: %s", _trace_prefix(trace_id), e, exc_info=True)
+            state.error = str(e)
 
     state.timings["total"] = time.time() - total_start
     logger.info("%srun_agent timing summary %s", _trace_prefix(trace_id), _format_timing_summary(state.timings))

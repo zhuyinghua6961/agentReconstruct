@@ -823,6 +823,97 @@ function looksLikeStructuredSectionHeading(line) {
   return /^(?:#{1,6}\s+)?[一二三四五六七八九十]+、.+$/.test(String(line || '').trim())
 }
 
+const PROCESS_STEP_BODY_START_RE = /^(将|在|通过|采用|进行|使用|把|按|对|根据|经|先|待|需|应|可|宜|通常|一般|这些|该|此|随后|然后|再|后|以|为|其|从|使|含|包括|加入|放入|倒入|配|称|混|搅|筛|控|设|保|维持|保持)/
+
+function looksLikePlainSectionHeading(line, prevLine, nextLine) {
+  const title = String(line || '').trim()
+  if (title.length < 8 || title.length > 36) return false
+  if (/^\s{0,3}#{1,6}\s+/.test(title)) return false
+  if (/^\d+[.)]/.test(title)) return false
+  if (/[。！？!?；;，,:：]/.test(title)) return false
+  if (!/^[\u4e00-\u9fffA-Za-z0-9（）()+\-、与及和或对为的于中从以将及/\s]+$/.test(title)) return false
+  if (!/[\u4e00-\u9fff]{4,}/.test(title)) return false
+
+  const next = String(nextLine || '').trim()
+  if (!next || next.length < 12) return false
+  if (looksLikeStructuredMarkdownLine(next)) return false
+
+  const strongTopicTitle = /(?:体系|机制|步骤|参数|调控|特征|价值|概述|结论|影响|作用|方案|方法|工艺|结构|总结|分析|讨论|形成|控制|要点|原理|路径)/.test(title)
+  if (!strongTopicTitle && next.length < 20) return false
+
+  return strongTopicTitle || (String(prevLine || '').trim() === '' && next.length >= 30)
+}
+
+function normalizePlainSectionHeadings(text) {
+  const lines = String(text || '').split('\n')
+  const normalized = []
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
+    const trimmed = String(line || '').trim()
+    const prev = index > 0 ? String(lines[index - 1] || '').trim() : ''
+    const next = findNextNonEmptyLine(lines, index + 1)
+
+    if (looksLikePlainSectionHeading(trimmed, prev, next)) {
+      normalized.push(`## ${trimmed}`)
+      continue
+    }
+    normalized.push(line)
+  }
+
+  return normalized.join('\n')
+}
+
+function normalizeProcessStepLine(line) {
+  const trimmed = String(line || '').trim()
+  if (!trimmed || /^\s{0,3}#{1,6}\s+/.test(trimmed)) return line
+
+  const numberedMatch = trimmed.match(
+    /^(\d+[.)]\s+)([\u4e00-\u9fff（）()+\-/·]{2,24}(?:（[^）]{1,16}）)?)\s+([\u4e00-\u9fff].+)$/
+  )
+  if (numberedMatch) {
+    const [, marker, title, body] = numberedMatch
+    if (PROCESS_STEP_BODY_START_RE.test(body.trim())) {
+      return `### ${marker}${title}\n\n${body.trim()}`
+    }
+  }
+
+  const unnumberedMatch = trimmed.match(/^([\u4e00-\u9fff（）()+\-/]{2,14})\s+([\u4e00-\u9fff].{10,})$/)
+  if (unnumberedMatch && !/^[\d#\-*+]/.test(trimmed)) {
+    const [, title, body] = unnumberedMatch
+    if (isHeadingTitleCandidate(title) && PROCESS_STEP_BODY_START_RE.test(body.trim())) {
+      return `### ${title}\n\n${body.trim()}`
+    }
+  }
+
+  const standaloneMatch = trimmed.match(/^(\d+[.)]\s+[\u4e00-\u9fff（）()+\-/·]{2,24}(?:（[^）]{1,16}）)?)\s*$/)
+  if (standaloneMatch) {
+    return `### ${standaloneMatch[1]}`
+  }
+
+  return line
+}
+
+function normalizeProcessStepLines(text) {
+  const lines = String(text || '').split('\n')
+  return lines.map((line) => normalizeProcessStepLine(line)).join('\n')
+}
+
+function stripTrailingRepairedPatentCitationDump(text) {
+  const source = String(text || '').trim()
+  if (!source) return source
+
+  const trailingClusterMatch = source.match(
+    /(\n\s*)((?:\([A-Z]{2}\d+[A-Z0-9]*\)\s*[。．.]?\s*){2,})\s*$/i
+  )
+  if (!trailingClusterMatch) return source
+
+  const cluster = trailingClusterMatch[2].trim()
+  if (/[\u4e00-\u9fff]/.test(cluster)) return source
+
+  return source.slice(0, source.length - trailingClusterMatch[0].length).trim()
+}
+
 function splitStructuredSubheadingText(text) {
   const source = String(text || '').trim()
   const match = source.match(/^([^：:\n]{1,40}?[：:])(?:\s*(.*))?$/)
@@ -1039,7 +1130,11 @@ function normalizeMarkdownForRender(text) {
     .replace(/([。！？：:；;）)】\]])\s*(#{1,6}\s+)/g, '$1\n\n$2')
 
   const input = normalizeInlineMarkdownBoundaries(
-    normalizeStructuredSectionSubheadings(repairMarkdownSoftBreaksForRender(crNorm))
+    normalizeProcessStepLines(
+      normalizeStructuredSectionSubheadings(
+        normalizePlainSectionHeadings(repairMarkdownSoftBreaksForRender(crNorm))
+      )
+    )
   )
 
   const lines = input.split('\n')
@@ -1083,7 +1178,9 @@ function normalizeMarkdownForRender(text) {
     normalized.push(line)
   }
 
-  return normalized.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+  return stripTrailingRepairedPatentCitationDump(
+    normalized.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+  )
 }
 
 function normalizeInlineMarkdownBoundaries(text) {
@@ -1105,6 +1202,13 @@ function normalizeInlineMarkdownBoundaries(text) {
       const items = splitInlineOrderedItems(inlineList)
       if (!items) return `${prefix} ${inlineList}`
       return `${prefix}\n\n${items.map(({ marker, text: itemText }) => `${marker} ${itemText}`).join('\n')}`
+    })
+
+    line = line.replace(/^(.*\S)\s+(#{2,6}\s+\d+[.)]\s+.+)$/, (_match, prefix, headingBlock) => {
+      const listMatch = String(headingBlock || '').match(/^(#{1,6})\s+(\d+[.)]\s+)(.+)$/)
+      if (!listMatch) return `${prefix} ${headingBlock}`
+      const [, hashes, listMarker, title] = listMatch
+      return `${prefix}\n\n${hashes} ${title}\n\n${listMarker}${title}`
     })
 
     line = line.replace(/^(.*\S)\s+(#{1,6}\s+.+)$/, (_match, prefix, headingBlock) => {
@@ -1453,6 +1557,15 @@ const BEIJING_DATE_FORMATTER = new Intl.DateTimeFormat('zh-CN', {
   month: '2-digit',
   day: '2-digit'
 })
+const BEIJING_DATETIME_MINUTE_FORMATTER = new Intl.DateTimeFormat('zh-CN', {
+  timeZone: BEIJING_TIME_ZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+})
 
 function toValidDate(value) {
   const date = value instanceof Date ? value : new Date(value)
@@ -1476,6 +1589,12 @@ export function formatTime(date) {
   if (diff < 3600000) return Math.floor(diff / 60000) + '分钟前'
   if (diff < 86400000) return Math.floor(diff / 3600000) + '小时前'
   return formatBeijingDate(d)
+}
+
+export function formatMessageTime(date) {
+  const d = toValidDate(date)
+  if (!d) return ''
+  return BEIJING_DATETIME_MINUTE_FORMATTER.format(d).replace(/\//g, '-')
 }
 
 function renderMarkdownToHtml(text) {

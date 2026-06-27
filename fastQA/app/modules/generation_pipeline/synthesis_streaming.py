@@ -7,6 +7,7 @@ import time
 from typing import Any, Callable, Dict, List, Set, Tuple
 
 from app.integrations.llm import raise_if_upstream_pool_timeout
+from app.utils.upstream_errors import UpstreamCallError
 from app.integrations.llm.thinking import (
     LLM_STAGE_CONTROL,
     LLM_STAGE_STAGE4_FINAL_ANSWER,
@@ -1438,7 +1439,14 @@ def iter_stage4_synthesis_with_pdf_chunks(
     except Exception as exc:
         raise_if_upstream_pool_timeout(exc)
         logger.error("stage4 synthesis failed: %s", exc, exc_info=True)
-        yield {"success": False, "error": str(exc)}
+        upstream = UpstreamCallError.from_exception(
+            exc,
+            code="LLM_UNAVAILABLE",
+            component="llm",
+            stage="stage4",
+            error="llm_unavailable",
+        )
+        yield {"success": False, "error": str(exc), "upstream_error": upstream.to_dict()}
 
 
 __all__ = [

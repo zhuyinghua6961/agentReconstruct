@@ -32,6 +32,7 @@ from server.patent.upstream_transport import (
     record_patent_dispatch_error,
     record_patent_dispatch_success,
 )
+from server.utils.upstream_errors import UpstreamCallError, status_code_from_exception
 
 _LOGGER = logging.getLogger("patent.answering")
 _PATENT_ID_CITATION_RE = re.compile(r"\(\s*patent_id\s*=\s*([A-Za-z0-9._/\-]+)\s*\)", re.IGNORECASE)
@@ -811,7 +812,7 @@ class PatentAnswerBuilder:
                     (time.perf_counter() - request_started) * 1000,
                 )
                 return sanitize_patent_id_citations(content, allowed_patent_ids=allowed_patent_ids)[0]
-            _LOGGER.warning("patent answer builder returned empty content; using fallback answer")
+            _LOGGER.warning("patent answer builder returned empty content")
             log_model_call_success(
                 _LOGGER,
                 component="llm_patent_answer",
@@ -824,12 +825,12 @@ class PatentAnswerBuilder:
                 answer_chars=0,
                 fallback=True,
             )
-            return self._build_sanitized_fallback_answer(
-                question=question,
-                retrieval_outcome=retrieval_outcome,
-                context=context,
-                allowed_patent_ids=allowed_patent_ids,
+            raise UpstreamCallError.llm_unavailable(
+                stage="stage4",
+                status_code=getattr(response, "status_code", None),
             )
+        except UpstreamCallError:
+            raise
         except Exception as exc:
             log_model_call_failed(
                 _LOGGER,
@@ -844,13 +845,11 @@ class PatentAnswerBuilder:
                 fallback=True,
                 reason="request_failed",
             )
-            _LOGGER.warning("patent answer builder request failed; using fallback answer: %s", exc)
-            return self._build_sanitized_fallback_answer(
-                question=question,
-                retrieval_outcome=retrieval_outcome,
-                context=context,
-                allowed_patent_ids=allowed_patent_ids,
-            )
+            _LOGGER.warning("patent answer builder request failed: %s", exc)
+            raise UpstreamCallError.llm_unavailable(
+                stage="stage4",
+                status_code=status_code_from_exception(exc),
+            ) from exc
 
     def stream(
         self,
@@ -1108,7 +1107,7 @@ class PatentAnswerBuilder:
                     (time.perf_counter() - stream_started) * 1000,
                 )
                 return
-            _LOGGER.warning("patent answer builder stream returned no content; using fallback answer")
+            _LOGGER.warning("patent answer builder stream returned no content")
             log_model_call_success(
                 _LOGGER,
                 component="llm_patent_answer",
@@ -1122,6 +1121,12 @@ class PatentAnswerBuilder:
                 chunk_count=0,
                 fallback=True,
             )
+            raise UpstreamCallError.llm_unavailable(
+                stage="stage4",
+                status_code=getattr(response, "status_code", None),
+            )
+        except UpstreamCallError:
+            raise
         except Exception as exc:
             if streamed_any:
                 log_model_call_failed(
@@ -1138,7 +1143,10 @@ class PatentAnswerBuilder:
                     reason="partial_stream_failed",
                 )
                 _LOGGER.warning("patent answer builder stream failed after partial content: %s", exc)
-                return
+                raise UpstreamCallError.stream_interrupted(
+                    stage="stage4",
+                    status_code=status_code_from_exception(exc),
+                ) from exc
             log_model_call_failed(
                 _LOGGER,
                 component="llm_patent_answer",
@@ -1152,15 +1160,11 @@ class PatentAnswerBuilder:
                 fallback=True,
                 reason="request_failed",
             )
-            _LOGGER.warning("patent answer builder stream failed; using fallback answer: %s", exc)
-        fallback = self._build_sanitized_fallback_answer(
-            question=question,
-            retrieval_outcome=retrieval_outcome,
-            context=context,
-            allowed_patent_ids=allowed_patent_ids,
-        )
-        if fallback:
-            yield fallback
+            _LOGGER.warning("patent answer builder stream failed: %s", exc)
+            raise UpstreamCallError.llm_unavailable(
+                stage="stage4",
+                status_code=status_code_from_exception(exc),
+            ) from exc
 
     @staticmethod
     def from_env(*, http_client: Any | None = None) -> "PatentAnswerBuilder":

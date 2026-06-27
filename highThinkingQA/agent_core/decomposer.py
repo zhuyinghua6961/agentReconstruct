@@ -45,6 +45,7 @@ def decompose_question(
         temperature=0.3,  # 低温度保证输出格式稳定
         max_tokens=2048,
         enable_thinking=enable_thinking,
+        stage="decompose",
     )
 
     # 解析 JSON 数组

@@ -3,6 +3,11 @@ const CODE_MESSAGES = {
   UPSTREAM_ERROR: '上游模型服务异常，请稍后重试',
   UPSTREAM_TIMEOUT: '模型响应超时，请稍后重试',
   UPSTREAM_POOL_TIMEOUT: '模型连接繁忙，请稍后重试',
+  LLM_UNAVAILABLE: 'LLM 服务不可用',
+  EMBEDDING_UNAVAILABLE: 'Embedding 模型不可用',
+  RETRIEVAL_FAILED: '文献检索失败',
+  UPSTREAM_STREAM_INTERRUPTED: '模型流式输出中断',
+  RERANK_DEGRADED: '重排序服务不可用，已按向量相似度排序继续',
   ASK_CANCELLED: '已取消生成',
   TASK_EXPIRED: '这次回答已过期，请重新提问',
   INTERNAL_ERROR: '服务器内部错误',
@@ -43,6 +48,11 @@ const ERROR_NAME_TO_CODE = {
   cancelled: 'ASK_CANCELLED',
   internal_error: 'INTERNAL_ERROR',
   timeout: 'UPSTREAM_TIMEOUT',
+  llm_unavailable: 'LLM_UNAVAILABLE',
+  embedding_unavailable: 'EMBEDDING_UNAVAILABLE',
+  retrieval_failed: 'RETRIEVAL_FAILED',
+  upstream_stream_interrupted: 'UPSTREAM_STREAM_INTERRUPTED',
+  rerank_degraded: 'RERANK_DEGRADED',
 }
 
 const TECHNICAL_PATTERNS = [
@@ -131,10 +141,15 @@ export function formatUserFacingError({ code = '', error = '', message = '', met
   const mergedCode = normalizeCode(code || metadata?.error_code || '', error || metadata?.error_name || '')
   const mergedMessage = String(message || metadata?.error_message || '').trim()
   const mergedError = String(error || metadata?.error_name || '').trim()
-  return humanizeTechnicalMessage(mergedMessage || mergedError, {
+  const statusCode = Number(metadata?.status_code ?? metadata?.http_status ?? 0) || null
+  let resolved = humanizeTechnicalMessage(mergedMessage || mergedError, {
     code: mergedCode,
     error: mergedError,
   })
+  if (statusCode && !/\bHTTP\s+\d{3}\b/i.test(resolved)) {
+    resolved = `${resolved}（HTTP ${statusCode}）`
+  }
+  return resolved
 }
 
 export function formatHttpError(status, path = '') {
