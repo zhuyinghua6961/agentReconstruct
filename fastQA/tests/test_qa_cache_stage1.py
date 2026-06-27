@@ -77,10 +77,14 @@ def test_stage1_cache_does_not_store_json_parse_fallback_payload():
         runtime=runtime,
         question="q",
         stage1_result={
-            "success": True,
-            "deep_answer": "too long raw pre-answer",
+            "success": False,
+            "deep_answer": "",
             "retrieval_claims": [],
-            "fallback": "json_parse_failed",
+            "upstream_error": {
+                "code": "STAGE1_JSON_INVALID",
+                "error": "stage1_json_invalid",
+                "message": "大模型输出 json 不规范，请重试",
+            },
             "raw_response": "```json ... ```",
         },
     )

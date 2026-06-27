@@ -36,19 +36,24 @@ class _Runtime:
             "user_question": user_question,
             "conversation_context": conversation_context,
         }
-        return {"success": True, "deep_answer": "deep", "retrieval_claims": []}
+        return {"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "lfp disadvantages"}]}
 
     def stage2_targeted_retrieval(self, retrieval_claims, n_results_per_claim=10, user_question=None, should_cancel=None, active_stream_count=None) -> dict:
-        return {"success": False, "error": "retrieval_failed"}
+        return {
+            "success": True,
+            "documents": ["doc"],
+            "metadatas": [{"doi": "10.1/example"}],
+            "distances": [0.1],
+        }
 
     def stage25_md_expansion(self, *, retrieval_results: dict, user_question: str, dois: list[str]) -> dict:
-        return {}
+        return {"enabled": False, "applied": False, "md_chunks_by_doi": {}, "stats": {}}
 
     def _extract_dois_from_results(self, retrieval_results: dict) -> list[str]:
-        return []
+        return ["10.1/example"]
 
     def stage3_load_pdf_chunks(self, dois, max_chunks_per_doi=3, should_cancel=None):
-        return {}
+        return {"10.1/example": [{"text": "evidence"}]}
 
     def stage4_synthesis_with_pdf_chunks(self, user_question, deep_answer, pdf_chunks, retrieval_results=None, should_cancel=None, conversation_context=None):
         yield {"success": True, "final_answer": deep_answer, "query_mode": "kb_qa", "references": []}

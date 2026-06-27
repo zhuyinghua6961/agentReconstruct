@@ -191,7 +191,7 @@ def test_fastapi_ask_stream_upstream_error_contract(monkeypatch):
     assert [frame["type"] for frame in frames] == ["error"]
     assert frames[0]["code"] == "UPSTREAM_ERROR"
     assert frames[0]["error"] == "upstream_error"
-    assert frames[0]["message"] == "mock upstream failure"
+    assert frames[0]["message"] == "上游模型服务异常，请稍后重试"
 
 
 def test_fastapi_patent_mode_not_implemented_contract():

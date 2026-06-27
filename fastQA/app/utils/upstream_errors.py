@@ -97,6 +97,39 @@ class UpstreamCallError(Exception):
         )
 
     @classmethod
+    def stage1_json_invalid(cls) -> UpstreamCallError:
+        return cls(
+            code="STAGE1_JSON_INVALID",
+            error="stage1_json_invalid",
+            component="llm",
+            stage="stage1",
+            message="大模型输出 json 不规范，请重试",
+            retriable=True,
+        )
+
+    @classmethod
+    def stage1_no_retrieval_claims(cls) -> UpstreamCallError:
+        return cls(
+            code="STAGE1_NO_RETRIEVAL_CLAIMS",
+            error="stage1_no_retrieval_claims",
+            component="llm",
+            stage="stage1",
+            message="大模型未输出检索词，请重试",
+            retriable=True,
+        )
+
+    @classmethod
+    def stage2_no_doi(cls) -> UpstreamCallError:
+        return cls(
+            code="STAGE2_NO_DOI",
+            error="stage2_no_doi",
+            component="retrieval",
+            stage="stage2",
+            message="metadata 无 doi，请重试",
+            retriable=True,
+        )
+
+    @classmethod
     def stream_interrupted(
         cls,
         *,

@@ -8,6 +8,9 @@ const CODE_MESSAGES = {
   RETRIEVAL_FAILED: '文献检索失败',
   UPSTREAM_STREAM_INTERRUPTED: '模型流式输出中断',
   RERANK_DEGRADED: '重排序服务不可用，已按向量相似度排序继续',
+  STAGE1_JSON_INVALID: '大模型输出 json 不规范，请重试',
+  STAGE1_NO_RETRIEVAL_CLAIMS: '大模型未输出检索词，请重试',
+  STAGE2_NO_DOI: 'metadata 无 doi，请重试',
   ASK_CANCELLED: '已取消生成',
   TASK_EXPIRED: '这次回答已过期，请重新提问',
   INTERNAL_ERROR: '服务器内部错误',
@@ -53,6 +56,9 @@ const ERROR_NAME_TO_CODE = {
   retrieval_failed: 'RETRIEVAL_FAILED',
   upstream_stream_interrupted: 'UPSTREAM_STREAM_INTERRUPTED',
   rerank_degraded: 'RERANK_DEGRADED',
+  stage1_json_invalid: 'STAGE1_JSON_INVALID',
+  stage1_no_retrieval_claims: 'STAGE1_NO_RETRIEVAL_CLAIMS',
+  stage2_no_doi: 'STAGE2_NO_DOI',
 }
 
 const TECHNICAL_PATTERNS = [

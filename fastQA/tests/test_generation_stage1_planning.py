@@ -198,7 +198,7 @@ def test_stage1_planning_marks_cancelled_after_llm_response():
     assert result["metadata"]["cancelled"] is True
 
 
-def test_stage1_planning_falls_back_when_json_invalid():
+def test_stage1_planning_fails_when_json_invalid():
     client = _FakeClient("not-json")
     result = run_stage1_pre_answer_and_planning(
         user_question="what is lfp?",
@@ -209,9 +209,10 @@ def test_stage1_planning_falls_back_when_json_invalid():
         logger=_Logger(),
     )
 
-    assert result["success"] is True
+    assert result["success"] is False
     assert result["retrieval_claims"] == []
-    assert result["fallback"] == "json_parse_failed"
+    assert result["upstream_error"]["code"] == "STAGE1_JSON_INVALID"
+    assert result["upstream_error"]["message"] == "大模型输出 json 不规范，请重试"
 
 
 def test_stage1_planning_parses_fenced_json_when_deep_answer_contains_inner_code_fence():
@@ -515,8 +516,8 @@ def test_stage1_planning_logs_json_parse_failure_quality_and_response_preview(mo
         logger=logger,
     )
 
-    assert result["success"] is True
-    assert result["fallback"] == "json_parse_failed"
+    assert result["success"] is False
+    assert result["upstream_error"]["code"] == "STAGE1_JSON_INVALID"
     messages = [message for _level, message in logger.records]
     assert any(
         "阶段一结构化质量检查" in message

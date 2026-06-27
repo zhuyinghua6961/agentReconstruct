@@ -6,7 +6,8 @@ from server.patent.file_contract import build_patent_file_contract
 from server.patent.pdf_service import PatentPdfService
 
 
-def test_patent_file_contract_rejects_local_only_table(tmp_path):
+def test_patent_file_contract_rejects_local_only_table(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATENT_ORIGINAL_MINIO_ONLY", "true")
     local = tmp_path / "a.xlsx"
     local.write_bytes(b"placeholder")
 

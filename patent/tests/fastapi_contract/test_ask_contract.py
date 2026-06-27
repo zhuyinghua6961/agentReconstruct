@@ -2361,6 +2361,7 @@ def test_stream_maps_prepare_time_failures_to_terminal_error():
             "error": "patent_busy",
             "message": "durable patent turn is already in flight",
             "trace_id": "req_123",
+            "retriable": True,
             "seq": 0,
             "ts": "2026-03-26T00:00:00Z",
         }
@@ -5180,7 +5181,7 @@ def test_http_request_rejects_invalid_conversation_id_instead_of_downgrading_to_
 
     assert response.status_code == 400
     assert response.json()["code"] == codes.INVALID_REQUEST
-    assert "conversation_id" in response.json()["message"]
+    assert response.json()["message"] == "请求参数无效"
 
 
 def test_http_request_rejects_non_empty_file_selection_in_phase1():

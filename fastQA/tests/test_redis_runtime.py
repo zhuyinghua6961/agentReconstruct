@@ -52,7 +52,15 @@ def test_fastqa_shared_config_enables_redis_by_default():
     service_content = service_env.read_text(encoding="utf-8")
 
     assert "REDIS_ENABLED" not in infrastructure_content
-    assert "REDIS_KEY_PREFIX=fastqa" in service_content
+    assert "REDIS_ENABLED" not in service_content
+
+    _reset_settings_cache()
+    try:
+        settings = get_settings()
+        assert settings.redis_enabled is True
+        assert settings.redis_key_prefix == "fastqa"
+    finally:
+        _reset_settings_cache()
 
 
 def test_fastqa_shared_config_defines_shared_llm_pool_defaults():

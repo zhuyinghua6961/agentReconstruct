@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from types import SimpleNamespace
 
+import pytest
+
 from agent_core.llm_client import chat_completion, chat_completion_stream, get_async_llm_client, get_llm_client
 from agent_core.openai_compat import (
     OpenAICompatibleChatClient,
@@ -13,6 +15,7 @@ from agent_core.openai_compat import (
 from agent_core.upstream_auth_logging import reset_upstream_auth_log_state_for_tests
 from agent_core.thinking import LLM_STAGE_STAGE4_FINAL_ANSWER, auth_headers, local_sdk_api_key, resolve_auth_mode
 from server.services.documents_service import DocumentsService
+from server.utils.upstream_errors import UpstreamCallError
 
 
 class _FakeCompletions:
@@ -375,10 +378,11 @@ def test_chat_completion_logs_llm_auth_failure_status(monkeypatch, caplog):
     completions = _FakeUnauthorizedCompletions()
     client = _FakeClient(completions)
 
-    try:
+    with pytest.raises(UpstreamCallError) as exc_info:
         chat_completion(prompt="demo", client=client, enable_thinking=False)
-    except RuntimeError:
-        pass
+
+    assert exc_info.value.code == "LLM_UNAVAILABLE"
+    assert exc_info.value.status_code == 401
 
     messages = [record.message for record in caplog.records]
     auth_failed = [message for message in messages if "LLM upstream auth failed" in message]

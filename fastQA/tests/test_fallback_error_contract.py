@@ -173,7 +173,66 @@ def test_example11_all_claims_hard_fail_emits_error_no_fallback():
     assert not any(event.get("type") == "content" for event in events)
 
 
-def test_example11_neg_empty_results_without_exception_still_fallback():
+def test_example10_stage1_json_invalid_emits_error_no_fallback():
+    upstream = UpstreamCallError.stage1_json_invalid()
+    runtime = _Runtime(
+        stage1_payload={"success": False, "error": upstream.error, "upstream_error": upstream.to_dict()},
+        stage2_payload={"success": True, "documents": [], "metadatas": [], "distances": []},
+        doi_payload=[],
+        stage4_payload=[],
+    )
+    orchestrator = GenerationPipelineOrchestrator()
+
+    events = list(
+        orchestrator.stream(
+            question="hello",
+            runtime=runtime,
+            redis_service=None,
+            n_results_per_claim=5,
+            should_cancel=None,
+            active_stream_count=None,
+            logger=_logger(),
+            sse_event=lambda payload: payload,
+        )
+    )
+
+    error_events = [event for event in events if event.get("type") == "error"]
+    assert error_events
+    assert error_events[0]["code"] == "STAGE1_JSON_INVALID"
+    assert error_events[0]["message"] == "大模型输出 json 不规范，请重试"
+    assert not any(event.get("type") == "done" for event in events)
+
+
+def test_example21_no_retrieval_claims_emits_error_no_fallback():
+    runtime = _Runtime(
+        stage1_payload={"success": True, "deep_answer": "deep", "retrieval_claims": []},
+        stage2_payload={"success": True, "documents": [], "metadatas": [], "distances": []},
+        doi_payload=[],
+        stage4_payload=[],
+    )
+    orchestrator = GenerationPipelineOrchestrator()
+
+    events = list(
+        orchestrator.stream(
+            question="hello",
+            runtime=runtime,
+            redis_service=None,
+            n_results_per_claim=5,
+            should_cancel=None,
+            active_stream_count=None,
+            logger=_logger(),
+            sse_event=lambda payload: payload,
+        )
+    )
+
+    error_events = [event for event in events if event.get("type") == "error"]
+    assert error_events
+    assert error_events[0]["code"] == "STAGE1_NO_RETRIEVAL_CLAIMS"
+    assert error_events[0]["message"] == "大模型未输出检索词，请重试"
+    assert not any(event.get("type") == "done" for event in events)
+
+
+def test_example11_neg_empty_results_without_exception_emits_error():
     result = run_stage2_targeted_retrieval(
         retrieval_claims=[{"claim": "lfp capacity"}],
         n_results_per_claim=3,
@@ -208,9 +267,13 @@ def test_example11_neg_empty_results_without_exception_still_fallback():
         )
     )
 
-    assert any(event.get("type") == "step" and event.get("step") == "stage2_no_doi" for event in events)
-    assert events[-1]["type"] == "done"
-    assert events[-1]["final_answer"] == "deep"
+    error_events = [event for event in events if event.get("type") == "error"]
+    done_events = [event for event in events if event.get("type") == "done"]
+    assert error_events
+    assert error_events[0]["code"] == "STAGE2_NO_DOI"
+    assert error_events[0]["message"] == "metadata 无 doi，请重试"
+    assert not done_events
+    assert not any(event.get("type") == "content" for event in events)
 
 
 def test_example13_rerank_fallback_emits_warning_step_with_reason():

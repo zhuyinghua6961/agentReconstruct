@@ -593,7 +593,7 @@ def test_orchestrator_passes_conversation_context_to_stage1():
             captured["runtime"] = runtime
             captured["user_question"] = user_question
             captured["conversation_context"] = conversation_context
-            return {"success": True, "deep_answer": "deep", "retrieval_claims": []}
+            return {"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]}
 
     orchestrator = GenerationPipelineOrchestrator(stage1=_Stage1())
 
@@ -611,7 +611,7 @@ def test_orchestrator_passes_conversation_context_to_stage1():
         },
     )
 
-    assert result.success is True
+    assert result.success is False
     assert captured["user_question"] == "hello"
     assert captured["conversation_context"] == {
         "recent_turns_for_llm": [{"role": "assistant", "content": "prev"}],
@@ -633,7 +633,7 @@ def test_orchestrator_passes_should_cancel_to_stage1():
     class _Stage1:
         def run(self, *, runtime, user_question, conversation_context=None, should_cancel=None):
             captured["should_cancel"] = should_cancel
-            return {"success": True, "deep_answer": "deep", "retrieval_claims": []}
+            return {"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]}
 
     should_cancel = lambda: False
     orchestrator = GenerationPipelineOrchestrator(stage1=_Stage1())
@@ -1304,7 +1304,7 @@ def test_orchestrator_stream_passes_conversation_context_to_stage1():
             captured["runtime"] = runtime
             captured["user_question"] = user_question
             captured["conversation_context"] = conversation_context
-            return {"success": True, "deep_answer": "deep", "retrieval_claims": []}
+            return {"success": True, "deep_answer": "deep", "retrieval_claims": [{"claim": "x"}]}
 
     orchestrator = GenerationPipelineOrchestrator(stage1=_Stage1())
 
@@ -1325,7 +1325,8 @@ def test_orchestrator_stream_passes_conversation_context_to_stage1():
         )
     )
 
-    assert events[-1]["type"] == "done"
+    assert events[-1]["type"] == "error"
+    assert events[-1]["code"] == "RETRIEVAL_FAILED"
     assert captured["conversation_context"] == {
         "recent_turns_for_llm": [{"role": "assistant", "content": "prev"}],
         "summary_for_llm": {"short_summary": "sum"},

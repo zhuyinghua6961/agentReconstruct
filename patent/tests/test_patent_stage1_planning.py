@@ -101,19 +101,24 @@ def test_stage1_planning_parses_json_and_normalizes_patent_retrieval_plan():
     assert result["deep_answer"] == "初步判断这项技术仍处于导入窗口。"
     assert len(retrieval_claims) == 2
     assert retrieval_claims[0].claim == "钠离子储能在目标窗口内可替代 LFP。"
-    assert retrieval_claims[0].keywords == ["钠离子电池", "储能", "替代", "LFP", "时间窗口"]
+    assert all(
+        keyword in retrieval_claims[0].keywords
+        for keyword in ["钠离子电池", "储能", "替代", "LFP", "时间窗口"]
+    )
+    assert "CN115132975B" in retrieval_claims[0].keywords
+    assert "US20240001234A1" in retrieval_claims[0].keywords
     assert retrieval_claims[0].preferred_sections == ["claims", "description", "tables"]
     assert retrieval_claims[0].filters == {"countries": ["CN", "US"]}
     assert retrieval_claims[1].claim == "需要定位循环寿命、安全性和成本证据。"
-    assert retrieval_claims[1].keywords == ["循环寿命", "安全性", "成本"]
+    assert all(keyword in retrieval_claims[1].keywords for keyword in ["循环寿命", "安全性", "成本"])
     assert retrieval_claims[1].preferred_sections == ["description", "tables"]
     assert retrieval_plan.question_type == "technology_substitution"
     assert "substitution_risk" in retrieval_plan.analysis_axes
     assert "time_window" in retrieval_plan.analysis_axes
     assert retrieval_plan.explicit_patent_ids == ["CN115132975B", "US20240001234A1"]
     assert retrieval_plan.candidate_recall_queries == [
-        "钠离子储能在目标窗口内可替代 LFP。 钠离子电池 储能 替代 LFP 时间窗口",
-        "需要定位循环寿命、安全性和成本证据。 循环寿命 安全性 成本",
+        "钠离子储能在目标窗口内可替代 LFP。 CN115132975B US20240001234A1 LFP 对比 评估钠离子储能替代 的时间窗口 钠离子电池 储能 替代 时间窗口",
+        "需要定位循环寿命、安全性和成本证据。 CN115132975B US20240001234A1 LFP 对比 评估钠离子储能替代 的时间窗口 循环寿命 安全性 成本",
     ]
     assert retrieval_plan.evidence_localization_queries == retrieval_plan.candidate_recall_queries
     assert retrieval_plan.preferred_sections == ["claims", "description", "tables"]
@@ -276,12 +281,16 @@ def test_stage1_planning_normalizes_singleton_strings_and_punctuated_patent_ids(
 
     retrieval_claims = result["retrieval_claims"]
     retrieval_plan = result["retrieval_plan"]
-    assert retrieval_claims[0].keywords == ["battery safety"]
+    assert "battery safety" in retrieval_claims[0].keywords
+    assert "CN202110320984" in retrieval_claims[0].keywords
     assert retrieval_claims[0].preferred_sections == ["tables"]
     assert "risk" in retrieval_plan.analysis_axes
-    assert retrieval_plan.candidate_recall_queries == ["assess substitution risk battery safety"]
-    assert retrieval_plan.evidence_localization_queries == ["assess substitution risk battery safety"]
-    assert retrieval_plan.explicit_patent_ids == ["CN2021103209841", "US20240001234A1"]
+    assert retrieval_plan.candidate_recall_queries == [
+        "assess substitution risk CN202110320984 请评估 US2024 A1 的可替代风险 battery safety"
+    ]
+    assert retrieval_plan.evidence_localization_queries == retrieval_plan.candidate_recall_queries
+    assert "CN2021103209841" in retrieval_plan.explicit_patent_ids
+    assert "US20240001234A1" in retrieval_plan.explicit_patent_ids
 
 
 def test_patent_runtime_stage1_uses_configured_planning_client():

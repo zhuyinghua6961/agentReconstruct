@@ -882,7 +882,11 @@ class GenerationPipelineOrchestrator:
                     use_generation_driven=True,
                     stage_timings_ms=timings,
                 ),
-                raw={"error": stage1_result.get("error"), "stage1_result": stage1_result},
+                raw={
+                    "error": stage1_result.get("error"),
+                    "upstream_error": stage1_result.get("upstream_error"),
+                    "stage1_result": stage1_result,
+                },
             )
 
         deep_answer = str(stage1_result.get("deep_answer") or "")
@@ -915,6 +919,7 @@ class GenerationPipelineOrchestrator:
             _short_preview(question),
         )
         if not retrieval_claims:
+            upstream = UpstreamCallError.stage1_no_retrieval_claims()
             logger.warning(
                 "fastqa pipeline short-circuit reason=stage1_no_retrieval_claims deep_answer_chars=%s "
                 "answer_plan_keys=%s comparison_enabled=%s fallback=%s question=%s",
@@ -924,11 +929,19 @@ class GenerationPipelineOrchestrator:
                 str(stage1_result.get("fallback") or ""),
                 _short_preview(question),
             )
-            return self._fallback_result(
-                final_answer=deep_answer,
-                query_mode="生成驱动检索（仅预回答）",
-                timings=timings,
+            return QaKbExecutionResult(
+                success=False,
+                final_answer="",
+                metadata=QaKbExecutionMetadata(
+                    route="kb_qa",
+                    pipeline_mode="new",
+                    query_mode="生成驱动检索（无检索词）",
+                    use_generation_driven=True,
+                    stage_timings_ms=timings,
+                ),
                 raw={
+                    "error": upstream.error,
+                    "upstream_error": upstream.to_dict(),
                     "deep_answer": deep_answer,
                     "retrieval_claims": retrieval_claims,
                     "stage1_result": stage1_result,
@@ -1026,6 +1039,7 @@ class GenerationPipelineOrchestrator:
             dois = selected_dois
             apply_selected_dois_to_comparison_groups(retrieval_results=stage2_result, selected_dois=dois)
         if not dois:
+            upstream = UpstreamCallError.stage2_no_doi()
             logger.warning(
                 "fastqa pipeline fallback reason=stage2_no_doi unique_count=%s total_count=%s "
                 "all_stage2_dois=%s doi_source=%s query_focus_terms=%s question=%s",
@@ -1036,11 +1050,19 @@ class GenerationPipelineOrchestrator:
                 stage1_query_focus_terms,
                 _short_preview(question),
             )
-            return self._fallback_result(
-                final_answer=deep_answer,
-                query_mode="生成驱动检索（无DOI，仅预回答）",
-                timings=timings,
+            return QaKbExecutionResult(
+                success=False,
+                final_answer="",
+                metadata=QaKbExecutionMetadata(
+                    route="kb_qa",
+                    pipeline_mode="new",
+                    query_mode="生成驱动检索（无DOI）",
+                    use_generation_driven=True,
+                    stage_timings_ms=timings,
+                ),
                 raw={
+                    "error": upstream.error,
+                    "upstream_error": upstream.to_dict(),
                     "deep_answer": deep_answer,
                     "retrieval_claims": retrieval_claims,
                     "retrieval_results": stage2_result,
@@ -1385,6 +1407,7 @@ class GenerationPipelineOrchestrator:
             _short_preview(question),
         )
         if not retrieval_claims:
+            upstream = UpstreamCallError.stage1_no_retrieval_claims()
             logger.warning(
                 "fastqa stream short-circuit reason=stage1_no_retrieval_claims deep_answer_chars=%s "
                 "answer_plan_keys=%s comparison_enabled=%s fallback=%s question=%s",
@@ -1394,28 +1417,7 @@ class GenerationPipelineOrchestrator:
                 str(stage1_result.get("fallback") or ""),
                 _short_preview(question),
             )
-            yield sse_event(
-                _degradation_warning_step(
-                    step="stage1_no_retrieval_claims",
-                    message="未生成检索要点，将仅使用阶段一预回答",
-                )
-            )
-            yield from iter_result_events(
-                result=self._fallback_result(
-                    final_answer=deep_answer,
-                    query_mode="生成驱动检索（仅预回答）",
-                    timings=timings,
-                    raw={
-                        "deep_answer": deep_answer,
-                        "retrieval_claims": retrieval_claims,
-                        "stage1_result": stage1_result,
-                        "answer_plan": answer_plan,
-                        "comparison_plan": comparison_plan,
-                    },
-                ),
-                sse_event=sse_event,
-                chunk_size=chunk_size,
-            )
+            yield sse_event(build_sse_error_event(upstream))
             return
 
         logger.info("fastqa stream emitting stage2 thinking event question=%s", question[:120])
@@ -1512,6 +1514,7 @@ class GenerationPipelineOrchestrator:
             dois = selected_dois
             apply_selected_dois_to_comparison_groups(retrieval_results=stage2_result, selected_dois=dois)
         if not dois:
+            upstream = UpstreamCallError.stage2_no_doi()
             logger.warning(
                 "fastqa stream fallback reason=stage2_no_doi unique_count=%s total_count=%s "
                 "all_stage2_dois=%s doi_source=%s query_focus_terms=%s question=%s",
@@ -1522,30 +1525,7 @@ class GenerationPipelineOrchestrator:
                 stage1_query_focus_terms,
                 _short_preview(question),
             )
-            yield sse_event(
-                _degradation_warning_step(
-                    step="stage2_no_doi",
-                    message="未检索到相关文献，将仅使用阶段一预回答",
-                )
-            )
-            yield from iter_result_events(
-                result=self._fallback_result(
-                    final_answer=deep_answer,
-                    query_mode="生成驱动检索（无DOI，仅预回答）",
-                    timings=timings,
-                    raw={
-                        "deep_answer": deep_answer,
-                        "retrieval_claims": retrieval_claims,
-                        "retrieval_results": stage2_result,
-                        "dois": [],
-                        "all_stage2_dois": all_stage2_dois,
-                        "doi_source": doi_source,
-                        "comparison_plan": comparison_plan,
-                    },
-                ),
-                sse_event=sse_event,
-                chunk_size=chunk_size,
-            )
+            yield sse_event(build_sse_error_event(upstream))
             return
 
         if _stage3_diag_enabled():

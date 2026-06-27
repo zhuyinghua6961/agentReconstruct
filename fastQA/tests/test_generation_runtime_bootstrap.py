@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+from app.core.config import WORKSPACE_DIR
 from app.modules.generation_pipeline.runtime_bootstrap import (
     apply_default_doi_runtime_settings,
     build_openai_client,
@@ -39,7 +40,7 @@ def test_resolve_generation_runtime_inputs_uses_service_roots(monkeypatch, tmp_p
 
 
 def test_resolve_generation_runtime_inputs_resolves_resource_relative_vector_path(monkeypatch, tmp_path):
-    workspace_resource = Path.cwd() / "resource" / "fastqa" / "vector_database"
+    workspace_resource = WORKSPACE_DIR / "resource" / "fastqa" / "vector_database"
     monkeypatch.setenv("VECTOR_DB_PATH", "resource/fastqa/vector_database")
 
     resolved = resolve_generation_runtime_inputs(

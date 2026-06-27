@@ -647,14 +647,15 @@ def run_stage1_pre_answer_and_planning(
         stage1_result, cleaned_text = _parse_stage1_json_payload(result_text)
         if stage1_result is None or cleaned_text is None:
             preview = result_text[:500].replace("\n", "\\n")
-            logger.error("阶段一 JSON 解析失败，降级为仅预回答")
+            upstream = UpstreamCallError.stage1_json_invalid()
+            logger.error("阶段一 JSON 解析失败，终止流程")
             logger.error("阶段一原始响应前500字符: %s", preview)
             _log_stage1_structured_quality(
                 logger=logger,
                 raw_response=result_text,
                 json_parsed=False,
                 schema_valid=False,
-                deep_answer=result_text,
+                deep_answer="",
                 retrieval_claims_count=0,
                 valid_claims_count=0,
                 raw_claims_count=0,
@@ -664,11 +665,12 @@ def run_stage1_pre_answer_and_planning(
                 fallback="json_parse_failed",
             )
             return {
-                "success": True,
-                "deep_answer": result_text,
+                "success": False,
+                "deep_answer": "",
                 "retrieval_claims": [],
                 "raw_response": result_text,
-                "fallback": "json_parse_failed",
+                "error": upstream.error,
+                "upstream_error": upstream.to_dict(),
             }
 
         deep_answer = str(stage1_result.get("deep_answer") or "").strip()

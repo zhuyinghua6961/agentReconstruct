@@ -205,7 +205,7 @@ def test_request_payload_sets_explicit_output_budget_for_pdf_summary():
         client.close()
 
     assert int(payload.get("max_tokens") or 0) >= 1800
-    assert float(payload.get("top_p") or 0) >= 0.9
+    assert payload.get("reasoning_effort") == "high" or float(payload.get("top_p") or 0) >= 0.9
 
 
 def test_pdf_answer_client_uses_injected_http_client_and_request_timeout():

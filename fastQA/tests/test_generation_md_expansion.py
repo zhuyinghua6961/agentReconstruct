@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from app.core.config import WORKSPACE_DIR
 from app.modules.generation_pipeline.md_expansion import run_stage25_md_expansion
 
 
@@ -54,7 +55,7 @@ def test_run_stage25_md_expansion_returns_md_chunks(monkeypatch):
 def test_run_stage25_md_expansion_resolves_resource_relative_md_path(monkeypatch):
     monkeypatch.setenv("QA_STAGE25_MD_GLOBAL_SUPPLEMENT_ENABLED", "0")
     monkeypatch.setenv("VECTOR_DB_MD_PATH", "resource/fastqa/vector_database_md")
-    expected_path = str((Path.cwd() / "resource" / "fastqa" / "vector_database_md").resolve())
+    expected_path = str((WORKSPACE_DIR / "resource" / "fastqa" / "vector_database_md").resolve())
     captured: dict[str, str] = {}
 
     class _FakeCollection:
